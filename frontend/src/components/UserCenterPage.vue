@@ -5,7 +5,7 @@
     <div class="account-grid">
     <n-card :bordered="false" class="dashboard-card account-card">
       <template #header>
-        <span class="card-title">账户资料</span>
+        <span class="card-title"><UiIcon name="user" />账户资料</span>
       </template>
       <template #header-extra><n-spin v-if="loading" size="small" /></template>
 
@@ -30,7 +30,7 @@
           <div class="profile-copy">
             <div class="username-text">{{ accountInfo?.name || authStore.username }}</div>
             <div class="profile-hint">{{ isUploadingAvatar ? '正在上传头像…' : '点击头像更换 · JPG / PNG，最大 5 MB' }}</div>
-            <n-button v-if="avatarUrl" size="small" type="error" secondary :loading="isDeletingAvatar" :disabled="isUploadingAvatar" @click="deleteAvatar">删除头像</n-button>
+            <n-button v-if="avatarUrl" size="small" type="error" secondary :loading="isDeletingAvatar" :disabled="isUploadingAvatar" @click="deleteAvatar"><template #icon><UiIcon name="delete" /></template>删除头像</n-button>
           </div>
         </div>
 
@@ -57,20 +57,38 @@
       <n-empty v-else-if="!loading" description="未获取到账户信息" />
     </n-card>
     <n-card :bordered="false" class="dashboard-card notification-card">
-      <template #header><span class="card-title">通知设置</span></template>
+      <template #header><span class="card-title"><UiIcon name="notifications" />通知设置</span></template>
       <p class="notification-intro">绑定 Telegram，接收入库和任务通知。</p>
+      <n-spin :show="loadingConfig">
+      <template v-if="configModel">
+      <n-form-item label="Telegram Bot Token" label-placement="top">
+        <n-input v-model:value="configModel.telegram_bot_token" type="password" show-password-on="click" placeholder="从 @BotFather 获取" />
+      </n-form-item>
+      <n-form-item label="全局通知频道" label-placement="top">
+        <n-input v-model:value="configModel.telegram_channel_id" placeholder="频道链接、@频道名或 Chat ID" />
+      </n-form-item>
+      <n-form-item label="通知类型" label-placement="top">
+        <n-checkbox-group v-model:value="configModel.telegram_notify_types"><n-space wrap>
+          <n-checkbox value="library_new"><UiIcon name="library" :size="16" /> 入库通知</n-checkbox>
+          <n-checkbox value="intercept_notify"><UiIcon name="warning" :size="16" /> 拦截通知</n-checkbox>
+          <n-checkbox value="recognize_fail"><UiIcon name="help" :size="16" /> 识别失败</n-checkbox>
+        </n-space></n-checkbox-group>
+      </n-form-item>
+      </template>
       <n-form-item label="Telegram Chat ID" label-placement="top">
         <n-input v-model:value="telegramChatId" placeholder="输入 Chat ID，例如 123456789" @keyup.enter="saveChatId" :disabled="loading || isSavingChatId" />
         <template #feedback>先打开机器人并发送 /start，再填写您的 Chat ID。</template>
       </n-form-item>
       <div class="notification-actions">
-        <n-button :loading="isFetchingBotLink" @click="openBotChat">打开 Telegram 机器人</n-button>
-        <n-button type="primary" :loading="isSavingChatId" :disabled="loading" @click="saveChatId">保存通知设置</n-button>
+        <n-button :loading="isFetchingBotLink" @click="openBotChat"><template #icon><UiIcon name="link" /></template>打开机器人</n-button>
+        <n-button :loading="isTestingTelegram" :disabled="!configModel?.telegram_bot_token || (!telegramChatId && !configModel?.telegram_channel_id)" @click="testTelegram"><template #icon><UiIcon name="send" /></template>发送测试</n-button>
+        <n-button type="primary" :loading="isSavingChatId" :disabled="loading || loadingConfig" @click="saveChatId"><template #icon><UiIcon name="save" /></template>保存通知设置</n-button>
       </div>
       <div v-if="accountInfo?.telegram_channel_id" class="global-notification-link">
         <span>全局通知频道</span>
-        <n-button text type="primary" tag="a" :href="globalChannelLink" target="_blank" rel="noopener noreferrer">加入频道 / 群组</n-button>
+        <n-button text type="primary" tag="a" :href="globalChannelLink" target="_blank" rel="noopener noreferrer"><template #icon><UiIcon name="link" /></template>加入频道 / 群组</n-button>
       </div>
+      </n-spin>
     </n-card>
     </div>
   </div>
@@ -80,14 +98,17 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue';
 import axios from 'axios';
 import { useAuthStore } from '../stores/auth';
+import { useConfig } from '../composables/useConfig';
 import {
   NPageHeader, NCard, NDescriptions, NDescriptionsItem, NTag, NEmpty,
-  NFormItem, NInput, NButton, useMessage, NAvatar, NIcon, NTooltip, NSpin
+  NFormItem, NInput, NButton, useMessage, NAvatar, NIcon, NTooltip, NSpin, NCheckbox, NCheckboxGroup, NSpace
 } from 'naive-ui';
 import { CloudUploadOutline } from '@vicons/ionicons5';
 
 const authStore = useAuthStore();
 const message = useMessage();
+const { configModel, loadingConfig, handleSaveConfig, configError } = useConfig();
+const isTestingTelegram = ref(false);
 
 const loading = ref(true);
 const accountInfo = computed(() => authStore.accountInfo);
@@ -185,14 +206,35 @@ const saveChatId = async () => {
   if (loading.value || isSavingChatId.value) return;
   isSavingChatId.value = true;
   try {
+    const config = configModel.value;
+    if (!config || !await handleSaveConfig({ telegram_bot_token: config.telegram_bot_token, telegram_channel_id: config.telegram_channel_id, telegram_notify_types: config.telegram_notify_types })) {
+      throw new Error(configError.value || '通知配置保存失败');
+    }
     const response = await axios.post('/api/portal/telegram-chat-id', {
       chat_id: telegramChatId.value
     });
+    if (accountInfo.value) {
+      accountInfo.value.telegram_chat_id = telegramChatId.value;
+      accountInfo.value.telegram_channel_id = configModel.value.telegram_channel_id;
+    }
     message.success(response.data.message || '保存成功');
   } catch (error) {
-    message.error(error.response?.data?.message || '保存失败');
+    message.error(error.response?.data?.message || error.message || '保存失败');
   } finally {
     isSavingChatId.value = false;
+  }
+};
+
+const testTelegram = async () => {
+  isTestingTelegram.value = true;
+  try {
+    const { data } = await axios.post('/api/telegram/test', { token: configModel.value.telegram_bot_token, chat_id: telegramChatId.value.trim() || configModel.value.telegram_channel_id });
+    if (data.success === true) message.success(data.message || '测试消息已发送');
+    else message.error(data.message || '测试消息发送失败');
+  } catch (error) {
+    message.error(error.response?.data?.message || '测试消息发送失败');
+  } finally {
+    isTestingTelegram.value = false;
   }
 };
 

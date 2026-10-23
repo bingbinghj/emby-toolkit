@@ -218,11 +218,9 @@ async fn emby(
         string(item, "Path")
     };
     let library = crate::emby::library_for_path(&state, &path).await?;
-    let selected = list(&config["libraries_to_process"]);
-    if !selected.is_empty()
-        && library
-            .as_ref()
-            .is_none_or(|l| !selected.contains(&l["ItemId"]))
+    if library
+        .as_ref()
+        .is_some_and(|library| crate::emby::library_ignored(&config, &string(library, "ItemId")))
     {
         return Ok((StatusCode::OK, Json(json!({"status":"ignored_library"}))));
     }
@@ -588,6 +586,10 @@ pub async fn process_emby(
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
     let id = string(event, "id");
+    let item = details(state, &id, "Path").await?;
+    if crate::emby::path_ignored(state, &string(&item, "Path")).await? {
+        return Ok(json!({"updated":0,"status":"ignored_library"}));
+    }
     let episodes = list(&event["episode_ids"])
         .iter()
         .filter_map(Value::as_str)
@@ -828,7 +830,15 @@ pub async fn process_moviepilot(
     event: &Value,
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
-    let files = list(&event["files"]);
+    let mut files = vec![];
+    for file in list(&event["files"]) {
+        if !crate::emby::path_ignored(state, file.as_str().unwrap_or("")).await? {
+            files.push(file);
+        }
+    }
+    if files.is_empty() {
+        return Ok(json!({"updated":0,"status":"ignored_library"}));
+    }
     let mut updated = 0;
     let mut failures = vec![];
     let tmdb = string(event, "tmdb_id");

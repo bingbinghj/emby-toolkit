@@ -8,12 +8,52 @@ use reqwest::Method;
 use serde_json::Value;
 use std::{collections::HashSet, time::Duration};
 
+pub fn library_ignored(config: &Value, library: &str) -> bool {
+    !library.is_empty()
+        && crate::media_edit::list(&config["libraries_to_ignore"])
+            .iter()
+            .any(|id| id.as_str() == Some(library))
+}
+
+pub async fn processing_libraries(state: &AppState) -> Result<Vec<String>> {
+    let config = state.config.read().await.clone();
+    let user = crate::state::string(&config, "emby_user_id");
+    if user.is_empty() {
+        return Err(ApiError::bad("未配置 Emby 用户 ID"));
+    }
+    let response = state
+        .emby(Method::GET, &format!("Users/{user}/Views"), &[], None)
+        .await?;
+    let libraries = response["Items"]
+        .as_array()
+        .ok_or_else(|| ApiError::bad("Emby 媒体库列表无效"))?;
+    Ok(libraries
+        .iter()
+        .filter_map(|library| library["Id"].as_str())
+        .filter(|id| !id.is_empty() && !library_ignored(&config, id))
+        .map(str::to_string)
+        .collect())
+}
+
+pub async fn path_ignored(state: &AppState, path: &str) -> Result<bool> {
+    let config = state.config.read().await.clone();
+    if crate::media_edit::list(&config["libraries_to_ignore"]).is_empty() {
+        return Ok(false);
+    }
+    Ok(library_for_path(state, path)
+        .await?
+        .is_some_and(|library| library_ignored(&config, &crate::state::string(&library, "ItemId"))))
+}
+
 pub async fn items(
     state: &AppState,
     parent: &str,
     fields: &str,
     context: &JobContext,
 ) -> Result<Vec<Value>> {
+    if library_ignored(&*state.config.read().await, parent) {
+        return Ok(vec![]);
+    }
     let mut result = vec![];
     let mut start = 0;
     let mut seen = HashSet::new();
@@ -332,10 +372,10 @@ pub async fn query_items(
     Ok(result)
 }
 pub async fn persons(state: &AppState, context: &JobContext) -> Result<Vec<Value>> {
-    let libraries = crate::media_edit::list(&state.config.read().await["libraries_to_process"]);
+    let libraries = processing_libraries(state).await?;
     let mut ids = std::collections::BTreeSet::new();
     for library in libraries {
-        for item in items(state, library.as_str().unwrap_or(""), "People", context).await? {
+        for item in items(state, &library, "People", context).await? {
             for person in crate::media_edit::list(&item["People"]) {
                 let id = string(&person, "Id");
                 if !id.is_empty() {
@@ -345,16 +385,7 @@ pub async fn persons(state: &AppState, context: &JobContext) -> Result<Vec<Value
         }
     }
     if ids.is_empty() {
-        return query_items(
-            state,
-            &[
-                ("IncludeItemTypes", "Person".into()),
-                ("Recursive", "true".into()),
-                ("Fields", "ProviderIds,Name".into()),
-            ],
-            context,
-        )
-        .await;
+        return Ok(vec![]);
     }
     let mut result = vec![];
     for chunk in ids.into_iter().collect::<Vec<_>>().chunks(500) {

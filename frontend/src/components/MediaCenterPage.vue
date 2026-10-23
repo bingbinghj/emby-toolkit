@@ -1,11 +1,11 @@
 <template>
-  <div class="mp-page media-center-page">
-    <div class="media-center-sticky-controls">
+  <div ref="mediaPage" class="mp-page media-center-page">
+    <div ref="stickyControls" class="media-center-sticky-controls">
       <n-page-header
         class="mp-page-header"
-        :title="libraryId ? (library?.name || '媒体库') : '媒体中心'"
         @back="libraryId ? goToLibraries() : undefined"
       >
+        <template #title><UiIcon :name="libraryId ? 'library' : 'media'" /> {{ libraryId ? (library?.name || '媒体库') : '媒体中心' }}</template>
         <template #back v-if="libraryId">
           <n-button quaternary circle aria-label="返回媒体库" title="返回媒体库">
             <template #icon><n-icon><ArrowBackOutline /></n-icon></template>
@@ -90,7 +90,7 @@
 
         <n-empty v-else-if="!loading" :description="emptyDescription" class="media-empty" />
 
-        <nav class="alphabet-nav" aria-label="按首字母筛选">
+        <nav class="alphabet-nav" :style="alphabetStyle" aria-label="按首字母筛选">
           <button
             v-for="letter in letters"
             :key="letter"
@@ -133,7 +133,10 @@ const total = ref(0);
 const pageSize = 30;
 const search = ref('');
 const selectedLetter = ref('#');
+const mediaPage = ref(null);
+const stickyControls = ref(null);
 const mediaGrid = ref(null);
+const alphabetStyle = ref({});
 const letters = ['#', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'];
 const loading = ref(false);
 const error = ref('');
@@ -200,7 +203,7 @@ const loadPage = async (startIndex, { reset = false, target = null } = {}) => {
   if (!libraryId.value) return;
   const normalizedStart = Math.max(Number(startIndex) || 0, 0);
   if (!reset && (pendingPageStarts.has(normalizedStart) || normalizedStart >= total.value)) return;
-  const requestId = ++requestVersion;
+  const requestId = reset ? ++requestVersion : requestVersion;
   if (!reset) pendingPageStarts.add(normalizedStart);
   if (reset) {
     itemsByIndex.value = {};
@@ -244,8 +247,8 @@ const loadPage = async (startIndex, { reset = false, target = null } = {}) => {
     if (reset) itemsByIndex.value = {};
     if (reset) total.value = 0;
   } finally {
-    pendingPageStarts.delete(normalizedStart);
     if (requestId === requestVersion) {
+      pendingPageStarts.delete(normalizedStart);
       loading.value = false;
       loadingDirection.value = '';
     }
@@ -256,7 +259,7 @@ const openLibrary = (id) => router.push({ name: 'MediaCenterLibrary', params: { 
 const goToLibraries = () => router.push({ name: 'MediaCenter' });
 const openMedia = (id) => router.push({ name: 'MediaEditPage', params: { itemId: id } });
 const resetBrowserPosition = () => {
-  scrollContainer?.scrollTo({ top: 0, behavior: 'auto' });
+  mediaPage.value?.scrollTo({ top: 0, behavior: 'auto' });
 };
 const searchItems = () => {
   resetBrowserPosition();
@@ -274,8 +277,13 @@ const selectLetter = (letter) => {
 };
 const refresh = () => libraryId.value ? loadPage(0, { reset: true }) : loadLibraries();
 const scrollToIndex = (index) => {
+  if (!index) return resetBrowserPosition();
+  const container = mediaPage.value;
   const element = mediaGrid.value?.querySelector(`[data-media-index="${index}"]`);
-  element?.scrollIntoView({ block: 'start', behavior: 'auto' });
+  if (!container || !element) return;
+  const top = element.getBoundingClientRect().top - container.getBoundingClientRect().top
+    + container.scrollTop - (stickyControls.value?.offsetHeight || 0) - 16;
+  container.scrollTo({ top: Math.max(top, 0), behavior: 'auto' });
 };
 const loadVisiblePages = (event) => {
   const container = event?.currentTarget || scrollContainer;
@@ -305,6 +313,7 @@ const loadVisiblePages = (event) => {
 };
 
 watch(libraryId, () => {
+  requestVersion += 1;
   clearTimeout(searchTimer);
   selectedLetter.value = '#';
   search.value = '';
@@ -339,8 +348,17 @@ const setupScrollListeners = () => {
     || scrollContainers[0]
     || document.scrollingElement;
   scrollContainers.forEach((container) => container.addEventListener('scroll', loadVisiblePages, { passive: true }));
-  gridResizeObserver = new ResizeObserver(() => loadVisiblePages());
+  gridResizeObserver = new ResizeObserver(() => {
+    const controlsHeight = stickyControls.value?.offsetHeight || 0;
+    alphabetStyle.value = {
+      top: `${controlsHeight + 16}px`,
+      maxHeight: `${Math.max((mediaPage.value?.clientHeight || 0) - controlsHeight - 32, 32)}px`,
+    };
+    loadVisiblePages();
+  });
   gridResizeObserver.observe(sentinel);
+  gridResizeObserver.observe(mediaPage.value);
+  gridResizeObserver.observe(stickyControls.value);
 };
 
 watch(mediaGrid, setupScrollListeners, { flush: 'post' });
@@ -381,7 +399,7 @@ onBeforeUnmount(() => {
 .library-search :deep(.n-input) { border: 1px solid var(--ui-border-strong); border-radius: 10px; background: var(--ui-surface); box-shadow: 0 2px 10px rgba(15, 23, 42, .06); transition: border-color .2s, box-shadow .2s; }
 .library-search :deep(.n-input:hover), .library-search :deep(.n-input.n-input--focus) { border-color: var(--n-primary-color); box-shadow: 0 0 0 3px color-mix(in srgb, var(--n-primary-color) 15%, transparent); }
 .search-submit { color: var(--n-primary-color); }
-.media-browser { position:relative; padding-right:0; }
+.media-browser { position:relative; display:grid; grid-template-columns:minmax(0,1fr) 34px; gap:16px; align-items:start; }
 .media-grid { display:grid; grid-auto-rows:auto; grid-template-columns:repeat(auto-fill,minmax(min(100%,148px),1fr)); gap:24px 18px; margin-top:16px; }
 .media-card, .media-card-placeholder { min-width:0; height:auto; }
 .media-card { padding: 0; border: 0; color: var(--ui-text); background: transparent; cursor: pointer; text-align: left; }
@@ -397,9 +415,9 @@ onBeforeUnmount(() => {
 .media-empty { margin: 70px 0; }
 .load-before-sentinel { min-height: 12px; display: flex; align-items: center; justify-content: center; }
 .load-more-sentinel { display: flex; min-height: 54px; align-items: center; justify-content: center; gap: 10px; color: var(--ui-text-muted); font-size: 12px; }
-.alphabet-nav { position:sticky; z-index:3; bottom:8px; display:flex; flex-direction:row; gap:2px; width:max-content; max-width:100%; margin:24px auto 0; padding:6px; overflow-x:auto; border:1px solid var(--ui-border); border-radius:8px; background:var(--modal-solid-bg-color); box-shadow:var(--ui-shadow); scrollbar-width:none; }
+.alphabet-nav { position:sticky; z-index:3; top:0; grid-column:2; display:flex; flex-direction:column; gap:2px; margin-top:16px; padding:4px 2px; overflow-y:auto; border:1px solid var(--ui-border); border-radius:8px; background:var(--modal-solid-bg-color); box-shadow:var(--ui-shadow); scrollbar-width:none; }
 .alphabet-nav::-webkit-scrollbar { display: none; }
-.alphabet-nav button { flex:0 0 28px; width:28px; height:32px; padding:0; border:0; border-radius:5px; color:var(--ui-text-muted); background:transparent; cursor:pointer; font-size:12px; line-height:32px; }
+.alphabet-nav button { flex:0 0 20px; width:28px; height:20px; padding:0; border:0; border-radius:5px; color:var(--ui-text-muted); background:transparent; cursor:pointer; font-size:12px; line-height:20px; }
 .alphabet-nav button:hover, .alphabet-nav button.is-active { color:var(--accent-color); background:var(--accent-glow-color); font-weight:700; }
 .media-center-loading { position: fixed; inset: 64px 0 0 244px; display: grid; place-items: center; pointer-events: none; background: color-mix(in srgb, var(--ui-page-bg) 45%, transparent); }
 @container (max-width:540px) {

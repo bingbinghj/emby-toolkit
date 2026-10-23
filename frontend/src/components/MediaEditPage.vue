@@ -4,7 +4,7 @@
     <div class="media-edit-page">
       <n-page-header class="mp-page-header" @back="goBack">
         <template #title>
-          手动编辑媒体信息
+          <UiIcon name="edit" /> 手动编辑媒体信息
         </template>
       </n-page-header>
 
@@ -20,7 +20,7 @@
           <!-- 左侧信息栏 (海报) -->
           <n-grid-item span="1">
             <n-space vertical :size="24">
-              <n-card :title="itemDetails.item_name" :bordered="false">
+              <n-card :bordered="false"><template #header><UiIcon name="media" /> {{ itemDetails.item_name }}</template>
                 <template #cover>
                   <n-image
                     :src="posterUrl"
@@ -75,7 +75,7 @@
                       编辑媒体信息 (音轨/字幕)
                     </n-button>
                     <n-button block secondary :loading="isRevalidatingFingerprints"
-                      @click="revalidateFingerprints(itemDetails.item_id || itemId)">
+                      @click="revalidateFingerprints(itemDetails.item_id || itemId)"><template #icon><UiIcon name="check" /></template>
                       重新校验指纹（{{ fingerprintScopeLabel }}）
                     </n-button>
                     <n-popconfirm
@@ -126,7 +126,7 @@
                 </template>
               </n-card>
 
-              <n-card title="辅助工具" :bordered="false">
+              <n-card :bordered="false"><template #header><UiIcon name="settings" /> 辅助工具</template>
                 <n-space vertical>
                   <n-form-item label="数据操作" label-placement="top">
                     <n-space>
@@ -137,7 +137,7 @@
                         target="_blank"
                         :disabled="!searchLinks.baidu"
                         :loading="isLoading"
-                      >
+                      ><template #icon><UiIcon name="search" /></template>
                         百度搜索
                       </n-button>
                       <n-dropdown
@@ -157,7 +157,7 @@
                         @click="translateAllFields"
                         :loading="isTranslating"
                         :disabled="isLoading"
-                      >
+                      ><template #icon><UiIcon name="language" /></template>
                         一键翻译
                       </n-button>
                     </n-space>
@@ -171,7 +171,7 @@
           <n-grid-item span="1 920:3">
             <n-card :bordered="false" class="dashboard-card">
               <template #header>
-                <span class="card-title">演员列表</span>
+                <span class="card-title"><UiIcon name="user" /> 演员列表</span>
               </template>
               <n-form label-placement="top" label-width="auto">
                 <draggable
@@ -250,8 +250,8 @@
                     </template>
                     添加演员
                   </n-button>
-                  <n-button @click="goBack">返回列表</n-button>
-                  <n-button type="primary" @click="handleSaveChanges" :loading="isSaving">
+                  <n-button @click="goBack"><template #icon><UiIcon name="back" /></template>返回列表</n-button>
+                  <n-button type="primary" @click="handleSaveChanges" :loading="isSaving"><template #icon><UiIcon name="save" /></template>
                     保存修改
                   </n-button>
                 </n-space>
@@ -264,7 +264,7 @@
       <div v-else class="error-container">
         <n-alert title="错误" type="error">
           无法加载媒体详情，或指定的媒体项不存在。请检查后端日志或确认该媒体项有效。
-          <n-button text @click="goBack" style="margin-left: 10px;">返回列表</n-button>
+          <n-button text @click="goBack" style="margin-left: 10px;"><template #icon><UiIcon name="back" /></template>返回列表</n-button>
         </n-alert>
       </div>
     </div>
@@ -274,13 +274,12 @@
       v-model:show="showEpisodeSelector"
       preset="card"
       style="width: 980px; max-width: 95vw;"
-      :title="itemDetails?.item_type === 'Series' ? '选择季和要编辑的视频' : '选择要编辑的视频'"
       :bordered="false"
       size="huge"
-    >
+    ><template #header><UiIcon name="media" /> {{ itemDetails?.item_type === 'Series' ? '选择季和要编辑的视频' : '选择要编辑的视频' }}</template>
       <n-spin :show="isFetchingEpisodes">
         <n-button secondary :loading="isRevalidatingFingerprints" style="margin-bottom: 12px;"
-          @click="revalidateFingerprints(itemDetails.item_id || itemId)">
+          @click="revalidateFingerprints(itemDetails.item_id || itemId)"><template #icon><UiIcon name="check" /></template>
           重新校验指纹（{{ fingerprintScopeLabel }}）
         </n-button>
         <div v-if="episodesList.length > 0" class="episode-selector-board">
@@ -294,7 +293,7 @@
                 :type="season.season_number === selectedSeasonNumber ? 'primary' : 'default'"
                 :secondary="season.season_number !== selectedSeasonNumber"
                 @click="handleSeasonChange(season.season_number)"
-              >
+              ><template #icon><UiIcon name="media" /></template>
                 {{ formatSeasonLabel(season.season_number) }}
               </n-button>
             </div>
@@ -316,11 +315,11 @@
                 secondary
                 :disabled="selectedBatchVersionIndex === null"
                 @click="selectEpisodesByVersion"
-              >
+              ><template #icon><UiIcon name="check" /></template>
                 选择此版本
               </n-button>
-              <n-button size="small" secondary @click="selectAllEpisodes">全选</n-button>
-              <n-button size="small" secondary @click="clearSelectedEpisodes">清空</n-button>
+              <n-button size="small" secondary @click="selectAllEpisodes"><template #icon><UiIcon name="check" /></template>全选</n-button>
+              <n-button size="small" secondary @click="clearSelectedEpisodes"><template #icon><UiIcon name="close" /></template>清空</n-button>
             </n-space>
           </div>
 
@@ -377,11 +376,10 @@
       v-model:show="showAddActorModal"
       preset="card"
       style="width: 600px"
-      title="搜索并添加演员"
       :bordered="false"
       size="huge"
       :segmented="{ content: 'soft', footer: 'soft' }"
-    >
+    ><template #header><UiIcon name="user" /> 搜索并添加演员</template>
       <n-input
         v-model:value="actorSearchQuery"
         placeholder="输入演员名进行搜索..."
@@ -410,7 +408,7 @@
               </template>
             </n-thing>
             <template #suffix>
-              <n-button size="small" type="primary">选择</n-button>
+              <n-button size="small" type="primary"><template #icon><UiIcon name="check" /></template>选择</n-button>
             </template>
           </n-list-item>
         </n-list>
@@ -423,10 +421,9 @@
       v-model:show="showImageEditor"
       preset="card"
       style="width: 1100px; max-width: 95vw;"
-      title="编辑图像"
       :bordered="false"
       size="huge"
-    >
+    ><template #header><UiIcon name="image" /> 编辑图像</template>
       <div class="emby-image-grid">
         <div v-for="img in imageTypes" :key="img.type" class="emby-image-card">
           <!-- 图片展示区 (统一使用 16:9 比例，图片 contain 缩放) -->
@@ -496,10 +493,9 @@
       v-model:show="showTmdbSelector"
       preset="card"
       style="width: 1200px; max-width: 95vw;"
-      :title="`搜索图像 - ${currentTmdbImageLabel}`"
       :bordered="false"
       size="huge"
-    >
+    ><template #header><UiIcon name="search" /> {{ `搜索图像 - ${currentTmdbImageLabel}` }}</template>
       <div v-if="isFetchingTmdbImages" class="tmdb-loading-state">
         <n-spin size="large" />
         <div style="margin-top: 16px; color: var(--n-text-color-3);">正在从 TheMovieDb 拉取数据...</div>
@@ -536,15 +532,15 @@
     </n-modal>
 
     <!-- 输入图片URL模态框 -->
-    <n-modal v-model:show="showUrlPrompt" preset="dialog" title="设置网络图片">
+    <n-modal v-model:show="showUrlPrompt" preset="dialog"><template #title><UiIcon name="link" /> 设置网络图片</template>
       <n-input
         v-model:value="imageUrlInput"
         type="text"
         placeholder="请粘贴以 http/https 开头的图片直链..."
       />
       <template #action>
-        <n-button @click="showUrlPrompt = false">取消</n-button>
-        <n-button type="primary" @click="submitUrlImage" :loading="isUploadingImage">确定</n-button>
+        <n-button @click="showUrlPrompt = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
+        <n-button type="primary" @click="submitUrlImage" :loading="isUploadingImage"><template #icon><UiIcon name="check" /></template>确定</n-button>
       </template>
     </n-modal>
     <!-- ★★★ 媒体信息编辑模态框 ★★★ -->
@@ -552,13 +548,12 @@
       v-model:show="showMediaInfoEditor"
       preset="card"
       style="width: 800px; max-width: 95vw;"
-      title="编辑媒体信息 (音轨/字幕)"
       :bordered="false"
       size="huge"
-    >
+    ><template #header><UiIcon name="media" /> 编辑媒体信息 (音轨/字幕)</template>
       <n-button secondary :loading="isRevalidatingFingerprints" style="margin-bottom: 16px;"
         :disabled="isSavingMediaInfo || isDeletingMediaVersion || isRepairingTruehdCore"
-        @click="revalidateFingerprints(currentEditMediaId)">
+        @click="revalidateFingerprints(currentEditMediaId)"><template #icon><UiIcon name="check" /></template>
         重新校验当前视频指纹
       </n-button>
       <n-alert v-if="mediaInfoContext.fingerprint_pending" type="warning" style="margin-bottom: 16px;">
@@ -649,13 +644,13 @@
       </n-alert>
 
       <!-- ★★★ 硬字幕标记按钮 ★★★ -->
-      <n-card title="标记硬字幕 (写入视频流 Title)" size="small" style="margin-bottom: 16px;">
+      <n-card size="small" style="margin-bottom: 16px;"><template #header><UiIcon name="language" /> 标记硬字幕 (写入视频流 Title)</template>
         <n-space>
-          <n-button @click="setHardcodedSubtitle('简中硬字幕')" secondary>简中</n-button>
-          <n-button @click="setHardcodedSubtitle('繁中硬字幕')" secondary>繁中</n-button>
-          <n-button @click="setHardcodedSubtitle('简英硬字幕')" secondary>简英</n-button>
-          <n-button @click="setHardcodedSubtitle('繁英硬字幕')" secondary>繁英</n-button>
-          <n-button @click="clearHardcodedSubtitle()" secondary>清除标记</n-button>
+          <n-button @click="setHardcodedSubtitle('简中硬字幕')" secondary><template #icon><UiIcon name="language" /></template>简中</n-button>
+          <n-button @click="setHardcodedSubtitle('繁中硬字幕')" secondary><template #icon><UiIcon name="language" /></template>繁中</n-button>
+          <n-button @click="setHardcodedSubtitle('简英硬字幕')" secondary><template #icon><UiIcon name="language" /></template>简英</n-button>
+          <n-button @click="setHardcodedSubtitle('繁英硬字幕')" secondary><template #icon><UiIcon name="language" /></template>繁英</n-button>
+          <n-button @click="clearHardcodedSubtitle()" secondary><template #icon><UiIcon name="close" /></template>清除标记</n-button>
         </n-space>
       </n-card>
 
@@ -776,13 +771,13 @@
             将丢弃当前未保存修改；存在歧义时会只读探测 CD2，并且只纠正证据唯一的高清音轨兼容核心。是否继续？
           </n-popconfirm>
           <n-space>
-            <n-button :disabled="isRepairingTruehdCore" @click="showMediaInfoEditor = false">取消</n-button>
+            <n-button :disabled="isRepairingTruehdCore" @click="showMediaInfoEditor = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
             <n-button
               type="primary"
               :disabled="isRepairingTruehdCore"
               :loading="isSavingMediaInfo"
               @click="saveMediaInfo"
-            >
+            ><template #icon><UiIcon name="save" /></template>
               保存并刷新
             </n-button>
           </n-space>
@@ -795,10 +790,9 @@
       v-model:show="showRenameEditor"
       preset="card"
       style="width: 760px; max-width: 95vw;"
-      title="重命名媒体"
       :bordered="false"
       size="huge"
-    >
+    ><template #header><UiIcon name="edit" /> 重命名媒体</template>
       <n-alert type="info" style="margin-bottom: 16px;">
         输入新的文件名即可。目录按高级设置中的 MoviePilot 重命名格式生成；源文件扩展名固定，115 文件、STRM 和媒体信息路径会同步更新。
       </n-alert>
@@ -868,13 +862,13 @@
       </div>
       <template #action>
         <n-space justify="end">
-          <n-button @click="previewRename" :loading="isPreviewingRename">预览</n-button>
+          <n-button @click="previewRename" :loading="isPreviewingRename"><template #icon><UiIcon name="preview" /></template>预览</n-button>
           <n-button
             type="primary"
             @click="executeRename"
             :loading="isExecutingRename"
             :disabled="!renamePreview"
-          >
+          ><template #icon><UiIcon name="save" /></template>
             保存重命名
           </n-button>
         </n-space>

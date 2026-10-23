@@ -1,11 +1,6 @@
 use crate::{
-    AppState, assets, emby,
-    error::{ApiError, Result},
-    jobs::JobContext,
-    media_edit::list,
-    metadata, metadata_payload,
-    state::string,
-    tmdb, versions,
+    AppState, assets, emby, error::Result, jobs::JobContext, media_edit::list, metadata,
+    metadata_payload, state::string, tmdb, versions,
 };
 use reqwest::Method;
 use serde_json::{Value, json};
@@ -52,13 +47,9 @@ fn tags(item: &Value) -> Value {
 }
 pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result<Value> {
     let config = state.config.read().await.clone();
-    let libraries = list(&config["libraries_to_process"])
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
-        .collect::<Vec<_>>();
+    let libraries = emby::processing_libraries(state).await?;
     if libraries.is_empty() {
-        return Err(ApiError::bad("未在配置中指定要处理的媒体库。"));
+        return Ok(json!({"updated":0,"message":"没有需要处理的媒体库"}));
     }
     context
         .update(0, "建立差异基准", "读取在线版本和作品绑定")
@@ -138,6 +129,9 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
             .cloned()
         {
             for (index, asset) in list(&snapshot["asset_details_json"]).iter().enumerate() {
+                if emby::library_ignored(&config, &string(asset, "source_library_id")) {
+                    continue;
+                }
                 let id = string(asset, "emby_item_id");
                 let Some(item) = scanned.iter().find(|i| i["Id"] == id) else {
                     continue;
@@ -173,7 +167,17 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
             all_seasons.entry(parent).or_default().insert(number);
         }
     }
-    let missing = online.difference(&observed).cloned().collect::<Vec<_>>();
+    let ignored_ids = rows
+        .iter()
+        .flat_map(|row| list(&row["asset_details_json"]))
+        .filter(|asset| emby::library_ignored(&config, &string(asset, "source_library_id")))
+        .map(|asset| string(&asset, "emby_item_id"))
+        .collect::<HashSet<_>>();
+    let missing = online
+        .difference(&observed)
+        .filter(|id| !ignored_ids.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
     let mut offline = 0;
     if !missing.is_empty() {
         match versions::existing(state, &missing).await {
@@ -280,6 +284,9 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
             context.checkpoint().await?;
             match crate::media_edit::details(state, &id, FIELDS).await {
                 Ok(mut top) if top["Type"] == work.1 => {
+                    if emby::path_ignored(state, &string(&top, "Path")).await? {
+                        continue;
+                    }
                     let library = source_libraries.get(&id).cloned().unwrap_or_default();
                     top["_SourceLibraryId"] = json!(library);
                     if work.1 == "Series" {

@@ -346,12 +346,21 @@ async fn config_save(
     if value.as_object().is_none_or(|object| object.is_empty()) {
         return Err(ApiError::bad("请求体中未包含配置数据"));
     }
-    let user = string(&value, "emby_user_id").trim().to_string();
-    if user.is_empty() {
-        return Err(ApiError::bad("Emby User ID 不能为空！"));
+    if value.get("emby_user_id").is_some() {
+        let user = string(&value, "emby_user_id").trim().to_string();
+        if user.is_empty() {
+            return Err(ApiError::bad("Emby User ID 不能为空！"));
+        }
+        if user.len() != 32 || !user.bytes().all(|c| c.is_ascii_hexdigit()) {
+            return Err(ApiError::bad("Emby User ID 格式不正确！"));
+        }
+        value["emby_user_id"] = json!(user);
     }
-    if user.len() != 32 || !user.bytes().all(|c| c.is_ascii_hexdigit()) {
-        return Err(ApiError::bad("Emby User ID 格式不正确！"));
+    if value.get("libraries_to_ignore").is_some_and(|ids| {
+        ids.as_array()
+            .is_none_or(|ids| ids.iter().any(|id| id.as_str().is_none()))
+    }) {
+        return Err(ApiError::bad("忽略媒体库必须是 ID 字符串数组"));
     }
     let config = state.config.read().await.clone();
     for key in [
@@ -373,9 +382,19 @@ async fn config_save(
     {
         value["subtitle_chinese_default_language"] = json!("chs");
     }
-    let base = string(&value, "emby_server_url");
-    let key = string(&value, "emby_api_key");
-    if !base.is_empty() && !key.is_empty() && value["libraries_to_process"].is_array() {
+    let mut effective = config.clone();
+    effective
+        .as_object_mut()
+        .unwrap()
+        .extend(value.as_object().unwrap().clone());
+    let base = string(&effective, "emby_server_url");
+    let key = string(&effective, "emby_api_key");
+    let user = string(&effective, "emby_user_id");
+    if !base.is_empty()
+        && !key.is_empty()
+        && !user.is_empty()
+        && value["libraries_to_ignore"].is_array()
+    {
         let libraries = async {
             let response = state
                 .http
@@ -397,7 +416,7 @@ async fn config_save(
                     .iter()
                     .filter_map(|item| item["Id"].as_str())
                     .collect::<std::collections::HashSet<_>>();
-                value["libraries_to_process"]
+                value["libraries_to_ignore"]
                     .as_array_mut()
                     .unwrap()
                     .retain(|id| id.as_str().is_some_and(|id| valid.contains(id)));
@@ -407,7 +426,9 @@ async fn config_save(
         }
     }
     state.save_config(&value).await?;
-    Ok(Json(json!({"message":"配置已成功保存并自动净化！"})))
+    Ok(Json(
+        json!({"message":"配置已成功保存并自动净化！","saved_fields":value}),
+    ))
 }
 
 pub fn default_mapping(key: &str) -> Option<Value> {

@@ -1,7 +1,7 @@
 <!-- src/components/settings/SchedulerSettingsPage.vue -->
 <template>
   <n-layout class="mp-page scheduler-page" content-style="padding: 0;">
-    <n-page-header class="mp-page-header" title="任务中心" subtitle="查看任务说明并执行媒体维护" />
+    <n-page-header class="mp-page-header" subtitle="查看任务说明并执行媒体维护"><template #title><UiIcon name="time" /> 任务中心</template></n-page-header>
     <div v-if="isLoading" class="center-container">
       <n-spin size="large" />
     </div>
@@ -9,7 +9,7 @@
     <n-space v-else-if="configModel" vertical :size="24">
       <n-card :bordered="false" class="dashboard-card">
         <template #header>
-          <span class="card-title">Telegram 快捷菜单</span>
+          <span class="card-title"><UiIcon name="send" /> Telegram 快捷菜单</span>
         </template>
         <template #header-extra>
           <n-text depth="3">配置显示在 TG 机器人输入框左侧 Menu 按钮中的快捷任务</n-text>
@@ -47,7 +47,7 @@
 
       <n-card :bordered="false" class="dashboard-card">
         <template #header>
-          <span class="card-title">临时任务</span>
+          <span class="card-title"><UiIcon name="play" /> 临时任务</span>
         </template>
         <template #header-extra>
           <n-text depth="3">用于需要立即手动执行的场景</n-text>
@@ -55,14 +55,14 @@
 
         <div class="temp-task-groups">
           <section v-for="group in manualTaskGroups" :key="group.key" class="temp-task-group">
-            <div class="temp-task-group-title">{{ group.name }}</div>
+            <div class="temp-task-group-title"><UiIcon :name="taskIcon(group.key)" /> {{ group.name }}</div>
             <div class="temp-task-grid">
               <div v-for="task in group.tasks" :key="task.key">
                 <n-tooltip trigger="hover" placement="top">
                   <template #trigger>
                     <div class="temp-task-item">
                       <div class="temp-task-copy">
-                        <n-text class="temp-task-name">{{ task.name }}</n-text>
+                        <n-text class="temp-task-name"><UiIcon :name="taskIcon(group.key)" /> {{ task.name }}</n-text>
                         <p class="temp-task-description">{{ getTaskHelp(task) }}</p>
                       </div>
                       <n-button
@@ -95,10 +95,9 @@
       v-model:show="showTgMenuConfigModal"
       class="custom-card custom-modal glass-modal"
       preset="card"
-      title="配置 Telegram 快捷菜单"
       style="width: 90%; max-width: 600px;"
       :mask-closable="false"
-    >
+    ><template #header><UiIcon name="send" /> 配置 Telegram 快捷菜单</template>
       <n-alert type="info" :show-icon="false" style="margin-bottom: 16px;">
         请勾选需要在 Telegram 机器人菜单中显示的任务，并拖动调整顺序。
       </n-alert>
@@ -118,18 +117,18 @@
       </div>
       <template #footer>
         <n-space justify="end">
-          <n-button @click="showTgMenuConfigModal = false">取消</n-button>
-          <n-button type="primary" @click="saveTgMenuConfig">保存</n-button>
+          <n-button @click="showTgMenuConfigModal = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
+          <n-button type="primary" @click="saveTgMenuConfig"><template #icon><UiIcon name="save" /></template>保存</n-button>
         </n-space>
       </template>
     </n-modal>
 
-    <n-modal v-model:show="showSyncModeModal" preset="dialog" title="选择处理模式" :mask-closable="false" class="glass-modal">
+    <n-modal v-model:show="showSyncModeModal" preset="dialog" :mask-closable="false" class="glass-modal"><template #title><UiIcon name="options" /> 选择处理模式</template>
       <n-text>您希望如何执行此任务？</n-text>
       <template #action>
-        <n-button @click="showSyncModeModal = false">取消</n-button>
-        <n-button @click="runTaskFromModal(false)">快速模式（增量）</n-button>
-        <n-button type="warning" @click="runTaskFromModal(true)">深度模式 (全量)</n-button>
+        <n-button @click="showSyncModeModal = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
+        <n-button @click="runTaskFromModal(false)"><template #icon><UiIcon name="play" /></template>快速模式（增量）</n-button>
+        <n-button type="warning" @click="runTaskFromModal(true)"><template #icon><UiIcon name="play" /></template>深度模式 (全量)</n-button>
       </template>
     </n-modal>
   </n-layout>
@@ -212,6 +211,8 @@ const manualTaskGroups = computed(() => {
   });
   return Array.from(groups.values());
 });
+
+const taskIcon = category => ({ 'media-data': 'database', 'media-info': 'media', 'p115-cache': 'folder', 'audio-maintenance': 'language', 'system-maintenance': 'settings' }[category] || 'play');
 
 const getTaskHelp = (task) => {
   if (!task) return '暂无任务说明。';

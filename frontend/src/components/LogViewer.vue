@@ -12,17 +12,20 @@
               clearable
               @keyup.enter="executeSearch"
               :disabled="isLoading"
-            />
+            ><template #prefix><UiIcon name="search" /></template></n-input>
             <n-button type="primary" @click="executeSearch" :loading="isSearching">
+              <template #icon><UiIcon name="search" /></template>
               搜索
             </n-button>
           </n-input-group>
 
           <n-radio-group v-model:value="searchMode" name="search-mode-radio">
             <n-radio-button value="filter" :disabled="isLoading">
+              <UiIcon name="options" :size="16" />
               匹配日志行
             </n-radio-button>
             <n-radio-button value="context" :disabled="isLoading">
+              <UiIcon name="time" :size="16" />
               完整上下文
             </n-radio-button>
           </n-radio-group>
@@ -36,7 +39,7 @@
           <div v-if="isSearchMode && searchMode === 'context'" class="view-container">
              <div class="toolbar">
                <n-button @click="clearSearch" size="tiny" secondary>
-                 <template #icon><n-icon :component="ArrowBackOutline" /></template>
+                 <template #icon><UiIcon name="back" /></template>
                  返回文件浏览
                </n-button>
                <span class="tip">已隐藏日期与模块名，仅显示核心流</span>
@@ -51,7 +54,7 @@
           <!-- 场景 2: 筛选模式 (JSON) - 保持不变，用于快速查看原始行 -->
           <div v-else-if="isSearchMode && searchMode === 'filter'" class="view-container">
             <n-button @click="clearSearch" size="tiny" secondary style="margin-bottom: 5px;">
-              <template #icon><n-icon :component="ArrowBackOutline" /></template>
+              <template #icon><UiIcon name="back" /></template>
               返回文件浏览
             </n-button>
 
@@ -81,12 +84,17 @@
                 placeholder="请选择日志文件"
                 :options="fileOptions"
                 :loading="isLoadingFiles"
-                @update:value="fetchLogContent"
+                @update:value="filename => fetchLogContent(filename)"
                 size="small"
                 class="history-file-select"
               />
-              <span class="tip">最新日志在顶部</span>
+              <span class="tip"><UiIcon name="time" :size="14" /> 最新日志在顶部</span>
               <n-button quaternary circle aria-label="刷新历史日志" title="刷新" :loading="isLoading" @click="refreshLogs"><template #icon><n-icon :component="RefreshOutline" /></template></n-button>
+            </div>
+            <div v-if="logPages > 1" class="history-pagination">
+              <n-button size="tiny" :disabled="isLoading || logPage <= 1" @click="fetchLogContent(selectedFile, logPage - 1)"><template #icon><UiIcon name="time" :size="14" /></template>较新日志</n-button>
+              <span>第 {{ logPage }} / {{ logPages }} 页，共 {{ logTotalLines }} 行</span>
+              <n-button size="tiny" :disabled="isLoading || logPage >= logPages" @click="fetchLogContent(selectedFile, logPage + 1)"><template #icon><UiIcon name="time" :size="14" /></template>较早日志</n-button>
             </div>
 
             <!-- 这里复用 iframe-wrapper -->
@@ -110,7 +118,7 @@ import {
   NInput, NInputGroup, NButton, NDivider, NEmpty, NIcon,
   NRadioGroup, NRadioButton
 } from 'naive-ui';
-import { ArrowBackOutline, RefreshOutline } from '@vicons/ionicons5';
+import { RefreshOutline } from '@vicons/ionicons5';
 
 const props = defineProps({ show: { type: Boolean, default: false } });
 
@@ -121,6 +129,7 @@ const isSearching = ref(false);
 const logFiles = ref([]);
 const selectedFile = ref(null);
 const logContent = ref(''); // 现在这里存储的是 HTML 字符串
+const logPage = ref(1), logPages = ref(1), logTotalLines = ref(0);
 const searchQuery = ref('');
 const searchResults = ref([]);
 const htmlContent = ref(''); // 搜索结果的 HTML
@@ -140,8 +149,9 @@ function applyFrameTheme(event) {
     (frame.contentDocument.head || frame.contentDocument.documentElement).appendChild(style);
   }
   const color = key => vars.getPropertyValue(key).trim();
-  style.textContent = `:root{--bg-color:${color('--ui-input-bg')};--text-color:${color('--ui-text')};--time-color:${color('--ui-text-muted')};--debug-color:${color('--ui-text-muted')};--info-color:${color('--ui-text')};--warn-color:${color('--ui-warning-color')};--error-color:${color('--ui-error-color')};--arrow-color:${color('--accent-color')};--highlight-bg:${color('--accent-color')}}
+  const css = `:root{--bg-color:${color('--ui-input-bg')};--text-color:${color('--ui-text')};--time-color:${color('--ui-text-muted')};--debug-color:${color('--ui-text-muted')};--info-color:${color('--ui-text')};--warn-color:${color('--ui-warning-color')};--error-color:${color('--ui-error-color')};--arrow-color:${color('--accent-color')};--highlight-bg:${color('--accent-color')}}
 body{background:var(--bg-color)!important;color:var(--text-color)!important;margin:0!important;padding:14px!important;height:auto!important;line-height:1.75!important}h3,.block-header{color:var(--time-color)!important;border-color:${color('--ui-border')}!important}pre,.msg{overflow-wrap:anywhere!important;word-break:break-word!important}.log-block{border-color:${color('--ui-border')}!important}.line:hover{background:${color('--accent-glow-color')}!important}.ts{opacity:1!important}mark,.keyword{background:var(--highlight-bg)!important;color:#fff!important}`;
+  if (style.textContent !== css) style.textContent = css;
 }
 onMounted(() => {
   themeObserver = new MutationObserver(() => {
@@ -203,7 +213,7 @@ const fetchLogFiles = async () => {
 };
 
 // ★★★ 修改：请求 HTML 格式 ★★★
-const fetchLogContent = async (filename) => {
+const fetchLogContent = async (filename, page = 1) => {
   if (!filename) return;
   const sequence = ++readSequence;
   isLoadingContent.value = true;
@@ -212,11 +222,17 @@ const fetchLogContent = async (filename) => {
     const response = await axios.get('/api/logs/view', {
       params: {
         filename,
+        page,
         format: 'html' // 告诉后端我要 HTML
       },
       responseType: 'text'
     });
-    if (sequence === readSequence) logContent.value = response.data;
+    if (sequence === readSequence) {
+      logContent.value = response.data;
+      logPage.value = Number(response.headers?.['x-log-page']) || 1;
+      logPages.value = Number(response.headers?.['x-log-pages']) || 1;
+      logTotalLines.value = Number(response.headers?.['x-log-total-lines']) || 0;
+    }
   } catch (error) {
     if (sequence === readSequence) message.error(`加载日志 ${filename} 失败！`);
   } finally {
@@ -295,6 +311,8 @@ async function refreshLogs() {
 }
 
 .header-section { flex-shrink: 0; }
+.history-pagination { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; flex-shrink:0; }
+.history-pagination span { color:var(--ui-text-muted); font-size:12px; }
 
 .flex-spin {
   flex: 1;

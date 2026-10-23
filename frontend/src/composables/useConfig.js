@@ -37,7 +37,8 @@ export function useConfig() {
   const handleSaveConfig = async (configToSave) => {
     // 检查是否有配置可以保存。优先使用传入的 configToSave，
     // 如果没有传入，则回退到使用全局的 configModel.value。
-    const payload = configToSave || configModel.value;
+    const source = configToSave || configModel.value;
+    const payload = source ? JSON.parse(JSON.stringify(source)) : null;
     if (!payload) {
       console.error('没有可保存的配置。');
       configError.value = '配置数据为空，无法保存。';
@@ -48,11 +49,17 @@ export function useConfig() {
     configError.value = null;
     try {
       // 使用最终确定的 payload 发送请求
-      await axios.post('/api/config', payload);
+      const response = await axios.post('/api/config', payload);
 
       // 保存成功后，用我们刚刚成功保存的数据来更新全局的 configModel
       // 这样可以确保单例状态与后端保持同步
-      configModel.value = { ...configModel.value, ...payload };
+      const savedFields = response.data?.saved_fields || payload;
+      for (const [field, savedValue] of Object.entries(savedFields)) {
+        // 保存期间继续编辑的草稿不应被旧请求结果覆盖。
+        if (JSON.stringify(configModel.value[field]) === JSON.stringify(payload[field])) {
+          configModel.value[field] = savedValue;
+        }
+      }
 
       return true;
     } catch (err) {

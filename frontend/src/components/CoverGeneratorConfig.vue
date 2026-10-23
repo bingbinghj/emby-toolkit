@@ -3,16 +3,12 @@
     <n-spin :show="isLoading">
       <div class="cover-generator-config">
         <n-page-header class="mp-page-header" subtitle="选择封面样式并配置媒体库标题">
-          <template #title>媒体库封面生成</template>
+          <template #title><UiIcon name="image" /> 媒体库封面生成</template>
           <template #extra>
             <n-space>
               <n-button @click="runGenerateAllTask" :loading="isGenerating">
                 <template #icon><n-icon :component="ImagesIcon" /></template>
                 生成全部封面
-              </n-button>
-              <n-button type="primary" @click="saveConfig" :loading="isSaving">
-                <template #icon><n-icon :component="SaveIcon" /></template>
-                保存设置
               </n-button>
             </n-space>
           </template>
@@ -26,7 +22,10 @@
         <n-card class="content-card dashboard-card" style="margin-top: 24px;">
           <template #header>
             <!-- 将 card-title 类应用到标题文本的容器上 -->
-            <span class="card-title">基础设置</span>
+            <span class="card-title"><UiIcon name="settings" /> 基础设置</span>
+          </template>
+          <template #header-extra>
+            <n-button type="primary" secondary :loading="isSaving" @click="saveConfig('basic')"><template #icon><UiIcon name="save" /></template>保存基础设置</n-button>
           </template>
           <n-grid class="cover-basic-grid" cols="1 520:2 880:3 1280:5" :x-gap="24" :y-gap="16">
             <!-- 第一列 -->
@@ -119,8 +118,12 @@
 
         <!-- ... 其余的 n-card 和 n-tabs 保持不变 ... -->
         <n-card class="content-card dashboard-card" style="margin-top: 24px;">
+          <template #header><span class="card-title"><UiIcon name="image" /> 封面样式与标题</span></template>
+          <template #header-extra>
+            <n-button type="primary" secondary :loading="isSaving" @click="saveConfig(configData.tab || 'style-tab')"><template #icon><UiIcon name="save" /></template>{{ sectionSaveLabel }}</n-button>
+          </template>
           <n-tabs v-model:value="configData.tab" type="line" animated>
-            <n-tab-pane name="style-tab" tab="封面风格">
+            <n-tab-pane name="style-tab"><template #tab><UiIcon name="image" /> 封面风格</template>
               <n-spin :show="isPreviewLoading"> <!-- 添加一个加载动画，提升体验 -->
                 <n-radio-group v-model:value="configData.cover_style" class="cover-style-options" name="cover-style-group">
                   <n-grid cols="1 600:2 950:3" :x-gap="16" :y-gap="16">
@@ -136,7 +139,7 @@
               </n-spin>
             </n-tab-pane>
 
-            <n-tab-pane name="title-tab" tab="封面标题">
+            <n-tab-pane name="title-tab"><template #tab><UiIcon name="library" /> 封面标题</template>
               <n-space vertical>
                 <!-- 表头，用于引导用户 -->
                 <n-grid class="title-config-head" :cols="10" :x-gap="12" style="margin-bottom: 4px;">
@@ -162,7 +165,7 @@
               </n-space>
             </n-tab-pane>
 
-            <n-tab-pane name="single-tab" tab="单图风格设置">
+            <n-tab-pane name="single-tab"><template #tab><UiIcon name="image" /> 单图风格设置</template>
               <n-alert type="info" :bordered="false" style="margin-bottom: 20px;">
                 若字体无法下载，建议在主程序的网络设置中配置GitHub代理，或手动下载字体后填写本地路径。
               </n-alert>
@@ -220,7 +223,7 @@
               </n-grid>
             </n-tab-pane>
 
-            <n-tab-pane name="multi-1-tab" tab="多图风格设置">
+            <n-tab-pane name="multi-1-tab"><template #tab><UiIcon name="image" /> 多图风格设置</template>
               <n-grid cols="1 720:2" :x-gap="24" :y-gap="12">
                 <n-gi span="1 720:2">
                   <n-alert type="info" :bordered="false">
@@ -288,7 +291,7 @@
               </n-grid>
             </n-tab-pane>
 
-            <n-tab-pane name="others-tab" tab="其他设置">
+            <n-tab-pane name="others-tab"><template #tab><UiIcon name="settings" /> 其他设置</template>
               <n-grid cols="1 720:2" :x-gap="24">
                 <n-gi>
                   <n-form-item label="自定义图片目录（可选）">
@@ -310,7 +313,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue';
+import { computed, ref, onMounted, watch } from 'vue';
 import axios from 'axios';
 import {
   useMessage, NLayout, NPageHeader, NButton, NIcon, NCard, NGrid, NGi,
@@ -319,7 +322,6 @@ import {
   NDivider, NAlert
 } from 'naive-ui';
 import {
-  SaveOutline as SaveIcon,
   ImagesOutline as ImagesIcon,
   TrashOutline as TrashIcon, // ★ 新增：删除图标
   AddOutline as AddIcon      // ★ 新增：添加图标
@@ -345,6 +347,16 @@ const isLoading = ref(true);
 const isSaving = ref(false);
 const isGenerating = ref(false);
 const configData = ref({});
+let persistedConfig = {};
+const sectionFields = {
+  basic: ['enabled', 'transfer_monitor', 'show_item_count', 'sort_by', 'max_safe_rating', 'exclude_libraries', 'badge_style', 'badge_size_ratio'],
+  'style-tab': ['cover_style'],
+  'title-tab': ['title_config'],
+  'single-tab': ['zh_font_path_local', 'en_font_path_local', 'zh_font_url', 'en_font_url', 'zh_font_size', 'en_font_size', 'blur_size', 'color_ratio', 'single_use_primary'],
+  'multi-1-tab': ['zh_font_path_multi_1_local', 'en_font_path_multi_1_local', 'zh_font_url_multi_1', 'en_font_url_multi_1', 'zh_font_size_multi_1', 'en_font_size_multi_1', 'blur_size_multi_1', 'color_ratio_multi_1', 'multi_1_blur', 'multi_1_use_main_font', 'multi_1_use_primary'],
+  'others-tab': ['covers_input', 'covers_output'],
+};
+const sectionSaveLabel = computed(() => ({ 'style-tab': '保存封面风格', 'title-tab': '保存封面标题', 'single-tab': '保存单图风格', 'multi-1-tab': '保存多图风格', 'others-tab': '保存其他设置' }[configData.value.tab || 'style-tab']));
 const ratingLimitOptions = ref([]);
 // ★ 新增：用于封面标题UI的结构化数据
 const titleConfigs = ref([]);
@@ -433,6 +445,7 @@ const fetchConfig = async () => {
   try {
     const response = await axios.get('/api/config/cover_generator');
     configData.value = response.data;
+    persistedConfig = structuredClone(response.data);
     // ★ 修改：获取配置后，立即解析YAML
     parseYamlToData(configData.value.title_config);
   } catch (error) {
@@ -451,13 +464,14 @@ const fetchLibraryOptions = async () => {
   }
 };
 
-const saveConfig = async () => {
+const saveConfig = async (section) => {
+  if (isSaving.value) return;
   isSaving.value = true;
-  // ★ 修改：保存前，将结构化数据转换回YAML字符串
-  configData.value.title_config = convertDataToYaml();
-
+  if (section === 'title-tab') configData.value.title_config = convertDataToYaml();
+  const payload = { ...persistedConfig, ...Object.fromEntries(sectionFields[section].map(key => [key, configData.value[key]])) };
   try {
-    await axios.post('/api/config/cover_generator', configData.value);
+    await axios.post('/api/config/cover_generator', payload);
+    persistedConfig = JSON.parse(JSON.stringify(payload));
     message.success('配置已成功保存！');
   } catch (error) {
     message.error('保存配置失败。');

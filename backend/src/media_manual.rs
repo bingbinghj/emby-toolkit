@@ -115,17 +115,27 @@ fn front(actor: &Value) -> Value {
     json!({"tmdbId":actor["id"],"name":actor["name"],"role":crate::cast::clean_character(&string(actor,"character")),"imageUrl":if path.is_empty(){Value::Null}else{json!(if path.starts_with("http"){path}else{format!("https://image.tmdb.org/t/p/w185{path}")})},"emby_person_id":actor["emby_person_id"]})
 }
 async fn edit(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>> {
+    let result = edit_data(&state, &id).await;
+    match &result {
+        Ok(Json(data)) => {
+            tracing::info!(item_id = %id, actors = data["current_emby_cast"].as_array().map_or(0, Vec::len), "打开演员编辑页完成")
+        }
+        Err(error) => tracing::warn!(item_id = %id, error = %error.1, "打开演员编辑页失败"),
+    }
+    result
+}
+async fn edit_data(state: &AppState, id: &str) -> Result<Json<Value>> {
     let item = details(
-        &state,
-        &id,
+        state,
+        id,
         "Name,Type,ProviderIds,People,ImageTags,ProductionYear",
     )
     .await?;
-    let row = record(&state, &id, &item).await?;
-    let actors = cast(&state, &row, &item).await?;
+    let row = record(state, id, &item).await?;
+    let actors = cast(state, &row, &item).await?;
     let review: Option<Value> =
         sqlx::query_scalar("SELECT to_jsonb(f) FROM failed_log f WHERE item_id=$1")
-            .bind(&id)
+            .bind(id)
             .fetch_optional(&state.db)
             .await?;
     let review = review.unwrap_or(json!({}));

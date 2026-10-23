@@ -17,18 +17,18 @@
           <button v-if="authStore.isAdmin" class="mp-task-trigger" :class="{ running: taskStatus?.is_running }" aria-label="通知中心" title="通知中心" @click="notificationOpen = true">
             <n-icon :component="NotificationsOutline" :size="19" /><span v-if="taskStatus?.is_running" class="mp-notification-dot" />
           </button>
-          <n-dropdown trigger="click" :options="themeOptions" :value="themeMode" @select="emit('update:theme-mode', $event)"><n-button quaternary circle aria-label="选择主题" :title="`主题：${themeOptions.find(option => option.key === themeMode)?.label || '跟随系统'}`"><template #icon><n-icon :component="PaletteIcon" /></template></n-button></n-dropdown>
+          <n-dropdown trigger="click" :options="themeMenuOptions" :value="themeMode" @select="emit('update:theme-mode', $event)"><n-button quaternary circle aria-label="选择主题" :title="`主题：${themeOptions.find(option => option.key === themeMode)?.label || '跟随系统'}`"><template #icon><n-icon :component="PaletteIcon" /></template></n-button></n-dropdown>
           <n-dropdown v-if="authStore.isLoggedIn" trigger="click" :options="userOptions" @select="handleUserSelect"><button class="mp-user-avatar" :aria-label="`${authStore.username} 的用户菜单`"><img v-if="authStore.avatarUrl && !avatarLoadFailed" :src="authStore.avatarUrl" alt="" @error="avatarLoadFailed = true" /><template v-else>{{ (authStore.username || 'U').slice(0, 1).toUpperCase() }}</template><span /></button></n-dropdown>
         </div>
       </header>
       <main class="mp-page-content" :class="{ 'mp-page-content-media': ['MediaCenter', 'MediaCenterLibrary'].includes(route.name) }"><router-view v-slot="slotProps"><component :is="slotProps.Component" :task-status="props.taskStatus" /></router-view></main>
     </div>
     <n-drawer v-model:show="mobileMenuOpen" placement="left" :width="280"><n-drawer-content :native-scrollbar="false"><div class="mp-brand"><img src="./assets/logo.png" alt="Emby Toolkit" /><strong>Emby Toolkit</strong></div><n-menu :options="menuOptions" :value="activeMenuKey" :default-expanded-keys="defaultExpandedKeys" @update:value="handleMenuUpdate" /></n-drawer-content></n-drawer>
-    <n-drawer v-model:show="notificationOpen" placement="right" :width="isMobile || notificationExpanded ? '100vw' : 'min(1000px, 92vw)'">
-      <n-drawer-content body-content-style="height: 100%; padding: 20px; box-sizing: border-box; overflow: hidden;">
+    <n-modal v-model:show="notificationOpen" class="mp-log-modal" :style="{ width: notificationExpanded ? 'calc(100vw - 32px)' : 'min(1100px, calc(100vw - 32px))' }">
+      <div class="mp-log-dialog">
         <NotificationCenter v-if="notificationOpen" :task="taskStatus" :expanded="notificationExpanded" :mobile="isMobile" @expand="notificationExpanded = !notificationExpanded" @close="notificationOpen = false" />
-      </n-drawer-content>
-    </n-drawer>
+      </div>
+    </n-modal>
 
     <!-- ★★★ 自定义菜单编辑器模态框 ★★★ -->
     <n-modal v-model:show="isMenuEditorVisible" preset="card" class="menu-editor-modal" style="width: min(650px, calc(100vw - 32px));" title="自定义侧边栏菜单 (全局生效)">
@@ -87,11 +87,11 @@
           <n-space>
             <n-popconfirm @positive-click="resetMenuConfig" negative-text="取消" positive-text="确定">
               <template #trigger>
-                <n-button type="error" ghost :loading="isSavingMenu">恢复默认</n-button>
+                <n-button type="error" ghost :loading="isSavingMenu"><template #icon><UiIcon name="refresh" /></template>恢复默认</n-button>
               </template>
               确定要恢复所有菜单的默认名称、顺序和显示状态吗？
             </n-popconfirm>
-            <n-button type="primary" @click="saveMenuConfig" :loading="isSavingMenu">保存并应用</n-button>
+            <n-button type="primary" @click="saveMenuConfig" :loading="isSavingMenu"><template #icon><UiIcon name="save" /></template>保存并应用</n-button>
           </n-space>
         </div>
       </template>
@@ -111,6 +111,7 @@ import {
 import { useAuthStore } from './stores/auth';
 import NotificationCenter from './components/NotificationCenter.vue';
 import { themeOptions } from './theme.js';
+import UiIcon from './components/UiIcon.vue';
 import {
   ListOutline as ReviewListIcon,
   TimerOutline as SchedulerIcon,
@@ -173,6 +174,8 @@ watch(() => route.fullPath, () => {
 
 const activeMenuKey = computed(() => route.name === 'MediaCenterLibrary' ? 'MediaCenter' : route.name);
 const renderIcon = (iconComponent) => () => h(NIcon, null, { default: () => h(iconComponent) });
+
+const themeMenuOptions = themeOptions.map(option => ({ ...option, icon: () => h(UiIcon, { name: 'theme' }) }));
 
 const userOptions = computed(() => {
   const options = [];

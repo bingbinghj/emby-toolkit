@@ -276,6 +276,16 @@ pub async fn prepare_batch(
     let mut notify = BTreeSet::new();
     let mut directories = BTreeSet::new();
     for (index, group) in groups.iter().enumerate() {
+        let mut ignored = false;
+        for path in group {
+            if crate::emby::path_ignored(state, path.to_str().unwrap_or("")).await? {
+                ignored = true;
+                break;
+            }
+        }
+        if ignored {
+            continue;
+        }
         check_active(state, group, context, cancel, true).await?;
         context
             .update(

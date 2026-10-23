@@ -1,15 +1,15 @@
 <template>
   <section class="notification-center" aria-label="通知中心">
     <header class="notification-heading">
-      <div><h2>通知中心</h2><p>查看运行状态与日志</p></div>
+      <div><h2><UiIcon name="notifications" /> 通知中心</h2><p>查看运行状态与日志</p></div>
       <div class="notification-window-actions">
         <n-button v-if="!mobile" quaternary circle :aria-label="expanded ? '收起面板' : '展开面板'" :title="expanded ? '收起面板' : '展开面板'" @click="$emit('expand')"><template #icon><n-icon :component="expanded ? ContractOutline : ExpandOutline" /></template></n-button>
         <n-button quaternary circle aria-label="关闭通知中心" title="关闭" @click="$emit('close')"><template #icon><n-icon :component="CloseOutline" /></template></n-button>
       </div>
     </header>
     <n-tabs v-model:value="activeTab" type="line" class="notification-tabs">
-      <n-tab name="logs">实时日志</n-tab>
-      <n-tab name="history">历史日志</n-tab>
+      <n-tab name="logs"><UiIcon name="notifications" :size="16" /> 实时日志</n-tab>
+      <n-tab name="history"><UiIcon name="time" :size="16" /> 历史日志</n-tab>
     </n-tabs>
     <div v-show="activeTab === 'logs'" class="notification-live">
       <section class="notification-task" aria-label="当前任务">
@@ -42,7 +42,7 @@
       </div>
       <footer class="notification-footer">
         <span>{{ filteredLogs.length }} 条日志{{ following ? ' · 自动跟随最新日志' : ' · 已暂停跟随' }}</span>
-        <n-button v-if="!following" size="small" type="primary" secondary @click="following = true">{{ hasNewLogs ? '有新日志 · 回到最新' : '回到最新' }}</n-button>
+        <n-button v-if="!following" size="small" type="primary" secondary @click="following = true"><template #icon><UiIcon name="refresh" /></template>{{ hasNewLogs ? '有新日志 · 回到最新' : '回到最新' }}</n-button>
       </footer>
     </div>
     <LogViewer v-show="activeTab === 'history'" :show="activeTab === 'history'" />

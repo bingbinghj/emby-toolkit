@@ -185,9 +185,9 @@ async fn translate_roles(
             .await?;
     }
     let mut media = vec![];
-    for library in crate::media_edit::list(&config["libraries_to_process"]) {
+    for library in crate::emby::processing_libraries(state).await? {
         media.extend(
-            crate::emby::items(state, library.as_str().unwrap_or(""), "Id,Type", context)
+            crate::emby::items(state, &library, "Id,Type", context)
                 .await?
                 .into_iter()
                 .filter(|i| matches!(i["Type"].as_str(), Some("Movie" | "Series"))),
@@ -319,13 +319,23 @@ async fn restore_metadata(state: &AppState, context: &crate::jobs::JobContext) -
             )
             .await;
         let result = async {
-            let path = crate::media_edit::list(&row["asset_details_json"])
-                .first()
+            let assets = crate::media_edit::list(&row["asset_details_json"]);
+            let path = assets
+                .iter()
+                .find(|asset| {
+                    !crate::emby::library_ignored(
+                        &config,
+                        &crate::state::string(asset, "source_library_id"),
+                    )
+                })
                 .and_then(|a| a["path"].as_str())
                 .unwrap_or("")
                 .to_string();
             if path.is_empty() || path.starts_with("http") {
                 return Err(ApiError::bad("缺失本地媒体路径"));
+            }
+            if crate::emby::path_ignored(state, &path).await? {
+                return Ok((0, 0));
             }
             let (payload, cast) = crate::metadata::reconstruct_full(state, &id, &kind, true)
                 .await?
@@ -453,6 +463,9 @@ async fn backup_info(state: &AppState, context: &crate::jobs::JobContext) -> Res
             .enumerate()
         {
             context.checkpoint().await?;
+            if crate::emby::path_ignored(state, &crate::state::string(asset, "path")).await? {
+                continue;
+            }
             let id = asset["emby_item_id"]
                 .as_str()
                 .or_else(|| ids.get(index).and_then(Value::as_str))

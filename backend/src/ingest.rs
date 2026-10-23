@@ -24,6 +24,9 @@ pub async fn feedback(
     if let Some(library) = &library {
         item["_SourceLibraryId"] = library["ItemId"].clone();
     }
+    if emby::path_ignored(state, &string(&item, "Path")).await? {
+        return Ok(json!({"updated":0,"status":"ignored_library"}));
+    }
     let kind = string(&item, "Type");
     let tmdb = string(&item["ProviderIds"], "Tmdb");
     if !matches!(kind.as_str(), "Movie" | "Series" | "Season" | "Episode") {
@@ -173,6 +176,9 @@ async fn process(
     pending: bool,
 ) -> Result<Value> {
     context.checkpoint().await?;
+    if emby::path_ignored(state, &string(item, "Path")).await? {
+        return Ok(json!({"updated":0,"status":"ignored_library"}));
+    }
     let kind = string(item, "Type");
     let tmdb = string(&item["ProviderIds"], "Tmdb");
     if !matches!(kind.as_str(), "Movie" | "Series") || tmdb.is_empty() {
@@ -434,6 +440,9 @@ pub async fn prepare_cached(
     context: &JobContext,
 ) -> Result<bool> {
     context.checkpoint().await?;
+    if emby::path_ignored(state, &string(item, "Path")).await? {
+        return Ok(true);
+    }
     let id = string(&item["ProviderIds"], "Tmdb");
     let kind = string(item, "Type");
     let Some((mut payload, cast)) = metadata::reconstruct_full(state, &id, &kind, false).await?

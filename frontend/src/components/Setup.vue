@@ -38,7 +38,7 @@
           </n-form-item>
 
           <n-space vertical style="margin-top: 20px;">
-            <n-button type="primary" attr-type="submit" block :loading="loading" size="large" class="setup-btn">
+            <n-button type="primary" attr-type="submit" block :loading="loading" size="large" class="setup-btn"><template #icon><UiIcon name="save" /></template>
               测试并保存
             </n-button>
           </n-space>

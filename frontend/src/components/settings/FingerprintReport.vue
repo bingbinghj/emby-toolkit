@@ -3,10 +3,10 @@
     :style="{ width: 'min(1200px, 96vw)' }" @update:show="$emit('update:show', $event)">
     <n-space vertical :size="16">
       <div class="report-actions">
-        <n-button :loading="loading" @click="load">刷新报告</n-button>
-        <n-button tag="a" href="/api/tasks/fingerprint-scan/report?download=1" :disabled="!report">下载报告</n-button>
+        <n-button :loading="loading" @click="load"><template #icon><UiIcon name="refresh" /></template>刷新报告</n-button>
+        <n-button tag="a" href="/api/tasks/fingerprint-scan/report?download=1" :disabled="!report"><template #icon><UiIcon name="download" /></template>下载报告</n-button>
         <n-button type="primary" secondary :loading="busy"
-          :disabled="running || loading || !canRetry" @click="$emit('retry', report.run_id)">再次补齐未确认项</n-button>
+          :disabled="running || loading || !canRetry" @click="$emit('retry', report.run_id)"><template #icon><UiIcon name="check" /></template>再次补齐未确认项</n-button>
       </div>
       <n-alert v-if="error" type="error">{{ error }}</n-alert>
       <n-empty v-if="!loading && !report && !error" description="暂无扫描报告" />

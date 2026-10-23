@@ -312,9 +312,22 @@ async fn view(
         .get("format")
         .is_some_and(|s| s.eq_ignore_ascii_case("html"))
     {
+        let pages = lines.len().div_ceil(500).max(1);
+        let page = params
+            .get("page")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(1)
+            .clamp(1, pages);
+        let start = (page - 1) * 500;
+        let page_lines = &lines[start..(start + 500).min(lines.len())];
         return Ok((
-            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-            html(&[json!({"file":name,"lines":lines})], ""),
+            [
+                ("content-type", "text/html; charset=utf-8".to_string()),
+                ("x-log-page", page.to_string()),
+                ("x-log-pages", pages.to_string()),
+                ("x-log-total-lines", lines.len().to_string()),
+            ],
+            html(&[json!({"file":name,"lines":page_lines})], ""),
         )
             .into_response());
     }

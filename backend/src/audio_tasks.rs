@@ -320,6 +320,9 @@ pub async fn repair_all(state: &AppState, context: &JobContext) -> Result<Value>
         if library_id.is_empty() {
             return Err(ApiError::bad("Emby 媒体库缺少 ID"));
         }
+        if crate::emby::library_ignored(&*state.config.read().await, &library_id) {
+            continue;
+        }
         let items = crate::emby::query_items(
             state,
             &[
@@ -376,6 +379,7 @@ pub async fn repair(state: &AppState, ids: &[String], context: &JobContext) -> R
         context.checkpoint().await?;
         let outcome=async{
             let item=media_edit::details(state,id,"Path,MediaSources,MediaStreams,PartCount,ExtraType").await?;
+            if crate::emby::path_ignored(state,&string(&item,"Path")).await?{return Ok(("skipped",json!({"item_id":id,"reason":"忽略媒体库"})));}
             if item["PartCount"].as_u64().unwrap_or(0)>1||!string(&item,"ExtraType").is_empty(){return Ok(("skipped",json!({"item_id":id,"reason":"分段或附加内容"})));}
             let target=media_edit::repair_target(state,id).await?;
             let original=media_edit::load(state,&target).await?;
@@ -558,6 +562,9 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
             continue;
         }
         let target = media_edit::repair_target(state, &id).await?;
+        if crate::emby::path_ignored(state, &target.path).await? {
+            continue;
+        }
         let mut members = vec![];
         let mut complete = true;
         for version in target

@@ -39,7 +39,7 @@ html.dark {
 }
 html, body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; }
 .mp-app-shell { display:flex; height:100dvh; width:100%; overflow:hidden; background:var(--ui-page-bg); }
-.mp-sidebar { flex:0 0 260px; width:260px; height:100%; background:var(--ui-surface); border-right:1px solid var(--ui-border-soft); display:flex; flex-direction:column; transition:width .2s,flex-basis .2s; }
+.mp-sidebar { flex:0 0 260px; width:260px; height:100%; background:var(--ui-page-bg); border-right:0; display:flex; flex-direction:column; transition:width .2s,flex-basis .2s; }
 .mp-nav-collapsed .mp-sidebar { flex-basis:80px; width:80px; }
 .mp-brand { display:flex; align-items:center; gap:12px; padding:22px 24px; min-height:88px; }
 .mp-brand img { width:34px; height:34px; object-fit:contain; border-radius:8px; }
@@ -52,7 +52,7 @@ html, body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 
 .mp-menu .n-menu-item-content::before { border-radius:8px; }
 .mp-menu .n-submenu { margin-bottom:14px; }
 .mp-main-column { flex:1; min-width:0; display:flex; flex-direction:column; padding:16px 24px 0; }
-.mp-navbar { flex-shrink:0; width:100%; max-width:1800px; margin-inline:auto; height:64px; padding:0 16px; border:1px solid var(--ui-border-soft); border-radius:12px; background:var(--ui-surface); box-shadow:var(--ui-shadow); display:flex; align-items:center; gap:14px; z-index:5; }
+.mp-navbar { flex-shrink:0; width:100%; max-width:1800px; margin-inline:auto; height:64px; padding:0 16px; border:0; border-radius:12px; background:var(--ui-surface); box-shadow:none; display:flex; align-items:center; gap:14px; z-index:5; }
 .mp-navbar-tools { margin-left:auto; display:flex; align-items:center; gap:8px; min-width:0; }
 .mp-user-avatar { position:relative; width:36px; height:36px; padding:0; border:0; border-radius:50%; font-size:14px; font-weight:600; background:var(--accent-glow-color); color:var(--accent-color); cursor:pointer; margin-left:5px; }
 .mp-user-avatar img { display:block; width:100%; height:100%; border-radius:50%; object-fit:cover; }
@@ -85,7 +85,7 @@ html, body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 
 .mp-page-content > .n-layout { background:transparent; }
 .mp-page-content > .n-layout > .n-layout-scroll-container { padding:0 !important; background:transparent; }
 .mp-page-content > .n-layout > .n-layout-scroll-container > .n-space { margin-top:0 !important; }
-.n-card.dashboard-card,.n-card:not(.glass-modal):not(.custom-modal) { height:auto; border:1px solid var(--ui-border-soft) !important; box-shadow:var(--ui-shadow) !important; background:var(--ui-surface) !important; }
+.n-card.dashboard-card,.n-card:not(.glass-modal):not(.custom-modal) { height:auto; border:0 !important; box-shadow:none !important; background:var(--ui-surface) !important; }
 .dashboard-card .card-title { color:var(--ui-text) !important; font-size:17px; font-weight:600 !important; }
 .n-card.dashboard-card > .n-card-header,.n-card:not(.glass-modal):not(.custom-modal) > .n-card-header { padding:22px 24px 10px; }
 .n-card.dashboard-card > .n-card__content,.n-card:not(.glass-modal):not(.custom-modal) > .n-card__content { padding:20px 24px; }
@@ -108,26 +108,9 @@ html, body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 
 .n-card.n-modal .n-input-group > :is(.n-input, .n-select) { min-width:0; }
 .n-dialog :is(.n-spin-content, .n-tabs, .n-tabs-nav, .n-tabs-pane-wrapper, .n-tab-pane, .n-input, .n-space) { min-width:0; max-width:100%; }
 .n-dialog .n-tabs-nav-scroll-content { max-width:100%; }
-.n-button--primary-type { --ui-button-label:var(--accent-color); }
-.n-button--info-type { --ui-button-label:var(--ui-info-color); }
-.n-button--success-type { --ui-button-label:var(--ui-success-color); }
-.n-button--warning-type { --ui-button-label:var(--ui-warning-color); }
-.n-button--error-type { --ui-button-label:var(--ui-error-color); }
-.n-button:is(.n-button--secondary, .n-button--ghost):not(.n-button--default-type):not(.n-button--color) {
-  --n-text-color:var(--ui-button-label) !important;
-  --n-text-color-hover:var(--ui-button-label) !important;
-  --n-text-color-pressed:var(--ui-button-label) !important;
-  --n-text-color-focus:var(--ui-button-label) !important;
-  --n-border:1px solid var(--ui-button-label) !important;
-  --n-border-hover:1px solid var(--ui-button-label) !important;
-  --n-border-pressed:1px solid var(--ui-button-label) !important;
-}
-.n-button--secondary:not(.n-button--default-type):not(.n-button--color) {
-  --n-color:color-mix(in srgb, var(--ui-button-label) 10%, transparent) !important;
-  --n-color-hover:color-mix(in srgb, var(--ui-button-label) 16%, transparent) !important;
-  --n-color-pressed:color-mix(in srgb, var(--ui-button-label) 12%, transparent) !important;
-  --n-color-focus:color-mix(in srgb, var(--ui-button-label) 16%, transparent) !important;
-}
+/* Ordinary actions use a neutral surface; only primary and destructive actions carry colour. */
+.n-button--secondary.n-button--default-type { background:var(--ui-surface-muted); }
+.n-card.n-modal .n-button:not(.n-button--primary-type):not(.n-button--error-type) { border-color:var(--ui-border-soft); }
 .n-card.n-modal .n-card__action { background:var(--modal-solid-bg-color); border-top:1px solid var(--ui-border); }
 .n-card.n-modal .n-card__footer { border-top:1px solid var(--ui-border); }
 .n-modal-container :is(.n-form-item-feedback-wrapper, .n-form-item-feedback) { color:var(--ui-text-muted); font-size:12px; line-height:1.65; }
@@ -186,33 +169,22 @@ html, body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 
 @media (prefers-reduced-motion:reduce) { .mp-running-task-track.indeterminate > span { animation:none; } }
 @media (max-width:600px) { .mp-navbar-center { margin:0 6px; } .mp-running-task { padding:7px; } .mp-running-task-title { gap:5px; } }
 
-/* MoviePilot transparent: low-opacity surfaces with a gentle blur. */
-html[data-theme='transparent'] :is(.mp-app-shell, .fullscreen-container) {
-  background: radial-gradient(ellipse at 15% 20%, #514263 0, transparent 52%), radial-gradient(ellipse at 90% 80%, #254753 0, transparent 55%), #1c1c1c;
+/* Material themes keep one quiet surface and solid, readable dialogs. */
+html[data-theme='transparent'] :is(.mp-app-shell, .fullscreen-container) { background:#1C1C1C; }
+html[data-theme='glass'] :is(.mp-app-shell, .fullscreen-container) { background:linear-gradient(145deg,#17263A,#0B1322 65%); }
+html:is([data-theme='transparent'], [data-theme='glass']) :is(.mp-navbar, .dashboard-card) {
+  backdrop-filter:blur(16px);
+  -webkit-backdrop-filter:blur(16px);
 }
-html[data-theme='transparent'] :is(.mp-navbar, .mp-sidebar, .n-card, .n-drawer, .n-dialog) {
-  backdrop-filter: blur(10px) !important;
-  -webkit-backdrop-filter: blur(10px) !important;
-}
-html[data-theme='transparent'] .mp-sidebar { background:rgba(30,30,30,.2); backdrop-filter:blur(16px) !important; }
-html[data-theme='transparent'] :is(.n-card, .mp-navbar) { background:rgba(30,30,30,.3) !important; }
-html[data-theme='transparent'] :is(.n-modal .n-card, .n-drawer, .n-dialog) { background:rgba(30,30,30,.72) !important; }
-
-/* MoviePilot glass: cool tinted backdrop, reflective edges, and layered glass surfaces. */
-html[data-theme='glass'] :is(.mp-app-shell, .fullscreen-container) {
-  background: radial-gradient(ellipse at 0 5%, #476178 0, transparent 45%), radial-gradient(ellipse at 95% 90%, #315369 0, transparent 55%), radial-gradient(ellipse at 75% 15%, #383052 0, transparent 50%), #0b1322;
-}
-html[data-theme='glass'] .mp-app-shell :is(.mp-navbar, .mp-sidebar, .n-card),
-html[data-theme='glass'] :is(.n-drawer, .n-dialog) {
-  background:linear-gradient(128deg, rgba(255,255,255,.1034), transparent 38%), linear-gradient(180deg, rgba(23,27,32,.244), rgba(23,27,32,.299)) !important;
-  border-color:var(--ui-border) !important;
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.15), 0 12px 30px rgba(0,0,0,.14) !important;
-  backdrop-filter:blur(20px) saturate(135%) !important;
-  -webkit-backdrop-filter:blur(20px) saturate(135%) !important;
-}
-html[data-theme='glass'] :is(.n-modal .n-card, .n-drawer, .n-dialog) { background:rgba(24,34,53,.85) !important; }
+html:is([data-theme='transparent'], [data-theme='glass']) :is(.n-modal .n-card, .n-drawer, .n-dialog, .mp-log-dialog) { background:var(--modal-solid-bg-color)!important; }
 html:is([data-theme='transparent'], [data-theme='glass']) :is(.n-data-table, .n-data-table-table, .n-tabs-pane-wrapper, .n-layout) { background:transparent; }
 html:is([data-theme='transparent'], [data-theme='glass']) .n-data-table .n-data-table-td { background:transparent; }
-@supports not (backdrop-filter: blur(1px)) {
-  html:is([data-theme='transparent'], [data-theme='glass']) :is(.mp-navbar, .mp-sidebar, .n-card, .n-drawer, .n-dialog) { background:var(--modal-solid-bg-color) !important; }
+@supports not (backdrop-filter:blur(1px)) {
+  html:is([data-theme='transparent'], [data-theme='glass']) :is(.mp-navbar,.dashboard-card) { background:var(--modal-solid-bg-color)!important; }
 }
+.mp-log-dialog { display:flex; height:min(800px,calc(100dvh - 48px)); min-height:0; padding:24px; border-radius:14px; background:var(--modal-solid-bg-color); box-shadow:0 12px 40px rgba(0,0,0,.2); overflow:hidden; }
+.mp-log-dialog > .notification-center { width:100%; }
+.card-title,.mp-title-with-icon { display:inline-flex; align-items:center; gap:10px; }
+.card-title > .n-icon { color:var(--accent-color); opacity:.85; }
+.settings-card-actions { display:flex; justify-content:flex-end; gap:12px; padding-top:16px; }
+@media(max-width:540px) { .mp-log-dialog { height:calc(100dvh - 24px); padding:16px; } }

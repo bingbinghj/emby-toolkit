@@ -54,6 +54,14 @@ async fn search(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>> {
+    let result = search_items(&state, &params).await;
+    match &result {
+        Ok(Json(data)) => tracing::info!(total_items = %data["total_items"], "手动搜索媒体库完成"),
+        Err(error) => tracing::warn!(error = %error.1, "手动搜索媒体库失败"),
+    }
+    result
+}
+async fn search_items(state: &AppState, params: &HashMap<String, String>) -> Result<Json<Value>> {
     let query = params.get("query").map_or("", String::as_str);
     if query.trim().is_empty() {
         return Err(ApiError::bad("搜索词不能为空"));
@@ -107,7 +115,7 @@ async fn search(
                 .collect::<Vec<_>>()
                 .join(" ");
             items.push(json!({"item_id":id,"item_name":format!("{}{}",string(&row,"title"),if version.is_empty(){String::new()}else{format!(" [{version}]")}),"item_type":row["item_type"],"production_year":row["release_year"],"failed_at":null,"error_message":format!("本地数据库搜索结果 (年份: {})",row["release_year"]),"score":null,"provider_ids":{"Tmdb":row["tmdb_id"]},"season_number":row["season_number"],"episode_number":row["episode_number"]}));
-            if let Ok(item)=crate::media_edit::details(&state,id,"Id,Name,Type,ProductionYear,Path,IndexNumber,ParentIndexNumber,SeriesId,SeriesName,SeriesPrimaryImageTag,ImageTags").await{details.insert(id.to_string(),item);}
+            if let Ok(item)=crate::media_edit::details(state,id,"Id,Name,Type,ProductionYear,Path,IndexNumber,ParentIndexNumber,SeriesId,SeriesName,SeriesPrimaryImageTag,ImageTags").await{details.insert(id.to_string(),item);}
         }
     }
     let libraries = list(

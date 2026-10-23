@@ -1,13 +1,13 @@
 <template>
-  <n-card title="全库指纹校验与补齐" :bordered="false" class="dashboard-card fingerprint-audit">
+  <n-card :bordered="false" class="dashboard-card fingerprint-audit"><template #header><UiIcon name="check" /> 全库指纹校验与补齐</template>
     <n-space vertical :size="16">
       <n-text depth="3">逐项核对在库电影和分集。一致就跳过，不一致且能确认文件身份就自动更新；无法确认的保留。115 目录请求至少间隔 5 秒，适合夜间运行。</n-text>
       <div class="audit-actions">
-        <n-button type="primary" secondary :disabled="running || busy" @click="run('start')">扫描全库并补齐</n-button>
-        <n-button :disabled="running || busy || !progress?.remaining" @click="run('resume')">继续上次扫描</n-button>
-        <n-button :disabled="running || busy || !progress?.failed || !!progress?.remaining" @click="run('retry')">重试无法确认项</n-button>
-        <n-button :loading="loading" @click="load">刷新进度</n-button>
-        <n-button :disabled="!reportAvailable" @click="reportVisible = true">查看并分析报告</n-button>
+        <n-button type="primary" secondary :disabled="running || busy" @click="run('start')"><template #icon><UiIcon name="search" /></template>扫描全库并补齐</n-button>
+        <n-button :disabled="running || busy || !progress?.remaining" @click="run('resume')"><template #icon><UiIcon name="play" /></template>继续上次扫描</n-button>
+        <n-button :disabled="running || busy || !progress?.failed || !!progress?.remaining" @click="run('retry')"><template #icon><UiIcon name="refresh" /></template>重试无法确认项</n-button>
+        <n-button :loading="loading" @click="load"><template #icon><UiIcon name="refresh" /></template>刷新进度</n-button>
+        <n-button :disabled="!reportAvailable" @click="reportVisible = true"><template #icon><UiIcon name="search" /></template>查看并分析报告</n-button>
       </div>
       <div v-if="progress" class="audit-progress">
         <div class="audit-progress-heading"><strong>{{ stateLabel }}</strong><span>已扫描 {{ progress.completed }} / {{ progress.total }}</span></div>

@@ -198,6 +198,9 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
     for row in rows {
         let ids = list(&row["emby_item_ids_json"]);
         for (index, asset) in list(&row["asset_details_json"]).into_iter().enumerate() {
+            if crate::emby::path_ignored(state, &string(&asset, "path")).await? {
+                continue;
+            }
             let path = PathBuf::from(string(&asset, "path"));
             if path
                 .extension()
@@ -238,6 +241,9 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
     let mut affected = std::collections::BTreeSet::new();
     for (path, bindings) in assets {
         context.checkpoint().await?;
+        if crate::emby::path_ignored(state, path.to_str().unwrap_or("")).await? {
+            continue;
+        }
         let final_path = path.with_file_name(format!(
             "{}-mediainfo.json",
             path.file_stem().unwrap_or_default().to_string_lossy()

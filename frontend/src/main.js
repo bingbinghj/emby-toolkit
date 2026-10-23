@@ -5,6 +5,7 @@ import { createPinia } from 'pinia';
 import App from './App.vue'
 import router from './router';
 import naive from 'naive-ui';
+import UiIcon from './components/UiIcon.vue';
 import { useAuthStore } from './stores/auth'; // ★★★ 1. 导入你的 auth store ★★★
 import { installBackgroundTaskInterceptor } from './utils/backgroundTasks';
 
@@ -15,6 +16,7 @@ import './assets/moviepilot.css';
 // --- 创建核心实例 ---
 const pinia = createPinia();
 const app = createApp(App);
+app.component('UiIcon', UiIcon);
 
 // --- 严格按照顺序注册插件 ---
 app.use(pinia);

@@ -1,7 +1,7 @@
 <!-- src/components/ReviewList.vue -->
 <template>
   <n-layout class="mp-page review-page" content-style="padding: 0;">
-  <n-page-header class="mp-page-header" title="手动处理" subtitle="搜索媒体或检查待复核项目" />
+  <n-page-header class="mp-page-header" subtitle="搜索媒体或检查待复核项目"><template #title><UiIcon name="edit" /> 手动处理</template></n-page-header>
   <n-card class="dashboard-card" :bordered="false" size="small">
 
     <n-alert title="操作提示" type="info" style="margin-bottom: 20px;">
@@ -105,7 +105,7 @@
         <div v-else ref="resultsContainer" class="review-results">
           <div v-if="tableData.length > 0 && compactList" class="review-cards">
             <article v-for="row in cardRows" :key="row.item_id" class="review-item-card">
-              <button type="button" class="review-item-title" @click="goToEditPage(row)">{{ row.item_name || '未知名称' }}</button>
+              <button type="button" class="review-item-title" @click="goToEditPage(row)"><UiIcon name="media" /> {{ row.item_name || '未知名称' }}</button>
               <p class="review-item-meta">{{ [row.series_name !== row.item_name ? row.series_name : '', reviewEpisodeLabel(row), row.production_year, `ID: ${row.item_id}`].filter(Boolean).join(' · ') }}</p>
               <p v-if="isShowingSearchResults" class="review-item-meta">{{ row.library_name || '未知媒体库' }}</p>
               <template v-else>
@@ -152,7 +152,7 @@ import {
     NCard, NSpin, NAlert, NText, NDataTable, NButton, NSpace, NPopconfirm, NEmpty, NIcon, NSelect, NPageHeader, NPagination,
     useMessage
 } from 'naive-ui';
-import { SearchOutline as SearchIcon, CloseCircleOutline as ClearIcon, PlayForwardOutline as ReprocessIcon, CheckmarkCircleOutline as MarkDoneIcon, TrashOutline as TrashIcon } from '@vicons/ionicons5';
+import { SearchOutline as SearchIcon, CloseCircleOutline as ClearIcon, PlayForwardOutline as ReprocessIcon, CheckmarkCircleOutline as MarkDoneIcon, CreateOutline as EditIcon, TrashOutline as TrashIcon } from '@vicons/ionicons5';
 
 const props = defineProps({
   taskStatus: {
@@ -280,7 +280,7 @@ const ReviewActions = ({ row }) => {
           size: 'small',
           type: 'primary',
           onClick: () => goToEditPage(row)
-        }, { default: () => '手动编辑' })
+        }, { icon: () => h(NIcon, { component: EditIcon }), default: () => '手动编辑' })
       );
 
       if (!isShowingSearchResults.value) {

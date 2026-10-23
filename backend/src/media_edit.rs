@@ -436,8 +436,18 @@ pub async fn additional_parts(state: &AppState, id: &str, info: &Value) -> Resul
     Ok(parts)
 }
 async fn edit(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>> {
-    let mut target = target(&state, &id).await?;
-    let info = load(&state, &target).await?;
+    let result = edit_data(&state, &id).await;
+    match &result {
+        Ok(Json(data)) => {
+            tracing::info!(item_id = %id, versions = data["versions"].as_array().map_or(0, Vec::len), "打开音轨字幕编辑页完成")
+        }
+        Err(error) => tracing::warn!(item_id = %id, error = %error.1, "打开音轨字幕编辑页失败"),
+    }
+    result
+}
+async fn edit_data(state: &AppState, id: &str) -> Result<Json<Value>> {
+    let mut target = target(state, id).await?;
+    let info = load(state, &target).await?;
     let mut options = vec![];
     let mut seen = HashSet::new();
     for stream in media_info::container(&info)
@@ -457,7 +467,7 @@ async fn edit(State(state): State<AppState>, Path(id): Path<String>) -> Result<J
     let mut native = vec![];
     if target.kind == "Movie" && target.versions.len() > 1 {
         let first = string(&target.versions[0], "emby_id");
-        if let Ok(item) = details(&state, &first, "ParentId").await {
+        if let Ok(item) = details(state, &first, "ParentId").await {
             let parent = string(&item, "ParentId");
             let user = string(&*state.config.read().await, "emby_user_id");
             if !parent.is_empty()
@@ -486,7 +496,7 @@ async fn edit(State(state): State<AppState>, Path(id): Path<String>) -> Result<J
                     .flatten()
                     .find(|v| ids.contains(&string(v, "Id")))
                     && let Ok(details) =
-                        details(&state, &string(primary, "Id"), "MediaSources").await
+                        details(state, &string(primary, "Id"), "MediaSources").await
                 {
                     for source in details["MediaSources"].as_array().into_iter().flatten() {
                         let id = source["ItemId"]
@@ -517,7 +527,7 @@ async fn edit(State(state): State<AppState>, Path(id): Path<String>) -> Result<J
         });
         version["segments"] = json!([]);
         let id = string(version, "emby_id");
-        if let Ok(details) = details(&state, &id, "Path,PartCount,MediaSources").await
+        if let Ok(details) = details(state, &id, "Path,PartCount,MediaSources").await
             && details["PartCount"].as_u64().unwrap_or(0) > 1
         {
             let mut segments = vec![];
@@ -525,7 +535,7 @@ async fn edit(State(state): State<AppState>, Path(id): Path<String>) -> Result<J
                 .as_str()
                 .unwrap_or(version["path"].as_str().unwrap_or(""));
             segments.push(json!({"emby_id":id,"label":format!("分段 1 · {}",std::path::Path::new(path).file_name().and_then(|s|s.to_str()).unwrap_or(&id)),"path":path}));
-            for (index, part) in additional_parts(&state, &id, &details)
+            for (index, part) in additional_parts(state, &id, &details)
                 .await?
                 .iter()
                 .enumerate()

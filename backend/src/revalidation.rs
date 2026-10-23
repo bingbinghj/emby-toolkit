@@ -574,6 +574,9 @@ pub async fn ids(state: &AppState, ids: &[String], context: &JobContext) -> Resu
                 continue;
             }
             context.checkpoint().await?;
+            if crate::emby::path_ignored(state, &string(asset, "path")).await? {
+                continue;
+            }
             let result = async {
                 mark_pending(state, row, index, None).await?;
                 let item = details(state, &id, "Id,Type,Name,Path,Size,MediaSources").await?;

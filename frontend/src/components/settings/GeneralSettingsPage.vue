@@ -1,4 +1,4 @@
-﻿<!-- frontend/src/components/settings/GeneralSettingsPage.vue -->
+<!-- frontend/src/components/settings/GeneralSettingsPage.vue -->
 <template>
   <n-layout class="mp-page settings-page" :content-style="pageContentStyle">
     <n-page-header class="mp-page-header" title="通用设置" subtitle="配置媒体处理、服务连接和通知" />
@@ -9,7 +9,7 @@
         <n-form
           ref="formRef"
           :rules="formRules"
-          @submit.prevent="save"
+          @submit.prevent
           label-placement="top"
           label-width="auto"
           label-align="left"
@@ -17,12 +17,12 @@
         >
           <n-tabs class="settings-tabs" type="line" animated :size="isMobile ? 'medium' : 'large'" :pane-style="tabPaneStyle">
             <!-- ================== 标签页 1: 通用设置 ================== -->
-            <n-tab-pane name="general" tab="通用设置">
+            <n-tab-pane name="general"><template #tab><span class="mp-title-with-icon"><UiIcon name="settings" :size="16" />通用设置</span></template>
               <n-grid class="mp-aligned-grid" cols="1 720:2 1100:3" :x-gap="24" :y-gap="24">
                 <!-- 左侧列 -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title">基础设置</span></template>
+                    <template #header><span class="card-title"><n-icon :component="SettingsIcon" />基础设置</span></template>
                     <n-form-item-grid-item label="处理项目间的延迟 (秒)" path="delay_between_items_sec">
                       <n-input-number v-model:value="configModel.delay_between_items_sec" :min="0" :step="0.1" placeholder="例如: 0.5"/>
                     </n-form-item-grid-item>
@@ -117,6 +117,14 @@
                         </n-text>
                       </template>
                     </n-form-item-grid-item>
+                    <template #footer>
+                      <n-space justify="end">
+                        <n-button type="primary" :loading="savingCard === 'basic'" :disabled="savingConfig" aria-label="保存基础设置" @click="saveCard('basic')">
+                          <template #icon><n-icon :component="SaveIcon" /></template>
+                          保存
+                        </n-button>
+                      </n-space>
+                    </template>
                   </n-card>
                 </n-gi>
                 <!-- 第二列：实时监控 -->
@@ -124,7 +132,7 @@
                   <n-card :bordered="false" class="dashboard-card">
                     <template #header>
                       <div style="display: flex; align-items: center; gap: 8px;">
-                        <span class="card-title">实时监控</span>
+                        <span class="card-title"><n-icon :component="MonitorIcon" />实时监控</span>
                       </div>
                     </template>
 
@@ -236,11 +244,19 @@
                         </n-text>
                       </template>
                     </n-form-item>
+                    <template #footer>
+                      <n-space justify="end">
+                        <n-button type="primary" :loading="savingCard === 'monitor'" :disabled="savingConfig" aria-label="保存实时监控" @click="saveCard('monitor')">
+                          <template #icon><n-icon :component="SaveIcon" /></template>
+                          保存
+                        </n-button>
+                      </n-space>
+                    </template>
                   </n-card>
                 </n-gi>
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title">数据源与API</span></template>
+                    <template #header><span class="card-title"><n-icon :component="ApiIcon" />数据源与API</span></template>
                     <n-form-item label="TMDB API Key" path="tmdb_api_key">
                       <n-input type="password" show-password-on="mousedown" v-model:value="configModel.tmdb_api_key" placeholder="输入你的 TMDB API Key" />
                     </n-form-item>
@@ -263,20 +279,28 @@
                       <n-input type="password" show-password-on="mousedown" v-model:value="configModel.douban_cookie" placeholder="从浏览器开发者工具中获取"/>
                       <template #feedback><n-text depth="3" style="font-size:0.8em;">非必要不用配置，作用有限。</n-text></template>
                     </n-form-item>
+                    <template #footer>
+                      <n-space justify="end">
+                        <n-button type="primary" :loading="savingCard === 'sources'" :disabled="savingConfig" aria-label="保存数据源与API" @click="saveCard('sources')">
+                          <template #icon><n-icon :component="SaveIcon" /></template>
+                          保存
+                        </n-button>
+                      </n-space>
+                    </template>
                   </n-card>
                 </n-gi>
               </n-grid>
             </n-tab-pane>
 
             <!-- ★★★ 115 网盘设置 ★★★ -->
-            <n-tab-pane name="115_drive" tab="115 网盘">
+            <n-tab-pane name="115_drive"><template #tab><span class="mp-title-with-icon"><UiIcon name="key" :size="16" />115 网盘</span></template>
               <n-grid class="mp-aligned-grid" cols="1 800:2" :x-gap="24" :y-gap="24">
 
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header>
                       <div style="display: flex; align-items: center; gap: 8px;">
-                        <span class="card-title">账户与连接</span>
+                        <span class="card-title"><n-icon :component="CloudIcon" />账户与连接</span>
                         <n-tag v-if="p115Info" :type="p115Info.valid ? 'success' : 'error'" size="small" round>
                           {{ p115Info.msg || (p115Info.valid ? '连接正常' : '连接异常') }}
                         </n-tag>
@@ -285,7 +309,7 @@
                     </template>
                     <template #header-extra>
                       <n-space align="center" :size="12">
-                        <n-button size="small" secondary type="success" @click="check115Status(false)" :loading="loading115Info">
+                        <n-button size="small" secondary type="success" @click="check115Status(false)" :loading="loading115Info"><template #icon><UiIcon name="refresh" /></template>
                           刷新状态
                         </n-button>
                       </n-space>
@@ -323,7 +347,7 @@
                             </template>
                             {{ p115Info?.has_token ? `${openApiAuthLabel}` : `未授权：${openApiAuthLabel}` }}
                           </n-tag>
-                          <n-button size="small" type="warning" @click="startWebAuth" :loading="isWebAuthing">
+                          <n-button size="small" type="warning" @click="startWebAuth" :loading="isWebAuthing"><template #icon><UiIcon name="key" /></template>
                             {{ p115Info?.has_token ? '重新登录' : '登录授权' }}
                           </n-button>
                         </n-space>
@@ -340,16 +364,16 @@
                             </template>
                             {{ p115Info?.has_token ? `${openApiAuthLabel}` : `未授权：${openApiAuthLabel}` }}
                           </n-tag>
-                          <n-button size="small" type="primary" @click="handleOpenQrcodeModal">
+                          <n-button size="small" type="primary" @click="handleOpenQrcodeModal"><template #icon><UiIcon name="key" /></template>
                             {{ p115Info?.has_token ? '重新扫码' : '扫码授权' }}
                           </n-button>
                         </n-space>
                         <n-input-group>
-                          <n-input v-model:value="configModel.p115_app_id" placeholder="先保存自定义AppID再扫码" />
+                          <n-input v-model:value="configModel.p115_app_id" placeholder="先保存此卡片的自定义 AppID 再扫码" />
                         </n-input-group>
                         <template #feedback>
                           <n-text depth="3" style="font-size:0.8em;">
-                            请先填写 AppID 并点击底部保存设置，然后再扫码授权。
+                            请先填写 AppID 并保存此卡片，然后再扫码授权。
                           </n-text>
                         </template>
                       </n-space>
@@ -370,7 +394,7 @@
                           </n-tag>
 
                           <n-space :size="8">
-                            <n-button size="small" type="primary" @click="openCookieModal">
+                            <n-button size="small" type="primary" @click="openCookieModal"><template #icon><UiIcon name="refresh" /></template>
                               {{ p115Info?.has_cookie ? '重新获取' : '扫码获取' }}
                             </n-button>
                             <n-popconfirm
@@ -412,12 +436,20 @@
                         </n-text>
                       </template>
                     </n-form-item>
+                    <template #footer>
+                      <n-space justify="end">
+                        <n-button type="primary" :loading="savingCard === 'p115Account'" :disabled="savingConfig" aria-label="保存账户与连接" @click="saveCard('p115Account')">
+                          <template #icon><n-icon :component="SaveIcon" /></template>
+                          保存
+                        </n-button>
+                      </n-space>
+                    </template>
                   </n-card>
                 </n-gi>
 
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
-                    <template #header><span class="card-title">指纹与缓存</span></template>
+                    <template #header><span class="card-title"><n-icon :component="FingerprintIcon" />指纹与缓存</span></template>
 
                     <n-form-item label="本地 STRM 根目录" path="local_strm_root">
                       <n-input-group>
@@ -484,37 +516,34 @@
                           </n-text>
                       </template>
                     </n-form-item>
+                    <template #footer>
+                      <n-space justify="end">
+                        <n-button type="primary" :loading="savingCard === 'fingerprints'" :disabled="savingConfig" aria-label="保存指纹与缓存" @click="saveCard('fingerprints')">
+                          <template #icon><n-icon :component="SaveIcon" /></template>
+                          保存
+                        </n-button>
+                      </n-space>
+                    </template>
                   </n-card>
                 </n-gi>
               </n-grid>
             </n-tab-pane>
 
             <!-- ================== 标签页 2: Emby (紧凑版) ================== -->
-            <n-tab-pane name="emby" tab="Emby">
+            <n-tab-pane name="emby"><template #tab><span class="mp-title-with-icon"><UiIcon name="media" :size="16" />Emby</span></template>
               <n-grid cols="1" :x-gap="24" :y-gap="24" responsive="screen">
 
                 <!-- ########## 左侧卡片: Emby 连接设置 ########## -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title">Emby 连接设置</span></template>
+                    <template #header><span class="card-title"><n-icon :component="ServerIcon" />Emby 连接设置</span></template>
 
                     <!-- ★★★ 调整点1: 恢复双列，但减小间距 x-gap="12" ★★★ -->
                     <n-grid cols="1 m:2" :x-gap="12" :y-gap="12" responsive="screen">
 
                       <!-- 1. Emby URL (左) -->
                       <!-- ★★★ 调整点2: label-width="100" 覆盖全局的200，让输入框更长、更紧凑 ★★★ -->
-                      <n-form-item-grid-item label-width="100">
-                        <template #label>
-                          <div style="display: flex; align-items: center; justify-content: flex-end; width: 100%;">
-                            <span>Emby URL</span>
-                            <n-tooltip trigger="hover">
-                              <template #trigger>
-                                <n-icon :component="AlertIcon" class="info-icon" />
-                              </template>
-                              此项修改需要重启容器才能生效。
-                            </n-tooltip>
-                          </div>
-                        </template>
+                      <n-form-item-grid-item label="Emby URL" path="emby_server_url" label-width="100">
                         <n-input v-model:value="configModel.emby_server_url" placeholder="http://localhost:8096" />
                       </n-form-item-grid-item>
 
@@ -574,13 +603,22 @@
 
                       <!-- 分割线 -->
                       <n-gi span="1 m:2">
-                        <n-divider title-placement="left" style="margin-top: 10px;">选择要处理的媒体库</n-divider>
+                        <n-divider title-placement="left" style="margin-top: 10px;">选择要忽略的媒体库</n-divider>
                       </n-gi>
 
                       <!-- 8. 媒体库选择 -->
                       <n-form-item-grid-item label-placement="top" span="1 m:2">
                         <n-spin :show="loadingLibraries">
-                          <n-checkbox-group v-model:value="configModel.libraries_to_process">
+                          <n-space align="center" style="margin-bottom: 12px;">
+                            <n-button size="small" :disabled="!availableLibraries.length" @click="configModel.libraries_to_ignore = availableLibraries.map(lib => lib.Id)">
+                              <template #icon><n-icon :component="SelectAllIcon" /></template>全选
+                            </n-button>
+                            <n-button size="small" :disabled="!configModel.libraries_to_ignore?.length" @click="configModel.libraries_to_ignore = []">
+                              <template #icon><n-icon :component="ClearIcon" /></template>清空
+                            </n-button>
+                            <n-text depth="3">默认不选，处理全部媒体库；勾选后忽略对应媒体库。</n-text>
+                          </n-space>
+                          <n-checkbox-group v-model:value="configModel.libraries_to_ignore">
                             <n-space item-style="display: flex; flex-wrap: wrap;">
                               <n-checkbox v-for="lib in availableLibraries" :key="lib.Id" :value="lib.Id" :label="lib.Name" />
                             </n-space>
@@ -593,6 +631,14 @@
                       </n-form-item-grid-item>
 
                     </n-grid>
+                    <template #footer>
+                      <n-space justify="end">
+                        <n-button type="primary" :loading="savingCard === 'emby'" :disabled="savingConfig" aria-label="保存Emby 连接设置" @click="saveCard('emby')">
+                          <template #icon><n-icon :component="SaveIcon" /></template>
+                          保存
+                        </n-button>
+                      </n-space>
+                    </template>
                   </n-card>
                 </n-gi>
 
@@ -600,13 +646,13 @@
             </n-tab-pane>
 
             <!-- ================== 标签页 3: 智能服务  ================== -->
-            <n-tab-pane name="services" tab="智能服务">
+            <n-tab-pane name="services"><template #tab><span class="mp-title-with-icon"><UiIcon name="language" :size="16" />智能服务</span></template>
               <n-grid cols="1" :x-gap="24" :y-gap="24" responsive="screen">
 
                 <!-- 左侧: AI翻译 -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
-                    <template #header><span class="card-title">AI 增强</span></template>
+                    <template #header><span class="card-title"><n-icon :component="AIIcon" />AI 增强</span></template>
                     <template #header-extra>
                       <n-space align="center">
                         <n-button
@@ -614,7 +660,7 @@
                           type="info"
                           ghost
                           @click="openPromptModal"
-                        >
+                        ><template #icon><UiIcon name="language" /></template>
                           配置提示词
                         </n-button>
                         <n-button
@@ -624,7 +670,7 @@
                           @click="testAI"
                           :loading="isTestingAI"
                           :disabled="!configModel.ai_api_key"
-                        >
+                        ><template #icon><UiIcon name="link" /></template>
                           测试连接
                         </n-button>
                       </n-space>
@@ -754,6 +800,14 @@
                       </n-form-item>
 
                     </div>
+                    <template #footer>
+                      <n-space justify="end">
+                        <n-button type="primary" :loading="savingCard === 'ai'" :disabled="savingConfig" aria-label="保存AI 增强" @click="saveCard('ai')">
+                          <template #icon><n-icon :component="SaveIcon" /></template>
+                          保存
+                        </n-button>
+                      </n-space>
+                    </template>
                   </n-card>
                 </n-gi>
 
@@ -761,50 +815,36 @@
             </n-tab-pane>
 
             <!-- ================== 标签页 4: 高级 (核心修改区域) ================== -->
-            <n-tab-pane name="advanced" tab="高级">
+            <n-tab-pane name="advanced"><template #tab><span class="mp-title-with-icon"><UiIcon name="options" :size="16" />高级</span></template>
               <n-grid class="mp-aligned-grid" cols="1 800:2" :x-gap="24" :y-gap="24">
 
                 <!-- 卡片 1: 日志配置 -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title">日志配置</span></template>
-                    <n-form-item-grid-item>
-                      <template #label>
-                        <n-space align="center">
-                          <span>单个日志文件大小 (MB)</span>
-                          <n-tooltip trigger="hover">
-                            <template #trigger>
-                              <n-icon :component="AlertIcon" class="info-icon" />
-                            </template>
-                            此项修改需要重启容器才能生效。
-                          </n-tooltip>
-                        </n-space>
-                      </template>
+                    <template #header><span class="card-title"><n-icon :component="FileIcon" />日志配置</span></template>
+                    <n-form-item-grid-item label="单个日志文件大小 (MB)" path="log_rotation_size_mb">
                       <n-input-number v-model:value="configModel.log_rotation_size_mb" :min="1" :step="1" placeholder="例如: 5"/>
                       <template #feedback><n-text depth="3" style="font-size:0.8em;">设置 app.log 文件的最大体积，超限后会轮转。</n-text></template>
                     </n-form-item-grid-item>
-                    <n-form-item-grid-item>
-                      <template #label>
-                        <n-space align="center">
-                          <span>日志备份数量</span>
-                          <n-tooltip trigger="hover">
-                            <template #trigger>
-                              <n-icon :component="AlertIcon" class="info-icon" />
-                            </template>
-                            此项修改需要重启容器才能生效。
-                          </n-tooltip>
-                        </n-space>
-                      </template>
+                    <n-form-item-grid-item label="日志备份数量" path="log_rotation_backup_count">
                       <n-input-number v-model:value="configModel.log_rotation_backup_count" :min="1" :step="1" placeholder="例如: 10"/>
                       <template #feedback><n-text depth="3" style="font-size:0.8em;">保留最近的日志文件数量 (app.log.1, app.log.2 ...)。</n-text></template>
                     </n-form-item-grid-item>
+                    <template #footer>
+                      <n-space justify="end">
+                        <n-button type="primary" :loading="savingCard === 'logs'" :disabled="savingConfig" aria-label="保存日志配置" @click="saveCard('logs')">
+                          <template #icon><n-icon :component="SaveIcon" /></template>
+                          保存
+                        </n-button>
+                      </n-space>
+                    </template>
                   </n-card>
                 </n-gi>
 
                 <!-- 卡片 2: 入库自动处理 -->
                 <n-gi span="1 800:2">
                   <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title">入库自动处理</span></template>
+                    <template #header><span class="card-title"><n-icon :component="SyncIcon" />入库自动处理</span></template>
                     <n-form-item-grid-item label="入库自动纠正高清音轨" path="auto_repair_truehd_core_on_ingest">
                       <n-switch v-model:value="configModel.auto_repair_truehd_core_on_ingest" />
                       <template #feedback>
@@ -821,13 +861,21 @@
                         </n-text>
                       </template>
                     </n-form-item-grid-item>
+                    <template #footer>
+                      <n-space justify="end">
+                        <n-button type="primary" :loading="savingCard === 'ingest'" :disabled="savingConfig" aria-label="保存入库自动处理" @click="saveCard('ingest')">
+                          <template #icon><n-icon :component="SaveIcon" /></template>
+                          保存
+                        </n-button>
+                      </n-space>
+                    </template>
                   </n-card>
                 </n-gi>
 
                 <!-- 卡片 3: 媒体重命名格式 -->
                 <n-gi span="1 800:2">
                   <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title">媒体重命名格式</span></template>
+                    <template #header><span class="card-title"><n-icon :component="RenameIcon" />媒体重命名格式</span></template>
                     <div class="rename-format-grid">
                       <div class="rename-format-form">
                         <n-form-item-grid-item label="电影格式" path="movie_rename_format">
@@ -898,13 +946,21 @@
                         </n-spin>
                       </div>
                     </div>
+                    <template #footer>
+                      <n-space justify="end">
+                        <n-button type="primary" :loading="savingCard === 'rename'" :disabled="savingConfig" aria-label="保存媒体重命名格式" @click="saveCard('rename')">
+                          <template #icon><n-icon :component="SaveIcon" /></template>
+                          保存
+                        </n-button>
+                      </n-space>
+                    </template>
                   </n-card>
                 </n-gi>
 
                 <!-- 卡片 3: 数据管理 (左下) -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title">数据管理</span></template>
+                    <template #header><span class="card-title"><n-icon :component="DatabaseIcon" />数据管理</span></template>
                     <n-space vertical>
                       <div class="data-action-grid">
                         <n-button @click="showExportModal" :loading="isExporting" class="action-button"><template #icon><n-icon :component="ExportIcon" /></template>导出数据</n-button>
@@ -950,48 +1006,10 @@
                   </n-card>
                 </n-gi>
 
-                <!-- 卡片 4: Telegram 设置 (右下) -->
-                <n-gi>
-                  <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title">Telegram 设置</span></template>
-
-                    <template #header-extra>
-                      <n-button size="tiny" type="primary" ghost @click="testTelegram" :loading="isTestingTelegram" :disabled="!configModel.telegram_bot_token || !configModel.telegram_channel_id">
-                        发送测试
-                      </n-button>
-                    </template>
-
-                    <n-form-item-grid-item label="Telegram Bot Token" path="telegram_bot_token">
-                      <n-input v-model:value="configModel.telegram_bot_token" type="password" show-password-on="click" placeholder="从 @BotFather 获取" />
-                    </n-form-item-grid-item>
-
-                    <n-form-item-grid-item label="全局通知频道" path="telegram_channel_id">
-                      <n-input v-model:value="configModel.telegram_channel_id" placeholder="例如: https://t.me/embytoolkit，管理员TGID请至个人中心填写" />
-                    </n-form-item-grid-item>
-
-                    <n-form-item-grid-item label="通知类型" path="telegram_notify_types">
-                      <n-checkbox-group v-model:value="configModel.telegram_notify_types">
-                        <n-space>
-                          <n-checkbox value="library_new" label="入库通知" />
-                          <n-checkbox value="intercept_notify" label="拦截通知" />
-                          <n-checkbox value="recognize_fail" label="识别失败" />
-                        </n-space>
-                      </n-checkbox-group>
-                    </n-form-item-grid-item>
-                  </n-card>
-                </n-gi>
 
               </n-grid>
             </n-tab-pane>
           </n-tabs>
-
-
-          <!-- 页面底部的统一保存按钮 -->
-          <div class="mp-page-actions settings-save-actions">
-          <n-button class="settings-save-button" type="primary" attr-type="submit" :loading="savingConfig" size="large">
-            保存所有设置
-          </n-button>
-          </div>
         </n-form>
       </div>
 
@@ -1019,7 +1037,7 @@
             style="width: 220px;"
             @update:value="refreshCookieQrcode"
           />
-          <n-button type="primary" @click="refreshCookieQrcode" :loading="cookieQrcodeLoading">
+          <n-button type="primary" @click="refreshCookieQrcode" :loading="cookieQrcodeLoading"><template #icon><UiIcon name="refresh" /></template>
             刷新二维码
           </n-button>
         </n-space>
@@ -1047,7 +1065,7 @@
           <div v-else-if="cookieQrcodeStatus === 'expired'">
             <n-result status="warning" title="二维码已过期">
               <template #footer>
-                <n-button type="primary" @click="refreshCookieQrcode">重新获取</n-button>
+                <n-button type="primary" @click="refreshCookieQrcode"><template #icon><UiIcon name="refresh" /></template>重新获取</n-button>
               </template>
             </n-result>
           </div>
@@ -1055,7 +1073,7 @@
           <div v-else-if="cookieQrcodeStatus === 'error'">
             <n-result status="error" title="Cookie 获取失败">
               <template #footer>
-                <n-button type="primary" @click="refreshCookieQrcode">重新获取</n-button>
+                <n-button type="primary" @click="refreshCookieQrcode"><template #icon><UiIcon name="refresh" /></template>重新获取</n-button>
               </template>
             </n-result>
           </div>
@@ -1070,7 +1088,7 @@
               placeholder="UID=...; CID=...; SEID=..."
               :rows="3"
             />
-            <n-button type="primary" size="small" style="margin-top: 8px;" @click="saveManualCookie">
+            <n-button type="primary" size="small" style="margin-top: 8px;" @click="saveManualCookie"><template #icon><UiIcon name="save" /></template>
               保存手动输入的 Cookie
             </n-button>
           </n-collapse-item>
@@ -1078,7 +1096,7 @@
       </n-space>
 
       <template #footer>
-        <n-button @click="closeCookieModal" v-if="cookieQrcodeStatus !== 'success'">关闭</n-button>
+        <n-button @click="closeCookieModal" v-if="cookieQrcodeStatus !== 'success'"><template #icon><UiIcon name="close" /></template>关闭</n-button>
       </template>
     </n-modal>
 
@@ -1110,7 +1128,7 @@
         <div v-else-if="qrcodeStatus === 'expired'">
           <n-result status="warning" title="二维码已过期">
             <template #footer>
-              <n-button type="primary" @click="openQrcodeModal">重新获取二维码</n-button>
+              <n-button type="primary" @click="openQrcodeModal"><template #icon><UiIcon name="refresh" /></template>重新获取二维码</n-button>
             </template>
           </n-result>
         </div>
@@ -1119,13 +1137,13 @@
         <div v-else-if="qrcodeStatus === 'error'">
           <n-result status="error" title="获取二维码失败">
             <template #footer>
-              <n-button type="primary" @click="openQrcodeModal">重试</n-button>
+              <n-button type="primary" @click="openQrcodeModal"><template #icon><UiIcon name="refresh" /></template>重试</n-button>
             </template>
           </n-result>
         </div>
       </div>
       <template #footer>
-        <n-button @click="closeQrcodeModal" v-if="qrcodeStatus !== 'success'">关闭</n-button>
+        <n-button @click="closeQrcodeModal" v-if="qrcodeStatus !== 'success'"><template #icon><UiIcon name="close" /></template>关闭</n-button>
       </template>
     </n-modal>
     <!-- ★★★ 本地物理目录选择器弹窗 ★★★ -->
@@ -1153,8 +1171,8 @@
 
           <!-- 底部按钮 -->
           <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 16px;">
-            <n-button @click="showLocalFolderModal = false">取消</n-button>
-            <n-button type="primary" @click="confirmLocalFolder">确定选择此目录</n-button>
+            <n-button @click="showLocalFolderModal = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
+            <n-button type="primary" @click="confirmLocalFolder"><template #icon><UiIcon name="select" /></template>确定选择此目录</n-button>
           </div>
         </n-space>
       </n-spin>
@@ -1181,8 +1199,8 @@
           </n-list>
 
           <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 16px;">
-            <n-button @click="showP115FolderModal = false">取消</n-button>
-            <n-button type="primary" @click="confirmP115Folder">确定选择此目录</n-button>
+            <n-button @click="showP115FolderModal = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
+            <n-button type="primary" @click="confirmP115Folder"><template #icon><UiIcon name="select" /></template>确定选择此目录</n-button>
           </div>
         </n-space>
       </n-spin>
@@ -1192,8 +1210,8 @@
   <!-- 导出选项模态框 -->
   <n-modal v-model:show="exportModalVisible" preset="dialog" title="选择要导出的数据表" :style="modalStyle(520)" class="glass-modal">
     <n-space justify="end" style="margin-bottom: 10px;">
-      <n-button text type="primary" @click="selectAllForExport">全选</n-button>
-      <n-button text type="primary" @click="deselectAllForExport">全不选</n-button>
+      <n-button text type="primary" @click="selectAllForExport"><template #icon><UiIcon name="select" /></template>全选</n-button>
+      <n-button text type="primary" @click="deselectAllForExport"><template #icon><UiIcon name="close" /></template>全不选</n-button>
     </n-space>
     <n-checkbox-group v-model:value="tablesToExport" vertical>
       <n-grid :y-gap="8" :cols="isMobile ? 1 : 2">
@@ -1205,8 +1223,8 @@
       </n-grid>
     </n-checkbox-group>
     <template #action>
-      <n-button @click="exportModalVisible = false">取消</n-button>
-      <n-button type="primary" @click="handleExport" :disabled="tablesToExport.length === 0">确认导出</n-button>
+      <n-button @click="exportModalVisible = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
+      <n-button type="primary" @click="handleExport" :disabled="tablesToExport.length === 0"><template #icon><UiIcon name="download" /></template>确认导出</n-button>
     </template>
   </n-modal>
   <!-- 导入选项模态框 -->
@@ -1222,8 +1240,8 @@
       <div>
         <n-text strong>选择要恢复的表 (从文件中自动读取)</n-text>
         <n-space style="margin-left: 20px; display: inline-flex; vertical-align: middle;">
-          <n-button size="tiny" text type="primary" @click="selectAllForImport">全选</n-button>
-          <n-button size="tiny" text type="primary" @click="deselectAllForImport">全不选</n-button>
+          <n-button size="tiny" text type="primary" @click="selectAllForImport"><template #icon><UiIcon name="select" /></template>全选</n-button>
+          <n-button size="tiny" text type="primary" @click="deselectAllForImport"><template #icon><UiIcon name="close" /></template>全不选</n-button>
         </n-space>
       </div>
       <n-checkbox-group
@@ -1242,16 +1260,16 @@
       </n-checkbox-group>
     </n-space>
     <template #action>
-      <n-button @click="cancelImport">取消</n-button>
-      <n-button type="primary" @click="confirmImport" :disabled="tablesToImport.length === 0">确认并开始恢复</n-button>
+      <n-button @click="cancelImport"><template #icon><UiIcon name="close" /></template>取消</n-button>
+      <n-button type="primary" @click="confirmImport" :disabled="tablesToImport.length === 0"><template #icon><UiIcon name="refresh" /></template>确认并开始恢复</n-button>
     </template>
   </n-modal>
 
   <!-- 清空指定表模态框 -->
   <n-modal v-model:show="clearTablesModalVisible" preset="dialog" title="清空指定数据表" :style="modalStyle(520)" class="glass-modal">
     <n-space justify="end" style="margin-bottom: 10px;">
-      <n-button text type="primary" @click="selectAllForClear">全选</n-button>
-      <n-button text type="primary" @click="deselectAllForClear">全不选</n-button>
+      <n-button text type="primary" @click="selectAllForClear"><template #icon><UiIcon name="select" /></template>全选</n-button>
+      <n-button text type="primary" @click="deselectAllForClear"><template #icon><UiIcon name="close" /></template>全不选</n-button>
     </n-space>
     <n-alert title="高危操作警告" type="error" style="margin-bottom: 15px;">
       此操作将 <strong class="warning-text">永久删除</strong> 所选表中的所有数据，且 <strong class="warning-text">不可恢复</strong>！请务必谨慎操作。
@@ -1270,8 +1288,8 @@
       </n-grid>
     </n-checkbox-group>
     <template #action>
-      <n-button @click="clearTablesModalVisible = false">取消</n-button>
-      <n-button type="error" @click="handleClearTables" :disabled="tablesToClear.length === 0" :loading="isClearing">确认清空</n-button>
+      <n-button @click="clearTablesModalVisible = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
+      <n-button type="error" @click="handleClearTables" :disabled="tablesToClear.length === 0" :loading="isClearing"><template #icon><UiIcon name="delete" /></template>确认清空</n-button>
     </template>
   </n-modal>
 
@@ -1289,8 +1307,8 @@
       <p class="warning-text" style="margin: 0;"><strong>请仅在您已经或将要重建 Emby 媒体库时执行此操作。</strong></p>
     </n-alert>
     <template #action>
-      <n-button @click="resetMappingsModalVisible = false">取消</n-button>
-      <n-button type="warning" @click="handleResetActorMappings" :loading="isResettingMappings">确认重置</n-button>
+      <n-button @click="resetMappingsModalVisible = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
+      <n-button type="warning" @click="handleResetActorMappings" :loading="isResettingMappings"><template #icon><UiIcon name="settings" /></template>确认重置</n-button>
     </template>
   </n-modal>
   <!-- AI 提示词配置模态框 -->
@@ -1302,7 +1320,7 @@
 
     <n-spin :show="loadingPrompts">
       <n-tabs type="line" size="small" animated>
-        <n-tab-pane name="fast_mode" tab="快速模式 (人名)">
+        <n-tab-pane name="fast_mode"><template #tab><span class="mp-title-with-icon"><UiIcon name="settings" :size="16" />快速模式 (人名)</span></template>
           <n-input
             v-model:value="promptsModel.fast_mode"
             type="textarea"
@@ -1311,7 +1329,7 @@
             style="font-family: monospace;"
           />
         </n-tab-pane>
-        <n-tab-pane name="quality_mode" tab="顾问模式 (人名)">
+        <n-tab-pane name="quality_mode"><template #tab><span class="mp-title-with-icon"><UiIcon name="settings" :size="16" />顾问模式 (人名)</span></template>
           <n-input
             v-model:value="promptsModel.quality_mode"
             type="textarea"
@@ -1320,7 +1338,7 @@
             style="font-family: monospace;"
           />
         </n-tab-pane>
-        <n-tab-pane name="overview_translation" tab="简介翻译">
+        <n-tab-pane name="overview_translation"><template #tab><span class="mp-title-with-icon"><UiIcon name="settings" :size="16" />简介翻译</span></template>
           <n-input
             v-model:value="promptsModel.overview_translation"
             type="textarea"
@@ -1330,7 +1348,7 @@
           />
           <n-text depth="3" style="font-size: 12px;">可用变量: {title}, {overview}</n-text>
         </n-tab-pane>
-        <n-tab-pane name="title_translation" tab="标题翻译">
+        <n-tab-pane name="title_translation"><template #tab><span class="mp-title-with-icon"><UiIcon name="settings" :size="16" />标题翻译</span></template>
           <n-input
             v-model:value="promptsModel.title_translation"
             type="textarea"
@@ -1340,7 +1358,7 @@
           />
           <n-text depth="3" style="font-size: 12px;">可用变量: {media_type}, {title}, {year}</n-text>
         </n-tab-pane>
-        <n-tab-pane name="transliterate_mode" tab="音译模式">
+        <n-tab-pane name="transliterate_mode"><template #tab><span class="mp-title-with-icon"><UiIcon name="settings" :size="16" />音译模式</span></template>
           <n-input
             v-model:value="promptsModel.transliterate_mode"
             type="textarea"
@@ -1349,7 +1367,7 @@
             style="font-family: monospace;"
           />
         </n-tab-pane>
-        <n-tab-pane name="batch_joke_fallback" tab="占位简介">
+        <n-tab-pane name="batch_joke_fallback"><template #tab><span class="mp-title-with-icon"><UiIcon name="settings" :size="16" />占位简介</span></template>
           <n-input
             v-model:value="promptsModel.batch_joke_fallback"
             type="textarea"
@@ -1365,14 +1383,14 @@
       <n-space justify="space-between" style="width: 100%">
         <n-popconfirm @positive-click="resetPrompts">
           <template #trigger>
-            <n-button type="warning" ghost :loading="savingPrompts">恢复默认</n-button>
+            <n-button type="warning" ghost :loading="savingPrompts"><template #icon><UiIcon name="refresh" /></template>恢复默认</n-button>
           </template>
           确定要丢弃所有自定义修改，恢复到系统默认提示词吗？
         </n-popconfirm>
 
         <n-space>
-          <n-button @click="promptModalVisible = false">取消</n-button>
-          <n-button type="primary" @click="savePrompts" :loading="savingPrompts">保存配置</n-button>
+          <n-button @click="promptModalVisible = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
+          <n-button type="primary" @click="savePrompts" :loading="savingPrompts"><template #icon><UiIcon name="save" /></template>保存配置</n-button>
         </n-space>
       </n-space>
     </template>
@@ -1380,7 +1398,7 @@
 </template>
 
 <script setup>
-import { ref, watch, computed, onMounted, onUnmounted, nextTick, isShallow } from 'vue';
+import { ref, watch, computed, onMounted, onUnmounted, nextTick } from 'vue';
 import {
   NCard, NForm, NFormItem, NInputNumber, NSwitch, NButton, NGrid, NGi,
   NSpin, NAlert, NInput, NSelect, NSpace, useMessage, useDialog,
@@ -1393,7 +1411,6 @@ import {
   CloudUploadOutline as ImportIcon,
   TrashOutline as ClearIcon,
   BuildOutline as BuildIcon,
-  AlertCircleOutline as AlertIcon,
   SyncOutline as SyncIcon,
   Folder as FolderIcon,
   CheckmarkCircleOutline as CheckIcon,
@@ -1401,6 +1418,17 @@ import {
   ArrowUpOutline as ArrowUpIcon,
   RefreshOutline as RefreshIcon,
   DocumentTextOutline as FileIcon,
+  SaveOutline as SaveIcon,
+  SettingsOutline as SettingsIcon,
+  EyeOutline as MonitorIcon,
+  GlobeOutline as ApiIcon,
+  CloudOutline as CloudIcon,
+  FingerPrintOutline as FingerprintIcon,
+  ServerOutline as ServerIcon,
+  SparklesOutline as AIIcon,
+  CreateOutline as RenameIcon,
+  FileTrayStackedOutline as DatabaseIcon,
+  CheckmarkDoneOutline as SelectAllIcon,
 } from '@vicons/ionicons5';
 import { useConfig } from '../../composables/useConfig.js';
 import axios from 'axios';
@@ -1539,6 +1567,7 @@ const isInvalidUserId = computed(() => {
   return configModel.value.emby_user_id.trim() !== '' && !embyUserIdRegex.test(configModel.value.emby_user_id);
 });
 const embyUserIdRule = {
+  configField: 'emby_user_id',
   trigger: ['input', 'blur'],
   validator(rule, value) {
     if (value && !embyUserIdRegex.test(value)) {
@@ -1743,20 +1772,6 @@ const handleClearTables = async () => {
 };
 const selectAllForClear = () => tablesToClear.value = [...allDbTables.value];
 const deselectAllForClear = () => tablesToClear.value = [];
-const initialRestartableConfig = ref(null);
-const triggerRestart = async () => {
-  message.info('正在发送重启指令...');
-  try {
-    await axios.post('/api/system/restart');
-    message.success('重启指令已发送，应用正在后台重启。请稍后手动刷新页面。', { duration: 10000 });
-  } catch (error) {
-    if (error.response) {
-      message.error(error.response.data.error || '发送重启请求失败，请查看日志。');
-    } else {
-      message.success('重启指令已发送，应用正在后台重启。请稍后手动刷新页面。', { duration: 10000 });
-    }
-  }
-};
 
 // ★★★ 115 相关逻辑 ★★★
 const p115Info = ref(null);
@@ -2220,45 +2235,38 @@ const genreOptions = computed(() => {
   return Array.from(map.values());
 });
 
-const save = async () => {
+const cardFields = {
+  basic: ['delay_between_items_sec', 'media_info_retry_interval', 'media_info_retry_attempts', 'subtitle_chinese_default_language', 'min_score_for_review', 'max_actors_to_process', 'max_episode_actors_to_process', 'extract_thumb', 'actor_role_add_prefix', 'remove_actors_without_avatars', 'keyword_to_tags', 'studio_to_chinese'],
+  monitor: ['monitor_enabled', 'monitor_paths', 'monitor_exclude_dirs', 'monitor_exclude_refresh_delay', 'monitor_extensions', 'tmdb_image_language_preference', 'monitor_sha1_pc_search'],
+  sources: ['tmdb_api_key', 'tmdb_api_base_url', 'douban_enable_online_api', 'api_douban_default_cooldown_seconds', 'douban_cookie'],
+  p115Account: ['p115_auth_method', 'p115_app_id', 'p115_api_priority', 'p115_request_interval'],
+  fingerprints: ['local_strm_root', 'cd2_media_root', 'p115_fingerprint_media_root_cid', 'p115_fingerprint_media_root_path', 'p115_generate_mediainfo', 'p115_enable_sync_delete'],
+  emby: ['emby_server_url', 'emby_public_url', 'emby_api_key', 'emby_webhook_secret', 'emby_webhook_ingest_enabled', 'emby_user_id', 'emby_admin_user', 'emby_admin_pass', 'emby_api_timeout', 'libraries_to_ignore'],
+  ai: ['ai_provider', 'ai_api_key', 'ai_model_name', 'ai_base_url', 'ai_request_timeout', 'ai_max_retries', 'ai_translation_batch_size', 'ai_translate_actor_role', 'ai_translate_on_sync', 'ai_translate_title', 'ai_translate_overview', 'ai_translate_episode_overview', 'ai_joke_fallback', 'ai_translation_mode'],
+  logs: ['log_rotation_size_mb', 'log_rotation_backup_count'],
+  ingest: ['auto_repair_truehd_core_on_ingest', 'auto_fill_language_titles_on_ingest'],
+  rename: ['movie_rename_format', 'tv_rename_format'],
+};
+const savingCard = ref(null);
+const saveCard = async (cardKey) => {
+  const fields = cardFields[cardKey];
+  if (!fields || savingConfig.value || !configModel.value) return;
   try {
-    await formRef.value?.validate();
-    const cleanConfigPayload = JSON.parse(JSON.stringify(configModel.value));
-    if (configModel.value) {
-        cleanConfigPayload.libraries_to_process = configModel.value.libraries_to_process;
-    }
-    const restartNeeded = initialRestartableConfig.value && (cleanConfigPayload.log_rotation_size_mb !== initialRestartableConfig.value.log_rotation_size_mb || cleanConfigPayload.log_rotation_backup_count !== initialRestartableConfig.value.log_rotation_backup_count || cleanConfigPayload.emby_server_url !== initialRestartableConfig.value.emby_server_url);
-    const performSaveAndUpdateState = async () => {
-      const success = await handleSaveConfig(cleanConfigPayload);
-      if (success) {
-        message.success('所有设置已成功保存！');
-        initialRestartableConfig.value = {
-          log_rotation_size_mb: cleanConfigPayload.log_rotation_size_mb,
-          log_rotation_backup_count: cleanConfigPayload.log_rotation_backup_count,
-          emby_server_url: cleanConfigPayload.emby_server_url,
-        };
-      } else {
-        message.error(configError.value || '配置保存失败，请检查后端日志。');
-      }
-      return success;
-    };
-    if (restartNeeded) {
-      dialog.warning({
-        title: '需要重启容器',
-        content: '您修改了需要重启容器才能生效的设置（如 Emby URL、日志配置等）。请选择如何操作：',
-        positiveText: '保存并重启',
-        negativeText: '仅保存',
-        onPositiveClick: async () => {
-          const saved = await performSaveAndUpdateState();
-          if (saved) { await triggerRestart(); }
-        },
-        onNegativeClick: async () => { await performSaveAndUpdateState(); }
-      });
+    await formRef.value?.validate(undefined, rule => fields.includes(rule.configField));
+    const payload = JSON.parse(JSON.stringify(Object.fromEntries(
+      fields.map(field => [field, configModel.value[field]])
+    )));
+    savingCard.value = cardKey;
+    const success = await handleSaveConfig(payload);
+    if (success) {
+      message.success('此卡片设置已保存！');
     } else {
-      await performSaveAndUpdateState();
+      message.error(configError.value || '配置保存失败，请检查后端日志。');
     }
   } catch (errors) {
-    message.error('请检查表单中的必填项或错误项！');
+    message.error('请检查此卡片中的必填项或错误项！');
+  } finally {
+    savingCard.value = null;
   }
 };
 const previewRenameFormats = async () => {
@@ -2381,36 +2389,6 @@ const handleCustomImportRequest = async ({ file }) => {
   }
 };
 
-// ★★★ 新增：Telegram 测试状态和函数 ★★★
-const isTestingTelegram = ref(false);
-
-const testTelegram = async () => {
-  if (!configModel.value.telegram_bot_token || !configModel.value.telegram_channel_id) {
-    message.warning('请先填写 Bot Token 和 频道 ID。');
-    return;
-  }
-
-  isTestingTelegram.value = true;
-  try {
-    // 发送当前输入框中的配置进行测试，无需先保存
-    const response = await axios.post('/api/telegram/test', {
-      token: configModel.value.telegram_bot_token,
-      chat_id: configModel.value.telegram_channel_id
-    });
-
-    if (response.data.success) {
-      message.success(response.data.message);
-    } else {
-      message.error(`测试失败: ${response.data.message}`);
-    }
-  } catch (error) {
-    const errorMsg = error.response?.data?.message || error.message;
-    message.error(`请求失败: ${errorMsg}`);
-  } finally {
-    isTestingTelegram.value = false;
-  }
-};
-
 const cancelImport = () => {
   importModalVisible.value = false;
   fileToImport.value = null;
@@ -2485,16 +2463,12 @@ onMounted(async () => {
   unwatchGlobal = watch(loadingConfig, (isLoading) => {
     if (!isLoading && componentIsMounted.value && configModel.value) {
       check115Status();
+      if (!Array.isArray(configModel.value.libraries_to_ignore)) configModel.value.libraries_to_ignore = [];
       if (!configModel.value.p115_auth_method) configModel.value.p115_auth_method = 'web';
       if (!configModel.value.p115_api_priority) configModel.value.p115_api_priority = 'cookie';
       if (configModel.value.emby_server_url && configModel.value.emby_api_key) {
         fetchEmbyLibrariesInternal();
       }
-      initialRestartableConfig.value = {
-        log_rotation_size_mb: configModel.value.log_rotation_size_mb,
-        log_rotation_backup_count: configModel.value.log_rotation_backup_count,
-        emby_server_url: configModel.value.emby_server_url,
-      };
       if (unwatchGlobal) { unwatchGlobal(); }
     }
   }, { immediate: true });
@@ -2518,6 +2492,7 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.card-title { display: inline-flex; align-items: center; gap: 8px; }
 /* 禁用AI设置时的遮罩效果 */
 .ai-settings-wrapper {
   transition: opacity 0.3s ease;
@@ -2560,7 +2535,6 @@ onUnmounted(() => {
   gap: 10px;
   align-items: stretch;
 }
-.settings-save-actions { position:sticky; bottom:0; z-index:10; padding:16px; border:1px solid var(--ui-border); border-radius:10px; background:var(--modal-solid-bg-color); }
 .data-action-grid .action-button {
   width: 100%;
   justify-content: center;
@@ -2692,7 +2666,7 @@ onUnmounted(() => {
     padding: 14px !important;
   }
 
-  .card-title {
+  .card-title { display: inline-flex; align-items: center; gap: 8px;
     font-size: 15px;
   }
 
@@ -2706,8 +2680,6 @@ onUnmounted(() => {
     justify-content: center;
   }
 
-  .settings-save-actions { bottom:0; }
-  .settings-save-button { width:100%; }
 
 }
 

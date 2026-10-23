@@ -5,6 +5,7 @@
   "emby_user_id": "",
   "emby_api_timeout": 60,
   "libraries_to_process": [],
+  "libraries_to_ignore": [],
   "emby_admin_user": "",
   "emby_admin_pass": "",
   "emby_webhook_ingest_enabled": false,

@@ -41,7 +41,7 @@ watch(resolvedTheme, mode => {
   const variables = {
     '--ui-page-bg': palette.background, '--ui-surface': palette.surface, '--ui-surface-muted': palette.mutedSurface,
     '--ui-text': palette.text, '--ui-text-muted': palette.muted, '--ui-border': palette.border,
-    '--ui-border-soft': palette.border, '--ui-border-strong': palette.inputBorder, '--ui-input-border': palette.inputBorder,
+    '--ui-border-soft': palette.borderSoft, '--ui-border-strong': palette.inputBorder, '--ui-input-border': palette.inputBorder,
     '--ui-input-bg': palette.input, '--accent-color': palette.accent, '--accent-glow-color': `color-mix(in srgb, ${palette.accent} 14%, transparent)`,
     '--modal-solid-bg-color': palette.popup,
     '--ui-error-color': isDark.value ? '#FF9BA3' : '#B52240',

@@ -4,7 +4,7 @@
     <n-tabs type="line" animated v-model:value="activeTab">
 
       <!-- Tab 1: 关键词 -->
-      <n-tab-pane name="keywords" tab="关键词">
+      <n-tab-pane name="keywords"><template #tab><span class="mp-title-with-icon"><UiIcon name="settings" :size="16" />关键词</span></template>
         <n-alert type="info" :bordered="false" class="mb-4">
           将中文标签映射到 TMDb 的英文关键词或 ID。
         </n-alert>
@@ -26,11 +26,11 @@
             </div>
           </div>
         </div>
-        <n-button dashed block class="mt-4" @click="addItem(keywordList)">添加关键词</n-button>
+        <n-button dashed block class="mt-4" @click="addItem(keywordList)"><template #icon><UiIcon name="add" /></template>添加关键词</n-button>
       </n-tab-pane>
 
       <!-- Tab 2: 工作室 -->
-      <n-tab-pane name="studios" tab="工作室">
+      <n-tab-pane name="studios"><template #tab><span class="mp-title-with-icon"><UiIcon name="settings" :size="16" />工作室</span></template>
         <n-alert type="info" :bordered="false" class="mb-4">
           配置出品公司或播出平台。<b>请区分电影制作公司和电视播出平台 ID。</b>
         </n-alert>
@@ -62,11 +62,11 @@
             </div>
           </div>
         </div>
-        <n-button dashed block class="mt-4" @click="addItem(studioList)">添加工作室</n-button>
+        <n-button dashed block class="mt-4" @click="addItem(studioList)"><template #icon><UiIcon name="add" /></template>添加工作室</n-button>
       </n-tab-pane>
 
       <!-- Tab 3: 国家/地区 -->
-      <n-tab-pane name="countries" tab="国家/地区">
+      <n-tab-pane name="countries"><template #tab><span class="mp-title-with-icon"><UiIcon name="settings" :size="16" />国家/地区</span></template>
         <n-alert type="info" :bordered="false" class="mb-4">
           配置国家/地区代码映射。<b>ISO代码</b>用于API筛选，<b>别名</b>用于元数据翻译匹配。
         </n-alert>
@@ -88,11 +88,11 @@
             </div>
           </div>
         </div>
-        <n-button dashed block class="mt-4" @click="addItem(countryList, 'country')">添加国家/地区</n-button>
+        <n-button dashed block class="mt-4" @click="addItem(countryList, 'country')"><template #icon><UiIcon name="add" /></template>添加国家/地区</n-button>
       </n-tab-pane>
 
       <!-- Tab 4: 原语言 -->
-      <n-tab-pane name="languages" tab="原语言">
+      <n-tab-pane name="languages"><template #tab><span class="mp-title-with-icon"><UiIcon name="settings" :size="16" />原语言</span></template>
         <n-alert type="info" :bordered="false" class="mb-4">
           配置语言代码映射。用于筛选器的语言选项。<b>别名</b>可用于兼容TMDb的历史遗留代码（如 cn 和 yue），以及压制组各种不规范的参数用于格式化媒体信息，注意别名第一个必须用三位语言代码。
         </n-alert>
@@ -116,11 +116,11 @@
             </div>
           </div>
         </div>
-        <n-button dashed block class="mt-4" @click="addItem(languageList, 'language')">添加语言</n-button>
+        <n-button dashed block class="mt-4" @click="addItem(languageList, 'language')"><template #icon><UiIcon name="add" /></template>添加语言</n-button>
       </n-tab-pane>
 
       <!-- Tab 5: 分级标签 -->
-      <n-tab-pane name="rating_labels" tab="分级标签">
+      <n-tab-pane name="rating_labels"><template #tab><span class="mp-title-with-icon"><UiIcon name="settings" :size="16" />分级标签</span></template>
         <n-alert type="info" :bordered="false" class="mb-4">
           定义系统中可用的<b>中文分级名称</b>（如“全年龄”、“限制级”）。<br/>
           这些标签将用于下方的“分级制度”映射以及分级筛选器。
@@ -143,11 +143,11 @@
             </div>
           </div>
         </div>
-        <n-button dashed block class="mt-4" @click="addItem(ratingLabelList, 'simple')">添加分级标签</n-button>
+        <n-button dashed block class="mt-4" @click="addItem(ratingLabelList, 'simple')"><template #icon><UiIcon name="add" /></template>添加分级标签</n-button>
       </n-tab-pane>
 
       <!-- Tab 6: 分级制度 (映射) -->
-      <n-tab-pane name="ratings" tab="分级制度">
+      <n-tab-pane name="ratings"><template #tab><span class="mp-title-with-icon"><UiIcon name="settings" :size="16" />分级制度</span></template>
         <n-alert type="info" :bordered="false" class="mb-4">
           TMDb 返回各国分级数据。在此定义<b>优先级</b>和<b>中文映射</b>。<br/>
           <b>Emby等级值</b>：用于封面生成时的权限控制 (G=1, PG=5, PG-13=8, R=9, NC-17=10, XXX=15)。
@@ -190,7 +190,7 @@
         <div class="list-header rating-list-header">
           <div class="col-label" style="flex: 1">国家/地区分级表 (跟随优先级排序)</div>
           <div class="col-action">
-            <n-button size="tiny" dashed @click="addRatingCountry">添加国家</n-button>
+            <n-button size="tiny" dashed @click="addRatingCountry"><template #icon><UiIcon name="add" /></template>添加国家</n-button>
           </div>
         </div>
 
@@ -204,7 +204,7 @@
               :name="countryCode"
             >
               <template #header-extra>
-                <n-button size="tiny" type="error" text @click.stop="removeRatingCountry(countryCode)">删除整组</n-button>
+                <n-button size="tiny" type="error" text @click.stop="removeRatingCountry(countryCode)"><template #icon><UiIcon name="delete" /></template>删除整组</n-button>
               </template>
 
               <!-- 具体分级规则表格 -->
@@ -268,7 +268,7 @@
         <template #icon><n-icon :component="RefreshIcon" /></template>
         恢复当前页默认
       </n-button>
-      <n-button type="primary" :loading="isSaving" @click="handleSave">
+      <n-button type="primary" :loading="isSaving" @click="handleSave"><template #icon><UiIcon name="save" /></template>
         保存所有配置
       </n-button>
     </div>
