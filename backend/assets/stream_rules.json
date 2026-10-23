@@ -1,0 +1,320 @@
+{
+  "DEFAULT_STREAM_FEATURE_MAPPING": [
+    {
+      "label": "上译",
+      "types": [
+        "Audio",
+        "Subtitle"
+      ],
+      "patterns": [
+        "(?<![A-Za-z0-9])SY(?![A-Za-z0-9])",
+        "(?<![A-Za-z0-9])CYSY(?![A-Za-z0-9])",
+        "(?<![A-Za-z0-9])DYSY(?![A-Za-z0-9])",
+        "(?<![A-Za-z0-9])GYSY(?![A-Za-z0-9])",
+        "(?<![A-Za-z0-9])CH-DYSY(?![A-Za-z0-9])",
+        "(?<![A-Za-z0-9])GP-DYSY(?![A-Za-z0-9])",
+        "上译",
+        "东影上译",
+        "泰盛上译",
+        "上海电影译制",
+        "上海电影配音",
+        "上海译制",
+        "上海配音",
+        "公映上译",
+        "上譯"
+      ]
+    },
+    {
+      "label": "公映",
+      "types": [
+        "Audio",
+        "Subtitle"
+      ],
+      "patterns": [
+        "(?<![A-Za-z0-9])GY(?![A-Za-z0-9])",
+        "公映",
+        "院线配音",
+        "影院版"
+      ]
+    },
+    {
+      "label": "长译",
+      "types": [
+        "Audio",
+        "Subtitle"
+      ],
+      "patterns": [
+        "(?<![A-Za-z0-9])CY(?![A-Za-z0-9])",
+        "(?<![A-Za-z0-9])GYCY(?![A-Za-z0-9])",
+        "长译",
+        "长春电影"
+      ]
+    },
+    {
+      "label": "京译",
+      "types": [
+        "Audio",
+        "Subtitle"
+      ],
+      "patterns": [
+        "(?<![A-Za-z0-9])JY(?![A-Za-z0-9])",
+        "(?<![A-Za-z0-9])GYJY(?![A-Za-z0-9])",
+        "京译",
+        "中影配音",
+        "北京电影"
+      ]
+    },
+    {
+      "label": "八一",
+      "types": [
+        "Audio",
+        "Subtitle"
+      ],
+      "patterns": [
+        "八一"
+      ]
+    },
+    {
+      "label": "六区",
+      "types": [
+        "Audio",
+        "Subtitle"
+      ],
+      "patterns": [
+        "六区"
+      ]
+    },
+    {
+      "label": "华纳",
+      "types": [
+        "Audio",
+        "Subtitle"
+      ],
+      "patterns": [
+        "华纳"
+      ]
+    },
+    {
+      "label": "中影",
+      "types": [
+        "Audio",
+        "Subtitle"
+      ],
+      "patterns": [
+        "中影"
+      ]
+    },
+    {
+      "label": "央视",
+      "types": [
+        "Audio",
+        "Subtitle"
+      ],
+      "patterns": [
+        "(?<![A-Za-z0-9])CCTV(?![A-Za-z0-9])",
+        "(?<![A-Za-z0-9])GP-CCTV(?![A-Za-z0-9])",
+        "央视",
+        "CCTV6"
+      ]
+    },
+    {
+      "label": "台配",
+      "types": [
+        "Audio",
+        "Subtitle"
+      ],
+      "patterns": [
+        "台配",
+        "台湾配音"
+      ]
+    },
+    {
+      "label": "台湾",
+      "types": [
+        "Subtitle"
+      ],
+      "patterns": [
+        "(?<![A-Za-z0-9])TW(?![A-Za-z0-9])",
+        "台灣",
+        "臺灣",
+        "台湾",
+        "台配",
+        "台灣配音",
+        "臺灣配音",
+        "台湾配音"
+      ]
+    },
+    {
+      "label": "香港",
+      "types": [
+        "Subtitle"
+      ],
+      "patterns": [
+        "(?<![A-Za-z0-9])HK(?![A-Za-z0-9])",
+        "港配",
+        "香港配音",
+        "港"
+      ]
+    },
+    {
+      "label": "国语",
+      "types": [
+        "Subtitle"
+      ],
+      "patterns": [
+        "国语",
+        "国配"
+      ]
+    },
+    {
+      "label": "官译",
+      "types": [
+        "Subtitle"
+      ],
+      "patterns": [
+        "官译",
+        "官方"
+      ]
+    },
+    {
+      "label": "原声",
+      "types": [
+        "Subtitle"
+      ],
+      "patterns": [
+        "原声",
+        "原音"
+      ]
+    },
+    {
+      "label": "特效",
+      "types": [
+        "Subtitle"
+      ],
+      "patterns": [
+        "(?<![A-Za-z0-9])TX(?![A-Za-z0-9])",
+        "特效"
+      ]
+    },
+    {
+      "label": "HDR",
+      "types": [
+        "Subtitle"
+      ],
+      "patterns": [
+        "(?<![A-Za-z0-9])HDR(?![A-Za-z0-9])",
+        "HDR"
+      ]
+    },
+    {
+      "label": "SDR",
+      "types": [
+        "Subtitle"
+      ],
+      "patterns": [
+        "(?<![A-Za-z0-9])SDR(?![A-Za-z0-9])",
+        "SDR"
+      ]
+    },
+    {
+      "label": "DoVi",
+      "types": [
+        "Subtitle"
+      ],
+      "patterns": [
+        "(?<![A-Za-z0-9])DoVi(?![A-Za-z0-9])",
+        "(?<![A-Za-z0-9])DV(?![A-Za-z0-9])",
+        "DoVi"
+      ]
+    },
+    {
+      "label": "拉美",
+      "types": [
+        "Subtitle",
+        "Audio"
+      ],
+      "patterns": [
+        "\\bLatin\\s*America\\b",
+        "\\bLatin\\s*American\\b",
+        "\\bLatin[-_\\s]*America\\b",
+        "\\bLatin[-_\\s]*American\\b",
+        "\\bLATAM\\b",
+        "\\bLatinoamerica\\b",
+        "\\bLatinoam[eé]rica\\b",
+        "拉美",
+        "拉丁美洲"
+      ]
+    },
+    {
+      "label": "巴西",
+      "types": [
+        "Subtitle",
+        "Audio"
+      ],
+      "patterns": [
+        "\\bBrazil\\b",
+        "\\bBrasil\\b",
+        "\\bBrazilian\\b",
+        "\\bBrasilian\\b",
+        "\\bBrasileiro\\b",
+        "\\bBrasileira\\b",
+        "\\bPortuguese\\s*\\(?Brazil\\)?\\b",
+        "\\bPortuguese\\s*[-_]\\s*Brazil\\b",
+        "巴西"
+      ]
+    },
+    {
+      "label": "听障",
+      "types": [
+        "Subtitle"
+      ],
+      "patterns": [
+        "(?<![A-Za-z0-9])SDH(?![A-Za-z0-9])",
+        "(?<![A-Za-z0-9])CC(?![A-Za-z0-9])",
+        "hearing impaired",
+        "hard of hearing",
+        "听障"
+      ]
+    },
+    {
+      "label": "导评",
+      "types": [
+        "Audio",
+        "Subtitle"
+      ],
+      "patterns": [
+        "Director'?s Commentary",
+        "Audio Commentary",
+        "Commentary",
+        "导评"
+      ]
+    }
+  ],
+  "STREAM_TITLE_GARBAGE_FILTER": [
+    "麦哈",
+    "说一不二",
+    "人人字幕组",
+    "人人影视",
+    "远鉴字幕组",
+    "衣柜字幕组",
+    "霸王龙压制组",
+    "字幕组",
+    "压制组",
+    "手抄",
+    "调轴",
+    "精校",
+    "原创",
+    "校对",
+    "后期",
+    "翻译",
+    "制作",
+    "发布",
+    "团队",
+    "组",
+    "字幕",
+    "配音",
+    "合金弹头",
+    "山茶树",
+    "木木"
+  ]
+}

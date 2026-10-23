@@ -1,0 +1,343 @@
+{
+  "chain": [
+    {
+      "key": "populate-metadata",
+      "name": "同步媒体数据",
+      "help": "同步 Emby 媒体库基础数据到本地缓存，用于元数据编辑、翻译、封面和指纹补齐。",
+      "category": "media-data",
+      "category_name": "媒体数据",
+      "description": "同步 Emby 媒体库基础数据到本地缓存，用于元数据编辑、翻译、封面和指纹补齐。"
+    },
+    {
+      "key": "enrich-aliases",
+      "name": "演员数据补充",
+      "help": "补充演员别名、译名等元数据资料，提高搜索和人物匹配命中率。",
+      "category": "media-data",
+      "category_name": "媒体数据",
+      "description": "补充演员别名、译名等元数据资料，提高搜索和人物匹配命中率。"
+    },
+    {
+      "key": "role-translation",
+      "name": "中文化角色名",
+      "help": "为影视条目中的角色名补充中文显示，让演员角色展示更友好。",
+      "category": "media-data",
+      "category_name": "媒体数据",
+      "description": "为影视条目中的角色名补充中文显示，让演员角色展示更友好。"
+    },
+    {
+      "key": "actor-translation",
+      "name": "中文化人物名",
+      "help": "为演员、导演等人物信息补充中文名。",
+      "category": "media-data",
+      "category_name": "媒体数据",
+      "description": "为演员、导演等人物信息补充中文名。"
+    },
+    {
+      "key": "backup-mediainfo",
+      "name": "备份媒体信息",
+      "help": "备份本地媒体信息缓存，避免重建库或迁移后丢失媒体参数。",
+      "category": "media-info",
+      "category_name": "媒体信息",
+      "description": "备份本地媒体信息缓存，避免重建库或迁移后丢失媒体参数。"
+    },
+    {
+      "key": "restore_mediainfo",
+      "name": "还原媒体信息",
+      "help": "从备份中还原媒体信息缓存，适合重装Emby 容器或迁移时使用，或修复本地媒体信息缓存丢失、迁移或缓存损坏后恢复数据。",
+      "category": "media-info",
+      "category_name": "媒体信息",
+      "description": "从备份中还原媒体信息缓存，适合重装Emby 容器或迁移时使用，或修复本地媒体信息缓存丢失、迁移或缓存损坏后恢复数据。"
+    },
+    {
+      "key": "clear-mediainfo",
+      "name": "清空媒体信息",
+      "help": "清空全部媒体信息备份，不删除媒体元数据、本地媒体信息文件或 115 文件缓存；清空后可重新执行备份媒体信息。",
+      "category": "media-info",
+      "category_name": "媒体信息",
+      "description": "清空全部媒体信息备份，不删除媒体元数据、本地媒体信息文件或 115 文件缓存；清空后可重新执行备份媒体信息。"
+    },
+    {
+      "key": "restore-nfo-and-images",
+      "name": "还原NFO和封面",
+      "help": "从备份或缓存中还原 NFO、海报、背景图等媒体附属文件。",
+      "category": "media-info",
+      "category_name": "媒体信息",
+      "description": "从备份或缓存中还原 NFO、海报、背景图等媒体附属文件。"
+    },
+    {
+      "key": "repair-p115-fingerprints",
+      "name": "补齐缓存指纹",
+      "help": "扫描在库电影和分集，补齐 115 PC、SHA1 和本地缓存；优先从本地缓存恢复，必要时查询 115。",
+      "category": "p115-cache",
+      "category_name": "115 与缓存",
+      "description": "扫描在库电影和分集，补齐 115 PC、SHA1 和本地缓存；优先从本地缓存恢复，必要时查询 115。"
+    },
+    {
+      "key": "purge-ghost-actors",
+      "name": "删除幽灵演员",
+      "help": "删除没有有效关联作品的幽灵演员，清理人物库冗余数据。",
+      "category": "system-maintenance",
+      "category_name": "系统维护",
+      "description": "删除没有有效关联作品的幽灵演员，清理人物库冗余数据。"
+    }
+  ],
+  "manual": [
+    {
+      "key": "populate-metadata",
+      "name": "同步媒体数据",
+      "help": "同步 Emby 媒体库基础数据到本地缓存，用于元数据编辑、翻译、封面和指纹补齐。",
+      "category": "media-data",
+      "category_name": "媒体数据",
+      "description": "同步 Emby 媒体库基础数据到本地缓存，用于元数据编辑、翻译、封面和指纹补齐。"
+    },
+    {
+      "key": "enrich-aliases",
+      "name": "演员数据补充",
+      "help": "补充演员别名、译名等元数据资料，提高搜索和人物匹配命中率。",
+      "category": "media-data",
+      "category_name": "媒体数据",
+      "description": "补充演员别名、译名等元数据资料，提高搜索和人物匹配命中率。"
+    },
+    {
+      "key": "role-translation",
+      "name": "中文化角色名",
+      "help": "为影视条目中的角色名补充中文显示，让演员角色展示更友好。",
+      "category": "media-data",
+      "category_name": "媒体数据",
+      "description": "为影视条目中的角色名补充中文显示，让演员角色展示更友好。"
+    },
+    {
+      "key": "actor-translation",
+      "name": "中文化人物名",
+      "help": "为演员、导演等人物信息补充中文名。",
+      "category": "media-data",
+      "category_name": "媒体数据",
+      "description": "为演员、导演等人物信息补充中文名。"
+    },
+    {
+      "key": "backup-mediainfo",
+      "name": "备份媒体信息",
+      "help": "备份本地媒体信息缓存，避免重建库或迁移后丢失媒体参数。",
+      "category": "media-info",
+      "category_name": "媒体信息",
+      "description": "备份本地媒体信息缓存，避免重建库或迁移后丢失媒体参数。"
+    },
+    {
+      "key": "restore_mediainfo",
+      "name": "还原媒体信息",
+      "help": "从备份中还原媒体信息缓存，适合重装Emby 容器或迁移时使用，或修复本地媒体信息缓存丢失、迁移或缓存损坏后恢复数据。",
+      "category": "media-info",
+      "category_name": "媒体信息",
+      "description": "从备份中还原媒体信息缓存，适合重装Emby 容器或迁移时使用，或修复本地媒体信息缓存丢失、迁移或缓存损坏后恢复数据。"
+    },
+    {
+      "key": "clear-mediainfo",
+      "name": "清空媒体信息",
+      "help": "清空全部媒体信息备份，不删除媒体元数据、本地媒体信息文件或 115 文件缓存；清空后可重新执行备份媒体信息。",
+      "category": "media-info",
+      "category_name": "媒体信息",
+      "description": "清空全部媒体信息备份，不删除媒体元数据、本地媒体信息文件或 115 文件缓存；清空后可重新执行备份媒体信息。"
+    },
+    {
+      "key": "restore-nfo-and-images",
+      "name": "还原NFO和封面",
+      "help": "从备份或缓存中还原 NFO、海报、背景图等媒体附属文件。",
+      "category": "media-info",
+      "category_name": "媒体信息",
+      "description": "从备份或缓存中还原 NFO、海报、背景图等媒体附属文件。"
+    },
+    {
+      "key": "repair-video-thumbnails",
+      "name": "修复视频预览缩略图",
+      "help": "先运行神医提取，按本次日志定点验收章节图或 BIF；对剩余失败项临时修正自定义 ffmpeg 参数并再次提取，结束后恢复配置。补图需要 ETK 可访问 Emby 所在主机的 Docker socket。",
+      "category": "media-info",
+      "category_name": "媒体信息",
+      "description": "先运行神医提取，按本次日志定点验收章节图或 BIF；对剩余失败项临时修正自定义 ffmpeg 参数并再次提取，结束后恢复配置。补图需要 ETK 可访问 Emby 所在主机的 Docker socket。"
+    },
+    {
+      "key": "repair-p115-fingerprints",
+      "name": "补齐缓存指纹",
+      "help": "扫描在库电影和分集，补齐 115 PC、SHA1 和本地缓存；优先从本地缓存恢复，必要时查询 115。",
+      "category": "p115-cache",
+      "category_name": "115 与缓存",
+      "description": "扫描在库电影和分集，补齐 115 PC、SHA1 和本地缓存；优先从本地缓存恢复，必要时查询 115。"
+    },
+    {
+      "key": "repair-truehd-core-shift",
+      "name": "纠正高清音轨错位",
+      "help": "手动扫描全部媒体库，纠正可唯一证明的高清音轨兼容核心错位，并单独列出具有错位结构但无法唯一判断的歧义项；新入库链路只定点检查当前媒体。",
+      "category": "audio-maintenance",
+      "category_name": "音轨维护",
+      "description": "手动扫描全部媒体库，纠正可唯一证明的高清音轨兼容核心错位，并单独列出具有错位结构但无法唯一判断的歧义项；新入库链路只定点检查当前媒体。"
+    },
+    {
+      "key": "restore-truehd-core-backups",
+      "name": "还原音轨备份",
+      "help": "按 ItemId 和当前媒体路径精确还原音轨纠正备份；没有有效备份时直接跳过，成功后继续保留备份。",
+      "category": "audio-maintenance",
+      "category_name": "音轨维护",
+      "description": "按 ItemId 和当前媒体路径精确还原音轨纠正备份；没有有效备份时直接跳过，成功后继续保留备份。"
+    },
+    {
+      "key": "clear-truehd-core-backups",
+      "name": "清理音轨备份",
+      "help": "仅删除音轨纠正任务生成的本地回滚备份，不删除当前媒体信息、Emby 数据或 115 文件。",
+      "category": "audio-maintenance",
+      "category_name": "音轨维护",
+      "description": "仅删除音轨纠正任务生成的本地回滚备份，不删除当前媒体信息、Emby 数据或 115 文件。"
+    },
+    {
+      "key": "clear-emby-activity-log",
+      "name": "清理活动日志",
+      "help": "停止 amilys/embyserver，备份并清空 activitylog.db 后重启 Emby；仅删除活动日志，不影响媒体库、用户和播放记录。",
+      "category": "system-maintenance",
+      "category_name": "系统维护",
+      "description": "停止 amilys/embyserver，备份并清空 activitylog.db 后重启 Emby；仅删除活动日志，不影响媒体库、用户和播放记录。"
+    },
+    {
+      "key": "purge-ghost-actors",
+      "name": "删除幽灵演员",
+      "help": "删除没有有效关联作品的幽灵演员，清理人物库冗余数据。",
+      "category": "system-maintenance",
+      "category_name": "系统维护",
+      "description": "删除没有有效关联作品的幽灵演员，清理人物库冗余数据。"
+    }
+  ],
+  "all": [
+    {
+      "key": "populate-metadata",
+      "name": "同步媒体数据",
+      "help": "同步 Emby 媒体库基础数据到本地缓存，用于元数据编辑、翻译、封面和指纹补齐。",
+      "category": "media-data",
+      "category_name": "媒体数据",
+      "description": "同步 Emby 媒体库基础数据到本地缓存，用于元数据编辑、翻译、封面和指纹补齐。",
+      "processor_type": "media"
+    },
+    {
+      "key": "enrich-aliases",
+      "name": "演员数据补充",
+      "help": "补充演员别名、译名等元数据资料，提高搜索和人物匹配命中率。",
+      "category": "media-data",
+      "category_name": "媒体数据",
+      "description": "补充演员别名、译名等元数据资料，提高搜索和人物匹配命中率。",
+      "processor_type": "media"
+    },
+    {
+      "key": "role-translation",
+      "name": "中文化角色名",
+      "help": "为影视条目中的角色名补充中文显示，让演员角色展示更友好。",
+      "category": "media-data",
+      "category_name": "媒体数据",
+      "description": "为影视条目中的角色名补充中文显示，让演员角色展示更友好。",
+      "processor_type": "media"
+    },
+    {
+      "key": "actor-translation",
+      "name": "中文化人物名",
+      "help": "为演员、导演等人物信息补充中文名。",
+      "category": "media-data",
+      "category_name": "媒体数据",
+      "description": "为演员、导演等人物信息补充中文名。",
+      "processor_type": "media"
+    },
+    {
+      "key": "backup-mediainfo",
+      "name": "备份媒体信息",
+      "help": "备份本地媒体信息缓存，避免重建库或迁移后丢失媒体参数。",
+      "category": "media-info",
+      "category_name": "媒体信息",
+      "description": "备份本地媒体信息缓存，避免重建库或迁移后丢失媒体参数。",
+      "processor_type": "media"
+    },
+    {
+      "key": "restore_mediainfo",
+      "name": "还原媒体信息",
+      "help": "从备份中还原媒体信息缓存，适合重装Emby 容器或迁移时使用，或修复本地媒体信息缓存丢失、迁移或缓存损坏后恢复数据。",
+      "category": "media-info",
+      "category_name": "媒体信息",
+      "description": "从备份中还原媒体信息缓存，适合重装Emby 容器或迁移时使用，或修复本地媒体信息缓存丢失、迁移或缓存损坏后恢复数据。",
+      "processor_type": "media"
+    },
+    {
+      "key": "clear-mediainfo",
+      "name": "清空媒体信息",
+      "help": "清空全部媒体信息备份，不删除媒体元数据、本地媒体信息文件或 115 文件缓存；清空后可重新执行备份媒体信息。",
+      "category": "media-info",
+      "category_name": "媒体信息",
+      "description": "清空全部媒体信息备份，不删除媒体元数据、本地媒体信息文件或 115 文件缓存；清空后可重新执行备份媒体信息。",
+      "processor_type": "media"
+    },
+    {
+      "key": "restore-nfo-and-images",
+      "name": "还原NFO和封面",
+      "help": "从备份或缓存中还原 NFO、海报、背景图等媒体附属文件。",
+      "category": "media-info",
+      "category_name": "媒体信息",
+      "description": "从备份或缓存中还原 NFO、海报、背景图等媒体附属文件。",
+      "processor_type": "media"
+    },
+    {
+      "key": "repair-video-thumbnails",
+      "name": "修复视频预览缩略图",
+      "help": "先运行神医提取，按本次日志定点验收章节图或 BIF；对剩余失败项临时修正自定义 ffmpeg 参数并再次提取，结束后恢复配置。补图需要 ETK 可访问 Emby 所在主机的 Docker socket。",
+      "category": "media-info",
+      "category_name": "媒体信息",
+      "description": "先运行神医提取，按本次日志定点验收章节图或 BIF；对剩余失败项临时修正自定义 ffmpeg 参数并再次提取，结束后恢复配置。补图需要 ETK 可访问 Emby 所在主机的 Docker socket。",
+      "processor_type": "media"
+    },
+    {
+      "key": "repair-p115-fingerprints",
+      "name": "补齐缓存指纹",
+      "help": "扫描在库电影和分集，补齐 115 PC、SHA1 和本地缓存；优先从本地缓存恢复，必要时查询 115。",
+      "category": "p115-cache",
+      "category_name": "115 与缓存",
+      "description": "扫描在库电影和分集，补齐 115 PC、SHA1 和本地缓存；优先从本地缓存恢复，必要时查询 115。",
+      "processor_type": "media"
+    },
+    {
+      "key": "repair-truehd-core-shift",
+      "name": "纠正高清音轨错位",
+      "help": "手动扫描全部媒体库，纠正可唯一证明的高清音轨兼容核心错位，并单独列出具有错位结构但无法唯一判断的歧义项；新入库链路只定点检查当前媒体。",
+      "category": "audio-maintenance",
+      "category_name": "音轨维护",
+      "description": "手动扫描全部媒体库，纠正可唯一证明的高清音轨兼容核心错位，并单独列出具有错位结构但无法唯一判断的歧义项；新入库链路只定点检查当前媒体。",
+      "processor_type": "media"
+    },
+    {
+      "key": "restore-truehd-core-backups",
+      "name": "还原音轨备份",
+      "help": "按 ItemId 和当前媒体路径精确还原音轨纠正备份；没有有效备份时直接跳过，成功后继续保留备份。",
+      "category": "audio-maintenance",
+      "category_name": "音轨维护",
+      "description": "按 ItemId 和当前媒体路径精确还原音轨纠正备份；没有有效备份时直接跳过，成功后继续保留备份。",
+      "processor_type": "media"
+    },
+    {
+      "key": "clear-truehd-core-backups",
+      "name": "清理音轨备份",
+      "help": "仅删除音轨纠正任务生成的本地回滚备份，不删除当前媒体信息、Emby 数据或 115 文件。",
+      "category": "audio-maintenance",
+      "category_name": "音轨维护",
+      "description": "仅删除音轨纠正任务生成的本地回滚备份，不删除当前媒体信息、Emby 数据或 115 文件。",
+      "processor_type": "media"
+    },
+    {
+      "key": "clear-emby-activity-log",
+      "name": "清理活动日志",
+      "help": "停止 amilys/embyserver，备份并清空 activitylog.db 后重启 Emby；仅删除活动日志，不影响媒体库、用户和播放记录。",
+      "category": "system-maintenance",
+      "category_name": "系统维护",
+      "description": "停止 amilys/embyserver，备份并清空 activitylog.db 后重启 Emby；仅删除活动日志，不影响媒体库、用户和播放记录。",
+      "processor_type": "media"
+    },
+    {
+      "key": "purge-ghost-actors",
+      "name": "删除幽灵演员",
+      "help": "删除没有有效关联作品的幽灵演员，清理人物库冗余数据。",
+      "category": "system-maintenance",
+      "category_name": "系统维护",
+      "description": "删除没有有效关联作品的幽灵演员，清理人物库冗余数据。",
+      "processor_type": "media"
+    }
+  ]
+}

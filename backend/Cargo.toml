@@ -1,0 +1,54 @@
+[package]
+name = "emby-toolkit"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["multipart"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+flate2 = "1"
+hmac = "0.12"
+num-bigint-dig = "0.8"
+percent-encoding = "2"
+quick-xml = "0.38"
+rand = "0.8"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "stream", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "json", "chrono"] }
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+tower-http = { version = "0.6", features = ["fs", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+url = "2"
+ferrous-opencc = { version = "0.4", default-features = false, features = ["t2s-conversion"] }
+fancy-regex = "0.19"
+minijinja = { version = "3.0.2", features = ["builtins", "json", "serde"] }
+minijinja-contrib = { version = "3.0.2", features = ["pycompat"] }
+sha1 = "0.10"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif"] }
+imageproc = { version = "0.27.0", default-features = false, features = ["text"] }
+ab_glyph = "0.2.32"
+serde_yaml = "0.9.34"
+woff2-patched = "0.4.0"
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+bollard = "0.21.1"
+ttf-parser = "0.25"
+tar = "0.4"
+notify = "8"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+strip = true

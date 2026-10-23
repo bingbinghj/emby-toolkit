@@ -1,0 +1,2051 @@
+{
+  "keywords": {
+    "chi": [
+      "chi",
+      "zho",
+      "zh",
+      "cmn",
+      "zh-cmn",
+      "mandarin",
+      "guo",
+      "guoyu",
+      "国语",
+      "普通话",
+      "中文",
+      "国配",
+      "公映",
+      "台配",
+      "京译",
+      "上译",
+      "央译"
+    ],
+    "yue": [
+      "yue",
+      "zh-yue",
+      "yue-hk",
+      "yue-hant-hk",
+      "cantonese",
+      "粤语",
+      "广东话",
+      "粤文",
+      "粤配",
+      "港配",
+      "粤语配音",
+      "粤英双语"
+    ],
+    "eng": [
+      "eng",
+      "en",
+      "english",
+      "英语",
+      "英文"
+    ],
+    "jpn": [
+      "jpn",
+      "ja",
+      "japanese",
+      "日语",
+      "日文"
+    ],
+    "kor": [
+      "kor",
+      "ko",
+      "korean",
+      "韩语",
+      "韩文"
+    ],
+    "sub_chi": [
+      "chi",
+      "zho",
+      "zh",
+      "cmn",
+      "zh-cmn",
+      "mandarin",
+      "guo",
+      "guoyu",
+      "国语",
+      "普通话",
+      "中文"
+    ],
+    "sub_yue": [
+      "yue",
+      "zh-yue",
+      "yue-hk",
+      "yue-hant-hk",
+      "cantonese",
+      "粤语",
+      "广东话",
+      "粤文",
+      "粤配",
+      "港配",
+      "粤语配音"
+    ],
+    "sub_chs": [
+      "chs",
+      "zhs",
+      "sc",
+      "gb",
+      "zh-cn",
+      "zh-sg",
+      "zh-hans",
+      "zh-hans-cn",
+      "simplified",
+      "简体",
+      "简中",
+      "简体中文"
+    ],
+    "sub_cht": [
+      "cht",
+      "zht",
+      "tc",
+      "big5",
+      "zh-tw",
+      "zh-hk",
+      "zh-mo",
+      "zh-hant",
+      "zh-hant-tw",
+      "zh-hant-hk",
+      "traditional",
+      "繁体",
+      "繁中",
+      "繁体中文"
+    ],
+    "sub_eng": [
+      "eng",
+      "en",
+      "english",
+      "英语",
+      "英文",
+      "英字"
+    ],
+    "sub_jpn": [
+      "jpn",
+      "ja",
+      "japanese",
+      "日语",
+      "日文",
+      "日字"
+    ],
+    "sub_kor": [
+      "kor",
+      "ko",
+      "korean",
+      "韩语",
+      "韩文",
+      "韩字"
+    ],
+    "fre": [
+      "fre",
+      "fra",
+      "fr",
+      "french",
+      "法语",
+      "法文"
+    ],
+    "sub_fre": [
+      "fre",
+      "fra",
+      "fr",
+      "french",
+      "法语",
+      "法文"
+    ],
+    "ger": [
+      "ger",
+      "deu",
+      "de",
+      "german",
+      "Deutsch",
+      "德语",
+      "德文"
+    ],
+    "sub_ger": [
+      "ger",
+      "deu",
+      "de",
+      "german",
+      "Deutsch",
+      "德语",
+      "德文"
+    ],
+    "spa": [
+      "spa",
+      "es",
+      "spanish",
+      "西班牙语",
+      "西班牙文"
+    ],
+    "sub_spa": [
+      "spa",
+      "es",
+      "spanish",
+      "西班牙语",
+      "西班牙文"
+    ],
+    "ita": [
+      "ita",
+      "it",
+      "italian",
+      "意大利语",
+      "意大利文"
+    ],
+    "sub_ita": [
+      "ita",
+      "it",
+      "italian",
+      "意大利语",
+      "意大利文"
+    ],
+    "rus": [
+      "rus",
+      "ru",
+      "russian",
+      "俄语",
+      "俄文"
+    ],
+    "sub_rus": [
+      "rus",
+      "ru",
+      "russian",
+      "俄语",
+      "俄文"
+    ],
+    "tha": [
+      "tha",
+      "th",
+      "thai",
+      "tai",
+      "Tai languages",
+      "泰语",
+      "泰文"
+    ],
+    "sub_tha": [
+      "tha",
+      "th",
+      "thai",
+      "tai",
+      "Tai languages",
+      "泰语",
+      "泰文"
+    ],
+    "hin": [
+      "hin",
+      "hi",
+      "hindi",
+      "印地语",
+      "印度语"
+    ],
+    "sub_hin": [
+      "hin",
+      "hi",
+      "hindi",
+      "印地语",
+      "印度语"
+    ],
+    "por": [
+      "por",
+      "pt",
+      "portuguese",
+      "葡萄牙语",
+      "葡萄牙文"
+    ],
+    "sub_por": [
+      "por",
+      "pt",
+      "portuguese",
+      "葡萄牙语",
+      "葡萄牙文"
+    ],
+    "ara": [
+      "ara",
+      "ar",
+      "arabic",
+      "阿拉伯语",
+      "阿拉伯文"
+    ],
+    "sub_ara": [
+      "ara",
+      "ar",
+      "arabic",
+      "阿拉伯语",
+      "阿拉伯文"
+    ],
+    "cat": [
+      "cat",
+      "CAT",
+      "ca",
+      "catalan",
+      "català",
+      "加泰罗尼亚语",
+      "加泰隆语"
+    ],
+    "sub_cat": [
+      "cat",
+      "CAT",
+      "ca",
+      "catalan",
+      "català",
+      "加泰罗尼亚语",
+      "加泰隆语"
+    ],
+    "cze": [
+      "cze",
+      "CZE",
+      "ces",
+      "cs",
+      "czech",
+      "捷克语",
+      "捷克文"
+    ],
+    "sub_cze": [
+      "cze",
+      "CZE",
+      "ces",
+      "cs",
+      "czech",
+      "捷克语",
+      "捷克文"
+    ],
+    "dan": [
+      "dan",
+      "DAN",
+      "da",
+      "danish",
+      "丹麦语",
+      "丹麦文"
+    ],
+    "sub_dan": [
+      "dan",
+      "DAN",
+      "da",
+      "danish",
+      "丹麦语",
+      "丹麦文"
+    ],
+    "gre": [
+      "gre",
+      "GRE",
+      "ell",
+      "el",
+      "greek",
+      "希腊语",
+      "希腊文"
+    ],
+    "sub_gre": [
+      "gre",
+      "GRE",
+      "ell",
+      "el",
+      "greek",
+      "希腊语",
+      "希腊文"
+    ],
+    "baq": [
+      "baq",
+      "BAQ",
+      "eus",
+      "eu",
+      "basque",
+      "巴斯克语",
+      "巴斯克文"
+    ],
+    "sub_baq": [
+      "baq",
+      "BAQ",
+      "eus",
+      "eu",
+      "basque",
+      "巴斯克语",
+      "巴斯克文"
+    ],
+    "fin": [
+      "fin",
+      "FIN",
+      "fi",
+      "finnish",
+      "芬兰语",
+      "芬兰文"
+    ],
+    "sub_fin": [
+      "fin",
+      "FIN",
+      "fi",
+      "finnish",
+      "芬兰语",
+      "芬兰文"
+    ],
+    "fil": [
+      "fil",
+      "FIL",
+      "tl",
+      "tag",
+      "tagalog",
+      "filipino",
+      "菲律宾语",
+      "他加禄语"
+    ],
+    "sub_fil": [
+      "fil",
+      "FIL",
+      "tl",
+      "tag",
+      "tagalog",
+      "filipino",
+      "菲律宾语",
+      "他加禄语"
+    ],
+    "glg": [
+      "glg",
+      "GLG",
+      "gl",
+      "galician",
+      "加利西亚语",
+      "加里西亚语"
+    ],
+    "sub_glg": [
+      "glg",
+      "GLG",
+      "gl",
+      "galician",
+      "加利西亚语",
+      "加里西亚语"
+    ],
+    "heb": [
+      "heb",
+      "HEB",
+      "he",
+      "iw",
+      "hebrew",
+      "希伯来语",
+      "希伯来文"
+    ],
+    "sub_heb": [
+      "heb",
+      "HEB",
+      "he",
+      "iw",
+      "hebrew",
+      "希伯来语",
+      "希伯来文"
+    ],
+    "hrv": [
+      "hrv",
+      "HRV",
+      "hr",
+      "croatian",
+      "克罗地亚语",
+      "克罗地亚文"
+    ],
+    "sub_hrv": [
+      "hrv",
+      "HRV",
+      "hr",
+      "croatian",
+      "克罗地亚语",
+      "克罗地亚文"
+    ],
+    "hun": [
+      "hun",
+      "HUN",
+      "hu",
+      "hungarian",
+      "匈牙利语",
+      "匈牙利文"
+    ],
+    "sub_hun": [
+      "hun",
+      "HUN",
+      "hu",
+      "hungarian",
+      "匈牙利语",
+      "匈牙利文"
+    ],
+    "ind": [
+      "ind",
+      "IND",
+      "id",
+      "in",
+      "indonesian",
+      "印度尼西亚语",
+      "印尼语"
+    ],
+    "sub_ind": [
+      "ind",
+      "IND",
+      "id",
+      "in",
+      "indonesian",
+      "印度尼西亚语",
+      "印尼语"
+    ],
+    "may": [
+      "may",
+      "MAY",
+      "msa",
+      "ms",
+      "malay",
+      "马来语",
+      "马来文"
+    ],
+    "sub_may": [
+      "may",
+      "MAY",
+      "msa",
+      "ms",
+      "malay",
+      "马来语",
+      "马来文"
+    ],
+    "nob": [
+      "nob",
+      "NOB",
+      "nb",
+      "no",
+      "nor",
+      "norwegian bokmal",
+      "norwegian bokmål",
+      "bokmal",
+      "bokmål",
+      "挪威语",
+      "挪威文",
+      "书面挪威语"
+    ],
+    "sub_nob": [
+      "nob",
+      "NOB",
+      "nb",
+      "no",
+      "nor",
+      "norwegian bokmal",
+      "norwegian bokmål",
+      "bokmal",
+      "bokmål",
+      "挪威语",
+      "挪威文",
+      "书面挪威语"
+    ],
+    "dut": [
+      "dut",
+      "DUT",
+      "nld",
+      "nl",
+      "dutch",
+      "flemish",
+      "荷兰语",
+      "荷兰文",
+      "弗拉芒语"
+    ],
+    "sub_dut": [
+      "dut",
+      "DUT",
+      "nld",
+      "nl",
+      "dutch",
+      "flemish",
+      "荷兰语",
+      "荷兰文",
+      "弗拉芒语"
+    ],
+    "pol": [
+      "pol",
+      "POL",
+      "pl",
+      "polish",
+      "波兰语",
+      "波兰文"
+    ],
+    "sub_pol": [
+      "pol",
+      "POL",
+      "pl",
+      "polish",
+      "波兰语",
+      "波兰文"
+    ],
+    "rum": [
+      "rum",
+      "RUM",
+      "ron",
+      "ro",
+      "romanian",
+      "罗马尼亚语",
+      "罗马尼亚文"
+    ],
+    "sub_rum": [
+      "rum",
+      "RUM",
+      "ron",
+      "ro",
+      "romanian",
+      "罗马尼亚语",
+      "罗马尼亚文"
+    ],
+    "rom": [
+      "rom",
+      "romany",
+      "romani",
+      "罗姆语",
+      "吉普赛语",
+      "吉卜赛语"
+    ],
+    "sub_rom": [
+      "rom",
+      "romany",
+      "romani",
+      "罗姆语",
+      "吉普赛语",
+      "吉卜赛语"
+    ],
+    "swe": [
+      "swe",
+      "SWE",
+      "sv",
+      "swedish",
+      "瑞典语",
+      "瑞典文"
+    ],
+    "sub_swe": [
+      "swe",
+      "SWE",
+      "sv",
+      "swedish",
+      "瑞典语",
+      "瑞典文"
+    ],
+    "tur": [
+      "tur",
+      "TUR",
+      "tr",
+      "turkish",
+      "土耳其语",
+      "土耳其文"
+    ],
+    "sub_tur": [
+      "tur",
+      "TUR",
+      "tr",
+      "turkish",
+      "土耳其语",
+      "土耳其文"
+    ],
+    "ukr": [
+      "ukr",
+      "UKR",
+      "uk",
+      "ukrainian",
+      "乌克兰语",
+      "乌克兰文"
+    ],
+    "sub_ukr": [
+      "ukr",
+      "UKR",
+      "uk",
+      "ukrainian",
+      "乌克兰语",
+      "乌克兰文"
+    ],
+    "vie": [
+      "vie",
+      "VIE",
+      "vi",
+      "vietnamese",
+      "越南语",
+      "越南文"
+    ],
+    "sub_vie": [
+      "vie",
+      "VIE",
+      "vi",
+      "vietnamese",
+      "越南语",
+      "越南文"
+    ],
+    "bul": [
+      "bul",
+      "BUL",
+      "bg",
+      "bulgarian",
+      "保加利亚语",
+      "保加利亚文"
+    ],
+    "sub_bul": [
+      "bul",
+      "BUL",
+      "bg",
+      "bulgarian",
+      "保加利亚语",
+      "保加利亚文"
+    ],
+    "est": [
+      "est",
+      "EST",
+      "et",
+      "estonian",
+      "爱沙尼亚语",
+      "爱沙尼亚文"
+    ],
+    "sub_est": [
+      "est",
+      "EST",
+      "et",
+      "estonian",
+      "爱沙尼亚语",
+      "爱沙尼亚文"
+    ],
+    "lit": [
+      "lit",
+      "LIT",
+      "lt",
+      "lithuanian",
+      "立陶宛语",
+      "立陶宛文"
+    ],
+    "sub_lit": [
+      "lit",
+      "LIT",
+      "lt",
+      "lithuanian",
+      "立陶宛语",
+      "立陶宛文"
+    ],
+    "lav": [
+      "lav",
+      "LAV",
+      "lv",
+      "latvian",
+      "拉脱维亚语",
+      "拉脱维亚文"
+    ],
+    "sub_lav": [
+      "lav",
+      "LAV",
+      "lv",
+      "latvian",
+      "拉脱维亚语",
+      "拉脱维亚文"
+    ],
+    "slo": [
+      "slo",
+      "SLO",
+      "slk",
+      "sk",
+      "slovak",
+      "斯洛伐克语",
+      "斯洛伐克文"
+    ],
+    "sub_slo": [
+      "slo",
+      "SLO",
+      "slk",
+      "sk",
+      "slovak",
+      "斯洛伐克语",
+      "斯洛伐克文"
+    ],
+    "slv": [
+      "slv",
+      "SLV",
+      "sl",
+      "slovenian",
+      "斯洛文尼亚语",
+      "斯洛文尼亚文"
+    ],
+    "sub_slv": [
+      "slv",
+      "SLV",
+      "sl",
+      "slovenian",
+      "斯洛文尼亚语",
+      "斯洛文尼亚文"
+    ],
+    "tam": [
+      "tam",
+      "TAM",
+      "ta",
+      "tamil",
+      "泰米尔语",
+      "泰米尔文"
+    ],
+    "sub_tam": [
+      "tam",
+      "TAM",
+      "ta",
+      "tamil",
+      "泰米尔语",
+      "泰米尔文"
+    ],
+    "tel": [
+      "tel",
+      "TEL",
+      "te",
+      "telugu",
+      "泰卢固语",
+      "泰卢固文"
+    ],
+    "sub_tel": [
+      "tel",
+      "TEL",
+      "te",
+      "telugu",
+      "泰卢固语",
+      "泰卢固文"
+    ],
+    "kan": [
+      "kan",
+      "KAN",
+      "kn",
+      "kannada",
+      "卡纳达语",
+      "卡纳达文",
+      "康纳达语"
+    ],
+    "sub_kan": [
+      "kan",
+      "KAN",
+      "kn",
+      "kannada",
+      "卡纳达语",
+      "卡纳达文",
+      "康纳达语"
+    ],
+    "mal": [
+      "mal",
+      "MAL",
+      "ml",
+      "malayalam",
+      "马拉雅拉姆语",
+      "马拉雅拉姆文"
+    ],
+    "sub_mal": [
+      "mal",
+      "MAL",
+      "ml",
+      "malayalam",
+      "马拉雅拉姆语",
+      "马拉雅拉姆文"
+    ],
+    "gem": [
+      "gem",
+      "Germanic",
+      "Germanic languages",
+      "日耳曼语族",
+      "日耳曼语"
+    ],
+    "sub_gem": [
+      "gem",
+      "Germanic",
+      "Germanic languages",
+      "日耳曼语族",
+      "日耳曼语"
+    ],
+    "mul": [
+      "mul",
+      "multiple languages",
+      "多语言"
+    ],
+    "sub_mul": [
+      "mul",
+      "multiple languages",
+      "多语言"
+    ],
+    "mis": [
+      "mis",
+      "uncoded",
+      "未分类语言"
+    ],
+    "sub_mis": [
+      "mis",
+      "uncoded",
+      "未分类语言"
+    ],
+    "zxx": [
+      "zxx",
+      "no linguistic content",
+      "无语言内容"
+    ],
+    "sub_zxx": [
+      "zxx",
+      "no linguistic content",
+      "无语言内容"
+    ]
+  },
+  "audio": {
+    "chi": "国语",
+    "yue": "粤语",
+    "eng": "英语",
+    "jpn": "日语",
+    "kor": "韩语",
+    "tha": "泰语",
+    "fre": "法语",
+    "ger": "德语",
+    "spa": "西班牙语",
+    "ita": "意大利语",
+    "rus": "俄语",
+    "hin": "印地语",
+    "por": "葡萄牙语",
+    "ara": "阿拉伯语",
+    "cat": "加泰罗尼亚语",
+    "cze": "捷克语",
+    "dan": "丹麦语",
+    "gre": "希腊语",
+    "baq": "巴斯克语",
+    "fin": "芬兰语",
+    "fil": "菲律宾语",
+    "glg": "加利西亚语",
+    "heb": "希伯来语",
+    "hrv": "克罗地亚语",
+    "hun": "匈牙利语",
+    "ind": "印度尼西亚语",
+    "may": "马来语",
+    "nob": "挪威语",
+    "dut": "荷兰语",
+    "pol": "波兰语",
+    "rum": "罗马尼亚语",
+    "rom": "罗姆语",
+    "swe": "瑞典语",
+    "tur": "土耳其语",
+    "ukr": "乌克兰语",
+    "vie": "越南语",
+    "bul": "保加利亚语",
+    "est": "爱沙尼亚语",
+    "lit": "立陶宛语",
+    "lav": "拉脱维亚语",
+    "slo": "斯洛伐克语",
+    "slv": "斯洛文尼亚语",
+    "tam": "泰米尔语",
+    "tel": "泰卢固语",
+    "kan": "卡纳达语",
+    "mal": "马拉雅拉姆语",
+    "gem": "日耳曼语族",
+    "mul": "多语言",
+    "mis": "未分类语言",
+    "zxx": "无语言内容"
+  },
+  "subtitle": {
+    "chi": "国语",
+    "yue": "粤语",
+    "chs": "简体",
+    "cht": "繁体",
+    "eng": "英文",
+    "jpn": "日文",
+    "kor": "韩文",
+    "tha": "泰文",
+    "fre": "法文",
+    "ger": "德文",
+    "spa": "西班牙文",
+    "ita": "意大利文",
+    "rus": "俄文",
+    "hin": "印地文",
+    "por": "葡萄牙文",
+    "ara": "阿拉伯文",
+    "cat": "加泰罗尼亚文",
+    "cze": "捷克文",
+    "dan": "丹麦文",
+    "gre": "希腊文",
+    "baq": "巴斯克文",
+    "fin": "芬兰文",
+    "fil": "菲律宾文",
+    "glg": "加利西亚文",
+    "heb": "希伯来文",
+    "hrv": "克罗地亚文",
+    "hun": "匈牙利文",
+    "ind": "印度尼西亚文",
+    "may": "马来文",
+    "nob": "挪威文",
+    "dut": "荷兰文",
+    "pol": "波兰文",
+    "rum": "罗马尼亚文",
+    "rom": "罗姆文",
+    "swe": "瑞典文",
+    "tur": "土耳其文",
+    "ukr": "乌克兰文",
+    "vie": "越南文",
+    "bul": "保加利亚文",
+    "est": "爱沙尼亚文",
+    "lit": "立陶宛文",
+    "lav": "拉脱维亚文",
+    "slo": "斯洛伐克文",
+    "slv": "斯洛文尼亚文",
+    "tam": "泰米尔文",
+    "tel": "泰卢固文",
+    "kan": "卡纳达文",
+    "mal": "马拉雅拉姆文",
+    "gem": "日耳曼语族",
+    "mul": "多语言",
+    "mis": "未分类语言",
+    "zxx": "无语言内容"
+  },
+  "groups": [
+    [
+      "0ff",
+      [
+        "FF(?:(?:A|WE)B|CD|E(?:DU|B)|TV)"
+      ]
+    ],
+    [
+      "1pt",
+      []
+    ],
+    [
+      "52pt",
+      []
+    ],
+    [
+      "观众",
+      [
+        "Audies",
+        "\\bAD(?:Audio|E(?:book|)|Music|Web)\\b"
+      ]
+    ],
+    [
+      "azusa",
+      []
+    ],
+    [
+      "备胎",
+      [
+        "BeiTai"
+      ]
+    ],
+    [
+      "学校",
+      [
+        "Bts(?:CHOOL|HD|PAD|TV)",
+        "Zone"
+      ]
+    ],
+    [
+      "carpt",
+      [
+        "CarPT"
+      ]
+    ],
+    [
+      "彩虹岛",
+      [
+        "CHD(?:Bits|PAD|(?:|HK)TV|WEB|)",
+        "StBOX",
+        "OneHD",
+        "Lee",
+        "xiaopie"
+      ]
+    ],
+    [
+      "碟粉",
+      [
+        "discfan"
+      ]
+    ],
+    [
+      "dragonhd",
+      []
+    ],
+    [
+      "eastgame",
+      [
+        "(?:(?:iNT|(?:HALFC|Mini(?:S|H|FH)D))-|)TLF"
+      ]
+    ],
+    [
+      "filelist",
+      []
+    ],
+    [
+      "gainbound",
+      [
+        "(?:DG|GBWE)B"
+      ]
+    ],
+    [
+      "hares",
+      [
+        "Hares(?:(?:M|T)V|Web|)"
+      ]
+    ],
+    [
+      "hd4fans",
+      []
+    ],
+    [
+      "高清视界",
+      [
+        "HDA(?:pad|rea|TV)",
+        "EPiC"
+      ]
+    ],
+    [
+      "阿童木",
+      [
+        "hdatmos"
+      ]
+    ],
+    [
+      "hdbd",
+      []
+    ],
+    [
+      "hdchina",
+      [
+        "HDC(?:hina|TV|)",
+        "k9611",
+        "tudou",
+        "iHD"
+      ]
+    ],
+    [
+      "杜比",
+      [
+        "D(?:ream|BTV)",
+        "(?:HD|QHstudI)o"
+      ]
+    ],
+    [
+      "红豆饭",
+      [
+        "beAst(?:TV|)",
+        "HDFans"
+      ]
+    ],
+    [
+      "家园",
+      [
+        "HDH(?:ome|Pad|TV|WEB|)"
+      ]
+    ],
+    [
+      "hdpt",
+      [
+        "HDPT(?:Web|)"
+      ]
+    ],
+    [
+      "天空",
+      [
+        "HDS(?:ky|TV|Pad|WEB|)",
+        "AQLJ"
+      ]
+    ],
+    [
+      "高清时间",
+      [
+        "hdtime"
+      ]
+    ],
+    [
+      "HDU",
+      []
+    ],
+    [
+      "hdvideo",
+      []
+    ],
+    [
+      "hdzone",
+      [
+        "HDZ(?:one|)"
+      ]
+    ],
+    [
+      "憨憨",
+      [
+        "HHWEB"
+      ]
+    ],
+    [
+      "末日",
+      [
+        "AGSV(PT|WEB|MUS)"
+      ]
+    ],
+    [
+      "hitpt",
+      []
+    ],
+    [
+      "htpt",
+      [
+        "HTPT"
+      ]
+    ],
+    [
+      "iptorrents",
+      []
+    ],
+    [
+      "joyhd",
+      []
+    ],
+    [
+      "朋友",
+      [
+        "FRDS",
+        "Yumi",
+        "cXcY"
+      ]
+    ],
+    [
+      "柠檬",
+      [
+        "L(?:eague(?:(?:C|H)D|(?:M|T)V|NF|WEB)|HD)",
+        "i18n",
+        "CiNT"
+      ]
+    ],
+    [
+      "馒头",
+      [
+        "MTeam(?:TV|)",
+        "MPAD",
+        "MWeb"
+      ]
+    ],
+    [
+      "nanyangpt",
+      []
+    ],
+    [
+      "老师",
+      [
+        "nicept"
+      ]
+    ],
+    [
+      "oshen",
+      []
+    ],
+    [
+      "我堡",
+      [
+        "Our(?:Bits|TV)",
+        "FLTTH",
+        "PbK",
+        "MGs",
+        "iLove(?:HD|TV)"
+      ]
+    ],
+    [
+      "猪猪",
+      [
+        "PiGo(?:NF|(?:H|WE)B)"
+      ]
+    ],
+    [
+      "铂金学院",
+      [
+        "ptchina"
+      ]
+    ],
+    [
+      "猫站",
+      [
+        "PTer(?:DIY|Game|(?:M|T)V|WEB|)"
+      ]
+    ],
+    [
+      "pthome",
+      [
+        "PTH(?:Audio|eBook|music|ome|tv|WEB|)"
+      ]
+    ],
+    [
+      "ptmsg",
+      []
+    ],
+    [
+      "烧包",
+      [
+        "PTsbao",
+        "OPS",
+        "F(?:Fans(?:AIeNcE|BD|D(?:VD|IY)|TV|WEB)|HDMv)",
+        "SGXT"
+      ]
+    ],
+    [
+      "pttime",
+      []
+    ],
+    [
+      "葡萄",
+      [
+        "PuTao"
+      ]
+    ],
+    [
+      "聆音",
+      [
+        "lingyin"
+      ]
+    ],
+    [
+      "春天",
+      [
+        "CMCT(?:A|V)?",
+        "Oldboys",
+        "GTR",
+        "CLV",
+        "CatEDU",
+        "Telesto",
+        "iFree"
+      ]
+    ],
+    [
+      "鲨鱼",
+      [
+        "Shark(?:WEB|DIY|TV|MV|)"
+      ]
+    ],
+    [
+      "他吹吹风",
+      [
+        "tccf"
+      ]
+    ],
+    [
+      "北洋园",
+      [
+        "TJUPT"
+      ]
+    ],
+    [
+      "听听歌",
+      [
+        "TTG",
+        "WiKi",
+        "NGB",
+        "DoA",
+        "(?:ARi|ExRE)N"
+      ]
+    ],
+    [
+      "U2",
+      []
+    ],
+    [
+      "ultrahd",
+      []
+    ],
+    [
+      "others",
+      [
+        "B(?:MDru|eyondHD|TN)",
+        "C(?:fandora|trlhd|MRG)",
+        "DON",
+        "EVO",
+        "FLUX",
+        "HONE(?:yG|)",
+        "N(?:oGroup|T(?:b|G))",
+        "PandaMoon",
+        "SMURF",
+        "T(?:EPES|aengoo|rollHD )"
+      ]
+    ],
+    [
+      "anime",
+      [
+        "\\bANi\\b",
+        "\\bHYSUB\\b",
+        "\\bKTXP\\b",
+        "LoliHouse",
+        "\\bMCE\\b",
+        "Nekomoe kissaten",
+        "SweetSub",
+        "MingY",
+        "(?:Lilith|NC|AI)-Raws",
+        "VCB-Stuido",
+        "织梦字幕组",
+        "枫叶字幕组",
+        "猎户手抄部",
+        "喵萌奶茶屋",
+        "漫猫字幕社",
+        "霜庭云花Sub",
+        "北宇治字幕组",
+        "氢气烤肉架",
+        "云歌字幕组",
+        "萌樱字幕组",
+        "极影字幕社",
+        "悠哈璃羽字幕社",
+        "❀拨雪寻春❀",
+        "沸羊羊(?:制作|字幕组)",
+        "(?:桜|樱)都字幕组"
+      ]
+    ],
+    [
+      "青蛙",
+      [
+        "FROG(?:E|Web|)"
+      ]
+    ],
+    [
+      "ubits",
+      [
+        "UB(?:its|WEB|TV)"
+      ]
+    ]
+  ],
+  "defaults": [
+    {
+      "label": "国语",
+      "value": "zh",
+      "aliases": [
+        "chi",
+        "zho",
+        "zh",
+        "cmn",
+        "zh-cmn",
+        "mandarin",
+        "guo",
+        "guoyu",
+        "国语",
+        "普通话",
+        "中文"
+      ]
+    },
+    {
+      "label": "粤语",
+      "value": "yue",
+      "aliases": [
+        "yue",
+        "zh-yue",
+        "yue-hk",
+        "yue-hant-hk",
+        "cantonese",
+        "粤语",
+        "广东话",
+        "粤文",
+        "粤配",
+        "港配",
+        "粤语配音"
+      ]
+    },
+    {
+      "label": "简体",
+      "value": "chs",
+      "aliases": [
+        "chs",
+        "zhs",
+        "sc",
+        "gb",
+        "zh-cn",
+        "zh-sg",
+        "zh-hans",
+        "zh-hans-cn",
+        "simplified",
+        "简体",
+        "简中",
+        "简体中文"
+      ]
+    },
+    {
+      "label": "繁体",
+      "value": "cht",
+      "aliases": [
+        "cht",
+        "zht",
+        "tc",
+        "big5",
+        "zh-tw",
+        "zh-hk",
+        "zh-mo",
+        "zh-hant",
+        "zh-hant-tw",
+        "zh-hant-hk",
+        "traditional",
+        "繁体",
+        "繁中",
+        "繁体中文"
+      ]
+    },
+    {
+      "label": "英语",
+      "value": "en",
+      "aliases": [
+        "eng",
+        "en",
+        "english",
+        "英语",
+        "英文"
+      ]
+    },
+    {
+      "label": "日语",
+      "value": "ja",
+      "aliases": [
+        "jpn",
+        "ja",
+        "japanese",
+        "日语",
+        "日文"
+      ]
+    },
+    {
+      "label": "韩语",
+      "value": "ko",
+      "aliases": [
+        "kor",
+        "ko",
+        "korean",
+        "韩语",
+        "韩文"
+      ]
+    },
+    {
+      "label": "法语",
+      "value": "fr",
+      "aliases": [
+        "fre",
+        "fra",
+        "fr",
+        "french",
+        "法语",
+        "法文"
+      ]
+    },
+    {
+      "label": "德语",
+      "value": "de",
+      "aliases": [
+        "ger",
+        "deu",
+        "de",
+        "german",
+        "Deutsch",
+        "德语",
+        "德文"
+      ]
+    },
+    {
+      "label": "西班牙语",
+      "value": "es",
+      "aliases": [
+        "spa",
+        "es",
+        "spanish",
+        "西班牙语",
+        "西班牙文"
+      ]
+    },
+    {
+      "label": "意大利语",
+      "value": "it",
+      "aliases": [
+        "ita",
+        "it",
+        "italian",
+        "意大利语",
+        "意大利文"
+      ]
+    },
+    {
+      "label": "俄语",
+      "value": "ru",
+      "aliases": [
+        "rus",
+        "ru",
+        "russian",
+        "俄语",
+        "俄文"
+      ]
+    },
+    {
+      "label": "泰语",
+      "value": "th",
+      "aliases": [
+        "tha",
+        "th",
+        "thai",
+        "tai",
+        "Tai languages",
+        "泰语",
+        "泰文"
+      ]
+    },
+    {
+      "label": "印地语",
+      "value": "hi",
+      "aliases": [
+        "hin",
+        "hi",
+        "hindi",
+        "印地语",
+        "印度语"
+      ]
+    },
+    {
+      "label": "葡萄牙语",
+      "value": "pt",
+      "aliases": [
+        "por",
+        "pt",
+        "portuguese",
+        "葡萄牙语",
+        "葡萄牙文"
+      ]
+    },
+    {
+      "label": "阿拉伯语",
+      "value": "ar",
+      "aliases": [
+        "ara",
+        "ar",
+        "arabic",
+        "阿拉伯语",
+        "阿拉伯文"
+      ]
+    },
+    {
+      "label": "加泰罗尼亚语",
+      "value": "ca",
+      "aliases": [
+        "cat",
+        "CAT",
+        "ca",
+        "catalan",
+        "català",
+        "加泰罗尼亚语",
+        "加泰隆语"
+      ]
+    },
+    {
+      "label": "捷克语",
+      "value": "cs",
+      "aliases": [
+        "cze",
+        "CZE",
+        "ces",
+        "cs",
+        "czech",
+        "捷克语",
+        "捷克文"
+      ]
+    },
+    {
+      "label": "丹麦语",
+      "value": "da",
+      "aliases": [
+        "dan",
+        "DAN",
+        "da",
+        "danish",
+        "丹麦语",
+        "丹麦文"
+      ]
+    },
+    {
+      "label": "希腊语",
+      "value": "el",
+      "aliases": [
+        "gre",
+        "GRE",
+        "ell",
+        "el",
+        "greek",
+        "希腊语",
+        "希腊文"
+      ]
+    },
+    {
+      "label": "巴斯克语",
+      "value": "eu",
+      "aliases": [
+        "baq",
+        "BAQ",
+        "eus",
+        "eu",
+        "basque",
+        "巴斯克语",
+        "巴斯克文"
+      ]
+    },
+    {
+      "label": "芬兰语",
+      "value": "fi",
+      "aliases": [
+        "fin",
+        "FIN",
+        "fi",
+        "finnish",
+        "芬兰语",
+        "芬兰文"
+      ]
+    },
+    {
+      "label": "菲律宾语",
+      "value": "fil",
+      "aliases": [
+        "fil",
+        "FIL",
+        "tl",
+        "tag",
+        "tagalog",
+        "filipino",
+        "菲律宾语",
+        "他加禄语"
+      ]
+    },
+    {
+      "label": "加利西亚语",
+      "value": "gl",
+      "aliases": [
+        "glg",
+        "GLG",
+        "gl",
+        "galician",
+        "加利西亚语",
+        "加里西亚语"
+      ]
+    },
+    {
+      "label": "希伯来语",
+      "value": "he",
+      "aliases": [
+        "heb",
+        "HEB",
+        "he",
+        "iw",
+        "hebrew",
+        "希伯来语",
+        "希伯来文"
+      ]
+    },
+    {
+      "label": "克罗地亚语",
+      "value": "hr",
+      "aliases": [
+        "hrv",
+        "HRV",
+        "hr",
+        "croatian",
+        "克罗地亚语",
+        "克罗地亚文"
+      ]
+    },
+    {
+      "label": "匈牙利语",
+      "value": "hu",
+      "aliases": [
+        "hun",
+        "HUN",
+        "hu",
+        "hungarian",
+        "匈牙利语",
+        "匈牙利文"
+      ]
+    },
+    {
+      "label": "印度尼西亚语",
+      "value": "id",
+      "aliases": [
+        "ind",
+        "IND",
+        "id",
+        "in",
+        "indonesian",
+        "印度尼西亚语",
+        "印尼语"
+      ]
+    },
+    {
+      "label": "马来语",
+      "value": "ms",
+      "aliases": [
+        "may",
+        "MAY",
+        "msa",
+        "ms",
+        "malay",
+        "马来语",
+        "马来文"
+      ]
+    },
+    {
+      "label": "挪威语",
+      "value": "nb",
+      "aliases": [
+        "nob",
+        "NOB",
+        "nb",
+        "no",
+        "nor",
+        "norwegian bokmal",
+        "norwegian bokmål",
+        "bokmal",
+        "bokmål",
+        "挪威语",
+        "挪威文",
+        "书面挪威语"
+      ]
+    },
+    {
+      "label": "荷兰语",
+      "value": "nl",
+      "aliases": [
+        "dut",
+        "DUT",
+        "nld",
+        "nl",
+        "dutch",
+        "flemish",
+        "荷兰语",
+        "荷兰文",
+        "弗拉芒语"
+      ]
+    },
+    {
+      "label": "波兰语",
+      "value": "pl",
+      "aliases": [
+        "pol",
+        "POL",
+        "pl",
+        "polish",
+        "波兰语",
+        "波兰文"
+      ]
+    },
+    {
+      "label": "罗马尼亚语",
+      "value": "ro",
+      "aliases": [
+        "rum",
+        "RUM",
+        "ron",
+        "ro",
+        "romanian",
+        "罗马尼亚语",
+        "罗马尼亚文"
+      ]
+    },
+    {
+      "label": "罗姆语",
+      "value": "rom",
+      "aliases": [
+        "rom",
+        "romany",
+        "romani",
+        "罗姆语",
+        "吉普赛语",
+        "吉卜赛语"
+      ]
+    },
+    {
+      "label": "瑞典语",
+      "value": "sv",
+      "aliases": [
+        "swe",
+        "SWE",
+        "sv",
+        "swedish",
+        "瑞典语",
+        "瑞典文"
+      ]
+    },
+    {
+      "label": "土耳其语",
+      "value": "tr",
+      "aliases": [
+        "tur",
+        "TUR",
+        "tr",
+        "turkish",
+        "土耳其语",
+        "土耳其文"
+      ]
+    },
+    {
+      "label": "乌克兰语",
+      "value": "uk",
+      "aliases": [
+        "ukr",
+        "UKR",
+        "uk",
+        "ukrainian",
+        "乌克兰语",
+        "乌克兰文"
+      ]
+    },
+    {
+      "label": "越南语",
+      "value": "vi",
+      "aliases": [
+        "vie",
+        "VIE",
+        "vi",
+        "vietnamese",
+        "越南语",
+        "越南文"
+      ]
+    },
+    {
+      "label": "保加利亚语",
+      "value": "bg",
+      "aliases": [
+        "bul",
+        "BUL",
+        "bg",
+        "bulgarian",
+        "保加利亚语",
+        "保加利亚文"
+      ]
+    },
+    {
+      "label": "爱沙尼亚语",
+      "value": "et",
+      "aliases": [
+        "est",
+        "EST",
+        "et",
+        "estonian",
+        "爱沙尼亚语",
+        "爱沙尼亚文"
+      ]
+    },
+    {
+      "label": "立陶宛语",
+      "value": "lt",
+      "aliases": [
+        "lit",
+        "LIT",
+        "lt",
+        "lithuanian",
+        "立陶宛语",
+        "立陶宛文"
+      ]
+    },
+    {
+      "label": "拉脱维亚语",
+      "value": "lv",
+      "aliases": [
+        "lav",
+        "LAV",
+        "lv",
+        "latvian",
+        "拉脱维亚语",
+        "拉脱维亚文"
+      ]
+    },
+    {
+      "label": "斯洛伐克语",
+      "value": "sk",
+      "aliases": [
+        "slo",
+        "SLO",
+        "slk",
+        "sk",
+        "slovak",
+        "斯洛伐克语",
+        "斯洛伐克文"
+      ]
+    },
+    {
+      "label": "斯洛文尼亚语",
+      "value": "sl",
+      "aliases": [
+        "slv",
+        "SLV",
+        "sl",
+        "slovenian",
+        "斯洛文尼亚语",
+        "斯洛文尼亚文"
+      ]
+    },
+    {
+      "label": "泰米尔语",
+      "value": "ta",
+      "aliases": [
+        "tam",
+        "TAM",
+        "ta",
+        "tamil",
+        "泰米尔语",
+        "泰米尔文"
+      ]
+    },
+    {
+      "label": "泰卢固语",
+      "value": "te",
+      "aliases": [
+        "tel",
+        "TEL",
+        "te",
+        "telugu",
+        "泰卢固语",
+        "泰卢固文"
+      ]
+    },
+    {
+      "label": "卡纳达语",
+      "value": "kn",
+      "aliases": [
+        "kan",
+        "KAN",
+        "kn",
+        "kannada",
+        "卡纳达语",
+        "卡纳达文",
+        "康纳达语"
+      ]
+    },
+    {
+      "label": "马拉雅拉姆语",
+      "value": "ml",
+      "aliases": [
+        "mal",
+        "MAL",
+        "ml",
+        "malayalam",
+        "马拉雅拉姆语",
+        "马拉雅拉姆文"
+      ]
+    },
+    {
+      "label": "无语言",
+      "value": "xx",
+      "aliases": [
+        "und",
+        "undefined",
+        "unknown",
+        "none",
+        "无语言",
+        "未知"
+      ]
+    },
+    {
+      "label": "日耳曼语族",
+      "value": "gem",
+      "aliases": [
+        "gem",
+        "Germanic",
+        "Germanic languages",
+        "日耳曼语族",
+        "日耳曼语"
+      ]
+    },
+    {
+      "label": "多语言",
+      "value": "mul",
+      "aliases": [
+        "mul",
+        "multiple languages",
+        "多语言"
+      ]
+    },
+    {
+      "label": "未分类语言",
+      "value": "mis",
+      "aliases": [
+        "mis",
+        "uncoded",
+        "未分类语言"
+      ]
+    },
+    {
+      "label": "无语言内容",
+      "value": "zxx",
+      "aliases": [
+        "zxx",
+        "no linguistic content",
+        "无语言内容"
+      ]
+    }
+  ]
+}
