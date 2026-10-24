@@ -126,7 +126,6 @@ import {
   LibraryOutline,
   SettingsOutline,
   MenuOutline,
-  ListCircleOutline as MenuEditIcon,
 } from '@vicons/ionicons5';
 import axios from 'axios';
 
@@ -179,15 +178,7 @@ const themeMenuOptions = themeOptions.map(option => ({ ...option, icon: () => h(
 
 const userOptions = computed(() => {
   const options = [];
-  options.push({ label: '用户中心', key: 'user-center', icon: renderIcon(UserCenterIcon) });
-
   if (authStore.isAdmin) {
-    options.push({
-      label: '自定义菜单',
-      key: 'edit-menu',
-      icon: renderIcon(MenuEditIcon)
-    });
-
     options.push({
       label: '重启容器',
       key: 'restart-container',
