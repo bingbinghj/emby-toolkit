@@ -18,9 +18,6 @@
               autocomplete="username"
               :input-props="{ name: 'username', autocapitalize: 'none', spellcheck: false }"
             >
-              <template #prefix>
-                <n-icon :component="PersonOutline" />
-              </template>
             </n-input>
           </n-form-item-row>
 
@@ -33,18 +30,15 @@
               autocomplete="current-password"
               :input-props="{ name: 'password' }"
             >
-              <template #prefix>
-                <n-icon :component="LockClosedOutline" />
-              </template>
             </n-input>
           </n-form-item-row>
 
-          <n-button type="primary" attr-type="submit" block :loading="loading" size="large" class="login-btn"><template #icon><UiIcon name="key" /></template>
+          <n-button type="primary" attr-type="submit" block :loading="loading" size="large" class="login-btn">
             登录
           </n-button>
 
           <div class="footer-links">
-            <n-button text type="primary" size="small" @click="showRecoveryModal = true"><template #icon><UiIcon name="key" /></template>
+            <n-button text type="primary" size="small" @click="showRecoveryModal = true">
               无法登录？重置连接配置
             </n-button>
           </div>
@@ -64,8 +58,8 @@
       </div>
 
       <template #action>
-        <n-button @click="showRecoveryModal = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
-        <n-button v-if="!tokenSent" type="error" @click="requestToken" :loading="recoveryLoading"><template #icon><UiIcon name="key" /></template>
+        <n-button @click="showRecoveryModal = false">取消</n-button>
+        <n-button v-if="!tokenSent" type="error" @click="requestToken" :loading="recoveryLoading">
           生成令牌
         </n-button>
         <n-button v-else type="primary" @click="verifyToken" :loading="recoveryLoading"><template #icon><UiIcon name="settings" /></template>
@@ -81,9 +75,8 @@ import { ref } from 'vue';
 import { useRouter } from 'vue-router';
 import {
   NLayout, NCard, NForm, NFormItemRow, NInput, NButton,
-  useMessage, NModal, NIcon
+  useMessage, NModal
 } from 'naive-ui';
-import { PersonOutline, LockClosedOutline } from '@vicons/ionicons5';
 import { useAuthStore } from '../stores/auth';
 import axios from 'axios';
 

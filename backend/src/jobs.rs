@@ -14,6 +14,16 @@ pub struct JobContext {
     progress: Arc<Mutex<Value>>,
 }
 impl JobContext {
+    pub async fn cancelled(&self) {
+        self.cancel.cancelled().await;
+    }
+    pub async fn sleep(&self, duration: std::time::Duration) -> Result<()> {
+        self.checkpoint().await?;
+        tokio::select! {
+            _ = self.cancel.cancelled() => self.checkpoint().await,
+            _ = tokio::time::sleep(duration) => self.checkpoint().await,
+        }
+    }
     pub fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
     }

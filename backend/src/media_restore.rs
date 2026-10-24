@@ -201,7 +201,22 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
             if crate::emby::path_ignored(state, &string(&asset, "path")).await? {
                 continue;
             }
-            let path = PathBuf::from(string(&asset, "path"));
+            let raw = string(&asset, "path");
+            let local = if raw.starts_with("http") {
+                let (pc, _, cache_path) = crate::fingerprints::lookup(state, &raw).await?;
+                crate::fingerprints::asset_path(
+                    state,
+                    &raw,
+                    pc.as_deref(),
+                    &cache_path,
+                    &json!({}),
+                    "http-restore",
+                )
+                .await
+            } else {
+                raw
+            };
+            let path = PathBuf::from(local);
             if path
                 .extension()
                 .is_some_and(|e| e.eq_ignore_ascii_case("strm"))
@@ -249,10 +264,22 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
             path.file_stem().unwrap_or_default().to_string_lossy()
         ));
         if !full && final_path.is_file() {
-            let existing = tokio::fs::read(&final_path).await?;
-            if let Ok(info) = serde_json::from_slice::<Value>(&existing)
-                && crate::media_info::container(&info)
-                    .is_none_or(|c| !string(c, "Container").eq_ignore_ascii_case("strm"))
+            let existing = match tokio::fs::read(&final_path).await {
+                Ok(existing) => existing,
+                Err(error) => {
+                    tracing::warn!(file=%final_path.display(), %error, "已有媒体信息文件无法读取，保留并继续其它文件");
+                    continue;
+                }
+            };
+            let info = match serde_json::from_slice::<Value>(&existing) {
+                Ok(info) => info,
+                Err(error) => {
+                    tracing::warn!(file=%final_path.display(), %error, "已有媒体信息JSON无法解析，保留并继续其它文件");
+                    continue;
+                }
+            };
+            if crate::media_info::container(&info)
+                .is_none_or(|c| !string(c, "Container").eq_ignore_ascii_case("strm"))
             {
                 continue;
             }
@@ -277,10 +304,10 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
             let mut chapters=None;
             let mut observations=vec![];
             if full {
-                for (id,_) in &bindings {
+                for (id,asset) in &bindings {
                     let item=crate::media_edit::details(state,id,"Path,Size,MediaSources,Chapters").await?;
                     observations.push((id.clone(),crate::revalidation::observation(state,&item).await));
-                    if string(&item,"Path")!=path.to_string_lossy(){return Err(ApiError::bad("Emby 路径已变化"));}
+                    if string(&item,"Path")!=string(asset,"path"){return Err(ApiError::bad("Emby 路径已变化"));}
                     crate::identity::verify(&json!({"size_bytes":item["Size"]}),&info)?;
                     let current=crate::media_info::clean_chapters(&item["Chapters"])?;
                     if chapters.as_ref().is_some_and(|c|c!=&current){return Err(ApiError::bad("同路径的章节标记不一致"));}

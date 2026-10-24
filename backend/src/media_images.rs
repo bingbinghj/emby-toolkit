@@ -13,7 +13,7 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -37,9 +37,10 @@ async fn proxy(response: reqwest::Result<reqwest::Response>, fallback: StatusCod
     if let Ok(response) = response
         && response.status().is_success()
     {
+        let status = response.status();
         let kind = response.headers().get(header::CONTENT_TYPE).cloned();
         if let Ok(bytes) = response.bytes().await {
-            let mut response = bytes.into_response();
+            let mut response = (status, bytes).into_response();
             if let Some(kind) = kind {
                 response.headers_mut().insert(header::CONTENT_TYPE, kind);
             }
@@ -63,6 +64,7 @@ async fn external(
         state
             .http
             .get(url)
+            .timeout(Duration::from_secs(15))
             .header(
                 "User-Agent",
                 string(&*state.config.read().await, "user_agent"),
@@ -93,6 +95,7 @@ async fn emby(
                 string(&config, "emby_server_url").trim_end_matches('/')
             ))
             .query(&query)
+            .timeout(Duration::from_secs(20))
             .send()
             .await,
         StatusCode::OK,

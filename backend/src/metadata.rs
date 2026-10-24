@@ -34,6 +34,11 @@ async fn write(
     preserve_top_title: bool,
     replace_children: bool,
 ) -> Result<()> {
+    tracing::info!(
+        "元数据库写入开始：记录 {} 条，保留顶层标题 {preserve_top_title}，迁移子项绑定 {replace_children}",
+        records.len()
+    );
+    let record_count = records.len();
     let mut transaction = state.db.begin().await?;
     let columns = sqlx::query("SELECT column_name,data_type FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='media_metadata'").fetch_all(&mut *transaction).await?;
     let allowed = columns
@@ -53,6 +58,7 @@ async fn write(
             && id.bytes().any(|b| b != b'0');
         let valid = numeric || (matches!(kind.as_str(), "Season" | "Episode") && id.contains('-'));
         if !valid || !matches!(kind.as_str(), "Movie" | "Series" | "Season" | "Episode") {
+            tracing::warn!("元数据库记录拒绝：类型 {kind}，TMDb {id} 无效");
             return Err(ApiError::bad("媒体记录缺少合法的类型和 TMDb ID"));
         }
         let fields = record
@@ -117,7 +123,9 @@ async fn write(
         versions::lock(&mut transaction, &kind, &id, "").await?;
     }
     if replace_children {
+        tracing::info!("元数据库子项绑定迁移开始：记录 {record_count} 条");
         replace_child_bindings(&mut transaction, records).await?;
+        tracing::info!("元数据库子项绑定迁移完成：记录 {record_count} 条");
     }
     for record in records {
         let id = string(record, "tmdb_id");
@@ -173,9 +181,15 @@ async fn write(
         sqlx::query(&query)
             .bind(&*record)
             .execute(&mut *transaction)
-            .await?;
+            .await
+            .inspect_err(|_| tracing::error!("元数据库记录写入失败：类型 {kind}，TMDb {id}"))?;
+        tracing::debug!("元数据库记录已写入事务：类型 {kind}，TMDb {id}");
     }
-    transaction.commit().await?;
+    transaction
+        .commit()
+        .await
+        .inspect_err(|_| tracing::error!("元数据库事务提交失败：记录 {record_count} 条"))?;
+    tracing::info!("元数据库写入完成：已提交 {record_count} 条记录");
     Ok(())
 }
 
@@ -364,7 +378,9 @@ pub async fn reconstruct_full(
     kind: &str,
     allow_empty_cast: bool,
 ) -> Result<Option<(Value, Vec<Value>)>> {
+    tracing::debug!("元数据缓存恢复开始：类型 {kind}，TMDb {id}");
     let Some(top) = row(state, id, kind).await? else {
+        tracing::info!("元数据缓存未命中：类型 {kind}，TMDb {id}，缺少主记录");
         return Ok(None);
     };
     let children: Vec<Value> = if kind == "Series" {
@@ -398,6 +414,7 @@ pub async fn reconstruct_full(
     };
     let cast = expand(&top);
     if cast.is_empty() && !allow_empty_cast {
+        tracing::info!("元数据缓存不可复用：类型 {kind}，TMDb {id}，缺少演员缓存");
         return Ok(None);
     }
     let mut payload = reconstruct(&top);
@@ -431,5 +448,13 @@ pub async fn reconstruct_full(
             payload["episodes_details"] = episodes;
         }
     }
+    tracing::info!(
+        "元数据缓存恢复完成：类型 {kind}，TMDb {id}，演员 {} 位，季 {} 个，分集 {} 个",
+        cast.len(),
+        list(&payload["seasons_details"]).len(),
+        payload["episodes_details"]
+            .as_object()
+            .map_or(0, |o| o.len())
+    );
     Ok(Some((payload, cast)))
 }

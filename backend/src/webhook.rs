@@ -82,6 +82,7 @@ async fn verify(
             .verify_slice(&actual.finalize().into_bytes())
             .is_err()
     {
+        tracing::warn!("Webhook 请求拒绝：共享密钥未配置或验证失败");
         return Err(ApiError(
             StatusCode::FORBIDDEN,
             "Webhook 共享密钥无效".into(),
@@ -98,7 +99,16 @@ async fn enqueue(state: &AppState, key: String, event: Value) {
             .filter_map(|v| v.as_str().map(str::to_string))
             .collect::<std::collections::BTreeSet<_>>();
         old["episode_ids"] = json!(ids);
+        tracing::info!(
+            "Webhook 排队合并：任务 {key}，目标分集 {} 个",
+            list(&old["episode_ids"]).len()
+        );
     } else {
+        tracing::info!(
+            "Webhook 排队：任务 {key}，来源 {}，目标分集 {} 个",
+            string(&event, "source"),
+            list(&event["episode_ids"]).len()
+        );
         pending.insert(key, event);
     }
     drop(pending);
@@ -133,8 +143,17 @@ async fn enqueue(state: &AppState, key: String, event: Value) {
             match state
                 .jobs
                 .submit("Webhook 入库", move |context| async move {
+                    tracing::info!(
+                        "Webhook 任务处理开始：来源 {}，Emby {}，目标分集 {} 个",
+                        string(&event, "source"),
+                        string(&event, "id"),
+                        list(&event["episode_ids"]).len()
+                    );
                     if event["source"] == "moviepilot" {
                         let result = process_moviepilot(&work, &event, &context).await;
+                        if let Err(error) = &result {
+                            tracing::error!("MoviePilot Webhook 任务失败：{}", error.1);
+                        }
                         if result.as_ref().map_or(true, |v| {
                             v["failures"].as_array().is_some_and(|f| !f.is_empty())
                         }) && let Some(key) = event["batch_key"].as_str()
@@ -143,7 +162,15 @@ async fn enqueue(state: &AppState, key: String, event: Value) {
                         }
                         result
                     } else {
-                        process_emby(&work, &event, &context).await
+                        process_emby(&work, &event, &context)
+                            .await
+                            .inspect_err(|error| {
+                                tracing::error!(
+                                    "Emby Webhook 任务失败：Emby {}，{}",
+                                    string(&event, "id"),
+                                    error.1
+                                )
+                            })
                     }
                 })
                 .await
@@ -209,6 +236,10 @@ async fn emby(
             Json(json!({"status":"emby_ingest_disabled"})),
         ));
     }
+    tracing::info!(
+        "Emby Webhook 已收到：事件 {event}，Emby {id}，类型 {kind}，名称 {}",
+        string(item, "Name")
+    );
     if event == "deep.delete" {
         return Ok((StatusCode::OK, Json(deep_delete(&state, item).await?)));
     }
@@ -241,6 +272,10 @@ async fn emby(
             .unwrap_or("")
             .to_string();
     }
+    tracing::info!(
+        "Emby Webhook 已接受：事件 {event}，Emby {id}，处理父项 {top}，目标分集 {} 个",
+        ids.len()
+    );
     enqueue(
         &state,
         format!("emby:{top}:{event}"),
@@ -527,6 +562,7 @@ async fn moviepilot(
         ));
     }
     if body["success"] != true {
+        tracing::info!("MoviePilot Webhook 跳过：上游刮削未成功");
         return Ok((
             StatusCode::OK,
             Json(json!({"status":"ignored","message":"moviepilot scrape failed"})),
@@ -534,6 +570,7 @@ async fn moviepilot(
     }
     let root = string(&body, "root_path");
     if root.is_empty() {
+        tracing::warn!("MoviePilot Webhook 拒绝：缺少 root_path");
         return Err(ApiError::bad("root_path is required"));
     }
     let media = string(&body, "media_type").to_lowercase();
@@ -545,8 +582,16 @@ async fn moviepilot(
     }
     if ["tv", "series", "电视剧"].contains(&media.as_str()) && body.get("episode_group").is_none()
     {
+        tracing::warn!("MoviePilot Webhook 拒绝：剧集缺少 episode_group 字段");
         return Err(ApiError::bad("episode_group is required for TV"));
     }
+    tracing::info!(
+        "MoviePilot Webhook 已收到：事件 {}，TMDb {}，类型 {}，文件 {} 个",
+        string(&body, "event"),
+        string(&body, "tmdb_id"),
+        string(&body, "media_type"),
+        list(&body["file_list"]).len()
+    );
     let files = collect_files(&state, &root, &list(&body["file_list"])).await?;
     if files.is_empty() {
         return Ok((
@@ -564,6 +609,7 @@ async fn moviepilot(
     let mut batches = state.webhooks.batches.lock().await;
     batches.retain(|_, time| time.elapsed() < Duration::from_secs(3600));
     if batches.contains_key(&key) {
+        tracing::info!("MoviePilot Webhook 跳过：重复批次 {key}");
         return Ok((
             StatusCode::OK,
             Json(json!({"status":"duplicate","batch_key":key})),
@@ -574,6 +620,10 @@ async fn moviepilot(
     body["source"] = json!("moviepilot");
     body["batch_key"] = json!(key);
     body["files"] = json!(files);
+    tracing::info!(
+        "MoviePilot Webhook 已接受：批次 {key}，有效文件 {} 个",
+        files.len()
+    );
     enqueue(&state, key.clone(), body).await;
     Ok((
         StatusCode::ACCEPTED,
@@ -586,16 +636,21 @@ pub async fn process_emby(
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
     let id = string(event, "id");
-    let item = details(state, &id, "Path").await?;
+    let item = details(state, &id, "Id,Type,Path,MediaSources,MediaStreams").await?;
     if crate::emby::path_ignored(state, &string(&item, "Path")).await? {
         return Ok(json!({"updated":0,"status":"ignored_library"}));
     }
+    tracing::info!(
+        "Emby 入库处理开始：Emby {id}，事件 {}",
+        string(event, "event")
+    );
     let episodes = list(&event["episode_ids"])
         .iter()
         .filter_map(Value::as_str)
         .map(str::to_string)
         .collect::<Vec<_>>();
     if event["event"] == "metadata.update" {
+        tracing::info!("Emby 元数据更新事件：Emby {id}，同步元数据库");
         return mirror(state, &string(&event["original"], "Id")).await;
     }
     if event["event"] == "image.update" {
@@ -606,13 +661,22 @@ pub async fn process_emby(
         ids.retain(|_, t| t.elapsed() < Duration::from_secs(3600));
         ids.contains_key(&id)
     };
+    if !enhanced && event["source"] == "emby" {
+        crate::media_preflight::run(state, &item, context).await?;
+        for episode in &episodes {
+            context.checkpoint().await?;
+            let item = details(state, episode, "Id,Type,Path,MediaSources,MediaStreams").await?;
+            crate::media_preflight::run(state, &item, context).await?;
+        }
+    }
     let mut result = match crate::ingest::feedback(state, &id, &episodes, false, context).await {
         Ok(result) => Ok(result),
         Err(error) => {
             if enhanced {
+                tracing::error!("已预增强项目缓存回流失败：Emby {id}，{}", error.1);
                 return Err(error);
             }
-            tracing::info!("缓存回流不可用，执行完整刮削：{}", error.1);
+            tracing::info!("缓存回流不可用，执行完整刮削：Emby {id}，{}", error.1);
             let item = details(
                 state,
                 &id,
@@ -631,6 +695,10 @@ pub async fn process_emby(
     if enhanced {
         state.webhooks.enhanced.lock().await.remove(&id);
     }
+    tracing::info!(
+        "Emby 入库处理完成：Emby {id}，更新 {} 条记录",
+        result["updated"].as_u64().unwrap_or(0)
+    );
     Ok(result)
 }
 
@@ -689,6 +757,7 @@ async fn mirror(state: &AppState, id: &str) -> Result<Value> {
         .collect::<Vec<_>>()
         .join(",");
     sqlx::query(&format!("UPDATE media_metadata SET {update},last_synced_at=NOW() FROM jsonb_populate_record(NULL::media_metadata,$1) r WHERE media_metadata.tmdb_id=$2 AND media_metadata.item_type=$3")).bind(row).bind(tmdb).bind(kind).execute(&state.db).await?;
+    tracing::info!("Emby 元数据同步完成：Emby {id}");
     Ok(json!({"updated":1,"message":"Emby 元数据已同步"}))
 }
 
@@ -839,6 +908,12 @@ pub async fn process_moviepilot(
     if files.is_empty() {
         return Ok(json!({"updated":0,"status":"ignored_library"}));
     }
+    tracing::info!(
+        "MoviePilot 后置增强开始：TMDb {}，批次 {}，输入文件 {} 个",
+        string(event, "tmdb_id"),
+        string(event, "batch_key"),
+        list(&event["files"]).len()
+    );
     let mut updated = 0;
     let mut failures = vec![];
     let tmdb = string(event, "tmdb_id");
@@ -870,6 +945,12 @@ pub async fn process_moviepilot(
         })
         .cloned()
         .collect::<Vec<_>>();
+    tracing::info!(
+        "MoviePilot 新文件核对完成：TMDb {tmdb}，有效文件 {} 个，新增 {} 个，已关联 {} 个",
+        files.len(),
+        new_files.len(),
+        files.len() - new_files.len()
+    );
     if !new_files.is_empty() {
         let mut libraries = std::collections::BTreeSet::new();
         for file in &new_files {
@@ -879,6 +960,7 @@ pub async fn process_moviepilot(
             libraries.insert(string(&library, "ItemId"));
         }
         for library in libraries {
+            tracing::info!("MoviePilot 等待媒体库入库扫描：媒体库 {library}");
             crate::emby::refresh_item(state, &library, true, context).await?;
         }
         crate::emby::idle(state, context).await?;
@@ -900,8 +982,24 @@ pub async fn process_moviepilot(
             }
         }
         let Some(item) = found else {
+            tracing::warn!(
+                "MoviePilot 入库等待未找到项目：文件 {}",
+                std::path::Path::new(path)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            );
             return Err(ApiError::bad(format!("尚未找到Emby入库项目：{path}")));
         };
+        tracing::debug!(
+            "MoviePilot 入库项目已找到：Emby {}，名称 {}，文件 {}",
+            string(&item, "Id"),
+            string(&item, "Name"),
+            std::path::Path::new(path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+        );
         current.push(string(&item, "Id"));
         if !new_files.contains(file) {
             continue;
@@ -927,6 +1025,10 @@ pub async fn process_moviepilot(
         }
     }
     if !new_files.is_empty() {
+        tracing::info!(
+            "MoviePilot 媒体信息提取开始：新增文件 {} 个",
+            new_files.len()
+        );
         crate::emby::scheduled(state, "MediaInfoExtractTask", context).await?;
         let tasks = state
             .emby(reqwest::Method::GET, "ScheduledTasks", &[], None)
@@ -936,15 +1038,35 @@ pub async fn process_moviepilot(
                 && task["State"] != "Running"
                 && task["LastExecutionResult"]["Status"] == "Completed"
         }) {
+            tracing::error!("MoviePilot 媒体信息提取失败：Emby 任务未成功完成");
             return Err(ApiError::bad("MoviePilot 媒体信息提取任务未成功完成"));
         }
         ensure_moviepilot_media_info(state, &new_files, context).await?;
+        tracing::info!(
+            "MoviePilot 媒体信息提取完成：新增文件 {} 个",
+            new_files.len()
+        );
     }
     if groups.is_empty() {
         crate::versions::reconcile(state, &current).await?;
+        tracing::info!(
+            "MoviePilot 后置增强完成：没有新增媒体文件，已核对 {} 个旧版本",
+            current.len()
+        );
         return Ok(json!({"updated":0,"message":"未发现新增媒体文件，已核对关联旧版本"}));
     }
-    for (id, episodes) in groups {
+    tracing::info!(
+        "MoviePilot 后置增强范围确认：TMDb {tmdb}，媒体组 {} 个",
+        groups.len()
+    );
+    for (index, (id, episodes)) in groups.into_iter().enumerate() {
+        if index > 0 {
+            state.item_delay(context).await?;
+        }
+        tracing::info!(
+            "MoviePilot 单组增强开始：Emby {id}，目标分集 {} 个",
+            episodes.len()
+        );
         let item = details(
             state,
             &id,
@@ -990,20 +1112,32 @@ pub async fn process_moviepilot(
                         episodes.clone()
                     };
                     if let Err(error) = crate::versions::reconcile(state, &current).await {
+                        tracing::warn!("MoviePilot 版本核对失败：Emby {id}，{}", error.1);
                         failures.push(error.1);
                     }
                     if state.config.read().await["emby_webhook_ingest_enabled"] != true
                         && let Err(error) =
                             finalize(state, &id, &episodes, !known.is_empty(), context).await
                     {
+                        tracing::warn!("MoviePilot 入库收尾失败：Emby {id}，{}", error.1);
                         failures.push(error.1);
                     }
                 }
-                Err(error) => failures.push(error.1),
+                Err(error) => {
+                    tracing::error!("MoviePilot 缓存回流失败：Emby {id}，{}", error.1);
+                    failures.push(error.1);
+                }
             },
-            Err(error) => failures.push(error.1),
+            Err(error) => {
+                tracing::error!("MoviePilot 单组增强失败：Emby {id}，{}", error.1);
+                failures.push(error.1);
+            }
         }
     }
+    tracing::info!(
+        "MoviePilot 后置增强处理结束：TMDb {tmdb}，更新 {updated} 条，失败 {} 项",
+        failures.len()
+    );
     Ok(json!({"updated":updated,"failures":failures,"message":"MoviePilot 后置增强处理结束"}))
 }
 
@@ -1014,6 +1148,10 @@ pub async fn finalize(
     updated: bool,
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
+    tracing::info!(
+        "入库收尾开始：Emby {id}，目标分集 {} 个，更新模式 {updated}",
+        episode_ids.len()
+    );
     let item = details(
         state,
         id,
@@ -1027,6 +1165,7 @@ pub async fn finalize(
     };
     let config = state.config.read().await.clone();
     let fingerprint_report = if !targets.is_empty() && config["monitor_sha1_pc_search"] != false {
+        tracing::info!("入库资产指纹补齐开始：Emby {id}，目标 {} 个", targets.len());
         let mut report = crate::revalidation::ids(state, &targets, context).await?;
         let failed = list(&report["failed_ids"])
             .iter()
@@ -1052,13 +1191,25 @@ pub async fn finalize(
             ));
             report["retry"] = retry;
         }
+        tracing::info!(
+            "入库资产指纹补齐结束：Emby {id}，成功 {}，未完成 {}",
+            report["updated"].as_u64().unwrap_or(0),
+            report["failed"].as_u64().unwrap_or(0)
+        );
         report
     } else {
         json!({})
     };
     let audio_report = if config["auto_repair_truehd_core_on_ingest"] == true {
+        tracing::info!("入库音轨检查开始：Emby {id}，目标 {} 个", targets.len());
         match crate::audio_tasks::repair(state, &targets, context).await {
-            Ok(report) => report,
+            Ok(report) => {
+                tracing::info!(
+                    "入库音轨检查结束：Emby {id}，失败 {} 项",
+                    report["failed"].as_u64().unwrap_or(0)
+                );
+                report
+            }
             Err(error) => {
                 tracing::warn!("当前入库音轨检查失败：{}", error.1);
                 json!({"failed":1,"error":error.1})
@@ -1067,10 +1218,21 @@ pub async fn finalize(
     } else {
         json!({})
     };
-    crate::emby::finalize_refresh(state, &item, context).await?;
+    tracing::info!(
+        "入库最终元数据刷新开始：Emby {id}，名称 {}",
+        string(&item, "Name")
+    );
+    crate::emby::finalize_refresh(state, &item, context)
+        .await
+        .inspect_err(|error| tracing::error!("入库最终元数据刷新失败：Emby {id}，{}", error.1))?;
+    tracing::info!("入库最终元数据刷新完成：Emby {id}");
     // Fingerprint/audio repair and the final metadata refresh may replace media-info data.
     // Fill afterwards, then confirm the actual stream titles returned by Emby.
     let title_report = if config["auto_fill_language_titles_on_ingest"] == true {
+        tracing::info!(
+            "入库音轨字幕标题填充开始：Emby {id}，目标 {} 个",
+            targets.len()
+        );
         crate::titles::fill_in_job(state, &targets, true, context).await?
     } else {
         json!({})
@@ -1089,6 +1251,12 @@ pub async fn finalize(
     {
         tracing::warn!("入库通知失败：{}", error.1);
     }
+    tracing::info!(
+        "入库收尾处理结束：Emby {id}，名称 {}，指纹未完成 {} 个，音轨失败 {} 个",
+        string(&item, "Name"),
+        fingerprint_report["failed"].as_u64().unwrap_or(0),
+        audio_report["failed"].as_u64().unwrap_or(0)
+    );
     Ok(
         json!({"title_fill":title_report,"fingerprints":fingerprint_report,"audio_repair":audio_report}),
     )

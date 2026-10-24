@@ -42,12 +42,12 @@ watch(resolvedTheme, mode => {
     '--ui-page-bg': palette.background, '--ui-surface': palette.surface, '--ui-surface-muted': palette.mutedSurface,
     '--ui-text': palette.text, '--ui-text-muted': palette.muted, '--ui-border': palette.border,
     '--ui-border-soft': palette.borderSoft, '--ui-border-strong': palette.inputBorder, '--ui-input-border': palette.inputBorder,
-    '--ui-input-bg': palette.input, '--accent-color': palette.accent, '--accent-glow-color': `color-mix(in srgb, ${palette.accent} 14%, transparent)`,
+    '--ui-input-bg': palette.input, '--accent-color': palette.primary, '--accent-glow-color': `color-mix(in srgb, ${palette.primary} 14%, transparent)`,
     '--modal-solid-bg-color': palette.popup,
-    '--ui-error-color': isDark.value ? '#FF9BA3' : '#B52240',
-    '--ui-warning-color': isDark.value ? '#FFD477' : '#865900',
-    '--ui-info-color': isDark.value ? '#83D2FF' : '#066C9F',
-    '--ui-success-color': isDark.value ? '#A3DD70' : '#327817',
+    '--ui-error-color': palette.error,
+    '--ui-warning-color': palette.warning,
+    '--ui-info-color': palette.info,
+    '--ui-success-color': palette.success,
   };
   Object.entries(variables).forEach(([key, value]) => root.style.setProperty(key, value));
 }, { immediate: true });

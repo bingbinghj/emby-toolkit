@@ -31,9 +31,25 @@ async fn write(path: &Path, content: &str, force: bool) -> Result<bool> {
                     .iter()
                     .all(|tag| element(&old, tag) == element(content, tag))))
     {
+        tracing::debug!(
+            "NFO 写入跳过：文件 {}，内容相同或标题简介无需更新",
+            path.display()
+        );
         return Ok(false);
     }
-    tokio::fs::write(path, content).await?;
+    tracing::debug!("NFO 文件写入开始：{}", path.display());
+    if let Err(error) = tokio::fs::write(path, content).await {
+        tracing::warn!(
+            "NFO 文件写入失败：{}，{error}，继续处理其它文件",
+            path.display()
+        );
+        return Ok(false);
+    }
+    tracing::debug!(
+        "NFO 文件写入完成：{}，{} 字节",
+        path.display(),
+        content.len()
+    );
     Ok(true)
 }
 fn season_dir(path: &Path) -> bool {
@@ -147,8 +163,16 @@ pub async fn sync(
     cast: &[Value],
     options: &Options<'_>,
 ) -> Result<usize> {
+    tracing::info!(
+        "NFO 同步开始：类型 {kind}，Emby {}，名称 {}，目标季 {:?}，目标季集 {:?}",
+        string(item, "Id"),
+        string(item, "Name"),
+        options.seasons,
+        options.episodes
+    );
     let raw = string(item, "Path");
     if raw.is_empty() || raw.starts_with("http") {
+        tracing::info!("NFO 同步跳过：Emby {}，缺少本地路径", string(item, "Id"));
         return Ok(0);
     }
     let path = Path::new(&raw);
@@ -163,6 +187,7 @@ pub async fn sync(
         directory
     };
     if !root.is_dir() {
+        tracing::info!("NFO 同步跳过：Emby {}，本地目录不存在", string(item, "Id"));
         return Ok(0);
     }
     let mut data = package.clone();
@@ -226,7 +251,14 @@ pub async fn sync(
                 }
                 if cast.is_empty() {
                     let pattern = regex::Regex::new(r"(?is)<actor>(.*?)</actor>").unwrap();
-                    cast=pattern.captures_iter(&old).map(|c|json!({"name":element(&c[1],"name"),"character":element(&c[1],"role"),"order":element(&c[1],"order"),"profile_path":element(&c[1],"thumb"),"tmdb_id":element(&c[1],"tmdbid")})).collect();
+                    cast = pattern.captures_iter(&old).map(|capture| {
+                        let read = |tag| {
+                            let value = element(&capture[1], tag);
+                            quick_xml::escape::unescape(&value)
+                                .unwrap_or(value.as_str().into()).into_owned()
+                        };
+                        json!({"name":read("name"),"character":read("role"),"order":read("order"),"profile_path":read("thumb"),"tmdb_id":read("tmdbid")})
+                    }).collect();
                 }
             }
             written +=
@@ -237,6 +269,10 @@ pub async fn sync(
                 list(&data["episodes_details"])
             };
             if episodes.is_empty() {
+                tracing::info!(
+                    "NFO 同步完成：Emby {}，写入 {written} 个，没有分集元数据",
+                    string(item, "Id")
+                );
                 return Ok(written);
             }
             let seasons = list(&data["seasons_details"]);
@@ -257,6 +293,12 @@ pub async fn sync(
                 if (!options.seasons.is_empty() && !options.seasons.contains(&key.0))
                     || (!options.episodes.is_empty() && !options.episodes.contains(&key))
                 {
+                    tracing::debug!(
+                        "NFO 分集跳过：S{}E{} 不在本次范围，文件 {}",
+                        key.0,
+                        key.1,
+                        file.display()
+                    );
                     continue;
                 }
                 let directory = file.parent().unwrap();
@@ -348,5 +390,9 @@ pub async fn sync(
         }
         _ => (),
     }
+    tracing::info!(
+        "NFO 同步完成：类型 {kind}，Emby {}，写入 {written} 个",
+        string(item, "Id")
+    );
     Ok(written)
 }

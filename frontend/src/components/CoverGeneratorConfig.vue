@@ -18,8 +18,8 @@
           然后在这个目录下新建想要自定义图片的媒体库子目录，例如：/config/custom_images/漫威宇宙，在这个目录下放入以1.jpg、2.jpg...命名的图片。
         </n-alert>
 
-        <!-- ★★★ 核心修改：使用 n-grid 重新排版 ★★★ -->
-        <n-card class="content-card dashboard-card" style="margin-top: 24px;">
+        <div class="cover-config-cards">
+        <n-card class="content-card dashboard-card">
           <template #header>
             <!-- 将 card-title 类应用到标题文本的容器上 -->
             <span class="card-title"><UiIcon name="settings" /> 基础设置</span>
@@ -117,7 +117,7 @@
         </n-card>
 
         <!-- ... 其余的 n-card 和 n-tabs 保持不变 ... -->
-        <n-card class="content-card dashboard-card" style="margin-top: 24px;">
+        <n-card class="content-card dashboard-card">
           <template #header><span class="card-title"><UiIcon name="image" /> 封面样式与标题</span></template>
           <template #header-extra>
             <n-button type="primary" secondary :loading="isSaving" @click="saveConfig(configData.tab || 'style-tab')"><template #icon><UiIcon name="save" /></template>{{ sectionSaveLabel }}</n-button>
@@ -126,15 +126,15 @@
             <n-tab-pane name="style-tab"><template #tab><UiIcon name="image" /> 封面风格</template>
               <n-spin :show="isPreviewLoading"> <!-- 添加一个加载动画，提升体验 -->
                 <n-radio-group v-model:value="configData.cover_style" class="cover-style-options" name="cover-style-group">
-                  <n-grid cols="1 600:2 950:3" :x-gap="16" :y-gap="16">
+                  <div class="cover-style-grid">
                     <!-- 【【【关键修改：src 绑定到动态的 ref】】】 -->
-                    <n-gi v-for="style in styles" :key="style.value">
+                    <div v-for="style in styles" :key="style.value">
                       <label class="style-card" :class="{ 'is-selected': configData.cover_style === style.value }">
                         <img :src="stylePreviews[style.value]" class="style-img" :alt="`${style.title}封面预览`" />
                         <div class="style-card-label"><n-radio :value="style.value" :label="style.title" /><span v-if="configData.cover_style === style.value">已选择</span></div>
                       </label>
-                    </n-gi>
-                  </n-grid>
+                    </div>
+                  </div>
                 </n-radio-group>
               </n-spin>
             </n-tab-pane>
@@ -307,6 +307,7 @@
             </n-tab-pane>
           </n-tabs>
         </n-card>
+        </div>
       </div>
     </n-spin>
   </n-layout>
@@ -612,6 +613,11 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.cover-config-cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(min(100%, 560px), 1fr)); align-items:start; gap:24px; margin-top:24px; }
+.cover-config-cards > .n-card { min-width:0; }
+.cover-style-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap:16px; }
+.cover-style-grid > div { min-width:0; }
+
 /* 样式部分保持不变 */
 .style-card {
   display:block;

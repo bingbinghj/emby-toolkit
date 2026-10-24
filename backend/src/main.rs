@@ -28,7 +28,8 @@ async fn main() -> anyhow::Result<()> {
         .event_format(LogFormat)
         .with_writer(LogWriter(state.logs.clone()))
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info,emby_toolkit=debug".into()),
         )
         .init();
     let bind: SocketAddr = std::env::var("ETK_BIND")

@@ -11,12 +11,14 @@ pub async fn get(state: &AppState, path: &str, query: &[(&str, String)]) -> Resu
     let config = state.config.read().await.clone();
     let key = string(&config, "tmdb_api_key");
     if key.is_empty() {
+        tracing::warn!("TMDb 请求跳过：API Key 未配置，资源 {path}");
         return Err(ApiError::bad("TMDb API Key 未配置"));
     }
     let base = string(&config, "tmdb_api_base_url");
     let mut parameters =
         std::collections::BTreeMap::from([("api_key", key), ("language", "zh-CN".into())]);
     parameters.extend(query.iter().map(|(k, v)| (*k, v.clone())));
+    tracing::debug!("TMDb 请求开始：资源 {path}");
     for attempt in 0..4 {
         let response = state
             .http
@@ -28,17 +30,43 @@ pub async fn get(state: &AppState, path: &str, query: &[(&str, String)]) -> Resu
         match response {
             Ok(response)
                 if matches!(response.status().as_u16(), 429 | 500 | 502 | 503 | 504)
-                    && attempt < 3 => {}
-            Err(error) if (error.is_connect() || error.is_timeout()) && attempt < 3 => {}
+                    && attempt < 3 =>
+            {
+                tracing::warn!(
+                    "TMDb 请求暂时失败：资源 {path}，HTTP {}，准备重试 {}/3",
+                    response.status(),
+                    attempt + 1
+                );
+            }
+            Err(error) if (error.is_connect() || error.is_timeout()) && attempt < 3 => {
+                tracing::warn!(
+                    "TMDb 请求暂时失败：资源 {path}，连接或超时错误，准备重试 {}/3",
+                    attempt + 1
+                );
+            }
             Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND => {
+                tracing::warn!("TMDb 请求未找到资源：{path}");
                 return Err(ApiError(
                     axum::http::StatusCode::NOT_FOUND,
                     "TMDb 资源不存在".into(),
                 ));
             }
-            response => return Ok(response?.error_for_status()?.json().await?),
+            response => {
+                let data = response
+                    .inspect_err(|_| tracing::error!("TMDb 请求失败：资源 {path}，网络错误"))?
+                    .error_for_status()
+                    .inspect_err(|e| {
+                        tracing::error!("TMDb 请求失败：资源 {path}，HTTP {:?}", e.status())
+                    })?
+                    .json()
+                    .await
+                    .inspect_err(|_| {
+                        tracing::error!("TMDb 请求失败：资源 {path}，响应 JSON 无效")
+                    })?;
+                tracing::debug!("TMDb 请求完成：资源 {path}，尝试 {} 次", attempt + 1);
+                return Ok(data);
+            }
         }
-        tracing::warn!("TMDb 请求失败，重试 {}/3: {path}", attempt + 1);
         tokio::time::sleep(Duration::from_secs(2_u64.pow(attempt))).await;
     }
     unreachable!()
@@ -53,9 +81,11 @@ async fn details_with_append(
     append: Option<&str>,
 ) -> Result<Value> {
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        tracing::warn!("TMDb 详情获取拒绝：类型 {kind}，ID 无效");
         return Err(ApiError::bad("TMDb ID 无效"));
     }
     let movie = kind == "Movie";
+    tracing::info!("TMDb 详情获取开始：类型 {kind}，TMDb {id}");
     let path = format!("/{}/{id}", if movie { "movie" } else { "tv" });
     let append = append.unwrap_or(if movie {
         "credits,videos,images,keywords,external_ids,translations,release_dates,alternative_titles"
@@ -87,6 +117,10 @@ async fn details_with_append(
             "original_name"
         }]
         .clone();
+        tracing::info!(
+            "TMDb 详情获取完成：类型 {kind}，TMDb {id}，名称 {}",
+            string(&data, title_field)
+        );
         return Ok(data);
     }
     if let Some(title) = data["translations"]["translations"]
@@ -108,9 +142,15 @@ async fn details_with_append(
             .as_str()
             .is_none_or(|s| s.chars().count() < 2);
     if need_title || need_overview {
+        tracing::info!(
+            "TMDb 英文补抓开始：类型 {kind}，TMDb {id}，标题 {need_title}，简介 {need_overview}"
+        );
         let fallback = match get(state, &path, &[("language", "en-US".into())]).await {
             Ok(value) => value,
-            Err(_) => return Ok(data),
+            Err(_) => {
+                tracing::warn!("TMDb 英文补抓失败，保留原数据：类型 {kind}，TMDb {id}");
+                return Ok(data);
+            }
         };
         if need_title && !string(&fallback, title_field).is_empty() {
             data[english] = fallback[title_field].clone();
@@ -119,6 +159,10 @@ async fn details_with_append(
             data["overview"] = fallback["overview"].clone();
         }
     }
+    tracing::info!(
+        "TMDb 详情获取完成：类型 {kind}，TMDb {id}，名称 {}",
+        string(&data, title_field)
+    );
     Ok(data)
 }
 fn flag(value: &Value) -> bool {
@@ -132,15 +176,8 @@ fn flag(value: &Value) -> bool {
         _ => false,
     }
 }
-pub async fn season(state: &AppState, id: &str, number: i64) -> Result<Value> {
-    get(
-        state,
-        &format!("/tv/{id}/season/{number}"),
-        &[("append_to_response", "credits".into())],
-    )
-    .await
-}
 pub async fn aggregate(state: &AppState, id: &str, numbers: &[i64]) -> Result<Value> {
+    tracing::info!("TMDb 按季聚合开始：TMDb {id}，目标季 {numbers:?}");
     let mut series = details_with_append(state, "Series", id,
         Some("credits,aggregate_credits,keywords,external_ids,content_ratings,alternative_titles,translations")).await?;
     let cast = series["aggregate_credits"]["cast"]
@@ -184,7 +221,9 @@ pub async fn aggregate(state: &AppState, id: &str, numbers: &[i64]) -> Result<Va
         .collect::<Vec<_>>();
     numbers.sort_unstable();
     numbers.dedup();
+    tracing::info!("TMDb 按季范围确认：TMDb {id}，本次季 {numbers:?}");
     for number in numbers {
+        tracing::info!("TMDb 季详情获取开始：TMDb {id}，第 {number} 季");
         let mut details = match get(
             state,
             &format!("/tv/{id}/season/{number}"),
@@ -196,7 +235,13 @@ pub async fn aggregate(state: &AppState, id: &str, numbers: &[i64]) -> Result<Va
         .await
         {
             Ok(data) => data,
-            Err(_) => continue,
+            Err(error) => {
+                tracing::warn!(
+                    "TMDb 季详情获取失败，跳过该季：TMDb {id}，第 {number} 季，{}",
+                    error.1
+                );
+                continue;
+            }
         };
         if let Some(poster) = details["images"]["posters"][0]["file_path"].as_str() {
             details["poster_path"] = json!(poster);
@@ -252,8 +297,17 @@ pub async fn aggregate(state: &AppState, id: &str, numbers: &[i64]) -> Result<Va
             }
         }
         details["episodes"] = json!(season_episodes);
+        tracing::info!(
+            "TMDb 季详情获取完成：TMDb {id}，第 {number} 季，分集 {} 个",
+            list(&details["episodes"]).len()
+        );
         seasons.push(details);
     }
+    tracing::info!(
+        "TMDb 按季聚合完成：TMDb {id}，季 {} 个，分集 {} 个",
+        seasons.len(),
+        episodes.as_object().map_or(0, |o| o.len())
+    );
     Ok(json!({"series_details":series,"seasons_details":seasons,"episodes_details":episodes}))
 }
 fn generic_title(title: &str, chinese: bool) -> bool {
@@ -284,8 +338,10 @@ pub async fn aggregate_group(
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'-')
     {
+        tracing::warn!("TMDb 剧集组聚合拒绝：TMDb {id}，剧集组 ID 无效");
         return Err(ApiError::bad("剧集组 ID 无效"));
     }
+    tracing::info!("TMDb 剧集组聚合开始：TMDb {id}，剧集组 {group}，目标季 {numbers:?}");
     let mut series = details_with_append(state,"Series",id,
         Some("credits,aggregate_credits,keywords,external_ids,content_ratings,alternative_titles,translations")).await?;
     let data = get(state, &format!("/tv/episode_group/{group}"), &[]).await?;
@@ -299,6 +355,7 @@ pub async fn aggregate_group(
             continue;
         };
         if !numbers.is_empty() && !numbers.contains(&number) {
+            tracing::debug!("TMDb 剧集组季跳过：TMDb {id}，第 {number} 季不在本次范围");
             continue;
         }
         let mut normalized = vec![];
@@ -318,8 +375,13 @@ pub async fn aggregate_group(
             normalized.push(episode);
         }
         if normalized.is_empty() {
+            tracing::info!("TMDb 剧集组季跳过：TMDb {id}，第 {number} 季没有分集");
             continue;
         }
+        tracing::info!(
+            "TMDb 剧集组季处理完成：TMDb {id}，第 {number} 季，分集 {} 个",
+            normalized.len()
+        );
         seasons.push(json!({"id":format!("{id}-G{group}-S{number}"),
             "name":season["name"].as_str().filter(|s|!s.is_empty()).map(str::to_string).unwrap_or(format!("第 {number} 季")),
             "overview":"","season_number":number,"air_date":normalized[0]["air_date"],"poster_path":null,
@@ -332,6 +394,11 @@ pub async fn aggregate_group(
             .as_u64()
             .filter(|v| *v > 0)
             .unwrap_or(episodes.len() as u64)
+    );
+    tracing::info!(
+        "TMDb 剧集组聚合完成：TMDb {id}，剧集组 {group}，季 {} 个，分集 {} 个",
+        seasons.len(),
+        episodes.len()
     );
     Ok(
         json!({"series_details":series,"seasons_details":seasons,"episodes_details":episodes,"episode_group_id":group}),

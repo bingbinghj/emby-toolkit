@@ -244,6 +244,9 @@ pub fn best_role(current: &str, candidate: &str) -> String {
     }
 }
 pub fn premerge(raw: &[Value], douban: &[Value]) -> Vec<Value> {
+    premerge_cast(raw, douban, false)
+}
+fn premerge_cast(raw: &[Value], douban: &[Value], marked: bool) -> Vec<Value> {
     let mut actors = raw.to_vec();
     let mut seen = HashSet::new();
     let mut names = HashSet::new();
@@ -281,18 +284,214 @@ pub fn premerge(raw: &[Value], douban: &[Value]) -> Vec<Value> {
             if !id.is_empty() {
                 actor["douban_id"] = json!(id);
             }
+            if marked {
+                actor["_douban_matched"] = json!(true);
+            }
         }
     }
     actors
+}
+fn actor_id(actor: &Value) -> Option<i32> {
+    actor["id"]
+        .as_i64()
+        .or_else(|| actor["id"].as_str().and_then(|id| id.parse().ok()))
+        .filter(|id| *id > 0 && *id <= i32::MAX as i64)
+        .map(|id| id as i32)
+}
+fn actor_count(actors: &[Value]) -> usize {
+    let mut names = HashSet::new();
+    let mut ids = HashSet::new();
+    actors
+        .iter()
+        .filter(|actor| {
+            let name = string(actor, "name").trim().to_string();
+            !name.is_empty()
+                && names.insert(name)
+                && actor_id(actor).is_some_and(|id| ids.insert(id))
+        })
+        .count()
+}
+async fn mapped_person(state: &AppState, douban: &str, imdb: &str) -> Result<Option<Value>> {
+    Ok(sqlx::query_scalar("SELECT to_jsonb(p) FROM person_metadata p WHERE ($1 <> '' AND douban_celebrity_id=$1) OR ($2 <> '' AND imdb_id=$2) LIMIT 1")
+        .bind(douban).bind(imdb).fetch_optional(&state.db).await?)
+}
+fn add_actor(actors: &mut Vec<Value>, candidate: &Value, id: i32, metadata: &Value, imdb: &str) {
+    if actors.iter().any(|actor| actor_id(actor) == Some(id)) {
+        return;
+    }
+    let mut actor = json!({"_douban_matched":true,"id":id,"name":candidate["name"],"character":candidate["character"],"order":999,"imdb_id":if imdb.is_empty(){None}else{Some(imdb)},"douban_id":candidate["id"].as_i64().map(|id|id.to_string()).unwrap_or_else(||string(candidate,"id")),"emby_person_id":null});
+    for field in [
+        "original_name",
+        "profile_path",
+        "gender",
+        "adult",
+        "popularity",
+    ] {
+        if let Some(value) = metadata.get(field) {
+            actor[field] = value.clone();
+        }
+    }
+    if string(&actor, "original_name").is_empty() {
+        actor["original_name"] = candidate["latin_name"].clone();
+    }
+    tracing::debug!(tmdb_id = id, name = %string(&actor,"name"), "豆瓣补充演员身份匹配完成");
+    actors.push(actor);
+}
+pub async fn supplement(state: &AppState, raw: &[Value], douban: &[Value]) -> Result<Vec<Value>> {
+    let mut actors = premerge_cast(raw, douban, true);
+    let config = state.config.read().await.clone();
+    let limit = config["max_actors_to_process"]
+        .as_u64()
+        .filter(|limit| *limit > 0)
+        .unwrap_or(30) as usize;
+    if douban.is_empty() || actor_count(&actors) >= limit {
+        return Ok(actors);
+    }
+    let original_ids = raw.iter().filter_map(actor_id).collect::<HashSet<_>>();
+    let mut names = HashSet::new();
+    let mut ids = HashSet::new();
+    let mut unmatched = vec![];
+    // Resolve all cached Douban identities before spending online lookups on the remaining actors.
+    for candidate in douban {
+        let name = string(candidate, "name").trim().to_lowercase();
+        let id = candidate["id"]
+            .as_i64()
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| string(candidate, "id"));
+        if name.is_empty()
+            || !names.insert(name)
+            || id.is_empty()
+            || !ids.insert(id.clone())
+            || actors.iter().any(|actor| string(actor, "douban_id") == id)
+        {
+            continue;
+        }
+        if let Some(metadata) = mapped_person(state, &id, "").await?
+            && let Some(id) = metadata["tmdb_person_id"]
+                .as_i64()
+                .and_then(|id| i32::try_from(id).ok())
+        {
+            add_actor(
+                &mut actors,
+                candidate,
+                id,
+                &metadata,
+                &string(&metadata, "imdb_id"),
+            );
+            continue;
+        }
+        unmatched.push(candidate);
+    }
+    if config["douban_enable_online_api"] == true && !string(&config, "tmdb_api_key").is_empty() {
+        for candidate in unmatched {
+            if actor_count(&actors) >= limit {
+                break;
+            }
+            let id = candidate["id"]
+                .as_i64()
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| string(candidate, "id"));
+            if !id.bytes().all(|byte| byte.is_ascii_digit()) {
+                continue;
+            }
+            let details = request(state, &format!("/celebrity/{id}"), false, &[]).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let details = match details {
+                Ok(details) => details,
+                Err(error) => {
+                    tracing::warn!(douban_id = %id, "豆瓣演员详情查询失败：{}", error.1);
+                    continue;
+                }
+            };
+            let Some(imdb) = list(&details["extra"]["info"]).iter().find_map(|info| {
+                (info.as_array().is_some_and(|info| info.len() == 2) && info[0] == "IMDb编号")
+                    .then(|| info[1].as_str())
+                    .flatten()
+                    .filter(|id| !id.trim().is_empty())
+                    .map(str::to_string)
+            }) else {
+                continue;
+            };
+            if let Some(metadata) = mapped_person(state, "", &imdb).await?
+                && let Some(id) = metadata["tmdb_person_id"]
+                    .as_i64()
+                    .and_then(|id| i32::try_from(id).ok())
+            {
+                add_actor(&mut actors, candidate, id, &metadata, &imdb);
+                continue;
+            }
+            let Ok(found) = crate::tmdb::get(
+                state,
+                &format!("/find/{imdb}"),
+                &[
+                    ("external_source", "imdb_id".into()),
+                    ("language", "en-US".into()),
+                ],
+            )
+            .await
+            else {
+                continue;
+            };
+            let Some(id) = list(&found["person_results"]).first().and_then(actor_id) else {
+                continue;
+            };
+            let metadata: Option<Value> = sqlx::query_scalar(
+                "SELECT to_jsonb(p) FROM person_metadata p WHERE tmdb_person_id=$1",
+            )
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?;
+            if metadata.is_none()
+                && let Some(existing) = actors.iter_mut().find(|actor| actor_id(actor) == Some(id))
+            {
+                if chinese(&string(candidate, "name")) {
+                    existing["name"] = candidate["name"].clone();
+                    if existing["_douban_matched"] != true {
+                        existing["_douban_matched"] = json!("name");
+                    }
+                }
+            } else {
+                add_actor(
+                    &mut actors,
+                    candidate,
+                    id,
+                    &metadata.unwrap_or(Value::Null),
+                    &imdb,
+                );
+            }
+        }
+    }
+    let added = actors.len().saturating_sub(raw.len());
+    let mut photos = 0;
+    for actor in actors
+        .iter_mut()
+        .filter(|actor| actor_id(actor).is_some_and(|id| !original_ids.contains(&id)))
+    {
+        if string(actor, "profile_path").is_empty()
+            && !string(&config, "tmdb_api_key").is_empty()
+            && let Ok(details) = crate::tmdb::person(state, actor_id(actor).unwrap()).await
+        {
+            actor["profile_path"] = details["profile_path"].clone();
+        }
+        if !string(actor, "profile_path").is_empty() {
+            photos += 1;
+        }
+    }
+    if added > 0 {
+        tracing::info!(added, photos, "[演员资料] 豆瓣补充演员身份与头像检查完成");
+    }
+    Ok(actors)
 }
 pub async fn premerge_online(state: &AppState, item: &Value, data: &mut Value) -> Result<()> {
     let raw = list(&data["credits"]["cast"]);
     if !should_fetch(&raw, &*state.config.read().await) {
         return Ok(());
     }
+    tracing::info!(item_id = %string(item, "Id"), "[演员资料] 开始匹配豆瓣演员与角色");
     match cast(state, item, data).await {
         Ok(cast) => {
-            // Python's premerge consumes latin_name and keeps only matched TMDb identities.
+            tracing::info!(matched = cast.len(), "[演员资料] 豆瓣演员匹配完成");
+            // Keep Douban's foreign names available for matching before the shared translation pass.
             let cast = cast
                 .into_iter()
                 .map(|mut a| {
@@ -300,9 +499,22 @@ pub async fn premerge_online(state: &AppState, item: &Value, data: &mut Value) -
                     a
                 })
                 .collect::<Vec<_>>();
-            data["credits"]["cast"] = json!(premerge(&raw, &cast));
+            data["credits"]["cast"] = json!(supplement(state, &raw, &cast).await?);
         }
         Err(error) => tracing::warn!("豆瓣演员补充失败：{}", error.1),
     }
     Ok(())
+}
+
+pub async fn premerge_in_job(
+    state: &AppState,
+    item: &Value,
+    data: &mut Value,
+    context: &crate::jobs::JobContext,
+) -> Result<()> {
+    context.checkpoint().await?;
+    tokio::select! {
+        _ = context.cancelled() => context.checkpoint().await,
+        result = premerge_online(state, item, data) => result,
+    }
 }

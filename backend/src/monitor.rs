@@ -214,7 +214,6 @@ pub async fn stable_files(
 pub struct Service {
     state: AppState,
     running: AtomicBool,
-    paused: AtomicBool,
     tx: mpsc::UnboundedSender<PathBuf>,
     rx: Mutex<Option<mpsc::UnboundedReceiver<PathBuf>>>,
 }
@@ -224,19 +223,9 @@ impl Service {
         Arc::new(Self {
             state,
             running: AtomicBool::new(false),
-            paused: AtomicBool::new(false),
             tx,
             rx: Mutex::new(Some(rx)),
         })
-    }
-    pub fn enqueue(&self, path: impl Into<PathBuf>) {
-        let _ = self.tx.send(path.into());
-    }
-    pub fn pause_queue(&self) {
-        self.paused.store(true, Ordering::SeqCst);
-    }
-    pub fn resume_queue(&self) {
-        self.paused.store(false, Ordering::SeqCst);
     }
     pub async fn run(self: Arc<Self>, cancel: CancellationToken) {
         if self.running.swap(true, Ordering::SeqCst) {
@@ -269,7 +258,7 @@ impl Service {
                         }}){Ok(mut next)=>{for root in &settings.roots{if let Err(error)=next.watch(root,RecursiveMode::Recursive){tracing::warn!(path=%root.display(),%error,"无法监控目录");}}watcher=Some(next);},Err(error)=>tracing::warn!(%error,"实时监控初始化失败")}}
                         if !settings.enabled{queue.clear();deadline=None;}
                     }
-                    if settings.enabled&&!queue.is_empty()&&!self.paused.load(Ordering::SeqCst)&&deadline.is_some_and(|d|d<=tokio::time::Instant::now()){
+                    if settings.enabled&&!queue.is_empty()&&deadline.is_some_and(|d|d<=tokio::time::Instant::now()){
                         if self.state.jobs.status().await["is_running"]==true{continue;}
                         let paths=queue.iter().cloned().collect::<Vec<_>>();let work=self.state.clone();let snapshot=settings.clone();let shutdown=batch_cancel.clone();
                         let submitted=self.state.jobs.submit("实时监控入库预处理",move|context|async move{process_batch(&work,&snapshot,&paths,&context,&shutdown).await}).await;

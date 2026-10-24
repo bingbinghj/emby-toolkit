@@ -557,7 +557,10 @@ async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext)
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
     if let Some(new_id) = &found {
-        sqlx::query("UPDATE media_metadata SET emby_item_ids_json=(SELECT jsonb_agg(CASE WHEN eid=$1 THEN to_jsonb($2::text) ELSE to_jsonb(eid) END ORDER BY idx) FROM jsonb_array_elements_text(emby_item_ids_json) WITH ORDINALITY arr(eid,idx)),asset_details_json=(SELECT jsonb_agg(CASE WHEN a->>'emby_item_id'=$1 THEN jsonb_set(a,'{emby_item_id}',to_jsonb($2::text)) ELSE a END ORDER BY idx) FROM jsonb_array_elements(asset_details_json) WITH ORDINALITY arr(a,idx)) WHERE emby_item_ids_json @> $3").bind(id).bind(new_id).bind(json!([id])).execute(&state.db).await?;
+        let mut transaction = state.db.begin().await?;
+        sqlx::query("UPDATE media_metadata SET emby_item_ids_json=(SELECT jsonb_agg(CASE WHEN eid=$1 THEN to_jsonb($2::text) ELSE to_jsonb(eid) END ORDER BY idx) FROM jsonb_array_elements_text(emby_item_ids_json) WITH ORDINALITY arr(eid,idx)),asset_details_json=(SELECT jsonb_agg(CASE WHEN a->>'emby_item_id'=$1 THEN jsonb_set(a,'{emby_item_id}',to_jsonb($2::text)) ELSE a END ORDER BY idx) FROM jsonb_array_elements(asset_details_json) WITH ORDINALITY arr(a,idx)) WHERE emby_item_ids_json @> $3").bind(id).bind(new_id).bind(json!([id])).execute(&mut *transaction).await?;
+        crate::orphans::migrate_item_logs(&mut transaction, id, new_id).await?;
+        transaction.commit().await?;
     }
     Ok(
         json!({"message":"媒体已重命名，115、STRM和媒体信息路径已同步","source_name":source.source,"target_name":filename,"target_cloud_path":plan["cloud_path"],"target_local_path":target,"item_id":found}),

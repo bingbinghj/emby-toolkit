@@ -288,5 +288,4 @@ pub async fn run(state: AppState, cancel: CancellationToken) {
         }
         tokio::select! {_ = cancel.cancelled()=>break,_ = changed(&state,&active_token)=>{},_ = tokio::time::sleep(Duration::from_secs(delay))=>{}}
     }
-    tracing::info!("Telegram 交互监听已停止");
 }

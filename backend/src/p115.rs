@@ -15,6 +15,9 @@ use tokio::sync::Mutex;
 
 #[path = "p115_auth.rs"]
 mod auth;
+#[path = "p115_download.rs"]
+mod download;
+pub use download::{download_url, download_url_with_user_agent};
 
 pub struct Endpoints {
     pub qrcode: String,
@@ -38,6 +41,8 @@ impl Default for Endpoints {
 pub struct Service {
     endpoints: Endpoints,
     auth_lock: Mutex<()>,
+    next_management_request: Mutex<Option<tokio::time::Instant>>,
+    downloads: download::Service,
     oauth_session: Mutex<Option<auth::QrSession>>,
     cookie_sessions: Mutex<HashMap<String, Arc<Mutex<auth::QrSession>>>>,
 }
@@ -47,6 +52,19 @@ impl Service {
             endpoints,
             ..Self::default()
         }
+    }
+    async fn rate_limit(&self, state: &AppState) {
+        let interval = state.config.read().await["p115_request_interval"]
+            .as_f64()
+            .filter(|seconds| seconds.is_finite())
+            .unwrap_or(1.5)
+            .max(1.5);
+        let mut next = self.next_management_request.lock().await;
+        let now = tokio::time::Instant::now();
+        let reserved = next.unwrap_or(now).max(now);
+        *next = Some(reserved + Duration::from_secs_f64(interval));
+        drop(next);
+        tokio::time::sleep_until(reserved).await;
     }
 }
 
@@ -176,6 +194,7 @@ async fn save_cookie(
         &json!({"cookie":cookie,"app_type":app}),
     )
     .await?;
+    state.p115.downloads.clear().await;
     Ok(Json(
         json!({"success":true,"message":format!("{} Cookie 已保存",app_label(app)),"client_type":app}),
     ))
@@ -187,6 +206,7 @@ async fn clear_cookie(State(state): State<AppState>) -> Result<Json<Value>> {
         &json!({"cookie":"","app_type":"web"}),
     )
     .await?;
+    state.p115.downloads.clear().await;
     Ok(Json(json!({"success":true,"message":"115 Cookie 已清理"})))
 }
 async fn cookie_get(
@@ -272,86 +292,6 @@ async fn openapi_request_with_user_agent(
     }
     unreachable!()
 }
-pub async fn download_url(state: &AppState, pc: &str) -> Result<String> {
-    download_url_with_user_agent(state, pc, "Mozilla/5.0").await
-}
-pub async fn download_url_with_user_agent(
-    state: &AppState,
-    pc: &str,
-    user_agent: &str,
-) -> Result<String> {
-    fn url(value: &Value) -> Option<String> {
-        if let Some(text) = value
-            .as_str()
-            .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
-        {
-            return Some(text.into());
-        }
-        if let Some(object) = value.as_object() {
-            if let Some(found) = object.get("url").and_then(url) {
-                return Some(found);
-            }
-            return object.values().find_map(url);
-        }
-        None
-    }
-    if pc.is_empty() || !pc.bytes().all(|b| b.is_ascii_alphanumeric()) {
-        return Err(ApiError::bad("115 PC 无效"));
-    }
-    let cookie = string(&tokens(state).await?, "cookie");
-    if !cookie.is_empty() {
-        let encrypted = crate::p115_cipher::encrypt(
-            serde_json::to_string(&json!({"pickcode":pc}))
-                .unwrap()
-                .as_bytes(),
-        );
-        let attempt = async {
-            let response = state
-                .http
-                .post(format!(
-                    "{}/app/chrome/downurl",
-                    state.p115.endpoints.openapi
-                ))
-                .header("Cookie", cookie)
-                .header("User-Agent", user_agent)
-                .form(&[("data", encrypted)])
-                .send()
-                .await?
-                .error_for_status()?;
-            let response: Value = response.json().await?;
-            if success(&response) {
-                let data = if let Some(encoded) = response["data"].as_str() {
-                    serde_json::from_slice(&crate::p115_cipher::decrypt(encoded)?)
-                        .map_err(|_| ApiError::bad("115 下载响应无效"))?
-                } else {
-                    response["data"].clone()
-                };
-                if let Some(url) = url(&data) {
-                    return Ok::<_, ApiError>(url);
-                }
-            }
-            Err(ApiError::bad("115 Cookie 未返回下载地址"))
-        }
-        .await;
-        if let Ok(url) = attempt {
-            return Ok(url);
-        }
-    }
-    let response = openapi_request_with_user_agent(
-        state,
-        reqwest::Method::POST,
-        "/open/ufile/downurl",
-        &[("pick_code", pc.into())],
-        user_agent,
-    )
-    .await?;
-    if success(&response)
-        && let Some(url) = url(&response["data"])
-    {
-        return Ok(url);
-    }
-    Err(ApiError::bad("115 未返回文件下载地址"))
-}
 pub async fn file_info(state: &AppState, id: u64) -> Result<Value> {
     let response = file_info_response(state, id).await?;
     if !success(&response) {
@@ -363,67 +303,140 @@ pub async fn file_info(state: &AppState, id: u64) -> Result<Value> {
         .unwrap_or(&response["data"])
         .clone())
 }
-pub async fn file_info_response(state: &AppState, id: u64) -> Result<Value> {
+async fn management(
+    state: &AppState,
+    cookie_path: &str,
+    cookie_fields: Vec<(String, String)>,
+    open_path: &str,
+    open_fields: Vec<(String, String)>,
+    write: bool,
+) -> Result<Value> {
     let auth = tokens(state).await?;
-    let cookie = string(&auth, "cookie");
-    let query = [("file_id", id.to_string())];
-    let response = if !cookie.is_empty() {
-        cookie_get(
-            state,
-            &cookie,
-            &format!("{}/files/file", state.p115.endpoints.webapi),
-            &query,
-        )
-        .await?
-    } else {
-        openapi_get(state, "/open/folder/get_info", &query).await?
-    };
-    Ok(response)
+    let prefer_open = string(&*state.config.read().await, "p115_api_priority") == "openapi";
+    let mut last = None;
+    for use_open in [prefer_open, !prefer_open] {
+        if string(&auth, if use_open { "access_token" } else { "cookie" }).is_empty() {
+            continue;
+        }
+        state.p115.rate_limit(state).await;
+        tracing::debug!(
+            "115 管理请求开始：接口 {}，路径 {}",
+            if use_open { "OpenAPI" } else { "Cookie" },
+            if use_open { open_path } else { cookie_path }
+        );
+        let result: Result<Value> = if use_open && !string(&auth, "access_token").is_empty() {
+            let fields = open_fields
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.clone()))
+                .collect::<Vec<_>>();
+            openapi_request(
+                state,
+                if write {
+                    reqwest::Method::POST
+                } else {
+                    reqwest::Method::GET
+                },
+                open_path,
+                &fields,
+            )
+            .await
+        } else if !use_open && !string(&auth, "cookie").is_empty() {
+            let url = format!("{}{}", state.p115.endpoints.webapi, cookie_path);
+            if write {
+                async {
+                    Ok(state
+                        .http
+                        .post(url)
+                        .header("Cookie", string(&auth, "cookie"))
+                        .header("User-Agent", "Mozilla/5.0")
+                        .form(&cookie_fields)
+                        .send()
+                        .await?
+                        .error_for_status()?
+                        .json()
+                        .await?)
+                }
+                .await
+            } else {
+                let fields = cookie_fields
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.clone()))
+                    .collect::<Vec<_>>();
+                cookie_get(state, &string(&auth, "cookie"), &url, &fields).await
+            }
+        } else {
+            continue;
+        };
+        match result {
+            Ok(response) if success(&response) || missing(&response) => {
+                tracing::debug!(
+                    "115 管理请求结束：接口 {}，路径 {}，成功 {}，目标不存在 {}",
+                    if use_open { "OpenAPI" } else { "Cookie" },
+                    if use_open { open_path } else { cookie_path },
+                    success(&response),
+                    missing(&response)
+                );
+                return Ok(response);
+            }
+            Ok(response) => {
+                last = Some(Ok(response));
+                tracing::warn!("115 管理接口返回失败，尝试备用凭证");
+            }
+            Err(error) => {
+                last = Some(Err(error));
+                tracing::warn!("115 管理接口请求失败，尝试备用凭证");
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    last.unwrap_or_else(|| Err(ApiError::bad("没有可用115凭证")))
+}
+fn fields(values: &[(&str, String)]) -> Vec<(String, String)> {
+    values
+        .iter()
+        .map(|(key, value)| ((*key).into(), value.clone()))
+        .collect()
+}
+pub async fn file_info_response(state: &AppState, id: u64) -> Result<Value> {
+    let query = fields(&[("file_id", id.to_string())]);
+    management(
+        state,
+        "/files/file",
+        query.clone(),
+        "/open/folder/get_info",
+        query,
+        false,
+    )
+    .await
 }
 pub async fn search(state: &AppState, value: &str) -> Result<Value> {
-    let query = [
+    let query = fields(&[
         ("search_value", value.into()),
         ("cid", "0".into()),
         ("limit", "100".into()),
         ("offset", "0".into()),
         ("show_dir", "1".into()),
-    ];
-    let cookie = string(&tokens(state).await?, "cookie");
-    if cookie.is_empty() {
-        openapi_get(state, "/open/ufile/search", &query).await
-    } else {
-        cookie_get(
-            state,
-            &cookie,
-            &format!("{}/files/search", state.p115.endpoints.webapi),
-            &query,
-        )
-        .await
-    }
+    ]);
+    management(
+        state,
+        "/files/search",
+        query.clone(),
+        "/open/ufile/search",
+        query,
+        false,
+    )
+    .await
 }
 pub async fn mkdir(state: &AppState, parent: &str, name: &str) -> Result<Value> {
-    let cookie = string(&tokens(state).await?, "cookie");
-    if cookie.is_empty() {
-        openapi_request(
-            state,
-            reqwest::Method::POST,
-            "/open/folder/add",
-            &[("pid", parent.into()), ("file_name", name.into())],
-        )
-        .await
-    } else {
-        Ok(state
-            .http
-            .post(format!("{}/files/add", state.p115.endpoints.webapi))
-            .header("Cookie", cookie)
-            .header("User-Agent", "Mozilla/5.0")
-            .form(&[("pid", parent), ("cname", name)])
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
-    }
+    management(
+        state,
+        "/files/add",
+        fields(&[("pid", parent.into()), ("cname", name.into())]),
+        "/open/folder/add",
+        fields(&[("pid", parent.into()), ("file_name", name.into())]),
+        true,
+    )
+    .await
 }
 pub async fn delete_files(state: &AppState, ids: &[String]) -> Result<()> {
     if ids.is_empty()
@@ -433,101 +446,57 @@ pub async fn delete_files(state: &AppState, ids: &[String]) -> Result<()> {
     {
         return Err(ApiError::bad("115 删除文件 ID 无效"));
     }
-    let cookie = string(&tokens(state).await?, "cookie");
-    let response = if cookie.is_empty() {
-        openapi_request(
-            state,
-            reqwest::Method::POST,
-            "/open/ufile/delete",
-            &[("file_ids", ids.join(","))],
-        )
-        .await?
+    let mut cookie = vec![("ignore_warn".into(), "1".into())];
+    if ids.len() == 1 {
+        cookie.push(("fid".into(), ids[0].clone()));
     } else {
-        let mut fields = vec![("ignore_warn".to_string(), "1".to_string())];
-        if ids.len() == 1 {
-            fields.push(("fid".into(), ids[0].clone()));
-        } else {
-            fields.extend(
-                ids.iter()
-                    .enumerate()
-                    .map(|(i, id)| (format!("fid[{i}]"), id.clone())),
-            );
-        }
-        state
-            .http
-            .post(format!("{}/rb/delete", state.p115.endpoints.webapi))
-            .header("Cookie", cookie)
-            .header("User-Agent", "Mozilla/5.0")
-            .form(&fields)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?
-    };
+        cookie.extend(
+            ids.iter()
+                .enumerate()
+                .map(|(index, id)| (format!("fid[{index}]"), id.clone())),
+        );
+    }
+    let response = management(
+        state,
+        "/rb/delete",
+        cookie,
+        "/open/ufile/delete",
+        fields(&[("file_ids", ids.join(","))]),
+        true,
+    )
+    .await?;
     if !success(&response) {
         return Err(ApiError::bad("115 删除失败，已保留本地源文件"));
     }
     Ok(())
 }
 pub async fn move_files(state: &AppState, ids: &[String], parent: &str) -> Result<Value> {
-    let cookie = string(&tokens(state).await?, "cookie");
-    if cookie.is_empty() {
-        openapi_request(
-            state,
-            reqwest::Method::POST,
-            "/open/ufile/move",
-            &[("file_ids", ids.join(",")), ("to_cid", parent.into())],
-        )
-        .await
-    } else {
-        let mut fields = vec![("pid".to_string(), parent.to_string())];
-        fields.extend(
-            ids.iter()
-                .enumerate()
-                .map(|(i, id)| (format!("fid[{i}]"), id.clone())),
-        );
-        Ok(state
-            .http
-            .post(format!("{}/files/move", state.p115.endpoints.webapi))
-            .header("Cookie", cookie)
-            .header("User-Agent", "Mozilla/5.0")
-            .form(&fields)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?)
-    }
+    let mut cookie = vec![("pid".into(), parent.into())];
+    cookie.extend(
+        ids.iter()
+            .enumerate()
+            .map(|(index, id)| (format!("fid[{index}]"), id.clone())),
+    );
+    management(
+        state,
+        "/files/move",
+        cookie,
+        "/open/ufile/move",
+        fields(&[("file_ids", ids.join(",")), ("to_cid", parent.into())]),
+        true,
+    )
+    .await
 }
 pub async fn rename(state: &AppState, id: &str, name: &str) -> Result<()> {
-    let auth = tokens(state).await?;
-    let cookie = string(&auth, "cookie");
-    let response = if !cookie.is_empty() {
-        let response: Value = state
-            .http
-            .post(format!(
-                "{}/files/batch_rename",
-                state.p115.endpoints.webapi
-            ))
-            .header("Cookie", cookie)
-            .header("User-Agent", "Mozilla/5.0")
-            .form(&[(format!("files_new_name[{id}]"), name)])
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        response
-    } else {
-        openapi_request(
-            state,
-            reqwest::Method::POST,
-            "/open/ufile/update",
-            &[("file_id", id.into()), ("file_name", name.into())],
-        )
-        .await?
-    };
+    let response = management(
+        state,
+        "/files/batch_rename",
+        vec![(format!("files_new_name[{id}]"), name.into())],
+        "/open/ufile/update",
+        fields(&[("file_id", id.into()), ("file_name", name.into())]),
+        true,
+    )
+    .await?;
     if !success(&response) {
         return Err(ApiError::bad("115重命名失败"));
     }
@@ -678,42 +647,8 @@ async fn directories(
             Json(json!({"code":400,"message":"未配置可用的 115 Token/Cookie"})),
         ));
     }
-    let query = [
-        ("cid", cid.clone()),
-        ("limit", "1000".into()),
-        ("offset", "0".into()),
-        ("show_dir", "1".into()),
-    ];
-    let prefer_openapi = string(&*state.config.read().await, "p115_api_priority") == "openapi";
-    let mut response = None;
-    for use_openapi in [prefer_openapi, !prefer_openapi] {
-        let attempt = if use_openapi && !access.is_empty() {
-            Some(openapi_get(&state, "/open/ufile/files", &query).await)
-        } else if !use_openapi && !cookie.is_empty() {
-            Some(
-                cookie_get(
-                    &state,
-                    &cookie,
-                    &format!("{}/files", state.p115.endpoints.webapi),
-                    &query,
-                )
-                .await,
-            )
-        } else {
-            None
-        };
-        if let Some(attempt) = attempt {
-            match attempt {
-                Ok(value) if success(&value) => {
-                    response = Some(value);
-                    break;
-                }
-                Ok(_) => tracing::warn!("115 目录查询失败，尝试备用凭证"),
-                Err(error) => tracing::warn!("115 目录查询异常: {}", error.1),
-            }
-        }
-    }
-    let Some(response) = response.filter(success) else {
+    let response = files(&state, &cid, 0).await;
+    let Ok(response) = response else {
         return Ok((
             StatusCode::BAD_GATEWAY,
             Json(json!({"code":502,"message":"读取 115 目录失败，请检查凭证"})),
@@ -827,39 +762,29 @@ fn local_directory_error(error: std::io::Error) -> ApiError {
     }
 }
 pub async fn files(state: &AppState, parent: &str, offset: usize) -> Result<Value> {
-    let auth = tokens(state).await?;
-    let query = [
+    let query = fields(&[
         ("cid", parent.into()),
         ("offset", offset.to_string()),
         ("limit", "1000".into()),
         ("show_dir", "1".into()),
-    ];
-    let prefer_open = string(&*state.config.read().await, "p115_api_priority") == "openapi";
-    for use_open in [prefer_open, !prefer_open] {
-        let response = if use_open && !string(&auth, "access_token").is_empty() {
-            openapi_get(state, "/open/ufile/files", &query).await
-        } else if !use_open && !string(&auth, "cookie").is_empty() {
-            cookie_get(
-                state,
-                &string(&auth, "cookie"),
-                &format!("{}/files", state.p115.endpoints.webapi),
-                &query,
-            )
-            .await
-        } else {
-            continue;
-        };
-        if let Ok(response) = response {
-            if success(&response) {
-                return Ok(response);
-            }
-            if missing(&response) {
-                return Err(ApiError(
-                    StatusCode::NOT_FOUND,
-                    "115 目录不存在或已删除".into(),
-                ));
-            }
-        }
+    ]);
+    let response = management(
+        state,
+        "/files",
+        query.clone(),
+        "/open/ufile/files",
+        query,
+        false,
+    )
+    .await?;
+    if missing(&response) {
+        return Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "115 目录不存在或已删除".into(),
+        ));
     }
-    Err(ApiError::bad("读取 115 文件列表失败，请检查凭证"))
+    if !success(&response) {
+        return Err(ApiError::bad("读取 115 文件列表失败，请检查凭证"));
+    }
+    Ok(response)
 }

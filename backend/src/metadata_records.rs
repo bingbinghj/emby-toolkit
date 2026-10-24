@@ -31,6 +31,11 @@ fn runtime(value: &Value) -> Value {
     )
 }
 pub fn pending(kind: &str, package: &Value, cast: &[Value], item: &Value) -> Result<Vec<Value>> {
+    tracing::debug!(
+        "元数据记录构建开始：类型 {kind}，Emby {}，演员 {} 位",
+        string(item, "Id"),
+        cast.len()
+    );
     if !matches!(kind, "Movie" | "Series") {
         return Err(ApiError::bad("待入库类型无效"));
     }
@@ -326,6 +331,10 @@ pub fn pending(kind: &str, package: &Value, cast: &[Value], item: &Value) -> Res
             record["imdb_id"] = package["imdb_id"].clone();
         }
     }
+    tracing::debug!(
+        "元数据记录构建完成：类型 {kind}，TMDb {provider}，记录 {} 条",
+        records.len()
+    );
     Ok(records)
 }
 
@@ -347,6 +356,10 @@ pub async fn online(
     context: &OnlineContext<'_>,
 ) -> Result<Vec<Value>> {
     let id = string(item, "Id");
+    tracing::info!(
+        "在线媒体资产绑定开始：类型 {kind}，Emby {id}，目标分集 {} 个",
+        context.episode_ids.len()
+    );
     if id.is_empty() || id == "pending" {
         return Err(ApiError::bad("在线入库缺少 Emby ID"));
     }
@@ -382,6 +395,11 @@ pub async fn online(
             }
         }
         online_assets(state, &mut records[0], &versions, item, context, true).await?;
+        tracing::info!(
+            "在线电影资产绑定完成：Emby {id}，版本 {} 个，记录 {} 条",
+            versions.len(),
+            records.len()
+        );
         return Ok(records);
     }
     records[0]["in_library"] = json!(true);
@@ -468,6 +486,12 @@ pub async fn online(
             "name":first["Name"].as_str().filter(|s|!s.is_empty()).map(str::to_string).unwrap_or(format!("Episode {}",key.1)),
             "overview":first["Overview"],"air_date":first["PremiereDate"]}]);
         let mut child = pending("Series", &fallback, cast, item)?.pop().unwrap();
+        tracing::debug!(
+            "分集资产使用内部元数据 ID：Emby {id}，S{}E{}，版本 {} 个",
+            key.0,
+            key.1,
+            versions.len()
+        );
         child["actors_json"] = crate::cast::episode(
             package,
             &serde_json::json!({"season_number":key.0}),
@@ -491,6 +515,10 @@ pub async fn online(
     if context.skip_series_record {
         records.retain(|r| r["item_type"] != "Series");
     }
+    tracing::info!(
+        "在线媒体资产绑定完成：类型 {kind}，Emby {id}，记录 {} 条",
+        records.len()
+    );
     Ok(records)
 }
 fn integer(value: &Value) -> Option<i64> {

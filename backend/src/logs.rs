@@ -189,7 +189,9 @@ impl Drop for LogGuard {
             if self.store.append(redacted.as_bytes()).is_err() {
                 let _ = std::io::stderr().write_all(b"ETK: unable to write log file\n");
             }
-            let _ = std::io::stdout().write_all(redacted.as_bytes());
+            if frontend_entry(&redacted).is_some() {
+                let _ = std::io::stdout().write_all(redacted.as_bytes());
+            }
         }
     }
 }
@@ -370,6 +372,8 @@ async fn context(
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| ApiError::bad("搜索关键词不能为空"))?;
+    let task_id = regex::Regex::new(r#"\btask_id=["']?([A-Za-z0-9_-]+)"#).unwrap();
+    let mut task: Option<(String, String, Vec<String>)> = None;
     let start = regex::Regex::new(r"Webhook: 收到入库事件\s'(.+?)'，已分派预检任务。").unwrap();
     let end =
         regex::Regex::new(r"后台任务\s'Webhook入库:\s(.+?)'\s结束，最终状态:\s处理完成。").unwrap();
@@ -378,7 +382,7 @@ async fn context(
     )
     .unwrap();
     let mut blocks = vec![];
-    for file in files(&state).await? {
+    for file in files(&state).await?.into_iter().rev() {
         let Ok(text) = read(&state, &file).await else {
             continue;
         };
@@ -387,6 +391,23 @@ async fn context(
         for line in text.split_inclusive('\n') {
             if line.trim().is_empty() {
                 continue;
+            }
+            let line_task = task_id.captures(line).map(|capture| capture[1].to_string());
+            if line.contains("[任务开始]")
+                && let Some(id) = &line_task
+            {
+                if let Some((file, _, lines)) = task.take() {
+                    push_task_context(&mut blocks, &file, lines, query);
+                }
+                task = Some((file.clone(), id.clone(), vec![line.into()]));
+            } else if let Some((_, id, lines)) = &mut task
+                && line_task.as_ref().is_none_or(|line_task| line_task == id)
+            {
+                lines.push(line.into());
+                if line.contains("[任务结束]") && line_task.as_ref() == Some(id) {
+                    let (file, _, lines) = task.take().unwrap();
+                    push_task_context(&mut blocks, &file, lines, query);
+                }
             }
             if let Some(capture) = start.captures(line) {
                 let name = capture[1].to_string();
@@ -419,6 +440,9 @@ async fn context(
             lines.push(line.into());
         }
     }
+    if let Some((file, _, lines)) = task {
+        push_task_context(&mut blocks, &file, lines, query);
+    }
     blocks.sort_by(|a, b| b["date"].as_str().cmp(&a["date"].as_str()));
     if params
         .get("format")
@@ -431,6 +455,15 @@ async fn context(
             .into_response())
     } else {
         Ok(Json(json!(blocks)).into_response())
+    }
+}
+fn push_task_context(blocks: &mut Vec<Value>, file: &str, lines: Vec<String>, query: &str) {
+    let query = query.to_lowercase();
+    if lines
+        .iter()
+        .any(|line| line.to_lowercase().contains(&query))
+    {
+        blocks.push(json!({"file":file,"date":timestamp(&lines[0]).unwrap_or("Unknown Date"),"lines":lines}));
     }
 }
 fn timestamp(line: &str) -> Option<&str> {

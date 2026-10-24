@@ -263,6 +263,7 @@ pub async fn request(
             json!({"model":model,"messages":[{"role":"system","content":system},{"role":"user","content":user}],"response_format":{"type":"json_object"},"temperature":temperature}),
         )
     } else {
+        tracing::warn!("AI 请求拒绝：不支持的服务 {provider}");
         return Err(ApiError::bad("不支持的 AI 服务"));
     };
     let retries = if provider == "openai" {
@@ -271,6 +272,11 @@ pub async fn request(
         0
     };
     for attempt in 0..=retries {
+        tracing::info!(
+            "AI 请求开始：服务 {provider}，模型 {model}，尝试 {}/{}",
+            attempt + 1,
+            retries + 1
+        );
         let mut request = state.http.post(&url).timeout(timeout).json(&body);
         request = if provider == "gemini" {
             request.header("x-goog-api-key", &key)
@@ -283,13 +289,32 @@ pub async fn request(
             Err(e) => e.is_connect() || e.is_timeout(),
         };
         if retry && attempt < retries {
+            tracing::warn!(
+                "AI 请求暂时失败：服务 {provider}，HTTP {:?}，准备重试 {}/{}",
+                response.as_ref().ok().map(|r| r.status().as_u16()),
+                attempt + 1,
+                retries
+            );
             tokio::time::sleep(Duration::from_millis(
                 (500 * 2_u64.saturating_pow(attempt.min(8) as u32)).min(8000),
             ))
             .await;
             continue;
         }
-        let response: Value = response?.error_for_status()?.json().await?;
+        let response: Value = response
+            .inspect_err(|_| {
+                tracing::error!(
+                    "AI 请求失败：服务 {provider}，网络错误，尝试 {} 次",
+                    attempt + 1
+                )
+            })?
+            .error_for_status()
+            .inspect_err(|e| {
+                tracing::error!("AI 请求失败：服务 {provider}，HTTP {:?}", e.status())
+            })?
+            .json()
+            .await
+            .inspect_err(|_| tracing::error!("AI 请求失败：服务 {provider}，响应 JSON 无效"))?;
         let content = if provider == "gemini" {
             response["candidates"][0]["content"]["parts"][0]["text"].as_str()
         } else {
@@ -297,7 +322,14 @@ pub async fn request(
         };
         return content
             .and_then(parse_json)
-            .ok_or_else(|| ApiError::bad("AI 未返回有效 JSON"));
+            .ok_or_else(|| ApiError::bad("AI 未返回有效 JSON"))
+            .inspect(|value| {
+                tracing::info!(
+                    "AI 请求完成：服务 {provider}，模型 {model}，返回条目 {} 个",
+                    value.as_object().map_or(0, |o| o.len())
+                )
+            })
+            .inspect_err(|_| tracing::warn!("AI 响应解析失败：服务 {provider}，未返回有效 JSON"));
     }
     unreachable!()
 }
@@ -335,6 +367,10 @@ async fn translate_inner(
         .cache_revision
         .load(std::sync::atomic::Ordering::SeqCst);
     let config = state.config.read().await.clone();
+    tracing::info!(
+        "AI 翻译开始：用途 {purpose}，输入 {} 条，写入缓存 {persist}",
+        inputs.len()
+    );
     let defaults: Value = serde_json::from_str(include_str!("../assets/defaults.json")).unwrap();
     let prompts = db::setting(&state.db, "ai_user_prompts")
         .await?
@@ -352,7 +388,9 @@ async fn translate_inner(
             system = system.replace(&format!("{{{key}}}"), value.as_str().unwrap_or(""));
         }
     }
-    system = system.replace("{{", "{").replace("}}", "}");
+    if purpose != "batch_joke_fallback" {
+        system = system.replace("{{", "{").replace("}}", "}");
+    }
     let mut output = BTreeMap::new();
     let mut missing = BTreeMap::new();
     let mut keys = BTreeMap::new();
@@ -372,13 +410,20 @@ async fn translate_inner(
         .fetch_optional(&state.db)
         .await?
         .flatten();
-        if let Some(cached) = cached.filter(|s| !s.is_empty()) {
+        if let Some(cached) = cached.filter(|s| {
+            !s.is_empty() && (purpose != "batch_joke_fallback" || s.starts_with("【老六占位简介】"))
+        }) {
             output.insert(id.clone(), cached);
         } else {
             missing.insert(id.clone(), source.clone());
         }
         keys.insert(id.clone(), key);
     }
+    tracing::info!(
+        "AI 翻译缓存检查完成：用途 {purpose}，命中 {} 条，待请求 {} 条",
+        output.len(),
+        missing.len()
+    );
     let batch = if matches!(purpose, "fast_mode" | "transliterate_mode" | "quality_mode") {
         config["ai_translation_batch_size"]
             .as_u64()
@@ -388,7 +433,13 @@ async fn translate_inner(
         20
     };
     let entries = missing.into_iter().collect::<Vec<_>>();
-    for chunk in entries.chunks(batch) {
+    for (index, chunk) in entries.chunks(batch).enumerate() {
+        tracing::info!(
+            "AI 翻译批次开始：用途 {purpose}，批次 {}/{}，条目 {} 条",
+            index + 1,
+            entries.len().div_ceil(batch),
+            chunk.len()
+        );
         let terms = chunk
             .iter()
             .map(|(_, source)| source.clone())
@@ -422,6 +473,10 @@ async fn translate_inner(
                     .unwrap_or(3.0),
             );
             if let Some(remaining) = interval.checked_sub(last.elapsed()) {
+                tracing::debug!(
+                    "AI 翻译请求间隔等待：用途 {purpose}，{} 毫秒",
+                    remaining.as_millis()
+                );
                 tokio::time::sleep(remaining).await;
             }
         }
@@ -430,14 +485,21 @@ async fn translate_inner(
             &config,
             &system,
             &python_json(&payload),
-            if purpose.ends_with("_mode") { 0.0 } else { 0.3 },
+            if purpose == "batch_joke_fallback" {
+                0.8
+            } else if purpose.ends_with("_mode") {
+                0.0
+            } else {
+                0.3
+            },
         )
         .await;
         if let Some(rate) = rate.as_mut() {
             **rate = Some(std::time::Instant::now());
         }
         drop(rate);
-        if let Ok(response) = response {
+        if let Ok(response) = &response {
+            let before = output.len();
             for (id, source) in chunk {
                 let lookup = if purpose.ends_with("_mode") {
                     source
@@ -453,8 +515,10 @@ async fn translate_inner(
                         .collect::<Vec<_>>()
                         .windows(2)
                         .any(|pair| pair.iter().all(|c| ['·', '•'].contains(c)));
-                    let quality = purpose != "quality_mode"
-                        || (!dots && (parts(source) <= 1 || parts(source) == parts(&value)));
+                    let quality = (purpose != "quality_mode"
+                        || (!dots && (parts(source) <= 1 || parts(source) == parts(&value))))
+                        && (purpose != "batch_joke_fallback"
+                            || value.starts_with("【老六占位简介】"));
                     if value != *source
                         && value
                             .chars()
@@ -471,14 +535,48 @@ async fn translate_inner(
                         {
                             sqlx::query("INSERT INTO translation_cache(original_text,translated_text,engine_used) VALUES($1,$2,$3) ON CONFLICT(original_text) DO UPDATE SET translated_text=EXCLUDED.translated_text,engine_used=EXCLUDED.engine_used,last_updated_at=NOW()")
                             .bind(&keys[id]).bind(&value).bind(string(&config,"ai_provider")).execute(&state.db).await?;
+                            tracing::debug!(
+                                "AI 翻译结果缓存已写入：用途 {purpose}，批次 {}",
+                                index + 1
+                            );
+                        } else {
+                            tracing::debug!(
+                                "AI 翻译结果缓存跳过：用途 {purpose}，批次 {}，预览或缓存版本已变化",
+                                index + 1
+                            );
                         }
                         output.insert(id.clone(), value);
+                    } else {
+                        tracing::debug!(
+                            "AI 翻译结果拒绝：用途 {purpose}，批次 {}，原词不变、缺少中文或质量检查未通过",
+                            index + 1
+                        );
                     }
+                } else {
+                    tracing::debug!(
+                        "AI 翻译结果缺失：用途 {purpose}，批次 {}，没有对应文本",
+                        index + 1
+                    );
                 }
             }
+            tracing::info!(
+                "AI 翻译批次完成：用途 {purpose}，批次 {}，接受 {} 条，拒绝或缺失 {} 条",
+                index + 1,
+                output.len() - before,
+                chunk.len() - (output.len() - before)
+            );
         } else {
-            tracing::warn!("AI 翻译批次失败，保留此前完成的结果");
+            tracing::warn!(
+                "AI 翻译批次失败，保留此前完成的结果：用途 {purpose}，批次 {}，{}",
+                index + 1,
+                response.unwrap_err().1
+            );
         }
     }
+    tracing::info!(
+        "AI 翻译完成：用途 {purpose}，可用 {} 条，未完成 {} 条",
+        output.len(),
+        inputs.len() - output.len()
+    );
     Ok(output)
 }

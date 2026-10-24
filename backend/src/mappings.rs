@@ -8,6 +8,7 @@ use crate::{
 use axum::{
     Json, Router,
     extract::{Query, State},
+    http::StatusCode,
     routing::get,
 };
 use reqwest::Method;
@@ -36,8 +37,29 @@ pub fn router() -> Router<AppState> {
         )
 }
 async fn external_genres(state: &AppState, kind: &str) -> Result<Json<Value>> {
-    let data = crate::tmdb::get(state, &format!("/genre/{kind}/list"), &[]).await?;
-    let mut genres = list(&data["genres"]);
+    if string(&*state.config.read().await, "tmdb_api_key").is_empty() {
+        return Err(ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "TMDb API Key 未配置".into(),
+        ));
+    }
+    let error = || {
+        ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!(
+                "从 TMDb 获取{}类型失败",
+                if kind == "movie" {
+                    "电影"
+                } else {
+                    "电视剧"
+                }
+            ),
+        )
+    };
+    let data = crate::tmdb::get(state, &format!("/genre/{kind}/list"), &[])
+        .await
+        .map_err(|_| error())?;
+    let mut genres = data["genres"].as_array().cloned().ok_or_else(error)?;
     for genre in &mut genres {
         let name = string(genre, "name");
         genre["name"] = json!(match name.as_str() {
@@ -62,7 +84,13 @@ async fn search_persons(
     if query.is_empty() {
         return Ok(Json(json!([])));
     }
-    let data = crate::tmdb::get(&state, "/search/person", &[("query", query.into())]).await?;
+    let data = crate::tmdb::get(
+        &state,
+        "/search/person",
+        &[("query", query.into()), ("include_adult", "false".into())],
+    )
+    .await
+    .unwrap_or(Value::Null);
     Ok(Json(json!(list(&data["results"]).iter().map(|p|json!({"id":p["id"],"name":p["name"],"profile_path":p["profile_path"],"department":p["known_for_department"],"known_for":list(&p["known_for"]).iter().filter_map(|i|i["title"].as_str().filter(|s|!s.is_empty()).or_else(||i["name"].as_str())).collect::<Vec<_>>().join("、")})).collect::<Vec<_>>())))
 }
 async fn search_companies(
@@ -74,16 +102,32 @@ async fn search_companies(
         return Ok(Json(json!([])));
     }
     if query.get("type").is_some_and(|s| s == "network") {
-        let data = crate::tmdb::get(&state, "/search/tv", &[("query", q.into())]).await?;
+        let mut parameters = vec![
+            ("query", q.into()),
+            ("include_adult", "false".into()),
+            ("page", "1".into()),
+        ];
+        let mut data = crate::tmdb::get(&state, "/search/tv", &parameters)
+            .await
+            .unwrap_or(Value::Null);
+        if data.as_object().is_some_and(|v| !v.is_empty()) && list(&data["results"]).is_empty() {
+            parameters.push(("language", "en-US".into()));
+            data = crate::tmdb::get(&state, "/search/tv", &parameters)
+                .await
+                .unwrap_or(Value::Null);
+        }
         let mut networks = vec![];
         let mut seen = std::collections::HashSet::new();
         for tv in list(&data["results"]).iter().take(3) {
-            let details = crate::tmdb::details(
+            let Ok(details) = crate::tmdb::details(
                 &state,
                 "Series",
                 &tv["id"].as_i64().unwrap_or(0).to_string(),
             )
-            .await?;
+            .await
+            else {
+                continue;
+            };
             for net in list(&details["networks"]) {
                 if seen.insert(net["id"].clone().to_string()) {
                     networks.push(json!({"id":net["id"],"name":net["name"],"logo_path":net["logo_path"],"origin_country":net["origin_country"],"source_show":tv["name"]}));
@@ -92,7 +136,9 @@ async fn search_companies(
         }
         return Ok(Json(json!(networks)));
     }
-    let data = crate::tmdb::get(&state, "/search/company", &[("query", q.into())]).await?;
+    let data = crate::tmdb::get(&state, "/search/company", &[("query", q.into())])
+        .await
+        .unwrap_or(Value::Null);
     Ok(Json(json!(list(&data["results"]))))
 }
 pub fn ensure_list(value: Value, default: Value) -> Value {
@@ -129,9 +175,15 @@ async fn mapping(state: &AppState, key: &str) -> Result<Vec<Value>> {
 }
 async fn distinct(state: &AppState, column: &str) -> Result<Json<Value>> {
     let sql = format!(
-        "SELECT DISTINCT NULLIF(COALESCE(elem->>'name',elem->>'label',elem->>'value',elem #>> '{{}}'),'') AS label FROM media_metadata CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof({column})='array' THEN {column} ELSE '[]'::jsonb END) elem ORDER BY label"
+        "SELECT DISTINCT NULLIF(COALESCE(elem->>'name',elem->>'label',elem->>'value',elem #>> '{{}}'),'') AS label FROM media_metadata CROSS JOIN LATERAL jsonb_array_elements(COALESCE({column},'[]'::jsonb)) elem WHERE {column} IS NOT NULL ORDER BY label"
     );
-    let labels: Vec<Option<String>> = sqlx::query_scalar(&sql).fetch_all(&state.db).await?;
+    let labels: Vec<Option<String>> = match sqlx::query_scalar(&sql).fetch_all(&state.db).await {
+        Ok(labels) => labels,
+        Err(error) => {
+            tracing::error!(%error, "读取媒体元数据 {column} 去重列表失败");
+            return Ok(Json(json!([])));
+        }
+    };
     Ok(Json(json!(
         labels.into_iter().flatten().collect::<Vec<_>>()
     )))
@@ -143,10 +195,26 @@ async fn genres(State(state): State<AppState>) -> Result<Json<Value>> {
     distinct(&state, "genres_json").await
 }
 async fn libraries(State(state): State<AppState>) -> Result<Json<Value>> {
-    let user = string(&*state.config.read().await, "emby_user_id");
+    let config = state.config.read().await.clone();
+    let user = string(&config, "emby_user_id");
+    if ["emby_server_url", "emby_api_key", "emby_user_id"]
+        .iter()
+        .any(|key| string(&config, key).is_empty())
+    {
+        return Err(ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Emby 服务器配置不完整".into(),
+        ));
+    }
     let views = state
         .emby(Method::GET, &format!("emby/Users/{user}/Views"), &[], None)
-        .await?;
+        .await
+        .map_err(|_| {
+            ApiError(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "无法从 Emby 获取媒体库列表".into(),
+            )
+        })?;
     Ok(Json(json!(
         views["Items"]
             .as_array()

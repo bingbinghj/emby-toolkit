@@ -51,6 +51,11 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
     if libraries.is_empty() {
         return Ok(json!({"updated":0,"message":"没有需要处理的媒体库"}));
     }
+    tracing::info!(
+        libraries = libraries.len(),
+        full,
+        "[同步媒体] 开始扫描媒体库与缓存差异"
+    );
     context
         .update(0, "建立差异基准", "读取在线版本和作品绑定")
         .await;
@@ -89,6 +94,11 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
     for library in &libraries {
         context.checkpoint().await?;
         let items = emby::items(state, library, FIELDS, context).await?;
+        tracing::info!(
+            library_id = library,
+            items = items.len(),
+            "[同步媒体] 媒体库扫描完成"
+        );
         for item in &items {
             let id = string(item, "Id");
             if !string(item, "ParentId").is_empty() {
@@ -259,6 +269,9 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
     let mut updated = 0;
     let mut failures = vec![];
     for (index, work) in dirty.into_iter().enumerate() {
+        if index > 0 {
+            state.item_delay(context).await?;
+        }
         context.checkpoint().await?;
         context
             .update(
@@ -357,6 +370,12 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
     sqlx::query("DELETE FROM media_metadata WHERE in_library=false AND tmdb_id LIKE '%-%'")
         .execute(&state.db)
         .await?;
+    tracing::info!(
+        updated,
+        offline,
+        failures = failures.len(),
+        "[同步媒体] 版本绑定、元数据与指纹处理结束"
+    );
     Ok(
         json!({"updated":updated,"offline":offline,"failures":failures,"failed":fingerprints["failed"].as_u64().unwrap_or(0),"fingerprints":fingerprints,"message":format!("同步完成！新增/更新: {updated} 个媒体项, 标记离线: {offline} 个媒体项。") }),
     )

@@ -47,14 +47,26 @@ pub async fn current_id(state: &AppState, id: &str) -> Result<String> {
         return Err(ApiError::bad("无效的媒体ID"));
     }
     let config = state.config.read().await.clone();
+    let base = string(&config, "emby_server_url")
+        .trim_end_matches('/')
+        .to_string();
+    let key = string(&config, "emby_api_key");
+    if base.is_empty() || key.is_empty() {
+        return Err(ApiError::bad("Emby 服务器配置不完整"));
+    }
     let response = state
         .http
         .get(format!(
-            "{}/Users/{}/Items/{id}",
-            string(&config, "emby_server_url").trim_end_matches('/'),
+            "{base}/Users/{}/Items/{id}",
             string(&config, "emby_user_id")
         ))
-        .header("X-Emby-Token", string(&config, "emby_api_key"))
+        .header("X-Emby-Token", key)
+        .timeout(Duration::from_secs(
+            config["emby_api_timeout"]
+                .as_u64()
+                .filter(|seconds| *seconds > 0)
+                .unwrap_or(60),
+        ))
         .query(&[("Fields", "Id,Path")])
         .send()
         .await?;
@@ -62,21 +74,52 @@ pub async fn current_id(state: &AppState, id: &str) -> Result<String> {
         response.error_for_status()?;
         return Ok(id.into());
     }
+    let bound: Vec<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(m) FROM media_metadata m WHERE emby_item_ids_json @> $1",
+    )
+    .bind(json!([id]))
+    .fetch_all(&state.db)
+    .await?;
+    if bound.len() != 1 {
+        return Ok(id.into());
+    }
+    let Some((slot, asset)) = recovery_asset(&bound[0], id) else {
+        return Ok(id.into());
+    };
     let target = crate::media_edit::target(state, id).await?;
+    if target.path != asset["path"] {
+        return Ok(id.into());
+    }
     let path = if target.path.starts_with("http") {
-        let path = target
-            .candidates
-            .iter()
-            .filter(|p| p.starts_with(string(&config, "local_strm_root")))
-            .find_map(|p| {
-                p.to_str()
-                    .and_then(|s| s.strip_suffix("-mediainfo.json"))
-                    .map(|s| format!("{s}.strm"))
-            });
-        let Some(path) = path else {
+        let pc = list(&bound[0]["file_pickcode_json"])
+            .get(slot)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let mut paths = BTreeSet::new();
+        for candidate in &target.candidates {
+            if !candidate.starts_with(string(&config, "local_strm_root")) {
+                continue;
+            }
+            let Some(stem) = candidate
+                .to_str()
+                .and_then(|s| s.strip_suffix("-mediainfo.json"))
+            else {
+                continue;
+            };
+            let path = format!("{stem}.strm");
+            if let Some(source) = crate::media_paths::strm_target(&path).await
+                && (crate::media_paths::clean(&source) == crate::media_paths::clean(&target.path)
+                    || (!pc.is_empty()
+                        && crate::fingerprints::pickcode(&source).as_deref() == Some(pc.as_str())))
+            {
+                paths.insert(path);
+            }
+        }
+        if paths.len() != 1 {
             return Ok(id.into());
-        };
-        path
+        }
+        paths.into_iter().next().unwrap()
     } else {
         target.path.clone()
     };
@@ -87,7 +130,7 @@ pub async fn current_id(state: &AppState, id: &str) -> Result<String> {
             &[
                 ("Path", path.clone()),
                 ("Recursive", "true".into()),
-                ("Fields", "Id,Path".into()),
+                ("Fields", "Id,Path,Type,ProviderIds".into()),
             ],
             None,
         )
@@ -100,36 +143,99 @@ pub async fn current_id(state: &AppState, id: &str) -> Result<String> {
         return Ok(id.into());
     }
     let new_id = string(&matches[0], "Id");
-    if new_id.is_empty() || new_id == id {
+    let provider = string(&matches[0]["ProviderIds"], "Tmdb");
+    let tmdb = string(&bound[0], "tmdb_id");
+    if new_id.is_empty()
+        || new_id.len() > 128
+        || !new_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+        || new_id == id
+        || matches[0]["Type"] != bound[0]["item_type"]
+        || (!provider.is_empty() && tmdb.parse::<u64>().is_ok() && provider != tmdb)
+    {
         return Ok(id.into());
     }
     let mut transaction = state.db.begin().await?;
-    let current: Option<Value> = sqlx::query_scalar(
-        "SELECT to_jsonb(m) FROM media_metadata m WHERE emby_item_ids_json @> $1 FOR UPDATE",
+    let current: Vec<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(m) FROM media_metadata m WHERE emby_item_ids_json @> $1 OR emby_item_ids_json @> $2 OR asset_details_json @> $3 ORDER BY tmdb_id,item_type FOR UPDATE",
     )
     .bind(json!([id]))
-    .fetch_optional(&mut *transaction)
+    .bind(json!([new_id]))
+    .bind(json!([{"emby_item_id":new_id}]))
+    .fetch_all(&mut *transaction)
     .await?;
-    let Some(current) = current else {
-        return Ok(id.into());
-    };
-    if !list(&current["asset_details_json"])
-        .iter()
-        .any(|a| a["path"] == target.path)
+    if current.len() != 1
+        || current[0]["tmdb_id"] != bound[0]["tmdb_id"]
+        || current[0]["item_type"] != bound[0]["item_type"]
+        || current[0]["emby_item_ids_json"] != bound[0]["emby_item_ids_json"]
+        || current[0]["asset_details_json"] != bound[0]["asset_details_json"]
+        || current[0]["file_sha1_json"] != bound[0]["file_sha1_json"]
+        || current[0]["file_pickcode_json"] != bound[0]["file_pickcode_json"]
+        || list(&current[0]["emby_item_ids_json"])
+            .iter()
+            .any(|v| v == &new_id)
+        || list(&current[0]["asset_details_json"])
+            .iter()
+            .any(|a| a["emby_item_id"] == new_id)
     {
-        return Err(ApiError::bad("旧媒体路径已变化，停止恢复绑定"));
+        return Ok(id.into());
     }
-    sqlx::query("UPDATE media_metadata SET emby_item_ids_json=(SELECT jsonb_agg(CASE WHEN eid=$1 THEN to_jsonb($2::text) ELSE to_jsonb(eid) END ORDER BY idx) FROM jsonb_array_elements_text(emby_item_ids_json) WITH ORDINALITY arr(eid,idx)),asset_details_json=(SELECT jsonb_agg(CASE WHEN a->>'emby_item_id'=$1 THEN jsonb_set(a,'{emby_item_id}',to_jsonb($2::text)) ELSE a END ORDER BY idx) FROM jsonb_array_elements(CASE WHEN jsonb_typeof(asset_details_json)='array' THEN asset_details_json ELSE '[]' END) WITH ORDINALITY arr(a,idx)),last_updated_at=NOW() WHERE emby_item_ids_json @> $3").bind(id).bind(&new_id).bind(json!([id])).execute(&mut *transaction).await?;
-    for table in ["processed_log", "failed_log"] {
-        sqlx::query(&format!("UPDATE {table} SET item_id=$1 WHERE item_id=$2 AND NOT EXISTS(SELECT 1 FROM {table} WHERE item_id=$1)"))
-            .bind(&new_id).bind(id).execute(&mut *transaction).await?;
-        sqlx::query(&format!("DELETE FROM {table} WHERE item_id=$1"))
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
+    let mut ids = list(&current[0]["emby_item_ids_json"]);
+    let mut assets = list(&current[0]["asset_details_json"]);
+    ids[slot] = json!(new_id);
+    if assets[slot]["emby_item_id"] == id {
+        assets[slot]["emby_item_id"] = json!(new_id);
     }
+    sqlx::query("UPDATE media_metadata SET emby_item_ids_json=$1,asset_details_json=$2,last_updated_at=NOW() WHERE tmdb_id=$3 AND item_type=$4")
+        .bind(json!(ids)).bind(json!(assets)).bind(&tmdb).bind(string(&bound[0], "item_type"))
+        .execute(&mut *transaction).await?;
+    migrate_item_logs(&mut transaction, id, &new_id).await?;
     transaction.commit().await?;
     Ok(new_id)
+}
+fn recovery_asset(row: &Value, id: &str) -> Option<(usize, Value)> {
+    let ids = list(&row["emby_item_ids_json"]);
+    let slots = ids
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| *value == id)
+        .collect::<Vec<_>>();
+    if slots.len() != 1 {
+        return None;
+    }
+    let slot = slots[0].0;
+    let assets = list(&row["asset_details_json"]);
+    let asset = assets.get(slot)?;
+    let asset_id = string(asset, "emby_item_id");
+    let path = string(asset, "path");
+    if path.is_empty()
+        || (!asset_id.is_empty() && asset_id != id)
+        || assets.iter().enumerate().any(|(index, other)| {
+            index != slot && (other["emby_item_id"] == id || other["path"] == path)
+        })
+    {
+        return None;
+    }
+    Some((slot, asset.clone()))
+}
+pub(crate) async fn migrate_item_logs(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    old_id: &str,
+    new_id: &str,
+) -> Result<()> {
+    if old_id.is_empty() || new_id.is_empty() || old_id == new_id {
+        return Ok(());
+    }
+    for table in ["processed_log", "failed_log"] {
+        sqlx::query(&format!("UPDATE {table} SET item_id=$1 WHERE item_id=$2 AND NOT EXISTS(SELECT 1 FROM {table} WHERE item_id=$1)"))
+            .bind(new_id).bind(old_id).execute(&mut **transaction).await?;
+        sqlx::query(&format!("DELETE FROM {table} WHERE item_id=$1"))
+            .bind(old_id)
+            .execute(&mut **transaction)
+            .await?;
+    }
+    Ok(())
 }
 fn text(value: &Value, keys: &[&str]) -> String {
     keys.iter()

@@ -276,6 +276,9 @@ pub async fn prepare_batch(
     let mut notify = BTreeSet::new();
     let mut directories = BTreeSet::new();
     for (index, group) in groups.iter().enumerate() {
+        if index > 0 {
+            state.item_delay(context).await?;
+        }
         let mut ignored = false;
         for path in group {
             if crate::emby::path_ignored(state, path.to_str().unwrap_or("")).await? {
@@ -560,8 +563,9 @@ async fn prepare_group(
             .collect::<String>()
         );
         dummy["Genres"] = top["genres"].clone();
-        crate::douban::premerge_online(state, &dummy, top).await?;
+        crate::douban::premerge_in_job(state, &dummy, top, context).await?;
         crate::translation::metadata_tree(state, &kind, &mut data, &string(&dummy, "Name")).await?;
+        crate::translation::overview_fallback(state, &kind, &mut data, &scope).await?;
         let top = if kind == "Series" {
             &data["series_details"]
         } else {
@@ -865,25 +869,41 @@ async fn download_images(
     };
     for (path, image) in image_plan(kind, root, &images, payload, &files) {
         check_active(state, paths, context, cancel, true).await?;
-        if path.is_file() {
+        if tokio::fs::metadata(&path)
+            .await
+            .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+        {
             continue;
         }
         before_write(&path, roots).await?;
-        let base = std::env::var("ETK_TMDB_IMAGE_BASE")
-            .unwrap_or_else(|_| "https://image.tmdb.org/t/p/original".into());
-        let bytes = state
-            .http
-            .get(format!("{}{image}", base.trim_end_matches('/')))
-            .send()
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
+        let bytes = match crate::images::fetch(state, &image, context).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                check_active(state, paths, context, cancel, true).await?;
+                tracing::warn!(file=%path.display(), reason=%error.1, "实时监控图片下载失败，继续处理其它图片");
+                continue;
+            }
+        };
         let current = check_active(state, paths, context, cancel, true).await?;
         before_write(&path, &current.roots).await?;
         before_write(&path, roots).await?;
-        tokio::fs::write(path, bytes).await?;
-        count += 1;
+        match tokio::fs::write(&path, bytes).await {
+            Ok(()) => count += 1,
+            Err(error) => {
+                tracing::warn!(file=%path.display(), %error, "实时监控图片写入失败，继续处理其它图片")
+            }
+        }
+    }
+    if kind == "Series" {
+        check_active(state, paths, context, cancel, true).await?;
+        count += crate::video_images::missing(state, &files, payload, Some(context)).await?;
+    } else if kind == "Movie" {
+        check_active(state, paths, context, cancel, true).await?;
+        if images["runtime"].is_null() {
+            images["runtime"] = payload["runtime"].clone();
+        }
+        count += crate::video_images::movie_missing(state, &paths[0], root, &images, Some(context))
+            .await?;
     }
     Ok(count)
 }

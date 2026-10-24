@@ -318,7 +318,7 @@
               ><template #icon><UiIcon name="check" /></template>
                 选择此版本
               </n-button>
-              <n-button size="small" secondary @click="selectAllEpisodes"><template #icon><UiIcon name="check" /></template>全选</n-button>
+              <n-button size="small" secondary @click="selectAllEpisodes">全选</n-button>
               <n-button size="small" secondary @click="clearSelectedEpisodes"><template #icon><UiIcon name="close" /></template>清空</n-button>
             </n-space>
           </div>
@@ -539,7 +539,7 @@
         placeholder="请粘贴以 http/https 开头的图片直链..."
       />
       <template #action>
-        <n-button @click="showUrlPrompt = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
+        <n-button @click="showUrlPrompt = false">取消</n-button>
         <n-button type="primary" @click="submitUrlImage" :loading="isUploadingImage"><template #icon><UiIcon name="check" /></template>确定</n-button>
       </template>
     </n-modal>
@@ -646,10 +646,10 @@
       <!-- ★★★ 硬字幕标记按钮 ★★★ -->
       <n-card size="small" style="margin-bottom: 16px;"><template #header><UiIcon name="language" /> 标记硬字幕 (写入视频流 Title)</template>
         <n-space>
-          <n-button @click="setHardcodedSubtitle('简中硬字幕')" secondary><template #icon><UiIcon name="language" /></template>简中</n-button>
-          <n-button @click="setHardcodedSubtitle('繁中硬字幕')" secondary><template #icon><UiIcon name="language" /></template>繁中</n-button>
-          <n-button @click="setHardcodedSubtitle('简英硬字幕')" secondary><template #icon><UiIcon name="language" /></template>简英</n-button>
-          <n-button @click="setHardcodedSubtitle('繁英硬字幕')" secondary><template #icon><UiIcon name="language" /></template>繁英</n-button>
+          <n-button @click="setHardcodedSubtitle('简中硬字幕')" secondary>简中</n-button>
+          <n-button @click="setHardcodedSubtitle('繁中硬字幕')" secondary>繁中</n-button>
+          <n-button @click="setHardcodedSubtitle('简英硬字幕')" secondary>简英</n-button>
+          <n-button @click="setHardcodedSubtitle('繁英硬字幕')" secondary>繁英</n-button>
           <n-button @click="clearHardcodedSubtitle()" secondary><template #icon><UiIcon name="close" /></template>清除标记</n-button>
         </n-space>
       </n-card>
@@ -771,7 +771,7 @@
             将丢弃当前未保存修改；存在歧义时会只读探测 CD2，并且只纠正证据唯一的高清音轨兼容核心。是否继续？
           </n-popconfirm>
           <n-space>
-            <n-button :disabled="isRepairingTruehdCore" @click="showMediaInfoEditor = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
+            <n-button :disabled="isRepairingTruehdCore" @click="showMediaInfoEditor = false">取消</n-button>
             <n-button
               type="primary"
               :disabled="isRepairingTruehdCore"

@@ -198,9 +198,25 @@ async fn emby_post(state: &AppState, path: &str, query: &[(&str, String)]) -> Re
     Ok(())
 }
 pub async fn refresh(state: &AppState, paths: &[String]) -> Result<()> {
+    let config = state.config.read().await.clone();
+    let local = string(&config, "local_strm_root").replace('\\', "/");
+    let cd2 = string(&config, "cd2_media_root").replace('\\', "/");
+    let cd2 = cd2.trim_end_matches('/');
     let directories: BTreeSet<_> = paths
         .iter()
-        .filter_map(|p| std::path::Path::new(p).parent().map(|p| p.to_path_buf()))
+        .map(|path| {
+            let path = path.replace('\\', "/");
+            if !local.is_empty() && !cd2.is_empty() {
+                if path == cd2 {
+                    return local.clone();
+                }
+                if let Some(suffix) = path.strip_prefix(&format!("{cd2}/")) {
+                    return format!("{}/{suffix}", local.trim_end_matches('/'));
+                }
+            }
+            path
+        })
+        .filter_map(|p| std::path::Path::new(&p).parent().map(|p| p.to_path_buf()))
         .collect();
     for mut directory in directories {
         let mut refreshed = false;
@@ -275,6 +291,11 @@ pub async fn save_with_rebuilt(
             ids.push(value.trim().into());
         }
     }
+    tracing::info!(
+        item_id = id,
+        targets = ids.len(),
+        "[媒体信息保存] 开始核对文件身份、轨道与关联版本"
+    );
     let mut prepared = BTreeMap::new();
     let mut groups = BTreeSet::new();
     let mut failures = vec![];
@@ -540,6 +561,13 @@ pub async fn save_with_rebuilt(
         .iter()
         .map(|v| v["skipped"].as_array().map_or(0, Vec::len))
         .sum();
+    tracing::info!(
+        item_id = id,
+        restored = restore.len(),
+        failures = failures.len(),
+        skipped_tracks = warnings,
+        "[媒体信息保存] JSON、媒体流和章节回读验收结束"
+    );
     Ok((
         if failures.is_empty() { 200 } else { 207 },
         json!({"message":format!("媒体信息已更新，已恢复 {} 个版本 JSON，Emby 正在重新扫描",restore.len()),"failures":failures,"batch_reports":reports,"warnings":warnings}),

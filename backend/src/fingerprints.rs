@@ -41,15 +41,20 @@ pub async fn lookup(
     );
     let row = sqlx::query("SELECT pick_code,sha1,local_path FROM p115_filesystem_cache WHERE ($1::text IS NOT NULL AND pick_code=$1) OR ($1::text IS NULL AND trim(both '/' from replace(local_path,chr(92),'/'))=ANY($2)) ORDER BY array_position($2,trim(both '/' from replace(local_path,chr(92),'/'))) NULLS LAST LIMIT 1")
         .bind(&pc).bind(&candidates).fetch_optional(&state.db).await?;
-    if let Some(row) = row {
-        return Ok((
+    let (pc, sha, local) = if let Some(row) = row {
+        (
             pc.or(row.try_get("pick_code")?),
-            row.try_get("sha1")?,
+            row.try_get::<Option<String>, _>("sha1")?
+                .filter(|sha| !sha.is_empty()),
             row.try_get::<Option<String>, _>("local_path")?
                 .unwrap_or_default(),
-        ));
-    }
-    let sha = if let Some(pc) = pc.as_deref()
+        )
+    } else {
+        (pc, None, String::new())
+    };
+    let sha = if sha.is_some() {
+        sha
+    } else if let Some(pc) = pc.as_deref()
         && let Some(id) = file_id(pc)
     {
         crate::p115::file_info(state, id).await.ok().and_then(|v| {
@@ -61,7 +66,7 @@ pub async fn lookup(
     } else {
         None
     };
-    Ok((pc, sha, String::new()))
+    Ok((pc, sha, local))
 }
 pub async fn asset_path(
     state: &AppState,

@@ -483,6 +483,32 @@ pub async fn repair(state: &AppState, ids: &[String], context: &JobContext) -> R
     result["report_path"] = json!(path);
     Ok(result)
 }
+async fn count_files(root: &std::path::Path, markdown: bool, context: &JobContext) -> Result<u64> {
+    let mut count = 0;
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        context.checkpoint().await?;
+        let mut entries = tokio::fs::read_dir(directory).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            let kind = entry.file_type().await?;
+            if kind.is_dir() {
+                directories.push(entry.path());
+            } else if !tokio::fs::metadata(entry.path())
+                .await
+                .is_ok_and(|m| m.is_dir())
+                && (!markdown
+                    || entry
+                        .file_name()
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .ends_with(".md"))
+            {
+                count += 1;
+            }
+        }
+    }
+    Ok(count)
+}
 pub async fn clear(state: &AppState, context: &JobContext) -> Result<Value> {
     context.checkpoint().await?;
     let root = backup_root(state).await?;
@@ -493,11 +519,37 @@ pub async fn clear(state: &AppState, context: &JobContext) -> Result<Value> {
     {
         return Err(ApiError::bad("报告目录不能为符号链接"));
     }
+    let data_root = tokio::fs::canonicalize(&state.data_dir).await?;
+    for path in [state.data_dir.join("reports"), reports.clone()] {
+        if tokio::fs::try_exists(&path).await?
+            && !tokio::fs::canonicalize(&path)
+                .await?
+                .starts_with(&data_root)
+        {
+            return Err(ApiError::bad("音轨报告目录越界"));
+        }
+    }
+    let deleted_files = count_files(&root, false, context).await?;
+    let deleted_reports = if reports.is_dir() {
+        count_files(&reports, true, context).await?
+    } else {
+        0
+    };
+    context.checkpoint().await?;
     tokio::fs::remove_dir_all(root).await?;
     if reports.is_dir() {
         tokio::fs::remove_dir_all(reports).await?;
     }
-    Ok(json!({"message":"音轨纠正备份和报告已清理"}))
+    let message = if deleted_files == 0 && deleted_reports == 0 {
+        "没有可清理的音轨纠正备份或报告。".to_string()
+    } else {
+        format!(
+            "音轨纠正备份和报告已清理，共删除 {deleted_files} 个备份文件、{deleted_reports} 个报告。"
+        )
+    };
+    tracing::info!("[音轨备份] {message}");
+    context.update(100, "清理完成", &message).await;
+    Ok(json!({"message":message,"deleted_files":deleted_files,"deleted_reports":deleted_reports}))
 }
 pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
     let root =

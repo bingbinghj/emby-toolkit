@@ -1,4 +1,10 @@
-use crate::{AppState, error::Result, media_edit::list, state::string, tmdb};
+use crate::{
+    AppState,
+    error::{ApiError, Result},
+    media_edit::list,
+    state::string,
+    tmdb,
+};
 use serde_json::Value;
 use std::{
     collections::BTreeMap,
@@ -102,15 +108,38 @@ pub fn plan(
     }
     result
 }
+pub(crate) async fn fetch(
+    state: &AppState,
+    image: &str,
+    context: &crate::jobs::JobContext,
+) -> Result<Vec<u8>> {
+    let base = std::env::var("ETK_TMDB_IMAGE_BASE")
+        .unwrap_or_else(|_| "https://image.tmdb.org/t/p/original".into());
+    tokio::select! {
+        _ = context.cancelled() => Err(ApiError(axum::http::StatusCode::CONFLICT, "任务已取消".into())),
+        result = async {
+            Ok(state.http.get(format!("{}{image}", base.trim_end_matches('/')))
+                .timeout(std::time::Duration::from_secs(15))
+                .send().await?.error_for_status()?.bytes().await?.to_vec())
+        } => result,
+    }
+}
+
 pub async fn download(
     state: &AppState,
     kind: &str,
     id: &str,
     item: &Value,
     aggregate: &Value,
+    context: &crate::jobs::JobContext,
 ) -> Result<usize> {
+    tracing::info!(
+        "图片资产下载开始：类型 {kind}，TMDb {id}，名称 {}",
+        string(item, "Name")
+    );
     let raw = string(item, "Path");
     if raw.is_empty() || raw.starts_with("http") {
+        tracing::info!("图片资产下载跳过：TMDb {id}，缺少本地路径");
         return Ok(0);
     }
     let path = Path::new(&raw);
@@ -126,6 +155,7 @@ pub async fn download(
         directory
     };
     if !root.is_dir() {
+        tracing::info!("图片资产下载跳过：TMDb {id}，本地目录不存在");
         return Ok(0);
     }
     let config = state.config.read().await.clone();
@@ -142,6 +172,7 @@ pub async fn download(
             .unwrap_or("zh")
             == "zh",
     ) {
+        tracing::debug!("图片语言策略查询：TMDb {id}，语言 {languages}");
         if let Ok(response) = tmdb::get(
             state,
             &endpoint,
@@ -165,9 +196,7 @@ pub async fn download(
             break;
         }
     }
-    let Some(data) = data else {
-        return Ok(0);
-    };
+    let data = data.unwrap_or_default();
     let mut pending = vec![root.to_path_buf()];
     let mut files = vec![];
     if kind == "Series" {
@@ -184,18 +213,51 @@ pub async fn download(
         }
     }
     let mut count = 0;
-    for (path, image) in plan(kind, root, &data, aggregate, &files) {
-        if path.is_file() {
+    let plan = plan(kind, root, &data, aggregate, &files);
+    tracing::info!("图片资产下载计划：TMDb {id}，目标 {} 个", plan.len());
+    for (path, image) in plan {
+        context.checkpoint().await?;
+        if tokio::fs::metadata(&path)
+            .await
+            .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+        {
+            tracing::debug!("图片下载跳过：TMDb {id}，文件 {} 已存在", path.display());
             continue;
         }
-        let response = state
-            .http
-            .get(format!("https://image.tmdb.org/t/p/original{image}"))
-            .send()
-            .await?
-            .error_for_status()?;
-        tokio::fs::write(path, response.bytes().await?).await?;
-        count += 1;
+        tracing::debug!("图片下载开始：TMDb {id}，文件 {}", path.display());
+        let result = async {
+            let bytes = fetch(state, &image, context).await?;
+            context.checkpoint().await?;
+            tokio::fs::write(&path, &bytes).await?;
+            Ok::<_, ApiError>(bytes.len())
+        }
+        .await;
+        match result {
+            Ok(size) => {
+                tracing::debug!(
+                    "图片下载完成：TMDb {id}，文件 {}，{size} 字节",
+                    path.display()
+                );
+                count += 1;
+            }
+            Err(error) if context.is_cancelled() => return Err(error),
+            Err(error) => tracing::warn!(
+                "图片下载失败：TMDb {id}，文件 {}，{}，继续处理其它图片",
+                path.display(),
+                error.1
+            ),
+        }
     }
+    if kind == "Series" {
+        count += crate::video_images::missing(state, &files, aggregate, Some(context)).await?;
+    } else if kind == "Movie" {
+        let mut movie_data = data.clone();
+        if movie_data["runtime"].is_null() {
+            movie_data["runtime"] = aggregate["runtime"].clone();
+        }
+        count += crate::video_images::movie_missing(state, path, root, &movie_data, Some(context))
+            .await?;
+    }
+    tracing::info!("图片资产下载完成：TMDb {id}，新增 {count} 个");
     Ok(count)
 }

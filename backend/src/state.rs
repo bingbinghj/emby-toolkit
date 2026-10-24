@@ -122,6 +122,12 @@ impl AppState {
             .http
             .request(method, format!("{base}/{path}"))
             .header("X-Emby-Token", key)
+            .timeout(Duration::from_secs(
+                cfg["emby_api_timeout"]
+                    .as_u64()
+                    .filter(|seconds| *seconds > 0)
+                    .unwrap_or(60),
+            ))
             .query(query);
         drop(cfg);
         if let Some(body) = body {
@@ -136,6 +142,13 @@ impl AppState {
             return Ok(json!({"success":true}));
         }
         serde_json::from_slice(&bytes).map_err(|_| ApiError::bad("Emby 返回了无效 JSON"))
+    }
+    pub async fn item_delay(&self, context: &crate::jobs::JobContext) -> Result<()> {
+        let seconds = self.config.read().await["delay_between_items_sec"]
+            .as_f64()
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+            .unwrap_or(0.0);
+        context.sleep(Duration::from_secs_f64(seconds)).await
     }
 }
 pub fn string(value: &Value, key: &str) -> String {

@@ -6,7 +6,8 @@
       <n-spin size="large" />
     </div>
 
-    <n-space v-else-if="configModel" vertical :size="24">
+    <div v-else-if="configModel" class="scheduler-content">
+      <div class="scheduler-overview">
       <n-card :bordered="false" class="dashboard-card">
         <template #header>
           <span class="card-title"><UiIcon name="send" /> Telegram 快捷菜单</span>
@@ -45,7 +46,9 @@
         </n-grid>
       </n-card>
 
-      <n-card :bordered="false" class="dashboard-card">
+      <FingerprintAuditPanel class="fingerprint-overview-card" :running="isBackgroundTaskRunning" :task-state="backgroundTaskStatus.state" />
+      </div>
+      <n-card :bordered="false" class="dashboard-card manual-tasks-card">
         <template #header>
           <span class="card-title"><UiIcon name="play" /> 临时任务</span>
         </template>
@@ -62,7 +65,7 @@
                   <template #trigger>
                     <div class="temp-task-item">
                       <div class="temp-task-copy">
-                        <n-text class="temp-task-name"><UiIcon :name="taskIcon(group.key)" /> {{ task.name }}</n-text>
+                        <n-text class="temp-task-name">{{ task.name }}</n-text>
                         <p class="temp-task-description">{{ getTaskHelp(task) }}</p>
                       </div>
                       <n-button
@@ -88,8 +91,7 @@
           </section>
         </div>
       </n-card>
-      <FingerprintAuditPanel :running="isBackgroundTaskRunning" :task-state="backgroundTaskStatus.state" />
-    </n-space>
+    </div>
 
     <n-modal
       v-model:show="showTgMenuConfigModal"
@@ -273,10 +275,11 @@ const triggerTaskNow = async (taskIdentifier) => {
 };
 
 const saveTgMenuConfig = async () => {
+  const payload = { tg_menu_tasks: enabledTgMenuTasks.value.map(t => t.key) };
   if (configModel.value) {
-    configModel.value.tg_menu_tasks = enabledTgMenuTasks.value.map(t => t.key);
+    configModel.value.tg_menu_tasks = payload.tg_menu_tasks;
   }
-  const success = await handleSaveConfig();
+  const success = await handleSaveConfig(payload);
   showTgMenuConfigModal.value = false;
   if (success) {
     message.success('TG 菜单配置已保存。');
@@ -345,6 +348,10 @@ watch([configModel, availableTasksForTgMenu], ([newConfig, tgMenuTasks]) => {
 </script>
 
 <style scoped>
+.scheduler-content { display:grid; gap:24px; }
+.scheduler-overview { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,440px),1fr)); gap:24px; align-items:start; }
+.scheduler-overview > * { min-width:0; }
+
 .center-container {
   display: flex;
   justify-content: center;

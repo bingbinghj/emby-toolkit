@@ -69,15 +69,15 @@
       </n-form-item>
       <n-form-item label="通知类型" label-placement="top">
         <n-checkbox-group v-model:value="configModel.telegram_notify_types"><n-space wrap>
-          <n-checkbox value="library_new"><UiIcon name="library" :size="16" /> 入库通知</n-checkbox>
-          <n-checkbox value="intercept_notify"><UiIcon name="warning" :size="16" /> 拦截通知</n-checkbox>
-          <n-checkbox value="recognize_fail"><UiIcon name="help" :size="16" /> 识别失败</n-checkbox>
+          <n-checkbox value="library_new">入库通知</n-checkbox>
+          <n-checkbox value="intercept_notify">拦截通知</n-checkbox>
+          <n-checkbox value="recognize_fail">识别失败</n-checkbox>
         </n-space></n-checkbox-group>
       </n-form-item>
       </template>
-      <n-form-item label="Telegram Chat ID" label-placement="top">
-        <n-input v-model:value="telegramChatId" placeholder="输入 Chat ID，例如 123456789" @keyup.enter="saveChatId" :disabled="loading || isSavingChatId" />
-        <template #feedback>先打开机器人并发送 /start，再填写您的 Chat ID。</template>
+      <n-form-item label="Telegram 用户ID（私聊ID）" label-placement="top">
+        <n-input v-model:value="telegramChatId" placeholder="输入 Telegram 用户ID，例如 123456789" @keyup.enter="saveChatId" :disabled="loading || isSavingChatId" />
+        <template #feedback>先向 Telegram 机器人发送 /start，再填写您的 Telegram 用户ID（私聊ID），用于接收个人通知。</template>
       </n-form-item>
       <div class="notification-actions">
         <n-button :loading="isFetchingBotLink" @click="openBotChat"><template #icon><UiIcon name="link" /></template>打开机器人</n-button>
@@ -270,7 +270,7 @@ onUnmounted(() => window.removeEventListener('resize', checkMobile));
 </script>
 
 <style scoped>
-.account-grid { display:grid; grid-template-columns:minmax(0, 1.35fr) minmax(0, 1fr); align-items:stretch; gap:24px; }
+.account-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(min(100%, 400px), 1fr)); align-items:stretch; gap:24px; }
 .account-grid > .n-card { height:100%; }
 .account-card, .notification-card { min-width:0; }
 
@@ -351,7 +351,6 @@ onUnmounted(() => window.removeEventListener('resize', checkMobile));
 .notification-actions { display:flex; flex-wrap:wrap; gap:12px; justify-content:flex-end; }
 .global-notification-link { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; margin-top:24px; padding-top:20px; border-top:1px solid var(--ui-border); font-size:13px; color:var(--ui-text-muted); }
 .account-descriptions :deep(th) { width:104px; white-space:nowrap; }
-@container (max-width:850px) { .account-grid { grid-template-columns:minmax(0, 1fr); } }
 @media (max-width:540px) {
   .profile-avatar-section { gap:16px; padding-bottom:20px; }
   .username-text { font-size:18px; }

@@ -1,6 +1,101 @@
 use crate::{AppState, ai, error::Result, media_edit::list, metadata, state::string};
 use serde_json::{Value, json};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+pub async fn overview_fallback(
+    state: &AppState,
+    kind: &str,
+    data: &mut Value,
+    scope: &[(i64, i64)],
+) -> Result<BTreeSet<String>> {
+    let config = state.config.read().await.clone();
+    if config["ai_joke_fallback"] != true
+        || string(&config, "ai_api_key").trim().is_empty()
+        || string(&config, "ai_model_name").trim().is_empty()
+        || !matches!(
+            string(&config, "ai_provider").to_lowercase().as_str(),
+            "openai" | "zhipuai" | "gemini"
+        )
+        || !matches!(kind, "Movie" | "Series")
+    {
+        return Ok(BTreeSet::new());
+    }
+    let top = data.get("series_details").unwrap_or(data);
+    let series_id = top["id"]
+        .as_u64()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| string(top, "id"));
+    let title = string(top, if kind == "Movie" { "title" } else { "name" });
+    let mut missing = BTreeMap::new();
+    let mut paths = BTreeMap::new();
+    let mut filled = BTreeSet::new();
+    for (path, node_kind) in nodes(kind, data) {
+        let node = data.pointer_mut(&path).unwrap();
+        if node_kind == "Season" || !string(node, "overview").is_empty() {
+            continue;
+        }
+        let key = if node_kind == "Episode" {
+            let (Some(season), Some(number)) = (
+                node["season_number"].as_i64(),
+                node["episode_number"].as_i64(),
+            ) else {
+                continue;
+            };
+            if !scope.contains(&(season, number)) {
+                continue;
+            }
+            format!("S{season}E{number}")
+        } else {
+            "main".into()
+        };
+        let cached: Option<String> = if node_kind == "Episode" {
+            sqlx::query_scalar("SELECT overview FROM media_metadata WHERE item_type='Episode' AND parent_series_tmdb_id=$1 AND season_number=$2 AND episode_number=$3 AND overview LIKE '%【老六占位简介】%' LIMIT 1")
+                .bind(&series_id).bind(node["season_number"].as_i64().map(|n| n as i32)).bind(node["episode_number"].as_i64().map(|n| n as i32)).fetch_optional(&state.db).await?
+        } else {
+            metadata::row(state, &series_id, kind)
+                .await?
+                .map(|row| string(&row, "overview"))
+        };
+        if let Some(cached) = cached.filter(|text| text.contains("【老六占位简介】")) {
+            node["overview"] = json!(cached);
+            tracing::debug!("占位简介缓存继承：TMDb {series_id}，目标 {key}");
+            filled.insert(key);
+        } else {
+            missing.insert(
+                key.clone(),
+                if key == "main" {
+                    title.clone()
+                } else {
+                    format!("{title} {key}")
+                },
+            );
+            paths.insert(key, path);
+        }
+    }
+    if !missing.is_empty() {
+        tracing::info!(
+            "占位简介生成开始：TMDb {series_id}，缺失简介 {} 处",
+            missing.len()
+        );
+        let generated = ai::translate(
+            state,
+            &missing,
+            "batch_joke_fallback",
+            &Value::Null,
+            &Value::Null,
+        )
+        .await?;
+        for (key, text) in generated {
+            data.pointer_mut(&paths[&key]).unwrap()["overview"] = json!(text);
+            filled.insert(key);
+        }
+        tracing::info!(
+            "占位简介处理结束：TMDb {series_id}，填充或继承 {} 处",
+            filled.len()
+        );
+    }
+    Ok(filled)
+}
 
 pub fn chinese(text: &str) -> bool {
     text.chars()
@@ -150,17 +245,22 @@ pub async fn metadata_tree(
             }
             let current = string(node, field);
             if chinese(&current) || (purpose == "title" && current.is_empty()) {
+                tracing::debug!(
+                    "元数据字段翻译跳过：类型 {kind}，TMDb {id}，字段 {field} 已有中文或空标题"
+                );
                 continue;
             }
             let stored = string(&local, if purpose == "title" { "title" } else { field });
             if chinese(&stored) {
                 node[field] = json!(stored);
+                tracing::debug!("元数据字段翻译缓存命中：类型 {kind}，TMDb {id}，字段 {field}");
                 continue;
             }
             if current.is_empty()
                 && matches!(kind.as_str(), "Movie" | "Series")
                 && purpose != "title"
             {
+                tracing::info!("元数据翻译英文源补抓开始：类型 {kind}，TMDb {id}，字段 {field}");
                 let endpoint = format!("/{}/{id}", if kind == "Movie" { "movie" } else { "tv" });
                 if let Ok(english) =
                     crate::tmdb::get(state, &endpoint, &[("language", "en-US".into())]).await
@@ -260,11 +360,24 @@ pub async fn metadata_tree(
             }
         }
     }
+    if !fields.is_empty() || !persons.is_empty() || !roles.is_empty() {
+        tracing::info!(
+            "元数据翻译开始：类型 {kind}，名称 {item_name}，元数据节点 {} 个，文本字段 {} 个，人名 {} 个，角色 {} 个",
+            nodes.len(),
+            fields.values().map(BTreeMap::len).sum::<usize>(),
+            persons.len(),
+            roles.len()
+        );
+    }
     let mut translated = 0;
     for purpose in ["overview", "tagline", "title"] {
         let Some(fields) = fields.get(purpose) else {
             continue;
         };
+        tracing::info!(
+            "元数据字段翻译开始：名称 {item_name}，用途 {purpose}，条目 {} 个",
+            fields.len()
+        );
         let inputs = fields
             .iter()
             .map(|(id, (_, source))| (id.clone(), source.clone()))
@@ -286,6 +399,10 @@ pub async fn metadata_tree(
             &Value::Null,
         )
         .await?;
+        tracing::info!(
+            "元数据字段翻译返回：名称 {item_name}，用途 {purpose}，可用结果 {} 个",
+            output.len()
+        );
         for (id, value) in output {
             if let Some((path, _)) = fields.get(&id)
                 && let Some(node) = data.pointer_mut(path)
@@ -322,6 +439,13 @@ pub async fn metadata_tree(
                 missing.insert(id.clone(), source.clone());
             }
         }
+        if !inputs.is_empty() {
+            tracing::info!(
+                "人物翻译缓存检查完成：用途 {purpose}，命中 {} 个，待请求 {} 个",
+                output.len(),
+                missing.len()
+            );
+        }
         let revision = state
             .ai
             .cache_revision
@@ -339,6 +463,14 @@ pub async fn metadata_tree(
                 sqlx::query("INSERT INTO translation_cache(original_text,translated_text,engine_used) VALUES($1,$2,$3) ON CONFLICT(original_text) DO UPDATE SET translated_text=EXCLUDED.translated_text,last_updated_at=NOW()")
             .bind(&inputs[id]).bind(value).bind(string(&*state.config.read().await,"ai_provider")).execute(&state.db).await?;
             }
+            if !translated.is_empty() {
+                tracing::info!(
+                    "人物翻译缓存写入完成：用途 {purpose}，条目 {} 个",
+                    translated.len()
+                );
+            }
+        } else if !translated.is_empty() {
+            tracing::debug!("人物翻译缓存写入跳过：用途 {purpose}，质量模式或缓存版本已变化");
         }
         output.extend(translated);
         Ok(output)
@@ -411,5 +543,10 @@ pub async fn metadata_tree(
         }
     }
     translated += people.len() + roles.len();
+    if !fields.is_empty() || !people.is_empty() || !roles.is_empty() {
+        tracing::info!(
+            "元数据翻译完成：类型 {kind}，名称 {item_name}，字段和人物结果 {translated} 个"
+        );
+    }
     Ok(translated)
 }

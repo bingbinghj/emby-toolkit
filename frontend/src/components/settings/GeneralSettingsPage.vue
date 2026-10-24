@@ -18,7 +18,7 @@
           <n-tabs class="settings-tabs" type="line" animated :size="isMobile ? 'medium' : 'large'" :pane-style="tabPaneStyle">
             <!-- ================== 标签页 1: 通用设置 ================== -->
             <n-tab-pane name="general"><template #tab><span class="mp-title-with-icon"><UiIcon name="settings" :size="16" />通用设置</span></template>
-              <n-grid class="mp-aligned-grid" cols="1 720:2 1100:3" :x-gap="24" :y-gap="24">
+              <n-grid class="mp-aligned-grid settings-card-grid" cols="1" :x-gap="24" :y-gap="24">
                 <!-- 左侧列 -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card">
@@ -294,7 +294,7 @@
 
             <!-- ★★★ 115 网盘设置 ★★★ -->
             <n-tab-pane name="115_drive"><template #tab><span class="mp-title-with-icon"><UiIcon name="key" :size="16" />115 网盘</span></template>
-              <n-grid class="mp-aligned-grid" cols="1 800:2" :x-gap="24" :y-gap="24">
+              <n-grid class="mp-aligned-grid settings-card-grid" cols="1" :x-gap="24" :y-gap="24">
 
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
@@ -816,7 +816,7 @@
 
             <!-- ================== 标签页 4: 高级 (核心修改区域) ================== -->
             <n-tab-pane name="advanced"><template #tab><span class="mp-title-with-icon"><UiIcon name="options" :size="16" />高级</span></template>
-              <n-grid class="mp-aligned-grid" cols="1 800:2" :x-gap="24" :y-gap="24">
+              <n-grid class="mp-aligned-grid settings-card-grid" cols="1" :x-gap="24" :y-gap="24">
 
                 <!-- 卡片 1: 日志配置 -->
                 <n-gi>
@@ -842,7 +842,7 @@
                 </n-gi>
 
                 <!-- 卡片 2: 入库自动处理 -->
-                <n-gi span="1 800:2">
+                <n-gi>
                   <n-card :bordered="false" class="dashboard-card">
                     <template #header><span class="card-title"><n-icon :component="SyncIcon" />入库自动处理</span></template>
                     <n-form-item-grid-item label="入库自动纠正高清音轨" path="auto_repair_truehd_core_on_ingest">
@@ -873,7 +873,7 @@
                 </n-gi>
 
                 <!-- 卡片 3: 媒体重命名格式 -->
-                <n-gi span="1 800:2">
+                <n-gi>
                   <n-card :bordered="false" class="dashboard-card">
                     <template #header><span class="card-title"><n-icon :component="RenameIcon" />媒体重命名格式</span></template>
                     <div class="rename-format-grid">
@@ -902,7 +902,7 @@
                               class="rename-preview-node"
                               :style="{ paddingLeft: `${index * 22}px` }"
                             >
-                              <n-icon :component="index === movieRenamePreviewParts.length - 1 ? FileIcon : FolderIcon" :color="index === movieRenamePreviewParts.length - 1 ? '#2080f0' : '#f0a020'" />
+                              <n-icon :component="index === movieRenamePreviewParts.length - 1 ? FileIcon : FolderIcon" :color="index === movieRenamePreviewParts.length - 1 ? 'var(--ui-info-color)' : 'var(--ui-warning-color)'" />
                               <span>{{ part }}</span>
                             </div>
                           </div>
@@ -936,7 +936,7 @@
                               class="rename-preview-node"
                               :style="{ paddingLeft: `${index * 22}px` }"
                             >
-                              <n-icon :component="index === tvRenamePreviewParts.length - 1 ? FileIcon : FolderIcon" :color="index === tvRenamePreviewParts.length - 1 ? '#2080f0' : '#f0a020'" />
+                              <n-icon :component="index === tvRenamePreviewParts.length - 1 ? FileIcon : FolderIcon" :color="index === tvRenamePreviewParts.length - 1 ? 'var(--ui-info-color)' : 'var(--ui-warning-color)'" />
                               <span>{{ part }}</span>
                             </div>
                           </div>
@@ -1096,7 +1096,7 @@
       </n-space>
 
       <template #footer>
-        <n-button @click="closeCookieModal" v-if="cookieQrcodeStatus !== 'success'"><template #icon><UiIcon name="close" /></template>关闭</n-button>
+        <n-button @click="closeCookieModal" v-if="cookieQrcodeStatus !== 'success'">关闭</n-button>
       </template>
     </n-modal>
 
@@ -1143,7 +1143,7 @@
         </div>
       </div>
       <template #footer>
-        <n-button @click="closeQrcodeModal" v-if="qrcodeStatus !== 'success'"><template #icon><UiIcon name="close" /></template>关闭</n-button>
+        <n-button @click="closeQrcodeModal" v-if="qrcodeStatus !== 'success'">关闭</n-button>
       </template>
     </n-modal>
     <!-- ★★★ 本地物理目录选择器弹窗 ★★★ -->
@@ -1162,7 +1162,7 @@
           <n-list hoverable clickable bordered style="max-height: 400px; overflow-y: auto; border-radius: 6px;">
             <n-list-item v-for="folder in localFolders" :key="folder.path" @click="selectLocalFolder(folder)">
               <template #prefix>
-                <n-icon :component="folder.is_parent ? ArrowUpIcon : FolderIcon" size="22" :color="folder.is_parent ? '#888' : '#f0a020'" />
+                <n-icon :component="folder.is_parent ? ArrowUpIcon : FolderIcon" size="22" :color="folder.is_parent ? 'var(--ui-text-muted)' : 'var(--ui-warning-color)'" />
               </template>
               <span :style="{ fontWeight: folder.is_parent ? 'bold' : 'normal' }">{{ folder.name }}</span>
             </n-list-item>
@@ -1171,7 +1171,7 @@
 
           <!-- 底部按钮 -->
           <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 16px;">
-            <n-button @click="showLocalFolderModal = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
+            <n-button @click="showLocalFolderModal = false">取消</n-button>
             <n-button type="primary" @click="confirmLocalFolder"><template #icon><UiIcon name="select" /></template>确定选择此目录</n-button>
           </div>
         </n-space>
@@ -1191,7 +1191,7 @@
           <n-list hoverable clickable bordered style="max-height: 400px; overflow-y: auto; border-radius: 6px;">
             <n-list-item v-for="folder in p115Folders" :key="`${folder.cid}-${folder.path}`" @click="selectP115Folder(folder)">
               <template #prefix>
-                <n-icon :component="folder.is_parent ? ArrowUpIcon : FolderIcon" size="22" :color="folder.is_parent ? '#888' : '#f0a020'" />
+                <n-icon :component="folder.is_parent ? ArrowUpIcon : FolderIcon" size="22" :color="folder.is_parent ? 'var(--ui-text-muted)' : 'var(--ui-warning-color)'" />
               </template>
               <span :style="{ fontWeight: folder.is_parent ? 'bold' : 'normal' }">{{ folder.name }}</span>
             </n-list-item>
@@ -1199,7 +1199,7 @@
           </n-list>
 
           <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 16px;">
-            <n-button @click="showP115FolderModal = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
+            <n-button @click="showP115FolderModal = false">取消</n-button>
             <n-button type="primary" @click="confirmP115Folder"><template #icon><UiIcon name="select" /></template>确定选择此目录</n-button>
           </div>
         </n-space>
@@ -1211,7 +1211,7 @@
   <n-modal v-model:show="exportModalVisible" preset="dialog" title="选择要导出的数据表" :style="modalStyle(520)" class="glass-modal">
     <n-space justify="end" style="margin-bottom: 10px;">
       <n-button text type="primary" @click="selectAllForExport"><template #icon><UiIcon name="select" /></template>全选</n-button>
-      <n-button text type="primary" @click="deselectAllForExport"><template #icon><UiIcon name="close" /></template>全不选</n-button>
+      <n-button text type="primary" @click="deselectAllForExport">全不选</n-button>
     </n-space>
     <n-checkbox-group v-model:value="tablesToExport" vertical>
       <n-grid :y-gap="8" :cols="isMobile ? 1 : 2">
@@ -1223,7 +1223,7 @@
       </n-grid>
     </n-checkbox-group>
     <template #action>
-      <n-button @click="exportModalVisible = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
+      <n-button @click="exportModalVisible = false">取消</n-button>
       <n-button type="primary" @click="handleExport" :disabled="tablesToExport.length === 0"><template #icon><UiIcon name="download" /></template>确认导出</n-button>
     </template>
   </n-modal>
@@ -1241,7 +1241,7 @@
         <n-text strong>选择要恢复的表 (从文件中自动读取)</n-text>
         <n-space style="margin-left: 20px; display: inline-flex; vertical-align: middle;">
           <n-button size="tiny" text type="primary" @click="selectAllForImport"><template #icon><UiIcon name="select" /></template>全选</n-button>
-          <n-button size="tiny" text type="primary" @click="deselectAllForImport"><template #icon><UiIcon name="close" /></template>全不选</n-button>
+          <n-button size="tiny" text type="primary" @click="deselectAllForImport">全不选</n-button>
         </n-space>
       </div>
       <n-checkbox-group
@@ -1260,7 +1260,7 @@
       </n-checkbox-group>
     </n-space>
     <template #action>
-      <n-button @click="cancelImport"><template #icon><UiIcon name="close" /></template>取消</n-button>
+      <n-button @click="cancelImport">取消</n-button>
       <n-button type="primary" @click="confirmImport" :disabled="tablesToImport.length === 0"><template #icon><UiIcon name="refresh" /></template>确认并开始恢复</n-button>
     </template>
   </n-modal>
@@ -1269,7 +1269,7 @@
   <n-modal v-model:show="clearTablesModalVisible" preset="dialog" title="清空指定数据表" :style="modalStyle(520)" class="glass-modal">
     <n-space justify="end" style="margin-bottom: 10px;">
       <n-button text type="primary" @click="selectAllForClear"><template #icon><UiIcon name="select" /></template>全选</n-button>
-      <n-button text type="primary" @click="deselectAllForClear"><template #icon><UiIcon name="close" /></template>全不选</n-button>
+      <n-button text type="primary" @click="deselectAllForClear">全不选</n-button>
     </n-space>
     <n-alert title="高危操作警告" type="error" style="margin-bottom: 15px;">
       此操作将 <strong class="warning-text">永久删除</strong> 所选表中的所有数据，且 <strong class="warning-text">不可恢复</strong>！请务必谨慎操作。
@@ -1288,7 +1288,7 @@
       </n-grid>
     </n-checkbox-group>
     <template #action>
-      <n-button @click="clearTablesModalVisible = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
+      <n-button @click="clearTablesModalVisible = false">取消</n-button>
       <n-button type="error" @click="handleClearTables" :disabled="tablesToClear.length === 0" :loading="isClearing"><template #icon><UiIcon name="delete" /></template>确认清空</n-button>
     </template>
   </n-modal>
@@ -1307,7 +1307,7 @@
       <p class="warning-text" style="margin: 0;"><strong>请仅在您已经或将要重建 Emby 媒体库时执行此操作。</strong></p>
     </n-alert>
     <template #action>
-      <n-button @click="resetMappingsModalVisible = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
+      <n-button @click="resetMappingsModalVisible = false">取消</n-button>
       <n-button type="warning" @click="handleResetActorMappings" :loading="isResettingMappings"><template #icon><UiIcon name="settings" /></template>确认重置</n-button>
     </template>
   </n-modal>
@@ -1389,7 +1389,7 @@
         </n-popconfirm>
 
         <n-space>
-          <n-button @click="promptModalVisible = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
+          <n-button @click="promptModalVisible = false">取消</n-button>
           <n-button type="primary" @click="savePrompts" :loading="savingPrompts"><template #icon><UiIcon name="save" /></template>保存配置</n-button>
         </n-space>
       </n-space>
@@ -2355,10 +2355,11 @@ const handleExport = async () => {
 const selectAllForExport = () => tablesToExport.value = [...allDbTables.value];
 const deselectAllForExport = () => tablesToExport.value = [];
 
-const handleCustomImportRequest = async ({ file }) => {
+const handleCustomImportRequest = async ({ file, onFinish, onError }) => {
   const rawFile = file.file;
   if (!rawFile) {
     message.error("未能获取到文件对象。");
+    onError();
     return;
   }
 
@@ -2374,6 +2375,7 @@ const handleCustomImportRequest = async ({ file }) => {
     const tables = response.data.tables;
     if (!tables || tables.length === 0) {
       message.error('备份文件有效，但其中不包含任何数据表。');
+      onError();
       return;
     }
 
@@ -2381,11 +2383,13 @@ const handleCustomImportRequest = async ({ file }) => {
     tablesInBackupFile.value = tables;
     tablesToImport.value = [...tables];
     importModalVisible.value = true;
+    onFinish();
 
   } catch (error) {
     msgReactive.destroy();
     const errorMsg = error.response?.data?.error || '解析备份文件失败，请检查文件是否有效。';
     message.error(errorMsg);
+    onError();
   }
 };
 
@@ -2492,6 +2496,10 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+.settings-card-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)) !important;
+}
+.settings-card-grid > div { grid-column: auto !important; }
 .card-title { display: inline-flex; align-items: center; gap: 8px; }
 /* 禁用AI设置时的遮罩效果 */
 .ai-settings-wrapper {
@@ -2531,17 +2539,19 @@ onUnmounted(() => {
 }
 .data-action-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 160px), 1fr));
   gap: 10px;
   align-items: stretch;
 }
 .data-action-grid .action-button {
   width: 100%;
+  min-width: 0;
   justify-content: center;
 }
 .data-action-grid :deep(.n-upload),
 .data-action-grid :deep(.n-upload-trigger) {
   width: 100%;
+  min-width: 0;
 }
 .glass-section {
   background-color: rgba(255, 255, 255, 0.1);

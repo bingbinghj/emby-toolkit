@@ -34,6 +34,7 @@ pub mod media_images;
 pub mod media_info;
 pub mod media_manual;
 pub mod media_paths;
+pub mod media_preflight;
 pub mod media_rename;
 pub mod media_restore;
 pub mod media_save;
@@ -69,6 +70,7 @@ pub mod titles;
 pub mod tmdb;
 pub mod translation;
 pub mod versions;
+pub mod video_images;
 pub mod webhook;
 
 pub use state::AppState;

@@ -646,6 +646,7 @@ async fn submit(
     axum::extract::State(state): axum::extract::State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<(axum::http::StatusCode, axum::Json<Value>)> {
+    let id = crate::orphans::current_id(&state, &id).await?;
     let work = state.clone();
     let task = state
         .jobs

@@ -26,7 +26,9 @@ pub async fn upsert(state: &AppState, person: &Value) -> Result<()> {
             .map(str::trim)
     };
     sqlx::query("INSERT INTO person_metadata(tmdb_person_id,primary_name,imdb_id,douban_celebrity_id,last_updated_at) VALUES($1,$2,$3,$4,NOW()) ON CONFLICT(tmdb_person_id) DO UPDATE SET primary_name=EXCLUDED.primary_name,imdb_id=COALESCE(EXCLUDED.imdb_id,person_metadata.imdb_id),douban_celebrity_id=COALESCE(EXCLUDED.douban_celebrity_id,person_metadata.douban_celebrity_id),last_updated_at=NOW() WHERE person_metadata.primary_name IS DISTINCT FROM EXCLUDED.primary_name OR person_metadata.imdb_id IS DISTINCT FROM COALESCE(EXCLUDED.imdb_id,person_metadata.imdb_id) OR person_metadata.douban_celebrity_id IS DISTINCT FROM COALESCE(EXCLUDED.douban_celebrity_id,person_metadata.douban_celebrity_id)")
-        .bind(id).bind(name).bind(optional("imdb_id")).bind(optional("douban_id")).execute(&state.db).await?;
+        .bind(id).bind(name).bind(optional("imdb_id")).bind(optional("douban_id")).execute(&state.db).await
+        .inspect(|result| tracing::debug!("人员元数据库写入完成：TMDb {id}，名称 {name}，变更 {} 行", result.rows_affected()))
+        .inspect_err(|_| tracing::error!("人员元数据库写入失败：TMDb {id}，名称 {name}"))?;
     if ["profile_path", "gender", "popularity"]
         .iter()
         .any(|k| person.get(*k).is_some())
@@ -92,6 +94,12 @@ async fn process_inner(
     item: &Value,
     persist: bool,
 ) -> Result<Vec<Value>> {
+    tracing::info!(
+        "演员表处理开始：Emby {}，名称 {}，输入 {} 位，写入缓存 {persist}",
+        string(item, "Id"),
+        string(item, "Name"),
+        source.len()
+    );
     let config = state.config.read().await.clone();
     let mut raw = source.to_vec();
     raw.sort_by_key(|p| p["order"].as_i64().unwrap_or(999));
@@ -120,11 +128,17 @@ async fn process_inner(
         }) {
             let mut actor = actor.clone();
             used.insert(string(&actor, "name").trim().to_string());
-            if chinese(&name) {
+            let douban_matched = actor["_douban_matched"] == true;
+            if !douban_matched && actor["_douban_matched"] != "name" && chinese(&name) {
                 actor["name"] = json!(name);
             }
             let role = crate::cast::clean_character(&string(person, "Role"));
-            if chinese(&role) || string(&actor, "character").is_empty() {
+            if douban_matched {
+                actor["character"] = json!(crate::douban::best_role(
+                    &role,
+                    &string(&actor, "character")
+                ));
+            } else if chinese(&role) || string(&actor, "character").is_empty() {
                 actor["character"] = json!(role);
             }
             actor["emby_person_id"] = person["Id"].clone();
@@ -150,11 +164,21 @@ async fn process_inner(
     }
     let mut result = crate::cast::format(&result, item, &config);
     for actor in &mut result {
+        if let Some(actor) = actor.as_object_mut() {
+            actor.remove("_douban_matched");
+        }
         actor["provider_ids"] = json!({"Tmdb":actor["id"].as_i64().map(|n|n.to_string()),"Imdb":actor["imdb_id"],"Douban":actor["douban_id"]});
         if persist {
             upsert(state, actor).await?;
         }
     }
+    tracing::info!(
+        "演员表处理完成：Emby {}，名称 {}，保留 {} 位，过滤 {} 位",
+        string(item, "Id"),
+        string(item, "Name"),
+        result.len(),
+        source.len().saturating_sub(result.len())
+    );
     Ok(result)
 }
 
@@ -164,6 +188,11 @@ pub async fn update_emby(
     data: &Value,
     item: &Value,
 ) -> Result<usize> {
+    tracing::info!(
+        "Emby 人物名字同步开始：Emby {}，名称 {}",
+        string(item, "Id"),
+        string(item, "Name")
+    );
     let mut names = std::collections::BTreeMap::<String, String>::new();
     let mut locations = std::collections::HashMap::new();
     let allowed = cast
@@ -253,10 +282,16 @@ pub async fn update_emby(
             locations.insert(id.clone(), string(person, "Id"));
         }
     }
+    tracing::info!(
+        "Emby 人物名字同步范围确认：Emby {}，待核对 {} 位",
+        string(item, "Id"),
+        names.len()
+    );
     let mut updated = 0;
     for (id, location) in locations {
         let mut person = crate::media_edit::details(state, &location, "Name").await?;
         if names.get(&id).is_some_and(|name| person["Name"] != *name) {
+            tracing::debug!("Emby 人物名字更新开始：人员 {location}，TMDb {id}");
             person["Name"] = json!(names[&id]);
             state
                 .emby(
@@ -267,7 +302,14 @@ pub async fn update_emby(
                 )
                 .await?;
             updated += 1;
+            tracing::debug!("Emby 人物名字更新完成：人员 {location}，TMDb {id}");
+        } else {
+            tracing::debug!("Emby 人物名字更新跳过：人员 {location}，TMDb {id}，名字无需更新");
         }
     }
+    tracing::info!(
+        "Emby 人物名字同步完成：Emby {}，更新 {updated} 位",
+        string(item, "Id")
+    );
     Ok(updated)
 }

@@ -56,7 +56,7 @@ html, body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 
 .mp-navbar-tools { margin-left:auto; display:flex; align-items:center; gap:8px; min-width:0; }
 .mp-user-avatar { position:relative; width:36px; height:36px; padding:0; border:0; border-radius:50%; font-size:14px; font-weight:600; background:var(--accent-glow-color); color:var(--accent-color); cursor:pointer; margin-left:5px; }
 .mp-user-avatar img { display:block; width:100%; height:100%; border-radius:50%; object-fit:cover; }
-.mp-user-avatar span { position:absolute; right:0; bottom:0; height:9px; width:9px; background:#56ca00; border:2px solid var(--ui-surface); border-radius:50%; }
+.mp-user-avatar span { position:absolute; right:0; bottom:0; height:9px; width:9px; background:var(--ui-success-color); border:2px solid var(--ui-surface); border-radius:50%; }
 .mp-task-trigger { position:relative; display:flex; align-items:center; justify-content:center; border:0; border-radius:50%; width:36px; height:36px; background:transparent; color:var(--ui-text-muted); cursor:pointer; }
 .mp-task-trigger:hover,.mp-task-trigger.running { background:var(--accent-glow-color); color:var(--accent-color); }
 .mp-page-content { flex:1; min-height:0; min-width:0; overflow:auto; padding:24px 0; scrollbar-gutter:stable; container-type:inline-size; }
@@ -118,7 +118,7 @@ html, body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 
 .n-dialog__action, .n-popconfirm__action { flex-wrap:wrap; }
 .fullscreen-container { height:100dvh; min-height:0; overflow:auto; }
 .login-layout, .setup-layout { background:transparent !important; }
-.n-modal .n-card,.n-card.glass-modal,.n-dialog.glass-modal { border-radius:12px !important; background:var(--ui-surface) !important; backdrop-filter:none !important; }
+.n-modal .n-card,.n-card.glass-modal,.n-dialog.glass-modal { border-radius:12px !important; background:var(--modal-solid-bg-color) !important; backdrop-filter:none !important; }
 .n-divider { border-color:var(--ui-border-soft) !important; }
 .n-tabs .n-tabs-tab { font-weight:500; }
 .drag-over-top { border-top-color:var(--accent-color) !important; }
@@ -169,18 +169,35 @@ html, body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 
 @media (prefers-reduced-motion:reduce) { .mp-running-task-track.indeterminate > span { animation:none; } }
 @media (max-width:600px) { .mp-navbar-center { margin:0 6px; } .mp-running-task { padding:7px; } .mp-running-task-title { gap:5px; } }
 
-/* Material themes keep one quiet surface and solid, readable dialogs. */
+/* MoviePilot v3 material tokens, using the default clear glass surface. */
 html[data-theme='transparent'] :is(.mp-app-shell, .fullscreen-container) { background:#1C1C1C; }
-html[data-theme='glass'] :is(.mp-app-shell, .fullscreen-container) { background:linear-gradient(145deg,#17263A,#0B1322 65%); }
-html:is([data-theme='transparent'], [data-theme='glass']) :is(.mp-navbar, .dashboard-card) {
-  backdrop-filter:blur(16px);
-  -webkit-backdrop-filter:blur(16px);
+html[data-theme='transparent'] :is(.mp-navbar, .n-card, .mp-sidebar) {
+  backdrop-filter:blur(10px);
+  -webkit-backdrop-filter:blur(10px);
 }
-html:is([data-theme='transparent'], [data-theme='glass']) :is(.n-modal .n-card, .n-drawer, .n-dialog, .mp-log-dialog) { background:var(--modal-solid-bg-color)!important; }
+html[data-theme='transparent'] .mp-sidebar { background:rgba(30,30,30,.2); backdrop-filter:blur(16px); }
+html[data-theme='glass'] {
+  --glass-surface:linear-gradient(128deg,rgba(255,255,255,.1034),transparent 38%), linear-gradient(180deg,rgba(23,27,32,.244),rgba(23,27,32,.299));
+  --glass-rim:rgba(255,255,255,.2664);
+  --glass-shadow:0 12px 30px rgba(0,0,0,.14), inset 0 1px 0 rgba(255,255,255,.15);
+}
+html[data-theme='glass'] :is(.mp-app-shell, .fullscreen-container) { background:#0B1322; }
+html[data-theme='glass'] :is(.mp-navbar, .mp-sidebar, .n-card) {
+  background:var(--glass-surface) !important;
+  border:1px solid var(--glass-rim) !important;
+  box-shadow:var(--glass-shadow) !important;
+  backdrop-filter:saturate(118%);
+  -webkit-backdrop-filter:saturate(118%);
+}
+html:is([data-theme='transparent'], [data-theme='glass']) :is(.n-card.n-modal, .n-drawer, .n-dialog, .n-popover, .mp-log-dialog) {
+  background:var(--modal-solid-bg-color) !important;
+  backdrop-filter:blur(16px) saturate(135%);
+  -webkit-backdrop-filter:blur(16px) saturate(135%);
+}
 html:is([data-theme='transparent'], [data-theme='glass']) :is(.n-data-table, .n-data-table-table, .n-tabs-pane-wrapper, .n-layout) { background:transparent; }
 html:is([data-theme='transparent'], [data-theme='glass']) .n-data-table .n-data-table-td { background:transparent; }
 @supports not (backdrop-filter:blur(1px)) {
-  html:is([data-theme='transparent'], [data-theme='glass']) :is(.mp-navbar,.dashboard-card) { background:var(--modal-solid-bg-color)!important; }
+  html:is([data-theme='transparent'], [data-theme='glass']) :is(.mp-navbar, .mp-sidebar, .n-card) { background:var(--modal-solid-bg-color) !important; }
 }
 .mp-log-dialog { display:flex; height:min(800px,calc(100dvh - 48px)); min-height:0; padding:24px; border-radius:14px; background:var(--modal-solid-bg-color); box-shadow:0 12px 40px rgba(0,0,0,.2); overflow:hidden; }
 .mp-log-dialog > .notification-center { width:100%; }

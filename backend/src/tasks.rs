@@ -66,6 +66,18 @@ pub async fn submit_task(state: &AppState, task: &str, full: bool) -> Result<Val
             format!("未知的任务名称: {task}"),
         ));
     }
+    if ["actor-translation", "role-translation"].contains(&task)
+        && state.config.read().await["ai_translate_actor_role"] != true
+    {
+        return Err(ApiError(StatusCode::CONFLICT, "AI翻译功能未启用".into()));
+    }
+    if task == "generate-all-covers"
+        && crate::db::setting(&state.db, "cover_generator_config")
+            .await?
+            .is_none_or(|config| config["enabled"] != true)
+    {
+        return Err(ApiError(StatusCode::CONFLICT, "封面生成器未启用".into()));
+    }
     let task = task.to_string();
     let catalog: Value = serde_json::from_str(include_str!("../assets/task_catalog.json")).unwrap();
     let name = catalog["all"]
@@ -109,6 +121,7 @@ async fn translate_persons(state: &AppState, context: &crate::jobs::JobContext) 
         return Ok(json!({"updated":0,"message":"AI翻译功能未启用，跳过任务。"}));
     }
     let people = crate::emby::persons(state, context).await?;
+    tracing::info!(people = people.len(), "[人物中文化] 已读取媒体库关联人物");
     let mut inputs = std::collections::BTreeMap::new();
     let mut source_map = std::collections::HashMap::new();
     for person in &people {
@@ -136,6 +149,11 @@ async fn translate_persons(state: &AppState, context: &crate::jobs::JobContext) 
     }
     let translated =
         crate::ai::translate(state, &inputs, "fast_mode", &json!({}), &Value::Null).await?;
+    tracing::info!(
+        requested = inputs.len(),
+        translated = translated.len(),
+        "[人物中文化] 翻译结果已取得，开始回写人物"
+    );
     let mut updated = 0;
     let mut failures = vec![];
     for person in people {
@@ -161,8 +179,14 @@ async fn translate_persons(state: &AppState, context: &crate::jobs::JobContext) 
             }
             .await;
             match result {
-                Ok(()) => updated += 1,
-                Err(error) => failures.push(format!("{id}: {}", error.1)),
+                Ok(()) => {
+                    updated += 1;
+                    tracing::info!(item_id = id, name = value, "[人物中文化] 人物名称已更新");
+                }
+                Err(error) => {
+                    tracing::warn!(item_id = id, error = %error.1, "[人物中文化] 人物更新失败");
+                    failures.push(format!("{id}: {}", error.1));
+                }
             }
         }
     }
@@ -195,6 +219,7 @@ async fn translate_roles(
     }
     let mut updated = 0;
     let mut failures = vec![];
+    let mut processed = false;
     for item in media {
         context.checkpoint().await?;
         let id = crate::state::string(&item, "Id");
@@ -208,6 +233,10 @@ async fn translate_roles(
         {
             continue;
         }
+        if processed {
+            state.item_delay(context).await?;
+        }
+        processed = true;
         let result = if full {
             let item = crate::media_edit::details(
                 state,
@@ -342,7 +371,8 @@ async fn restore_metadata(state: &AppState, context: &crate::jobs::JobContext) -
                 .ok_or_else(|| ApiError::bad("缺失元数据缓存"))?;
             let item = json!({"Path":path,"Type":kind});
             let nfo = crate::nfo_files::sync(&kind, &item, &payload, &cast, &options).await?;
-            let images = crate::images::download(state, &kind, &id, &item, &payload).await?;
+            let images =
+                crate::images::download(state, &kind, &id, &item, &payload, context).await?;
             Ok::<_, ApiError>((nfo, images))
         }
         .await;
