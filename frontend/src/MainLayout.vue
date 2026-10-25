@@ -2,7 +2,7 @@
   <div class="mp-app-shell" :class="{ 'mp-nav-collapsed': collapsed && !isMobile }">
     <aside v-if="!isMobile" class="mp-sidebar">
       <div class="mp-brand"><img src="./assets/logo.png" alt="Emby Toolkit" /><div v-if="!collapsed"><strong>Emby Toolkit</strong><span>媒体管理中心</span></div></div>
-      <n-menu v-if="isMenuReady" class="mp-menu" :collapsed="collapsed" :collapsed-width="80" :collapsed-icon-size="22" :options="menuOptions" :value="activeMenuKey" :default-expanded-keys="defaultExpandedKeys" @update:value="handleMenuUpdate" />
+      <n-menu v-if="isMenuReady" class="mp-menu" :icon-size="24" :collapsed="collapsed" :collapsed-width="80" :collapsed-icon-size="24" :options="menuOptions" :value="activeMenuKey" :default-expanded-keys="defaultExpandedKeys" @update:value="handleMenuUpdate" />
     </aside>
     <div class="mp-main-column">
       <header class="mp-navbar">
@@ -23,7 +23,7 @@
       </header>
       <main class="mp-page-content" :class="{ 'mp-page-content-media': ['MediaCenter', 'MediaCenterLibrary'].includes(route.name) }"><router-view v-slot="slotProps"><component :is="slotProps.Component" :task-status="props.taskStatus" /></router-view></main>
     </div>
-    <n-drawer v-model:show="mobileMenuOpen" placement="left" :width="280"><n-drawer-content :native-scrollbar="false"><div class="mp-brand"><img src="./assets/logo.png" alt="Emby Toolkit" /><strong>Emby Toolkit</strong></div><n-menu :options="menuOptions" :value="activeMenuKey" :default-expanded-keys="defaultExpandedKeys" @update:value="handleMenuUpdate" /></n-drawer-content></n-drawer>
+    <n-drawer v-model:show="mobileMenuOpen" placement="left" :width="280"><n-drawer-content :native-scrollbar="false"><div class="mp-brand"><img src="./assets/logo.png" alt="Emby Toolkit" /><strong>Emby Toolkit</strong></div><n-menu class="mp-menu" :icon-size="24" :options="menuOptions" :value="activeMenuKey" :default-expanded-keys="defaultExpandedKeys" @update:value="handleMenuUpdate" /></n-drawer-content></n-drawer>
     <n-modal v-model:show="notificationOpen" class="mp-log-modal" style="width: min(1100px, calc(100vw - 32px))">
       <div class="mp-log-dialog">
         <NotificationCenter v-if="notificationOpen" :task="taskStatus" @close="notificationOpen = false" />
@@ -122,9 +122,6 @@ import {
   SyncOutline as RestartIcon,
   PersonCircleOutline as UserCenterIcon,
   FilmOutline as MediaCenterIcon,
-  CompassOutline,
-  LibraryOutline,
-  SettingsOutline,
   MenuOutline,
 } from '@vicons/ionicons5';
 import axios from 'axios';
@@ -171,7 +168,7 @@ watch(() => route.fullPath, () => {
 });
 
 const activeMenuKey = computed(() => route.name === 'MediaCenterLibrary' ? 'MediaCenter' : route.name);
-const renderIcon = (iconComponent) => () => h(NIcon, null, { default: () => h(iconComponent) });
+const renderIcon = (iconComponent, size = 18) => () => h(NIcon, { size }, { default: () => h(iconComponent) });
 
 const themeMenuOptions = themeOptions.map(option => ({ ...option, icon: () => h(UiIcon, { name: 'theme' }) }));
 
@@ -240,13 +237,13 @@ const menuConfigTree = ref([]); // 树形配置数据
 // 1. 基础菜单（包含所有权限允许的菜单，带有 defaultLabel 用于重置）
 const baseMenuOptions = computed(() => {
   const discoveryGroup = {
-    label: '发现', defaultLabel: '发现', key: 'group-discovery', icon: renderIcon(CompassOutline), children: []
+    label: '发现', defaultLabel: '发现', key: 'group-discovery', children: []
   };
 
   if (authStore.isLoggedIn) {
-    discoveryGroup.children.push({ label: '用户中心', defaultLabel: '用户中心', key: 'UserCenter', icon: renderIcon(UserCenterIcon) });
+    discoveryGroup.children.push({ label: '用户中心', defaultLabel: '用户中心', key: 'UserCenter', icon: renderIcon(UserCenterIcon, 24) });
     if (authStore.isAdmin) {
-      discoveryGroup.children.push({ label: '媒体中心', defaultLabel: '媒体中心', key: 'MediaCenter', icon: renderIcon(MediaCenterIcon) });
+      discoveryGroup.children.push({ label: '媒体中心', defaultLabel: '媒体中心', key: 'MediaCenter', icon: renderIcon(MediaCenterIcon, 24) });
     }
   }
 
@@ -255,17 +252,17 @@ const baseMenuOptions = computed(() => {
   if (authStore.isAdmin) {
     finalMenu.push(
       {
-        label: '整理', defaultLabel: '整理', key: 'group-management', icon: renderIcon(LibraryOutline),
+        label: '整理', defaultLabel: '整理', key: 'group-management',
         children: [
-          { label: '手动处理', defaultLabel: '手动处理', key: 'ReviewList', icon: renderIcon(ReviewListIcon) },
+          { label: '手动处理', defaultLabel: '手动处理', key: 'ReviewList', icon: renderIcon(ReviewListIcon, 24) },
         ]
       },
       {
-        label: '系统', defaultLabel: '系统', key: 'group-system', icon: renderIcon(SettingsOutline),
+        label: '系统', defaultLabel: '系统', key: 'group-system',
         children: [
-          { label: '通用设置', defaultLabel: '通用设置', key: 'settings-general', icon: renderIcon(GeneralIcon) },
-          { label: '任务中心', defaultLabel: '任务中心', key: 'settings-scheduler', icon: renderIcon(SchedulerIcon) },
-          { label: '封面生成', defaultLabel: '封面生成', key: 'CoverGeneratorConfig', icon: renderIcon(PaletteIcon) },
+          { label: '通用设置', defaultLabel: '通用设置', key: 'settings-general', icon: renderIcon(GeneralIcon, 24) },
+          { label: '任务中心', defaultLabel: '任务中心', key: 'settings-scheduler', icon: renderIcon(SchedulerIcon, 24) },
+          { label: '封面生成', defaultLabel: '封面生成', key: 'CoverGeneratorConfig', icon: renderIcon(PaletteIcon, 24) },
         ]
       }
     );
@@ -456,7 +453,7 @@ const menuOptions = computed(() => {
     // 如果该组下没有任何可见的子菜单，则直接跳过（不渲染组，也不渲染子项）
     if (visibleChildren.length === 0) return;
 
-    if (group.visible) {
+    if (group.visible && !(collapsed.value && !isMobile.value)) {
       // 2. 如果一级菜单可见，正常渲染为包含 children 的折叠组
       finalMenu.push({
         key: group.key,

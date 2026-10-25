@@ -4,7 +4,7 @@
     <div class="media-edit-page">
       <n-page-header class="mp-page-header" @back="goBack">
         <template #title>
-          <UiIcon name="edit" /> 手动编辑媒体信息
+          手动编辑媒体信息
         </template>
       </n-page-header>
 
@@ -20,7 +20,7 @@
           <!-- 左侧信息栏 (海报) -->
           <n-grid-item span="1">
             <n-space vertical :size="24">
-              <n-card :bordered="false"><template #header><UiIcon name="media" /> {{ itemDetails.item_name }}</template>
+              <n-card :bordered="false"><template #header>{{ itemDetails.item_name }}</template>
                 <template #cover>
                   <n-image
                     :src="posterUrl"
@@ -126,7 +126,7 @@
                 </template>
               </n-card>
 
-              <n-card :bordered="false"><template #header><UiIcon name="settings" /> 辅助工具</template>
+              <n-card :bordered="false"><template #header>辅助工具</template>
                 <n-space vertical>
                   <n-form-item label="数据操作" label-placement="top">
                     <n-space>
@@ -171,7 +171,7 @@
           <n-grid-item span="1 920:3">
             <n-card :bordered="false" class="dashboard-card">
               <template #header>
-                <span class="card-title"><UiIcon name="user" /> 演员列表</span>
+                <span class="card-title">演员列表</span>
               </template>
               <n-form label-placement="top" label-width="auto">
                 <draggable
@@ -190,7 +190,7 @@
                             <n-avatar
                               round
                               size="small"
-                              :style="{ backgroundColor: getAvatarColor(actor.name) }"
+                              :style="{ backgroundColor: getAvatarColor(actor.name), color: textColorForBackground(getAvatarColor(actor.name)) }"
                             >
                               {{ index + 1 }}
                             </n-avatar>
@@ -276,7 +276,7 @@
       style="width: 980px; max-width: 95vw;"
       :bordered="false"
       size="huge"
-    ><template #header><UiIcon name="media" /> {{ itemDetails?.item_type === 'Series' ? '选择季和要编辑的视频' : '选择要编辑的视频' }}</template>
+    ><template #header>{{ itemDetails?.item_type === 'Series' ? '选择季和要编辑的视频' : '选择要编辑的视频' }}</template>
       <n-spin :show="isFetchingEpisodes">
         <n-button secondary :loading="isRevalidatingFingerprints" style="margin-bottom: 12px;"
           @click="revalidateFingerprints(itemDetails.item_id || itemId)"><template #icon><UiIcon name="check" /></template>
@@ -379,7 +379,7 @@
       :bordered="false"
       size="huge"
       :segmented="{ content: 'soft', footer: 'soft' }"
-    ><template #header><UiIcon name="user" /> 搜索并添加演员</template>
+    ><template #header>搜索并添加演员</template>
       <n-input
         v-model:value="actorSearchQuery"
         placeholder="输入演员名进行搜索..."
@@ -423,7 +423,7 @@
       style="width: 1100px; max-width: 95vw;"
       :bordered="false"
       size="huge"
-    ><template #header><UiIcon name="image" /> 编辑图像</template>
+    ><template #header>编辑图像</template>
       <div class="emby-image-grid">
         <div v-for="img in imageTypes" :key="img.type" class="emby-image-card">
           <!-- 图片展示区 (统一使用 16:9 比例，图片 contain 缩放) -->
@@ -495,7 +495,7 @@
       style="width: 1200px; max-width: 95vw;"
       :bordered="false"
       size="huge"
-    ><template #header><UiIcon name="search" /> {{ `搜索图像 - ${currentTmdbImageLabel}` }}</template>
+    ><template #header>{{ `搜索图像 - ${currentTmdbImageLabel}` }}</template>
       <div v-if="isFetchingTmdbImages" class="tmdb-loading-state">
         <n-spin size="large" />
         <div style="margin-top: 16px; color: var(--n-text-color-3);">正在从 TheMovieDb 拉取数据...</div>
@@ -532,7 +532,7 @@
     </n-modal>
 
     <!-- 输入图片URL模态框 -->
-    <n-modal v-model:show="showUrlPrompt" preset="dialog" :show-icon="false"><template #header><UiIcon name="link" /> 设置网络图片</template>
+    <n-modal v-model:show="showUrlPrompt" preset="dialog" :show-icon="false"><template #header>设置网络图片</template>
       <n-input
         v-model:value="imageUrlInput"
         type="text"
@@ -550,7 +550,7 @@
       style="width: 800px; max-width: 95vw;"
       :bordered="false"
       size="huge"
-    ><template #header><UiIcon name="media" /> 编辑媒体信息 (音轨/字幕)</template>
+    ><template #header>编辑媒体信息 (音轨/字幕)</template>
       <n-button secondary :loading="isRevalidatingFingerprints" style="margin-bottom: 16px;"
         :disabled="isSavingMediaInfo || isDeletingMediaVersion || isRepairingTruehdCore"
         @click="revalidateFingerprints(currentEditMediaId)"><template #icon><UiIcon name="check" /></template>
@@ -631,7 +631,7 @@
 
       <n-alert type="info" style="margin-bottom: 16px;">
         修改语言标签后保存，系统将自动覆盖底层指纹文件并通知 Emby 重新加载。<br/>
-        <b style="color: #d03050;">注意：</b>字幕的标题 (Title) 必须包含 <b>“简体”</b> 或 <b>“繁体”</b> 字样，Emby 才能正确识别并显示为 Chinese Simplified/Traditional。
+        <b style="color: var(--ui-error-text);">注意：</b>字幕的标题 (Title) 必须包含 <b>“简体”</b> 或 <b>“繁体”</b> 字样，Emby 才能正确识别并显示为 Chinese Simplified/Traditional。
       </n-alert>
 
       <n-alert v-if="canBatchApplyMediaInfo" type="warning" style="margin-bottom: 16px;">
@@ -644,7 +644,7 @@
       </n-alert>
 
       <!-- ★★★ 硬字幕标记按钮 ★★★ -->
-      <n-card size="small" style="margin-bottom: 16px;"><template #header><UiIcon name="language" /> 标记硬字幕 (写入视频流 Title)</template>
+      <n-card size="small" style="margin-bottom: 16px;"><template #header>标记硬字幕 (写入视频流 Title)</template>
         <n-space>
           <n-button @click="setHardcodedSubtitle('简中硬字幕')" secondary>简中</n-button>
           <n-button @click="setHardcodedSubtitle('繁中硬字幕')" secondary>繁中</n-button>
@@ -792,7 +792,7 @@
       style="width: 760px; max-width: 95vw;"
       :bordered="false"
       size="huge"
-    ><template #header><UiIcon name="edit" /> 重命名媒体</template>
+    ><template #header>重命名媒体</template>
       <n-alert type="info" style="margin-bottom: 16px;">
         输入新的文件名即可。目录按高级设置中的 MoviePilot 重命名格式生成；源文件扩展名固定，115 文件、STRM 和媒体信息路径会同步更新。
       </n-alert>
@@ -846,7 +846,7 @@
               class="rename-result-tree-node"
               :style="{ paddingLeft: `${index * 18}px` }"
             >
-              <n-icon :component="index === renamePreviewPathParts.length - 1 ? FileIcon : FolderIcon" :color="index === renamePreviewPathParts.length - 1 ? '#2080f0' : '#f0a020'" />
+              <n-icon :component="index === renamePreviewPathParts.length - 1 ? FileIcon : FolderIcon" :color="index === renamePreviewPathParts.length - 1 ? 'var(--ui-info-text)' : 'var(--ui-warning-text)'" />
               <code>{{ part }}</code>
             </div>
           </div>
@@ -903,6 +903,7 @@ import {
   TextOutline as TextIcon
 } from '@vicons/ionicons5';
 import { debounce } from 'lodash-es';
+import { textColorForBackground } from '../theme.js';
 import {
   buildMediaInfoLanguageOptions,
   filterMediaInfoLanguageOption,
@@ -2654,8 +2655,8 @@ const handleSaveChanges = async () => {
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background-color: #d03050;
-  color: #fff;
+  background-color: var(--ui-error-color);
+  color: var(--ui-on-error);
   font-size: 10px;
   font-weight: 700;
   line-height: 14px;
@@ -2666,10 +2667,10 @@ const handleSaveChanges = async () => {
   width: 42px;
   height: 30px;
   padding: 0;
-  border: 1px solid var(--n-border-color);
+  border: 1px solid var(--ui-border);
   border-radius: 5px;
-  background-color: var(--n-color);
-  color: var(--n-text-color-2);
+  background-color: var(--ui-surface-muted);
+  color: var(--ui-text);
   font-size: 12px;
   font-weight: 700;
   line-height: 1;
@@ -2678,9 +2679,6 @@ const handleSaveChanges = async () => {
 }
 
 .episode-chip:hover {
-  border-color: var(--n-primary-color);
-  background-color: var(--n-primary-color-hover);
-  color: #fff;
   transform: translateY(-1px);
 }
 
@@ -2689,52 +2687,59 @@ const handleSaveChanges = async () => {
 }
 
 .episode-chip-active {
-  border-color: var(--n-primary-color);
-  background-color: var(--n-primary-color);
-  color: #fff;
-  box-shadow: 0 0 0 2px rgba(24, 160, 88, 0.16);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-color) 16%, transparent);
 }
 
 .episode-chip-selected .episode-chip {
-  border-color: var(--n-primary-color);
-  box-shadow: 0 0 0 2px rgba(24, 160, 88, 0.12);
+  border-color: var(--accent-color);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-color) 12%, transparent);
 }
 
 .episode-chip-multi-version .episode-chip {
-  border-color: #f0a020;
-  background-color: rgba(240, 160, 32, 0.12);
-  color: #9a6700;
-  box-shadow: 0 0 0 2px rgba(240, 160, 32, 0.14);
-}
-
-.episode-chip-multi-version .episode-chip:hover,
-.episode-chip-multi-version .episode-chip-active {
-  border-color: #f0a020;
-  background-color: #f0a020;
-  color: #fff;
+  border-color: var(--ui-warning-color);
+  background-color: color-mix(in srgb, var(--ui-warning-color) 12%, var(--ui-surface-muted));
+  color: var(--ui-warning-text);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ui-warning-color) 14%, transparent);
 }
 
 .episode-chip-track-issue .episode-chip {
-  border-color: #d03050;
-  color: #d03050;
-  box-shadow: 0 0 0 2px rgba(208, 48, 80, 0.12);
+  border-color: var(--ui-error-color);
+  color: var(--ui-error-text);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ui-error-color) 12%, transparent);
 }
 
 .episode-chip-track-unavailable .episode-chip {
-  border-color: #f0a020;
-  color: #b87503;
-  box-shadow: 0 0 0 2px rgba(240, 160, 32, 0.12);
+  border-color: var(--ui-warning-color);
+  color: var(--ui-warning-text);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ui-warning-color) 12%, transparent);
 }
 
 .episode-chip-track-unavailable .episode-chip-issue-dot {
-  background-color: #f0a020;
+  background-color: var(--ui-warning-color);
+  color: var(--ui-on-warning);
+}
+
+.episode-chip-multi-version.episode-chip-track-issue .episode-chip {
+  color: var(--ui-warning-text);
+}
+
+.episode-chip:is(:hover, .episode-chip-active) {
+  border-color: var(--accent-color);
+  background-color: var(--ui-primary-solid);
+  color: var(--ui-on-primary);
+}
+
+.episode-chip-multi-version .episode-chip:is(:hover, .episode-chip-active) {
+  border-color: var(--ui-warning-color);
+  background-color: var(--ui-warning-color);
+  color: var(--ui-on-warning);
 }
 
 .media-info-version-select :deep(.n-base-selection) {
-  --n-border: 1px solid #f0a020 !important;
-  --n-border-hover: 1px solid #f0a020 !important;
-  --n-border-active: 1px solid #f0a020 !important;
-  --n-box-shadow-active: 0 0 0 2px rgba(240, 160, 32, 0.18) !important;
+  --n-border: 1px solid var(--ui-warning-color) !important;
+  --n-border-hover: 1px solid var(--ui-warning-color) !important;
+  --n-border-active: 1px solid var(--ui-warning-color) !important;
+  --n-box-shadow-active: 0 0 0 2px color-mix(in srgb, var(--ui-warning-color) 18%, transparent) !important;
 }
 
 .media-info-version-toolbar {
@@ -2780,7 +2785,7 @@ const handleSaveChanges = async () => {
 }
 
 .media-info-version-accent {
-  color: #d03050;
+  color: var(--ui-error-text);
   font-weight: 700;
   white-space: nowrap;
 }

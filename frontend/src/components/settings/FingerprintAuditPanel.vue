@@ -1,5 +1,5 @@
 <template>
-  <n-card :bordered="false" class="dashboard-card fingerprint-audit"><template #header><UiIcon name="check" /> 全库指纹校验与补齐</template>
+  <n-card :bordered="false" class="dashboard-card fingerprint-audit"><template #header>全库指纹校验与补齐</template>
     <n-space vertical :size="16">
       <n-text depth="3">逐项核对在库电影和分集。一致就跳过，不一致且能确认文件身份就自动更新；无法确认的保留。115 目录请求至少间隔 5 秒，适合夜间运行。</n-text>
       <div class="audit-actions">

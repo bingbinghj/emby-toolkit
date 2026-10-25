@@ -1,7 +1,7 @@
 <template>
   <section class="notification-center" aria-label="通知中心">
     <header class="notification-heading">
-      <div><h2><UiIcon name="notifications" /> 通知中心</h2><p>查看运行状态与日志</p></div>
+      <div><h2>通知中心</h2><p>查看运行状态与日志</p></div>
       <div class="notification-window-actions">
         <n-button quaternary circle aria-label="关闭通知中心" title="关闭" @click="$emit('close')"><template #icon><n-icon :component="CloseOutline" /></template></n-button>
       </div>
@@ -129,9 +129,9 @@ h2 { margin:0; font-size:20px; font-weight:600; }
 .notification-line { display:flex; gap:12px; padding:3px 0; }
 .notification-line > span:last-child { white-space:pre-wrap; overflow-wrap:anywhere; min-width:0; }
 .notification-line-number { flex:0 0 3ch; text-align:right; color:var(--ui-text-muted); user-select:none; }
-.log-error { color:var(--ui-error-color); }
-.log-warning { color:var(--ui-warning-color); }
-.log-progress { color:var(--accent-color); }
+.log-error { color:var(--ui-error-text); }
+.log-warning { color:var(--ui-warning-text); }
+.log-progress { color:var(--ui-primary-text); }
 .notification-footer { display:flex; align-items:center; flex-wrap:wrap; gap:8px; flex-shrink:0; }
 .notification-footer > span { margin-right:auto; font-size:12px; color:var(--ui-text-muted); }
 .notification-empty { margin:40px 0; }

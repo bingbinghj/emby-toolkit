@@ -35,15 +35,43 @@ export function getThemePalette(mode, prefersDark = true) {
   return (!prefersDark && lightMaterialPalettes[resolved]) || themePalettes[resolved];
 }
 
+export function textColorForBackground(color) {
+  const rgb = color.slice(1).match(/../g).map(value => parseInt(value, 16) / 255);
+  const brightness = rgb.reduce((sum, value, index) => sum + (value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4) * [.2126, .7152, .0722][index], 0);
+  return brightness > .179 ? '#000000' : '#FFFFFF';
+}
+
+export function getThemeTextColors(mode, prefersDark = true) {
+  const palette = getThemePalette(mode, prefersDark);
+  const colors = resolveColorScheme(mode, prefersDark) === 'light'
+    ? { muted: '#696471', primary: '#7133C9', success: '#267000', warning: '#815800', error: '#B9233A', info: '#00649C' }
+    : { muted: '#C5C0D3', primary: '#BDA5FF', success: '#93D775', warning: '#FFC56D', error: '#FF969E', info: '#7BCAFA' };
+  // Keep white primary actions legible while retaining the original purple hue.
+  colors.primarySurface = ({ '#8D51F9': '#884AF0', '#6E66ED': '#625AE0', '#A370F7': '#9157DD' })[palette.primary.toUpperCase()] || palette.primary;
+  for (const type of ['Primary', 'Success', 'Warning', 'Error', 'Info']) {
+    colors[`on${type}`] = type === 'Primary' ? '#FFFFFF' : palette[`on${type}`] || textColorForBackground(palette[type.toLowerCase()]);
+  }
+  return colors;
+}
+
 export function moviePilotTheme(mode, prefersDark = true) {
   const palette = getThemePalette(mode, prefersDark);
-  const { primary, surface, background, text, muted, border, borderSoft, input, inputBorder, popup, mutedSurface } = palette;
+  const ink = getThemeTextColors(mode, prefersDark);
+  const { primary, surface, background, text, border, borderSoft, input, inputBorder, popup, mutedSurface } = palette;
+  const muted = ink.muted;
   const translucent = mode === 'transparent' || mode === 'glass';
   const colors = Object.fromEntries(['primary', 'success', 'warning', 'error', 'info'].flatMap(key =>
     ['Color', 'ColorHover', 'ColorPressed', 'ColorSuppl'].map(state => [`${key}${state}`, palette[key]])
   ));
   const buttonText = Object.fromEntries(['Primary', 'Success', 'Warning', 'Error', 'Info'].flatMap(type =>
-    ['', 'Hover', 'Pressed', 'Focus'].map(state => [`textColor${state}${type}`, palette[`on${type}`] || '#FFFFFF'])
+    ['', 'Hover', 'Pressed', 'Focus'].map(state => [`textColor${state}${type}`, ink[`on${type}`]])
+  ));
+  const semanticText = Object.fromEntries(['Primary', 'Success', 'Warning', 'Error', 'Info'].map(type => [`textColor${type}`, ink[type.toLowerCase()]]));
+  const actionText = Object.fromEntries(['Primary', 'Success', 'Warning', 'Error', 'Info'].flatMap(type =>
+    ['Ghost', 'Text'].flatMap(style => ['', 'Hover', 'Pressed', 'Focus'].map(state => [`textColor${style}${state}${type}`, ink[type.toLowerCase()]]))
+  ));
+  const defaultActionText = Object.fromEntries(['', 'Ghost', 'Text'].flatMap(style =>
+    ['Hover', 'Pressed', 'Focus'].map(state => [`textColor${style}${state}`, ink.primary])
   ));
   return {
     common: {
@@ -57,12 +85,18 @@ export function moviePilotTheme(mode, prefersDark = true) {
     Layout: { color: translucent ? 'transparent' : background, headerColor: surface, siderColor: surface },
     Dialog: { textColor: text },
     Popover: { textColor: text },
+    Empty: { textColor: muted },
+    Typography: { ...semanticText, textColor: text, aTextColor: ink.primary },
+    Tag: { ...semanticText },
+    Tabs: { tabTextColorActiveLine: ink.primary, tabTextColorActiveBar: ink.primary, tabTextColorActiveCard: ink.primary },
+    Pagination: { itemTextColorActive: ink.primary },
+    Switch: { textColor: ink.onPrimary, railColorActive: ink.primarySurface },
     Card: { color: surface, borderColor: borderSoft, borderRadius: '12px', paddingMedium: '24px', titleFontWeight: '600' },
-    Button: { ...buttonText, borderRadiusMedium: '8px', borderRadiusSmall: '6px', fontWeight: '500', color: 'transparent', colorHover: mutedSurface, colorPressed: mutedSurface, textColor: text },
+    Button: { ...buttonText, ...actionText, ...defaultActionText, colorPrimary: ink.primarySurface, colorHoverPrimary: ink.primarySurface, colorPressedPrimary: ink.primarySurface, colorFocusPrimary: ink.primarySurface, borderRadiusMedium: '8px', borderRadiusSmall: '6px', fontWeight: '500', color: 'transparent', colorHover: mutedSurface, colorPressed: mutedSurface, textColor: text },
     Input: { color: input, colorFocus: input, textColor: text, placeholderColor: muted, border: `1px solid ${inputBorder}`, borderHover: `1px solid ${primary}`, borderFocus: `1px solid ${primary}`, boxShadowFocus: '0 0 0 3px var(--accent-glow-color)', borderRadius: '8px' },
     Select: { peers: { InternalSelection: { color: input, colorActive: input, textColor: text, placeholderColor: muted, border: `1px solid ${inputBorder}`, borderHover: `1px solid ${primary}`, borderActive: `1px solid ${primary}`, borderFocus: `1px solid ${primary}` } } },
     Checkbox: { color: input, border: `1px solid ${inputBorder}` },
-    Radio: { color: input, border: `1px solid ${inputBorder}` },
+    Radio: { color: input, border: `1px solid ${inputBorder}`, buttonTextColorActive: ink.primary },
     Form: { labelTextColor: text, feedbackTextColor: muted },
     DataTable: { thColor: mutedSurface, thTextColor: text, tdTextColor: text, tdColor: translucent ? 'transparent' : surface, tdColorStriped: mutedSurface, borderColor: borderSoft, thFontWeight: '600' },
     Descriptions: { thColor: mutedSurface, tdColor: translucent ? 'transparent' : surface, borderColor: border, thTextColor: muted, tdTextColor: text },
@@ -71,8 +105,9 @@ export function moviePilotTheme(mode, prefersDark = true) {
       itemTextColor: muted, itemIconColor: muted, itemTextColorHover: text,
       itemTextColorActive: '#FFFFFF', itemIconColorActive: '#FFFFFF',
       itemTextColorActiveHover: '#FFFFFF', itemIconColorActiveHover: '#FFFFFF',
-      itemColorActive: primary,
-      itemColorActiveHover: primary,
+      itemColorActive: ink.primarySurface,
+      itemColorActiveCollapsed: ink.primarySurface,
+      itemColorActiveHover: ink.primarySurface,
     },
   };
 }

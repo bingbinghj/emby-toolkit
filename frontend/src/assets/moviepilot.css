@@ -40,10 +40,20 @@ html.dark {
 html, body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; }
 .n-icon { display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; line-height:1; vertical-align:middle; }
 .n-icon > svg { display:block; }
-/* Text and action icons share one size, including native Naive UI icons. */
+/* Action icons use one size; navigation follows MoviePilot's 24px icons. */
 .n-button { --n-icon-size:18px !important; }
+.n-button--primary-type { --ui-button-ink:var(--ui-primary-text); }
+.n-button--success-type { --ui-button-ink:var(--ui-success-text); }
+.n-button--warning-type { --ui-button-ink:var(--ui-warning-text); }
+.n-button--error-type { --ui-button-ink:var(--ui-error-text); }
+.n-button--info-type { --ui-button-ink:var(--ui-info-text); }
+.n-button:is(.n-button--secondary, .n-button--tertiary):is(.n-button--primary-type, .n-button--success-type, .n-button--warning-type, .n-button--error-type, .n-button--info-type) {
+  --n-text-color:var(--ui-button-ink) !important; --n-text-color-hover:var(--ui-button-ink) !important;
+  --n-text-color-pressed:var(--ui-button-ink) !important; --n-text-color-focus:var(--ui-button-ink) !important;
+}
+.n-switch:not(.n-switch--active) .n-switch__unchecked { color:var(--ui-text); }
 :is(.n-page-header__title, .n-card-header__main, .n-dialog__title, .card-title, .mp-title-with-icon, .n-tabs-tab__label, .temp-task-group-title, .notification-heading h2, .n-radio__label, .tip) > .n-icon,
-:is(.n-button, .mp-task-trigger, .n-menu-item-content__icon, .n-dropdown-option-body__prefix, .n-input__prefix, .n-input__suffix, .n-list-item__prefix, .rename-preview-node, .rename-result-tree-node, .drag-handle) .n-icon,
+:is(.n-button, .mp-task-trigger, .n-dropdown-option-body__prefix, .n-input__prefix, .n-input__suffix, .n-list-item__prefix, .rename-preview-node, .rename-result-tree-node, .drag-handle, .review-search-action) .n-icon,
 .n-icon.drag-handle {
   font-size:18px !important; width:18px; height:18px;
 }
@@ -59,6 +69,13 @@ html, body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 
 .mp-menu { flex:1; overflow:auto; padding:8px 12px; }
 .mp-menu.n-menu--collapsed { padding-inline:0; }
 .mp-menu .n-menu-item-content::before { border-radius:8px; }
+.mp-menu .n-menu-item-content { align-items:center; padding-inline:12px !important; }
+.mp-menu .n-menu-item-content__icon { display:flex; align-items:center; justify-content:center; margin-right:10px !important; }
+.mp-menu .n-menu-item-content__icon .n-icon { font-size:24px; width:24px; height:24px; }
+.mp-menu.n-menu--collapsed .n-menu-item-content { padding-inline:28px !important; }
+.mp-menu.n-menu--collapsed .n-menu-item-content__icon { margin-right:0 !important; }
+.mp-menu .n-menu-item-content-header { line-height:24px; }
+.mp-menu .n-submenu > .n-menu-item .n-menu-item-content-header { font-size:12px; font-weight:500; color:var(--ui-text-muted); }
 .mp-menu .n-submenu { margin-bottom:14px; }
 .mp-main-column { flex:1; min-width:0; display:flex; flex-direction:column; padding:16px 24px 0; }
 .mp-navbar { flex-shrink:0; width:100%; max-width:1800px; margin-inline:auto; height:64px; padding:0 16px; border:0; border-radius:12px; background:var(--ui-surface); box-shadow:none; display:flex; align-items:center; gap:14px; z-index:5; }
@@ -84,6 +101,8 @@ html, body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 
 :is(.n-card-header__main, .n-dialog__title, .n-tabs-tab__label, .temp-task-group-title, .notification-heading h2, .n-radio__label, .tip):has(> .n-icon) { display:flex; align-items:center; gap:8px; }
 .mp-page-content .n-card-header__extra { min-width:0; color:var(--ui-text-muted); font-size:13px; }
 .mp-page-content .n-card-header__extra > .n-text { max-width:420px; }
+.dashboard-card .n-card-header__extra:has(> .n-text) { flex-basis:100%; margin-left:0; }
+.dashboard-card .n-card-header__extra > .n-text { max-width:none; }
 .mp-page-content .n-form-item-feedback-wrapper { padding-top:6px; font-size:12px; line-height:1.65; }
 .settings-page .n-form-item { margin-bottom:12px; }
 .settings-page .n-form-item-feedback__line > .n-text { font-size:12px !important; line-height:1.65; }

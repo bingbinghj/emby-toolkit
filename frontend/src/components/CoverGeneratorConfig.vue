@@ -3,7 +3,7 @@
     <n-spin :show="isLoading">
       <div class="cover-generator-config">
         <n-page-header class="mp-page-header" subtitle="选择封面样式并配置媒体库标题">
-          <template #title><UiIcon name="image" /> 媒体库封面生成</template>
+          <template #title>媒体库封面生成</template>
           <template #extra>
             <n-space>
               <n-button @click="runGenerateAllTask" :loading="isGenerating">
@@ -22,7 +22,7 @@
         <n-card class="content-card dashboard-card">
           <template #header>
             <!-- 将 card-title 类应用到标题文本的容器上 -->
-            <span class="card-title"><UiIcon name="settings" /> 基础设置</span>
+            <span class="card-title">基础设置</span>
           </template>
           <template #header-extra>
             <n-button type="primary" secondary :loading="isSaving" @click="saveConfig('basic')"><template #icon><UiIcon name="save" /></template>保存基础设置</n-button>
@@ -118,7 +118,7 @@
 
         <!-- ... 其余的 n-card 和 n-tabs 保持不变 ... -->
         <n-card class="content-card dashboard-card">
-          <template #header><span class="card-title"><UiIcon name="image" /> 封面样式与标题</span></template>
+          <template #header><span class="card-title">封面样式与标题</span></template>
           <template #header-extra>
             <n-button type="primary" secondary :loading="isSaving" @click="saveConfig(configData.tab || 'style-tab')"><template #icon><UiIcon name="save" /></template>{{ sectionSaveLabel }}</n-button>
           </template>
@@ -613,7 +613,7 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.cover-config-cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(min(100%, 560px), 1fr)); align-items:start; gap:24px; margin-top:24px; }
+.cover-config-cards { display:grid; grid-template-columns:minmax(0,1fr); gap:24px; margin-top:24px; }
 .cover-config-cards > .n-card { min-width:0; }
 .cover-style-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap:16px; }
 .cover-style-grid > div { min-width:0; }

@@ -12,7 +12,7 @@
 import { ref, computed, watch, onUnmounted } from 'vue';
 import { NConfigProvider, NMessageProvider, NDialogProvider, darkTheme, zhCN, dateZhCN } from 'naive-ui';
 import AppContent from './AppContent.vue';
-import { moviePilotTheme, themeOptions, getThemePalette, resolveTheme, resolveColorScheme } from './theme';
+import { moviePilotTheme, themeOptions, getThemePalette, getThemeTextColors, resolveTheme, resolveColorScheme } from './theme';
 
 const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
 const prefersDark = ref(systemTheme.matches);
@@ -33,6 +33,7 @@ const updateSystemTheme = event => { prefersDark.value = event.matches; };
 systemTheme.addEventListener('change', updateSystemTheme);
 onUnmounted(() => systemTheme.removeEventListener('change', updateSystemTheme));
 watch([resolvedTheme, palette], ([mode, palette]) => {
+  const ink = getThemeTextColors(mode, prefersDark.value);
   const root = document.documentElement;
   root.dataset.theme = mode;
   root.classList.toggle('dark', isDark.value);
@@ -40,7 +41,7 @@ watch([resolvedTheme, palette], ([mode, palette]) => {
   root.style.colorScheme = isDark.value ? 'dark' : 'light';
   const variables = {
     '--ui-page-bg': palette.background, '--ui-surface': palette.surface, '--ui-surface-muted': palette.mutedSurface,
-    '--ui-text': palette.text, '--ui-text-muted': palette.muted, '--ui-border': palette.border,
+    '--ui-text': palette.text, '--ui-text-muted': ink.muted, '--ui-border': palette.border,
     '--ui-border-soft': palette.borderSoft, '--ui-border-strong': palette.inputBorder, '--ui-input-border': palette.inputBorder,
     '--ui-input-bg': palette.input, '--accent-color': palette.primary, '--accent-glow-color': `color-mix(in srgb, ${palette.primary} 14%, transparent)`,
     '--modal-solid-bg-color': palette.popup,
@@ -48,6 +49,10 @@ watch([resolvedTheme, palette], ([mode, palette]) => {
     '--ui-warning-color': palette.warning,
     '--ui-info-color': palette.info,
     '--ui-success-color': palette.success,
+    '--ui-primary-text': ink.primary, '--ui-success-text': ink.success, '--ui-warning-text': ink.warning,
+    '--ui-error-text': ink.error, '--ui-info-text': ink.info,
+    '--ui-primary-solid': ink.primarySurface, '--ui-on-primary': ink.onPrimary,
+    '--ui-on-success': ink.onSuccess, '--ui-on-warning': ink.onWarning, '--ui-on-error': ink.onError, '--ui-on-info': ink.onInfo,
   };
   Object.entries(variables).forEach(([key, value]) => root.style.setProperty(key, value));
 }, { immediate: true });

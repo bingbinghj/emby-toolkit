@@ -5,7 +5,7 @@
     <div class="account-grid">
     <n-card :bordered="false" class="dashboard-card account-card">
       <template #header>
-        <span class="card-title"><UiIcon name="user" />账户资料</span>
+        <span class="card-title">账户资料</span>
       </template>
       <template #header-extra><n-spin v-if="loading" size="small" /></template>
 
@@ -57,7 +57,7 @@
       <n-empty v-else-if="!loading" description="未获取到账户信息" />
     </n-card>
     <n-card :bordered="false" class="dashboard-card notification-card">
-      <template #header><span class="card-title"><UiIcon name="notifications" />通知设置</span></template>
+      <template #header><span class="card-title">通知设置</span></template>
       <p class="notification-intro">绑定 Telegram，接收入库和任务通知。</p>
       <n-spin :show="loadingConfig">
       <template v-if="configModel">
@@ -270,8 +270,9 @@ onUnmounted(() => window.removeEventListener('resize', checkMobile));
 </script>
 
 <style scoped>
-.account-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(min(100%, 400px), 1fr)); align-items:stretch; gap:24px; }
+.account-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); align-items:stretch; gap:24px; }
 .account-grid > .n-card { height:100%; }
+@container (max-width:899px) { .account-grid { grid-template-columns:minmax(0,1fr); } }
 .account-card, .notification-card { min-width:0; }
 
 .profile-layout {

@@ -1,7 +1,7 @@
 <!-- src/components/settings/SchedulerSettingsPage.vue -->
 <template>
   <n-layout class="mp-page scheduler-page" content-style="padding: 0;">
-    <n-page-header class="mp-page-header" subtitle="查看任务说明并执行媒体维护"><template #title><UiIcon name="time" /> 任务中心</template></n-page-header>
+    <n-page-header class="mp-page-header" subtitle="查看任务说明并执行媒体维护"><template #title>任务中心</template></n-page-header>
     <div v-if="isLoading" class="center-container">
       <n-spin size="large" />
     </div>
@@ -10,7 +10,7 @@
       <div class="scheduler-overview">
       <n-card :bordered="false" class="dashboard-card">
         <template #header>
-          <span class="card-title"><UiIcon name="send" /> Telegram 快捷菜单</span>
+          <span class="card-title">Telegram 快捷菜单</span>
         </template>
         <template #header-extra>
           <n-text depth="3">配置显示在 TG 机器人输入框左侧 Menu 按钮中的快捷任务</n-text>
@@ -50,7 +50,7 @@
       </div>
       <n-card :bordered="false" class="dashboard-card manual-tasks-card">
         <template #header>
-          <span class="card-title"><UiIcon name="play" /> 临时任务</span>
+          <span class="card-title">临时任务</span>
         </template>
         <template #header-extra>
           <n-text depth="3">用于需要立即手动执行的场景</n-text>
@@ -58,7 +58,7 @@
 
         <div class="temp-task-groups">
           <section v-for="group in manualTaskGroups" :key="group.key" class="temp-task-group">
-            <div class="temp-task-group-title"><UiIcon :name="taskIcon(group.key)" /> {{ group.name }}</div>
+            <div class="temp-task-group-title">{{ group.name }}</div>
             <div class="temp-task-grid">
               <div v-for="task in group.tasks" :key="task.key">
                 <n-tooltip trigger="hover" placement="top">
@@ -99,7 +99,7 @@
       preset="card"
       style="width: 90%; max-width: 600px;"
       :mask-closable="false"
-    ><template #header><UiIcon name="send" /> 配置 Telegram 快捷菜单</template>
+    ><template #header>配置 Telegram 快捷菜单</template>
       <n-alert type="info" :show-icon="false" style="margin-bottom: 16px;">
         请勾选需要在 Telegram 机器人菜单中显示的任务，并拖动调整顺序。
       </n-alert>
@@ -125,7 +125,7 @@
       </template>
     </n-modal>
 
-    <n-modal v-model:show="showSyncModeModal" preset="dialog" :show-icon="false" :mask-closable="false" class="glass-modal"><template #header><UiIcon name="options" /> 选择处理模式</template>
+    <n-modal v-model:show="showSyncModeModal" preset="dialog" :show-icon="false" :mask-closable="false" class="glass-modal"><template #header>选择处理模式</template>
       <n-text>您希望如何执行此任务？</n-text>
       <template #action>
         <n-button @click="showSyncModeModal = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
@@ -214,7 +214,6 @@ const manualTaskGroups = computed(() => {
   return Array.from(groups.values());
 });
 
-const taskIcon = category => ({ 'media-data': 'database', 'media-info': 'media', 'p115-cache': 'folder', 'audio-maintenance': 'language', 'system-maintenance': 'settings' }[category] || 'play');
 
 const getTaskHelp = (task) => {
   if (!task) return '暂无任务说明。';
@@ -349,8 +348,9 @@ watch([configModel, availableTasksForTgMenu], ([newConfig, tgMenuTasks]) => {
 
 <style scoped>
 .scheduler-content { display:grid; gap:24px; }
-.scheduler-overview { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,440px),1fr)); gap:24px; align-items:start; }
-.scheduler-overview > * { min-width:0; }
+.scheduler-overview { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:24px; align-items:stretch; }
+.scheduler-overview > * { min-width:0; height:100%; }
+@container (max-width:899px) { .scheduler-overview { grid-template-columns:minmax(0,1fr); } }
 
 .center-container {
   display: flex;
@@ -363,17 +363,17 @@ watch([configModel, availableTasksForTgMenu], ([newConfig, tgMenuTasks]) => {
   justify-content: space-between;
   align-items: flex-start;
   gap: 12px;
-  min-height: 112px;
+  min-height: 128px;
   height:100%;
   padding:16px;
   border:1px solid var(--ui-border);
   border-radius:10px;
   background:var(--ui-surface-muted);
 }
-.temp-task-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap:14px; }
+.temp-task-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap:14px; }
 .temp-task-grid > div { min-width:0; }
 .temp-task-copy { min-width:0; flex:1; }
-.temp-task-name { color:var(--ui-text); font-weight:600; line-height:1.6; }
+.temp-task-name { color:var(--ui-text); font-weight:600; line-height:1.6; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
 .temp-task-description { margin:6px 0 0; font-size:12px; line-height:1.6; color:var(--ui-text-muted); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
 .temp-task-item > .n-button { flex-shrink:0; align-self:center; }
 .temp-task-groups {

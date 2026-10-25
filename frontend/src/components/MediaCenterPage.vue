@@ -5,7 +5,7 @@
         class="mp-page-header"
         @back="libraryId ? goToLibraries() : undefined"
       >
-        <template #title><UiIcon :name="libraryId ? 'library' : 'media'" /> {{ libraryId ? (library?.name || '媒体库') : '媒体中心' }}</template>
+        <template #title>{{ libraryId ? (library?.name || '媒体库') : '媒体中心' }}</template>
         <template #back v-if="libraryId">
           <n-button quaternary circle aria-label="返回媒体库" title="返回媒体库">
             <template #icon><n-icon><ArrowBackOutline /></n-icon></template>

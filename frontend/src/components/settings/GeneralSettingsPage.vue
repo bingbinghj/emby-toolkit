@@ -22,7 +22,7 @@
                 <!-- 左侧列 -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title"><n-icon :component="SettingsIcon" />基础设置</span></template>
+                    <template #header><span class="card-title">基础设置</span></template>
                     <n-form-item-grid-item label="处理项目间的延迟 (秒)" path="delay_between_items_sec">
                       <n-input-number v-model:value="configModel.delay_between_items_sec" :min="0" :step="0.1" placeholder="例如: 0.5"/>
                     </n-form-item-grid-item>
@@ -132,7 +132,7 @@
                   <n-card :bordered="false" class="dashboard-card">
                     <template #header>
                       <div style="display: flex; align-items: center; gap: 8px;">
-                        <span class="card-title"><n-icon :component="MonitorIcon" />实时监控</span>
+                        <span class="card-title">实时监控</span>
                       </div>
                     </template>
 
@@ -256,7 +256,7 @@
                 </n-gi>
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title"><n-icon :component="ApiIcon" />数据源与API</span></template>
+                    <template #header><span class="card-title">数据源与API</span></template>
                     <n-form-item label="TMDB API Key" path="tmdb_api_key">
                       <n-input type="password" show-password-on="mousedown" v-model:value="configModel.tmdb_api_key" placeholder="输入你的 TMDB API Key" />
                     </n-form-item>
@@ -300,7 +300,7 @@
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
                     <template #header>
                       <div style="display: flex; align-items: center; gap: 8px;">
-                        <span class="card-title"><n-icon :component="CloudIcon" />账户与连接</span>
+                        <span class="card-title">账户与连接</span>
                         <n-tag v-if="p115Info" :type="p115Info.valid ? 'success' : 'error'" size="small" round>
                           {{ p115Info.msg || (p115Info.valid ? '连接正常' : '连接异常') }}
                         </n-tag>
@@ -449,7 +449,7 @@
 
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
-                    <template #header><span class="card-title"><n-icon :component="FingerprintIcon" />指纹与缓存</span></template>
+                    <template #header><span class="card-title">指纹与缓存</span></template>
 
                     <n-form-item label="本地 STRM 根目录" path="local_strm_root">
                       <n-input-group>
@@ -536,7 +536,7 @@
                 <!-- ########## 左侧卡片: Emby 连接设置 ########## -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title"><n-icon :component="ServerIcon" />Emby 连接设置</span></template>
+                    <template #header><span class="card-title">Emby 连接设置</span></template>
 
                     <!-- ★★★ 调整点1: 恢复双列，但减小间距 x-gap="12" ★★★ -->
                     <n-grid cols="1 m:2" :x-gap="12" :y-gap="12" responsive="screen">
@@ -652,7 +652,7 @@
                 <!-- 左侧: AI翻译 -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card" style="height: 100%;">
-                    <template #header><span class="card-title"><n-icon :component="AIIcon" />AI 增强</span></template>
+                    <template #header><span class="card-title">AI 增强</span></template>
                     <template #header-extra>
                       <n-space align="center">
                         <n-button
@@ -821,7 +821,7 @@
                 <!-- 卡片 1: 日志配置 -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title"><n-icon :component="FileIcon" />日志配置</span></template>
+                    <template #header><span class="card-title">日志配置</span></template>
                     <n-form-item-grid-item label="单个日志文件大小 (MB)" path="log_rotation_size_mb">
                       <n-input-number v-model:value="configModel.log_rotation_size_mb" :min="1" :step="1" placeholder="例如: 5"/>
                       <template #feedback><n-text depth="3" style="font-size:0.8em;">设置 app.log 文件的最大体积，超限后会轮转。</n-text></template>
@@ -844,7 +844,7 @@
                 <!-- 卡片 2: 入库自动处理 -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title"><n-icon :component="SyncIcon" />入库自动处理</span></template>
+                    <template #header><span class="card-title">入库自动处理</span></template>
                     <n-form-item-grid-item label="入库自动纠正高清音轨" path="auto_repair_truehd_core_on_ingest">
                       <n-switch v-model:value="configModel.auto_repair_truehd_core_on_ingest" />
                       <template #feedback>
@@ -875,7 +875,7 @@
                 <!-- 卡片 3: 媒体重命名格式 -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title"><n-icon :component="RenameIcon" />媒体重命名格式</span></template>
+                    <template #header><span class="card-title">媒体重命名格式</span></template>
                     <div class="rename-format-grid">
                       <div class="rename-format-form">
                         <n-form-item-grid-item label="电影格式" path="movie_rename_format">
@@ -960,7 +960,7 @@
                 <!-- 卡片 3: 数据管理 (左下) -->
                 <n-gi>
                   <n-card :bordered="false" class="dashboard-card">
-                    <template #header><span class="card-title"><n-icon :component="DatabaseIcon" />数据管理</span></template>
+                    <template #header><span class="card-title">数据管理</span></template>
                     <n-space vertical>
                       <div class="data-action-grid">
                         <n-button @click="showExportModal" :loading="isExporting" class="action-button"><template #icon><n-icon :component="ExportIcon" /></template>导出数据</n-button>
@@ -1419,15 +1419,6 @@ import {
   RefreshOutline as RefreshIcon,
   DocumentTextOutline as FileIcon,
   SaveOutline as SaveIcon,
-  SettingsOutline as SettingsIcon,
-  EyeOutline as MonitorIcon,
-  GlobeOutline as ApiIcon,
-  CloudOutline as CloudIcon,
-  FingerPrintOutline as FingerprintIcon,
-  ServerOutline as ServerIcon,
-  SparklesOutline as AIIcon,
-  CreateOutline as RenameIcon,
-  FileTrayStackedOutline as DatabaseIcon,
   CheckmarkDoneOutline as SelectAllIcon,
 } from '@vicons/ionicons5';
 import { useConfig } from '../../composables/useConfig.js';
@@ -2497,9 +2488,25 @@ onUnmounted(() => {
 
 <style scoped>
 .settings-card-grid {
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)) !important;
+  grid-template-columns: minmax(0, 1fr) !important;
 }
 .settings-card-grid > div { grid-column: auto !important; }
+.settings-page :deep(.dashboard-card > .n-card__content),
+.ai-settings-wrapper {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 24px;
+  align-items: start;
+}
+.settings-page :deep(.dashboard-card > .n-card__content > *),
+.ai-settings-wrapper > * { grid-column: 1 / -1; min-width: 0; }
+.settings-page :deep(.dashboard-card > .n-card__content > .n-form-item),
+.settings-page :deep(.dashboard-card > .n-card__content > div:has(> .n-form-item)),
+.ai-settings-wrapper > .n-form-item { grid-column: auto; }
+@container (max-width: 899px) {
+  .settings-page :deep(.dashboard-card > .n-card__content),
+  .ai-settings-wrapper { grid-template-columns: minmax(0, 1fr); }
+}
 .card-title { display: inline-flex; align-items: center; gap: 8px; }
 /* 禁用AI设置时的遮罩效果 */
 .ai-settings-wrapper {
