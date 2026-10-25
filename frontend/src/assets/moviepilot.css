@@ -38,8 +38,15 @@ html.dark {
   --card-shadow-color: rgba(0,0,0,.25);
 }
 html, body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; }
-.ui-icon.n-icon { display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; line-height:1; vertical-align:middle; }
-.ui-icon.n-icon > svg { display:block; }
+.n-icon { display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; line-height:1; vertical-align:middle; }
+.n-icon > svg { display:block; }
+/* Text and action icons share one size, including native Naive UI icons. */
+.n-button { --n-icon-size:18px !important; }
+:is(.n-page-header__title, .n-card-header__main, .n-dialog__title, .card-title, .mp-title-with-icon, .n-tabs-tab__label, .temp-task-group-title, .notification-heading h2, .n-radio__label, .tip) > .n-icon,
+:is(.n-button, .mp-task-trigger, .n-menu-item-content__icon, .n-dropdown-option-body__prefix, .n-input__prefix, .n-input__suffix, .n-list-item__prefix, .rename-preview-node, .rename-result-tree-node, .drag-handle) .n-icon,
+.n-icon.drag-handle {
+  font-size:18px !important; width:18px; height:18px;
+}
 .mp-app-shell { display:flex; height:100dvh; width:100%; overflow:hidden; background:var(--ui-page-bg); }
 .mp-sidebar { flex:0 0 260px; width:260px; height:100%; background:var(--ui-page-bg); border-right:0; display:flex; flex-direction:column; transition:width .2s,flex-basis .2s; }
 .mp-nav-collapsed .mp-sidebar { flex-basis:80px; width:80px; }
@@ -74,7 +81,7 @@ html, body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 
 .mp-page-content .n-input-number { width:100%; }
 .mp-page-content .n-card-header { flex-wrap:wrap; gap:8px 16px; }
 .mp-page-content .n-card-header__main { min-width:0; font-size:17px; overflow-wrap:anywhere; }
-:is(.n-card-header__main, .n-dialog__title, .n-tabs-tab__label, .temp-task-group-title):has(> .ui-icon) { display:flex; align-items:center; gap:10px; }
+:is(.n-card-header__main, .n-dialog__title, .n-tabs-tab__label, .temp-task-group-title, .notification-heading h2, .n-radio__label, .tip):has(> .n-icon) { display:flex; align-items:center; gap:8px; }
 .mp-page-content .n-card-header__extra { min-width:0; color:var(--ui-text-muted); font-size:13px; }
 .mp-page-content .n-card-header__extra > .n-text { max-width:420px; }
 .mp-page-content .n-form-item-feedback-wrapper { padding-top:6px; font-size:12px; line-height:1.65; }
@@ -208,7 +215,7 @@ html:is([data-theme='transparent'], [data-theme='glass']) .n-data-table .n-data-
 }
 .mp-log-dialog { display:flex; height:min(800px,calc(100dvh - 48px)); min-height:0; padding:24px; border-radius:14px; background:var(--modal-solid-bg-color); box-shadow:0 12px 40px rgba(0,0,0,.2); overflow:hidden; }
 .mp-log-dialog > .notification-center { width:100%; }
-.card-title,.mp-title-with-icon { display:inline-flex; align-items:center; gap:10px; }
+.card-title,.mp-title-with-icon { display:inline-flex; align-items:center; gap:8px; }
 .card-title > .n-icon { color:var(--accent-color); opacity:.85; }
 .settings-card-actions { display:flex; justify-content:flex-end; gap:12px; padding-top:16px; }
 @media(max-width:540px) { .mp-log-dialog { height:calc(100dvh - 24px); padding:16px; } }
