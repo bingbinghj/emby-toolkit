@@ -125,7 +125,7 @@
       </template>
     </n-modal>
 
-    <n-modal v-model:show="showSyncModeModal" preset="dialog" :mask-closable="false" class="glass-modal"><template #title><UiIcon name="options" /> 选择处理模式</template>
+    <n-modal v-model:show="showSyncModeModal" preset="dialog" :show-icon="false" :mask-closable="false" class="glass-modal"><template #header><UiIcon name="options" /> 选择处理模式</template>
       <n-text>您希望如何执行此任务？</n-text>
       <template #action>
         <n-button @click="showSyncModeModal = false"><template #icon><UiIcon name="close" /></template>取消</n-button>

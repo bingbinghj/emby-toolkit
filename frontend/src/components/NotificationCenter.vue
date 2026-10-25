@@ -3,7 +3,6 @@
     <header class="notification-heading">
       <div><h2><UiIcon name="notifications" /> 通知中心</h2><p>查看运行状态与日志</p></div>
       <div class="notification-window-actions">
-        <n-button v-if="!mobile" quaternary circle :aria-label="expanded ? '收起面板' : '展开面板'" :title="expanded ? '收起面板' : '展开面板'" @click="$emit('expand')"><template #icon><n-icon :component="expanded ? ContractOutline : ExpandOutline" /></template></n-button>
         <n-button quaternary circle aria-label="关闭通知中心" title="关闭" @click="$emit('close')"><template #icon><n-icon :component="CloseOutline" /></template></n-button>
       </div>
     </header>
@@ -52,13 +51,13 @@
 <script setup>
 import { computed, ref, watch, nextTick } from 'vue';
 import { NTabs, NTab, NTag, NButton, NEmpty, NIcon, NInput, NSelect, NSwitch, NProgress, NPopconfirm, useMessage } from 'naive-ui';
-import { CloseOutline, ExpandOutline, ContractOutline, SearchOutline, PauseOutline, PlayOutline, StopOutline } from '@vicons/ionicons5';
+import { CloseOutline, SearchOutline, PauseOutline, PlayOutline, StopOutline } from '@vicons/ionicons5';
 import LogViewer from './LogViewer.vue';
 import { refreshTaskStatus } from '../composables/useTaskStatus.js';
 import axios from 'axios';
 
-const props = defineProps({ task: { type: Object, default: () => ({}) }, expanded: Boolean, mobile: Boolean });
-defineEmits(['expand', 'close']);
+const props = defineProps({ task: { type: Object, default: () => ({}) } });
+defineEmits(['close']);
 const message = useMessage();
 const activeTab = ref('logs'), logRef = ref(null), controlAction = ref('');
 const keyword = ref(''), logFilter = ref('all'), following = ref(true), displayedLogs = ref([]);

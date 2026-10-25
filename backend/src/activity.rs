@@ -53,6 +53,7 @@ pub async fn clear(state: &AppState, context: &JobContext) -> Result<Value> {
     context.checkpoint().await?;
     let result = async {
         if running {
+            tracing::info!("[活动日志清理] 开始停止 Emby 容器，清理结束后恢复运行");
             docker
                 .stop_container(
                     &id,
@@ -62,7 +63,9 @@ pub async fn clear(state: &AppState, context: &JobContext) -> Result<Value> {
                             .build(),
                     ),
                 )
-                .await?;
+                .await
+                .inspect_err(|error| tracing::error!(%error, "[活动日志清理] Emby 容器停止失败"))?;
+            tracing::info!("[活动日志清理] Emby 容器已停止");
         }
         let toolkit = std::env::var("CONTAINER_NAME").unwrap_or("emby-toolkit".into());
         let info = docker.inspect_container(&toolkit, None).await?;
@@ -87,6 +90,7 @@ pub async fn clear(state: &AppState, context: &JobContext) -> Result<Value> {
             )
             .await?
             .id;
+        tracing::info!("[活动日志清理] 清理辅助容器已创建");
         let result = async {
             docker
                 .start_container(
@@ -124,7 +128,7 @@ pub async fn clear(state: &AppState, context: &JobContext) -> Result<Value> {
             Ok::<_, ApiError>(result)
         }
         .await;
-        let _ = docker
+        match docker
             .remove_container(
                 &helper,
                 Some(
@@ -133,17 +137,24 @@ pub async fn clear(state: &AppState, context: &JobContext) -> Result<Value> {
                         .build(),
                 ),
             )
-            .await;
+            .await
+        {
+            Ok(()) => tracing::info!("[活动日志清理] 清理辅助容器已移除"),
+            Err(error) => tracing::warn!(%error, "[活动日志清理] 清理辅助容器移除失败"),
+        }
         result
     }
     .await;
     let restart = if running {
+        tracing::info!("[活动日志清理] 开始恢复 Emby 容器运行");
         docker
             .start_container(
                 &id,
                 None::<bollard::query_parameters::StartContainerOptions>,
             )
             .await
+            .inspect(|_| tracing::info!("[活动日志清理] Emby 容器已恢复启动"))
+            .inspect_err(|error| tracing::error!(%error, "[活动日志清理] Emby 容器恢复启动失败，请检查容器状态"))
             .map_err(ApiError::from)
     } else {
         Ok(())
@@ -168,8 +179,10 @@ pub async fn clear(state: &AppState, context: &JobContext) -> Result<Value> {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
         if !ready {
+            tracing::error!("[活动日志清理] Emby 容器已启动，但 API 未恢复");
             return Err(ApiError::bad("Emby重启后API未恢复"));
         }
+        tracing::info!("[活动日志清理] Emby API 已恢复");
     }
     Ok(
         json!({"deleted":result["before"].as_i64().unwrap_or(0)-result["after"].as_i64().unwrap_or(0),"backup":result["backup"],"message":"Emby活动日志清理完成"}),

@@ -112,44 +112,30 @@ where
         }
     }
     let changed = !restore.as_object().unwrap().is_empty();
+    let mode = "自定义配置";
+    tracing::info!("[神医临时设置] {mode} 开始");
     let outcome = std::panic::AssertUnwindSafe(async {
         if changed {
             write(state, &id, &desired).await?;
             if !matches(&read(state, &id).await?, &desired) {
                 return Err(ApiError::bad("神医临时配置回读不一致"));
             }
+            tracing::info!("[神医临时设置] {mode} 已启用临时配置，结束后恢复原配置");
+        } else {
+            tracing::info!("[神医临时设置] {mode} 原配置已满足要求，无需修改");
         }
         function().await
     })
     .catch_unwind()
     .await
     .unwrap_or_else(|_| Err(ApiError::bad("任务执行异常")));
-    if changed {
-        let mut restored = false;
-        for _ in 0..3 {
-            let attempt = async {
-                let mut current = read(state, &id).await?;
-                current
-                    .as_object_mut()
-                    .unwrap()
-                    .extend(restore.as_object().unwrap().clone());
-                write(state, &id, &current).await?;
-                Ok::<_, ApiError>(matches(&read(state, &id).await?, &restore))
-            }
-            .await;
-            if attempt.unwrap_or(false) {
-                restored = true;
-                break;
-            }
-        }
-        if !restored {
-            return Err(ApiError(
-                axum::http::StatusCode::CONFLICT,
-                "神医临时配置恢复失败，请核对自定义ffmpeg路径".into(),
-            ));
-        }
+    if changed && !restore_settings(state, &id, &restore, mode, outcome.as_ref().err()).await {
+        return Err(ApiError(
+            axum::http::StatusCode::CONFLICT,
+            "神医临时配置恢复失败，请核对自定义ffmpeg路径".into(),
+        ));
     }
-    outcome
+    settings_finished(mode, outcome)
 }
 fn page_id(page: &Value) -> Option<String> {
     ["Href", "NavMenuId"].iter().find_map(|key| {
@@ -252,6 +238,54 @@ fn matches(actual: &Value, expected: &Value) -> bool {
         })
     })
 }
+async fn restore_settings(
+    state: &AppState,
+    id: &str,
+    restore: &Value,
+    mode: &str,
+    failure: Option<&ApiError>,
+) -> bool {
+    tracing::info!("[神医临时设置] {mode} 开始恢复原配置");
+    for attempt in 1..=3 {
+        let result = async {
+            let mut current = read(state, id).await?;
+            current
+                .as_object_mut()
+                .unwrap()
+                .extend(restore.as_object().unwrap().clone());
+            write(state, id, &current).await?;
+            if !matches(&read(state, id).await?, restore) {
+                return Err(ApiError::bad("恢复配置回读不一致"));
+            }
+            Ok::<_, ApiError>(())
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                tracing::info!("[神医临时设置] {mode} 原配置已恢复");
+                return true;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "[神医临时设置] {mode} 第 {attempt}/3 次恢复未确认：{}",
+                    error.1
+                );
+            }
+        }
+    }
+    if let Some(error) = failure {
+        tracing::error!("[神医临时设置] {mode} 执行失败：{}", error.1);
+    }
+    tracing::error!("[神医临时设置] {mode} 已结束，恢复原配置失败，请检查神医设置");
+    false
+}
+fn settings_finished<T>(mode: &str, outcome: Result<T>) -> Result<T> {
+    match &outcome {
+        Ok(_) => tracing::info!("[神医临时设置] {mode} 已结束"),
+        Err(error) => tracing::warn!("[神医临时设置] {mode} 已结束，执行失败：{}", error.1),
+    }
+    outcome
+}
 pub async fn with_settings<F, Fut, T>(state: &AppState, mode: &str, function: F) -> Result<T>
 where
     F: FnOnce() -> Fut,
@@ -322,42 +356,26 @@ where
         }
     }
     let changed = !restore.as_object().unwrap().is_empty();
+    tracing::info!("[神医临时设置] {mode} 开始");
     let outcome = std::panic::AssertUnwindSafe(async {
         if changed {
             write(state, &id, &desired).await?;
             if !matches(&read(state, &id).await?, &desired) {
                 return Err(ApiError::bad("神医临时设置回读不一致"));
             }
+            tracing::info!("[神医临时设置] {mode} 已启用临时配置，结束后恢复原配置");
+        } else {
+            tracing::info!("[神医临时设置] {mode} 原配置已满足要求，无需修改");
         }
-        tracing::info!("[神医临时设置] {mode}，结束后恢复原配置");
         function().await
     })
     .catch_unwind()
     .await
     .unwrap_or_else(|_| Err(ApiError::bad("任务执行异常")));
-    if changed {
-        let mut restored = false;
-        for _ in 0..3 {
-            let attempt = async {
-                let mut current = read(state, &id).await?;
-                current
-                    .as_object_mut()
-                    .unwrap()
-                    .extend(restore.as_object().unwrap().clone());
-                write(state, &id, &current).await?;
-                Ok::<bool, ApiError>(matches(&read(state, &id).await?, &restore))
-            }
-            .await;
-            if attempt.unwrap_or(false) {
-                restored = true;
-                break;
-            }
-        }
-        if !restored {
-            return Err(ApiError::bad("神医临时设置恢复失败，请核对独占模式"));
-        }
+    if changed && !restore_settings(state, &id, &restore, mode, outcome.as_ref().err()).await {
+        return Err(ApiError::bad("神医临时设置恢复失败，请核对独占模式"));
     }
-    outcome
+    settings_finished(mode, outcome)
 }
 pub async fn threads(state: &AppState) -> Result<Value> {
     let id = discover(state).await?;

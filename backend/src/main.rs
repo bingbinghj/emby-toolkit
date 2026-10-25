@@ -58,6 +58,7 @@ async fn main() -> anyhow::Result<()> {
             }
             #[cfg(not(unix))]
             let _ = tokio::signal::ctrl_c().await;
+            tracing::info!("应用程序正在关闭，等待后台任务安全结束");
             shutdown.cancel();
             shutdown_jobs.shutdown().await;
         })
@@ -66,5 +67,6 @@ async fn main() -> anyhow::Result<()> {
     jobs.shutdown().await;
     bot.await?;
     watcher.await?;
+    tracing::info!("应用程序已关闭，后台任务已结束");
     Ok(())
 }

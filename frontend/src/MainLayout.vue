@@ -24,9 +24,9 @@
       <main class="mp-page-content" :class="{ 'mp-page-content-media': ['MediaCenter', 'MediaCenterLibrary'].includes(route.name) }"><router-view v-slot="slotProps"><component :is="slotProps.Component" :task-status="props.taskStatus" /></router-view></main>
     </div>
     <n-drawer v-model:show="mobileMenuOpen" placement="left" :width="280"><n-drawer-content :native-scrollbar="false"><div class="mp-brand"><img src="./assets/logo.png" alt="Emby Toolkit" /><strong>Emby Toolkit</strong></div><n-menu :options="menuOptions" :value="activeMenuKey" :default-expanded-keys="defaultExpandedKeys" @update:value="handleMenuUpdate" /></n-drawer-content></n-drawer>
-    <n-modal v-model:show="notificationOpen" class="mp-log-modal" :style="{ width: notificationExpanded ? 'calc(100vw - 32px)' : 'min(1100px, calc(100vw - 32px))' }">
+    <n-modal v-model:show="notificationOpen" class="mp-log-modal" style="width: min(1100px, calc(100vw - 32px))">
       <div class="mp-log-dialog">
-        <NotificationCenter v-if="notificationOpen" :task="taskStatus" :expanded="notificationExpanded" :mobile="isMobile" @expand="notificationExpanded = !notificationExpanded" @close="notificationOpen = false" />
+        <NotificationCenter v-if="notificationOpen" :task="taskStatus" @close="notificationOpen = false" />
       </div>
     </n-modal>
 
@@ -136,7 +136,6 @@ const isMobile = ref(window.innerWidth < 960);
 const collapsed = ref(false);
 const mobileMenuOpen = ref(false);
 const notificationOpen = ref(false);
-const notificationExpanded = ref(false);
 
 const checkMobile = () => {
   isMobile.value = window.innerWidth < 960;

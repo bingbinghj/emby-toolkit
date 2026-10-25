@@ -12,7 +12,7 @@
 import { ref, computed, watch, onUnmounted } from 'vue';
 import { NConfigProvider, NMessageProvider, NDialogProvider, darkTheme, zhCN, dateZhCN } from 'naive-ui';
 import AppContent from './AppContent.vue';
-import { moviePilotTheme, themeOptions, themePalettes, resolveTheme } from './theme';
+import { moviePilotTheme, themeOptions, getThemePalette, resolveTheme, resolveColorScheme } from './theme';
 
 const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
 const prefersDark = ref(systemTheme.matches);
@@ -20,8 +20,9 @@ const saved = localStorage.getItem('moviepilot-theme');
 const legacy = localStorage.getItem('isDark');
 const themeMode = ref(themeOptions.some(option => option.key === saved) ? saved : (legacy === null ? 'system' : legacy === 'true' ? 'dark' : 'light'));
 const resolvedTheme = computed(() => resolveTheme(themeMode.value, prefersDark.value));
-const isDark = computed(() => resolvedTheme.value !== 'light');
-const theme = computed(() => moviePilotTheme(resolvedTheme.value));
+const palette = computed(() => getThemePalette(resolvedTheme.value, prefersDark.value));
+const isDark = computed(() => resolveColorScheme(themeMode.value, prefersDark.value) === 'dark');
+const theme = computed(() => moviePilotTheme(resolvedTheme.value, prefersDark.value));
 function setThemeMode(value) {
   if (themeOptions.some(option => option.key === value)) {
     themeMode.value = value;
@@ -31,9 +32,8 @@ function setThemeMode(value) {
 const updateSystemTheme = event => { prefersDark.value = event.matches; };
 systemTheme.addEventListener('change', updateSystemTheme);
 onUnmounted(() => systemTheme.removeEventListener('change', updateSystemTheme));
-watch(resolvedTheme, mode => {
+watch([resolvedTheme, palette], ([mode, palette]) => {
   const root = document.documentElement;
-  const palette = themePalettes[mode];
   root.dataset.theme = mode;
   root.classList.toggle('dark', isDark.value);
   root.classList.toggle('light', !isDark.value);

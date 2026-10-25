@@ -532,7 +532,7 @@
     </n-modal>
 
     <!-- 输入图片URL模态框 -->
-    <n-modal v-model:show="showUrlPrompt" preset="dialog"><template #title><UiIcon name="link" /> 设置网络图片</template>
+    <n-modal v-model:show="showUrlPrompt" preset="dialog" :show-icon="false"><template #header><UiIcon name="link" /> 设置网络图片</template>
       <n-input
         v-model:value="imageUrlInput"
         type="text"

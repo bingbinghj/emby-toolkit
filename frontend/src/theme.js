@@ -21,8 +21,22 @@ export function resolveTheme(mode, prefersDark) {
   return mode === 'system' ? (prefersDark ? 'dark' : 'light') : (themePalettes[mode] ? mode : 'light');
 }
 
-export function moviePilotTheme(mode) {
-  const palette = themePalettes[mode] || themePalettes.light;
+const lightMaterialPalettes = {
+  transparent: { ...themePalettes.light, muted: 'rgba(58,53,65,.72)', surface: 'rgba(255,255,255,.3)', mutedSurface: 'rgba(255,255,255,.2)', input: 'rgba(255,255,255,.65)' },
+  glass: { ...themePalettes.light, muted: 'rgba(58,53,65,.72)', surface: 'rgba(255,255,255,.65)', mutedSurface: 'rgba(58,53,65,.04)', input: 'rgba(255,255,255,.65)' },
+};
+
+export function resolveColorScheme(mode, prefersDark) {
+  return resolveTheme(mode === 'transparent' || mode === 'glass' ? 'system' : mode, prefersDark) === 'light' ? 'light' : 'dark';
+}
+
+export function getThemePalette(mode, prefersDark = true) {
+  const resolved = resolveTheme(mode, prefersDark);
+  return (!prefersDark && lightMaterialPalettes[resolved]) || themePalettes[resolved];
+}
+
+export function moviePilotTheme(mode, prefersDark = true) {
+  const palette = getThemePalette(mode, prefersDark);
   const { primary, surface, background, text, muted, border, borderSoft, input, inputBorder, popup, mutedSurface } = palette;
   const translucent = mode === 'transparent' || mode === 'glass';
   const colors = Object.fromEntries(['primary', 'success', 'warning', 'error', 'info'].flatMap(key =>

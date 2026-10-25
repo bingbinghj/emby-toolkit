@@ -38,6 +38,8 @@ html.dark {
   --card-shadow-color: rgba(0,0,0,.25);
 }
 html, body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+.ui-icon.n-icon { display:inline-flex; align-items:center; justify-content:center; flex-shrink:0; line-height:1; vertical-align:middle; }
+.ui-icon.n-icon > svg { display:block; }
 .mp-app-shell { display:flex; height:100dvh; width:100%; overflow:hidden; background:var(--ui-page-bg); }
 .mp-sidebar { flex:0 0 260px; width:260px; height:100%; background:var(--ui-page-bg); border-right:0; display:flex; flex-direction:column; transition:width .2s,flex-basis .2s; }
 .mp-nav-collapsed .mp-sidebar { flex-basis:80px; width:80px; }
@@ -63,7 +65,7 @@ html, body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 
 .mp-page-content-media { overflow:hidden; }
 .mp-page { width:100%; max-width:1800px; min-width:0; margin-inline:auto; }
 .mp-page-header { margin-bottom:24px; }
-.mp-page-header .n-page-header__title { font-size:22px; font-weight:600; line-height:1.4; }
+.mp-page-header .n-page-header__title { display:flex; align-items:center; gap:10px; font-size:22px; font-weight:600; line-height:1.4; }
 .mp-page-header .n-page-header__subtitle { color:var(--ui-text-muted); font-size:13px; }
 .mp-page-actions { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:12px; margin-top:24px; padding:16px 0; }
 .mp-page-actions > .n-button { min-width:140px; }
@@ -72,6 +74,7 @@ html, body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 
 .mp-page-content .n-input-number { width:100%; }
 .mp-page-content .n-card-header { flex-wrap:wrap; gap:8px 16px; }
 .mp-page-content .n-card-header__main { min-width:0; font-size:17px; overflow-wrap:anywhere; }
+:is(.n-card-header__main, .n-dialog__title, .n-tabs-tab__label, .temp-task-group-title):has(> .ui-icon) { display:flex; align-items:center; gap:10px; }
 .mp-page-content .n-card-header__extra { min-width:0; color:var(--ui-text-muted); font-size:13px; }
 .mp-page-content .n-card-header__extra > .n-text { max-width:420px; }
 .mp-page-content .n-form-item-feedback-wrapper { padding-top:6px; font-size:12px; line-height:1.65; }
@@ -169,20 +172,24 @@ html, body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 
 @media (prefers-reduced-motion:reduce) { .mp-running-task-track.indeterminate > span { animation:none; } }
 @media (max-width:600px) { .mp-navbar-center { margin:0 6px; } .mp-running-task { padding:7px; } .mp-running-task-title { gap:5px; } }
 
-/* MoviePilot v3 material tokens, using the default clear glass surface. */
-html[data-theme='transparent'] :is(.mp-app-shell, .fullscreen-container) { background:#1C1C1C; }
+/* Material skins keep their appearance while the palette follows the system. */
+html:is([data-theme='transparent'], [data-theme='glass']) :is(.mp-app-shell, .fullscreen-container) { background:var(--ui-page-bg); }
 html[data-theme='transparent'] :is(.mp-navbar, .n-card, .mp-sidebar) {
   backdrop-filter:blur(10px);
   -webkit-backdrop-filter:blur(10px);
 }
-html[data-theme='transparent'] .mp-sidebar { background:rgba(30,30,30,.2); backdrop-filter:blur(16px); }
+html[data-theme='transparent'] .mp-sidebar { background:var(--ui-surface-muted); backdrop-filter:blur(16px); }
 html[data-theme='glass'] {
   --glass-surface:linear-gradient(128deg,rgba(255,255,255,.1034),transparent 38%), linear-gradient(180deg,rgba(23,27,32,.244),rgba(23,27,32,.299));
   --glass-rim:rgba(255,255,255,.2664);
   --glass-shadow:0 12px 30px rgba(0,0,0,.14), inset 0 1px 0 rgba(255,255,255,.15);
 }
-html[data-theme='glass'] :is(.mp-app-shell, .fullscreen-container) { background:#0B1322; }
-html[data-theme='glass'] :is(.mp-navbar, .mp-sidebar, .n-card) {
+html[data-theme='glass'].light {
+  --glass-surface:linear-gradient(128deg,rgba(255,255,255,.35),transparent 38%), linear-gradient(180deg,rgba(255,255,255,.58),rgba(255,255,255,.7));
+  --glass-rim:rgba(58,53,65,.12);
+  --glass-shadow:0 12px 30px rgba(58,53,65,.08), inset 0 1px 0 rgba(255,255,255,.65);
+}
+html[data-theme='glass'] :is(.mp-navbar, .mp-sidebar, .n-card):not(.n-modal, .n-modal *) {
   background:var(--glass-surface) !important;
   border:1px solid var(--glass-rim) !important;
   box-shadow:var(--glass-shadow) !important;
@@ -197,7 +204,7 @@ html:is([data-theme='transparent'], [data-theme='glass']) :is(.n-card.n-modal, .
 html:is([data-theme='transparent'], [data-theme='glass']) :is(.n-data-table, .n-data-table-table, .n-tabs-pane-wrapper, .n-layout) { background:transparent; }
 html:is([data-theme='transparent'], [data-theme='glass']) .n-data-table .n-data-table-td { background:transparent; }
 @supports not (backdrop-filter:blur(1px)) {
-  html:is([data-theme='transparent'], [data-theme='glass']) :is(.mp-navbar, .mp-sidebar, .n-card) { background:var(--modal-solid-bg-color) !important; }
+  html:is([data-theme='transparent'], [data-theme='glass']) :is(.mp-navbar, .mp-sidebar, .n-card):not(.n-modal, .n-modal *) { background:var(--modal-solid-bg-color) !important; }
 }
 .mp-log-dialog { display:flex; height:min(800px,calc(100dvh - 48px)); min-height:0; padding:24px; border-radius:14px; background:var(--modal-solid-bg-color); box-shadow:0 12px 40px rgba(0,0,0,.2); overflow:hidden; }
 .mp-log-dialog > .notification-center { width:100%; }

@@ -105,7 +105,7 @@
         <div v-else ref="resultsContainer" class="review-results">
           <div v-if="tableData.length > 0 && compactList" class="review-cards">
             <article v-for="row in cardRows" :key="row.item_id" class="review-item-card">
-              <button type="button" class="review-item-title" @click="goToEditPage(row)"><UiIcon name="media" /> {{ row.item_name || '未知名称' }}</button>
+              <button type="button" class="review-item-title" @click="goToEditPage(row)"><UiIcon name="media" /><span>{{ row.item_name || '未知名称' }}</span></button>
               <p class="review-item-meta">{{ [row.series_name !== row.item_name ? row.series_name : '', reviewEpisodeLabel(row), row.production_year, `ID: ${row.item_id}`].filter(Boolean).join(' · ') }}</p>
               <p v-if="isShowingSearchResults" class="review-item-meta">{{ row.library_name || '未知媒体库' }}</p>
               <template v-else>
@@ -633,7 +633,8 @@ onUnmounted(() => listObserver?.disconnect());
 .review-results { min-width:0; }
 .review-cards { display:grid; gap:12px; }
 .review-item-card { min-width:0; padding:16px; border:1px solid var(--ui-border); border-radius:12px; background:var(--ui-surface); }
-.review-item-title { display:block; width:100%; padding:0; border:0; color:var(--ui-text); background:transparent; text-align:left; font:inherit; font-weight:600; line-height:1.5; overflow-wrap:anywhere; cursor:pointer; }
+.review-item-title { display:flex; align-items:center; gap:8px; width:100%; padding:0; border:0; color:var(--ui-text); background:transparent; text-align:left; font:inherit; font-weight:600; line-height:1.5; overflow-wrap:anywhere; cursor:pointer; }
+.review-item-title > span { min-width:0; }
 .review-item-title:hover { color:var(--accent-color); }
 .review-item-title:focus-visible { outline:2px solid var(--accent-color); outline-offset:4px; border-radius:2px; }
 .review-item-meta { margin:6px 0; color:var(--ui-text-muted); font-size:12px; overflow-wrap:anywhere; }

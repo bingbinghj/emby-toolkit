@@ -6,7 +6,7 @@ use crate::{
 };
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
-use std::{collections::BTreeSet, time::Duration};
+use std::{collections::BTreeSet, error::Error as _, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 fn catalog() -> Vec<Value> {
@@ -203,11 +203,124 @@ async fn changed(state: &AppState, token: &str) {
     }
 }
 
+fn diagnostic(token: &str, text: &str) -> String {
+    crate::logs::redact(&text.replace(token, "********"))
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(500)
+        .collect()
+}
+
+fn network_diagnostic(token: &str, error: reqwest::Error) -> String {
+    let kind = if error.is_timeout() {
+        "超时"
+    } else if error.is_connect() {
+        "连接失败"
+    } else {
+        "请求或响应读取失败"
+    };
+    let error = error.without_url();
+    let mut detail = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        detail.push_str(&format!("：{cause}"));
+        source = cause.source();
+    }
+    format!("网络{kind}：{}", diagnostic(token, &detail))
+}
+
+struct PollFailure {
+    message: String,
+    stop: bool,
+    retry_after: Option<u64>,
+}
+
+fn response_failure(status: StatusCode, body: &Value, detail: &str, token: &str) -> PollFailure {
+    let code = body["error_code"].as_u64();
+    let hint = if status == StatusCode::CONFLICT || code == Some(409) {
+        "；请检查是否有其他 Bot 实例同时轮询，或是否设置了 webhook"
+    } else {
+        ""
+    };
+    PollFailure {
+        message: format!(
+            "HTTP {}{}：{}{hint}",
+            status.as_u16(),
+            code.map(|code| format!("，Telegram error_code {code}"))
+                .unwrap_or_default(),
+            diagnostic(token, detail),
+        ),
+        stop: matches!(status.as_u16(), 401 | 404) || matches!(code, Some(401 | 404)),
+        retry_after: if status == StatusCode::TOO_MANY_REQUESTS || code == Some(429) {
+            body["parameters"]["retry_after"]
+                .as_u64()
+                .filter(|seconds| *seconds > 0)
+        } else {
+            None
+        },
+    }
+}
+
+async fn poll_response(
+    response: std::result::Result<reqwest::Response, reqwest::Error>,
+    token: &str,
+) -> std::result::Result<Value, PollFailure> {
+    let response = response.map_err(|error| PollFailure {
+        message: network_diagnostic(token, error),
+        stop: false,
+        retry_after: None,
+    })?;
+    let status = response.status();
+    let bytes = response.bytes().await.map_err(|error| {
+        response_failure(
+            status,
+            &Value::Null,
+            &network_diagnostic(token, error),
+            token,
+        )
+    })?;
+    let body: Value = serde_json::from_slice(&bytes).map_err(|error| {
+        response_failure(
+            status,
+            &Value::Null,
+            &format!(
+                "响应不是有效 JSON（{error}）：{}",
+                String::from_utf8_lossy(&bytes)
+            ),
+            token,
+        )
+    })?;
+    if status.is_success() && body["ok"] == true && body["result"].is_array() {
+        Ok(body)
+    } else {
+        Err(response_failure(
+            status,
+            &body,
+            body["description"]
+                .as_str()
+                .unwrap_or("响应未确认成功或更新列表无效"),
+            token,
+        ))
+    }
+}
+
+fn retry_delay(failures: u32) -> u64 {
+    (5_u64 << failures.saturating_sub(1).min(4)).min(60)
+}
+
 pub async fn run(state: AppState, cancel: CancellationToken) {
     let mut active_token = String::new();
     let mut stopped_token = String::new();
     let mut menu = Value::Null;
     let mut offset: Option<i64> = None;
+    let mut failures: u32 = 0;
+    let mut listening = false;
     loop {
         if cancel.is_cancelled() {
             break;
@@ -215,10 +328,20 @@ pub async fn run(state: AppState, cancel: CancellationToken) {
         let config = state.config.read().await.clone();
         let token = string(&config, "telegram_bot_token");
         if token != active_token {
+            if listening {
+                let reason = if token.is_empty() {
+                    "Bot Token 配置已清空"
+                } else {
+                    "Bot Token 配置已切换"
+                };
+                tracing::info!("[TG交互] Telegram 交互监听已停止：{reason}");
+                listening = false;
+            }
             active_token = token.clone();
             stopped_token.clear();
             offset = None;
             menu = Value::Null;
+            failures = 0;
         }
         if token.is_empty() || token == stopped_token {
             tokio::select! {_ = cancel.cancelled()=>break,_ = tokio::time::sleep(Duration::from_secs(1))=>{}}
@@ -247,45 +370,57 @@ pub async fn run(state: AppState, cancel: CancellationToken) {
         if let Some(offset) = offset {
             request = request.query(&[("offset", offset)]);
         }
-        let response = tokio::select! {_ = cancel.cancelled()=>break,_ = changed(&state,&token)=>continue,result = request.send()=>result};
+        let response = tokio::select! {_ = cancel.cancelled()=>break,_ = changed(&state,&token)=>continue,result = async {
+            if !listening {
+                tracing::info!("[TG交互] Telegram 交互监听已启用");
+                listening = true;
+            }
+            request.send().await
+        }=>result};
+        let response = tokio::select! {_ = cancel.cancelled()=>break,_ = changed(&state,&token)=>continue,result = poll_response(response,&token)=>result};
         let mut delay = 1;
         match response {
-            Ok(response)
-                if [StatusCode::UNAUTHORIZED, StatusCode::NOT_FOUND]
-                    .contains(&response.status()) =>
-            {
-                tracing::error!("Telegram Bot Token 无效，交互轮询已停止");
-                stopped_token = token;
-            }
-            Ok(response) if response.status().is_success() => {
-                match response.json::<Value>().await {
-                    Ok(body) if body["ok"] == true => {
-                        for update in list(&body["result"]) {
-                            if cancel.is_cancelled()
-                                || string(&*state.config.read().await, "telegram_bot_token")
-                                    != token
-                            {
-                                break;
-                            }
-                            if let Some(number) = update["update_id"].as_i64() {
-                                offset = Some(number.saturating_add(1));
-                            }
-                            if let Err(error) = handle_update(&state, &token, &update).await {
-                                tracing::warn!("Telegram 交互处理失败：{}", error.1);
-                            }
-                        }
+            Ok(body) => {
+                if failures > 0 {
+                    tracing::info!("[TG交互] Telegram 轮询已恢复");
+                }
+                failures = 0;
+                for update in list(&body["result"]) {
+                    if cancel.is_cancelled()
+                        || string(&*state.config.read().await, "telegram_bot_token") != token
+                    {
+                        break;
                     }
-                    _ => {
-                        tracing::debug!("Telegram 返回无效更新，将重试");
-                        delay = 5;
+                    if let Some(number) = update["update_id"].as_i64() {
+                        offset = Some(number.saturating_add(1));
+                    }
+                    if let Err(error) = handle_update(&state, &token, &update).await {
+                        tracing::warn!("Telegram 交互处理失败：{}", error.1);
                     }
                 }
             }
-            _ => {
-                tracing::debug!("Telegram 轮询请求失败，将重试");
-                delay = 5;
+            Err(error) if error.stop => {
+                tracing::error!(
+                    "[TG交互] Telegram Bot Token 无效，交互监听已停止：{}",
+                    error.message
+                );
+                listening = false;
+                stopped_token = token;
+            }
+            Err(error) => {
+                failures = failures.saturating_add(1);
+                delay = error.retry_after.unwrap_or_else(|| retry_delay(failures));
+                tracing::warn!(
+                    "[TG交互] Telegram 轮询失败：{}；连续失败 {} 次，{} 秒后重试",
+                    error.message,
+                    failures,
+                    delay
+                );
             }
         }
         tokio::select! {_ = cancel.cancelled()=>break,_ = changed(&state,&active_token)=>{},_ = tokio::time::sleep(Duration::from_secs(delay))=>{}}
+    }
+    if listening {
+        tracing::info!("[TG交互] Telegram 交互监听已停止：服务关闭");
     }
 }

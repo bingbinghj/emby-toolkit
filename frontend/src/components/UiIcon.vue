@@ -1,4 +1,4 @@
-<template><n-icon :component="icons[name] || SettingsOutline" :size="size" aria-hidden="true" /></template>
+<template><n-icon class="ui-icon" :component="icons[name] || SettingsOutline" :size="size" aria-hidden="true" /></template>
 <script setup>
 import { NIcon } from 'naive-ui';
 import { SaveOutline, CloseOutline, SettingsOutline, SearchOutline, AddOutline, TrashOutline, RefreshOutline, DownloadOutline, CloudUploadOutline, CreateOutline, PlayOutline, StopOutline, CheckmarkOutline, FolderOutline, FilmOutline, LibraryOutline, PersonOutline, NotificationsOutline, LanguageOutline, ServerOutline, KeyOutline, ImagesOutline, TimeOutline, LinkOutline, SendOutline, HelpCircleOutline, ArrowBackOutline, OptionsOutline, CheckmarkDoneOutline, CopyOutline, EyeOutline, WarningOutline, ColorPaletteOutline, ChatbubbleOutline } from '@vicons/ionicons5';

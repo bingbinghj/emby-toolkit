@@ -690,6 +690,7 @@ async fn fallback(
     );
     let script = format!("{directory}/{folder}/ffmpeg");
     let archive = encoder_archive(&folder, &encoder, &rules)?;
+    tracing::info!("[缩略图临时编码器] 开始上传补图文件");
     docker
         .upload_to_container(
             &id,
@@ -700,7 +701,9 @@ async fn fallback(
             ),
             bollard::body_full(archive.into()),
         )
-        .await?;
+        .await
+        .inspect_err(|error| tracing::warn!(%error, "[缩略图临时编码器] 补图文件上传失败"))?;
+    tracing::info!("[缩略图临时编码器] 补图文件已上传，开始补图，结束后恢复原编码器");
     let result = async {
         let mut cursor = LogCursor::new(state).await?;
         crate::strm::with_changes(state, &json!({"CustomEncoderPath":script}), || async {
@@ -718,6 +721,12 @@ async fn fallback(
         })
     }
     .await;
+    match &result {
+        Ok(()) => tracing::info!("[缩略图临时编码器] 补图执行结束，检查停用状态与文件清理"),
+        Err(error) => {
+            tracing::warn!(reason = %error.1, "[缩略图临时编码器] 补图执行失败，检查停用状态与文件清理")
+        }
+    }
     let cleanup = async {
         let config = crate::strm::config(state).await?;
         if config["CustomEncoderPath"] != script && !active(&task(state).await?) {
@@ -738,14 +747,18 @@ async fn fallback(
                 &["rmdir".into(), format!("{directory}/{folder}")],
             )
             .await?;
+            tracing::info!("[缩略图临时编码器] 已确认停用，补图文件已清理");
         } else {
-            tracing::warn!("暂时保留仍可能使用的缩略图编码器：{script}");
+            tracing::warn!("[缩略图临时编码器] 暂时保留仍可能使用的缩略图编码器：{script}");
         }
         Ok::<_, ApiError>(())
     }
     .await;
     if let Err(error) = cleanup {
-        tracing::warn!("未确认临时编码器已停用，保留：{}", error.1);
+        tracing::warn!(
+            "[缩略图临时编码器] 未确认已停用或清理完成，保留剩余文件：{}",
+            error.1
+        );
     }
     result
 }

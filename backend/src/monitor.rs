@@ -250,12 +250,15 @@ impl Service {
                 path=rx.recv()=>if let Some(path)=path && settings.enabled && let Some(path)=settings.accepts(&path).await{queue.insert(path);deadline=Some(tokio::time::Instant::now()+Duration::from_secs(3));},
                 _=tick.tick()=>{
                     let config=self.state.config.read().await.clone();let next_signature=json!([config["monitor_enabled"],config["monitor_paths"],config["monitor_extensions"],config["monitor_exclude_dirs"],config["monitor_exclude_refresh_delay"]]).to_string();
-                    if next_signature!=signature{batch_cancel.cancel();batch_cancel=cancel.child_token();watcher=None;settings=Settings::read(&config).await;signature=next_signature;
+                    if next_signature!=signature{batch_cancel.cancel();batch_cancel=cancel.child_token();
+                        if watcher.take().is_some(){tracing::info!("[实时监控] 目录监听实例已停止，重新加载配置");}
+                        settings=Settings::read(&config).await;signature=next_signature;
                         let mut retained=BTreeSet::new();for path in &queue{if let Some(path)=settings.accepts(path).await{retained.insert(path);}}queue=retained;
                         if settings.enabled&&!settings.roots.is_empty(){let tx=self.tx.clone();match notify::recommended_watcher(move|event:notify::Result<notify::Event>|{match event{
                             Ok(event)=>{let paths=match event.kind{EventKind::Create(CreateKind::File|CreateKind::Any)=>event.paths,EventKind::Modify(ModifyKind::Name(RenameMode::To))=>event.paths,EventKind::Modify(ModifyKind::Name(RenameMode::Both))=>event.paths.into_iter().skip(1).collect(),_=>vec![]};for path in paths{let _=tx.send(path);}},
                             Err(error)=>tracing::warn!(%error,"实时监控文件事件读取失败")
-                        }}){Ok(mut next)=>{for root in &settings.roots{if let Err(error)=next.watch(root,RecursiveMode::Recursive){tracing::warn!(path=%root.display(),%error,"无法监控目录");}}watcher=Some(next);},Err(error)=>tracing::warn!(%error,"实时监控初始化失败")}}
+                        }}){Ok(mut next)=>{let mut watched=0;for root in &settings.roots{match next.watch(root,RecursiveMode::Recursive){Ok(())=>watched+=1,Err(error)=>tracing::warn!(path=%root.display(),%error,"无法监控目录")}}
+                            tracing::info!(watched,total=settings.roots.len(),"[实时监控] 目录监听实例已初始化");watcher=Some(next);},Err(error)=>tracing::warn!(%error,"实时监控初始化失败")}}
                         if !settings.enabled{queue.clear();deadline=None;}
                     }
                     if settings.enabled&&!queue.is_empty()&&deadline.is_some_and(|d|d<=tokio::time::Instant::now()){
@@ -267,7 +270,9 @@ impl Service {
                 }
             }
         }
-        drop(watcher);
+        if watcher.take().is_some() {
+            tracing::info!("[实时监控] 目录监听实例已停止，服务正在关闭");
+        }
         *self.rx.lock().unwrap() = Some(rx);
         self.running.store(false, Ordering::SeqCst);
     }
