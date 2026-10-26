@@ -616,7 +616,7 @@ onUnmounted(() => listObserver?.disconnect());
 }
 
 .review-search-action:hover {
-  color:var(--accent-color);
+  color:var(--ui-primary-text);
   background-color:var(--accent-glow-color);
 }
 
@@ -635,7 +635,7 @@ onUnmounted(() => listObserver?.disconnect());
 .review-item-card { min-width:0; padding:16px; border:1px solid var(--ui-border); border-radius:12px; background:var(--ui-surface); }
 .review-item-title { display:flex; align-items:center; gap:8px; width:100%; padding:0; border:0; color:var(--ui-text); background:transparent; text-align:left; font:inherit; font-weight:600; line-height:1.5; overflow-wrap:anywhere; cursor:pointer; }
 .review-item-title > span { min-width:0; }
-.review-item-title:hover { color:var(--accent-color); }
+.review-item-title:hover { color:var(--ui-primary-text); }
 .review-item-title:focus-visible { outline:2px solid var(--accent-color); outline-offset:4px; border-radius:2px; }
 .review-item-meta { margin:6px 0; color:var(--ui-text-muted); font-size:12px; overflow-wrap:anywhere; }
 .review-item-reason { margin:12px 0; color:var(--ui-text); overflow-wrap:anywhere; }

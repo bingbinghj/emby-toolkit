@@ -418,7 +418,7 @@ onBeforeUnmount(() => {
 .alphabet-nav { position:sticky; z-index:3; top:0; grid-column:2; display:flex; flex-direction:column; gap:2px; margin-top:16px; padding:4px 2px; overflow-y:auto; border:1px solid var(--ui-border); border-radius:8px; background:var(--modal-solid-bg-color); box-shadow:var(--ui-shadow); scrollbar-width:none; }
 .alphabet-nav::-webkit-scrollbar { display: none; }
 .alphabet-nav button { flex:0 0 20px; width:28px; height:20px; padding:0; border:0; border-radius:5px; color:var(--ui-text-muted); background:transparent; cursor:pointer; font-size:12px; line-height:20px; }
-.alphabet-nav button:hover, .alphabet-nav button.is-active { color:var(--accent-color); background:var(--accent-glow-color); font-weight:700; }
+.alphabet-nav button:hover, .alphabet-nav button.is-active { color:var(--ui-primary-text); background:var(--accent-glow-color); font-weight:700; }
 .media-center-loading { position: fixed; inset: 64px 0 0 244px; display: grid; place-items: center; pointer-events: none; background: color-mix(in srgb, var(--ui-page-bg) 45%, transparent); }
 @container (max-width:540px) {
   .library-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px 12px; }

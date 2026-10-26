@@ -8,10 +8,15 @@ import naive from 'naive-ui';
 import UiIcon from './components/UiIcon.vue';
 import { useAuthStore } from './stores/auth'; // ★★★ 1. 导入你的 auth store ★★★
 import { installBackgroundTaskInterceptor } from './utils/backgroundTasks';
+import { useAppearance } from './composables/useAppearance';
+import { applyDocumentTheme } from './theme';
 
 // 全局样式
 import './assets/global.css';
 import './assets/moviepilot.css';
+
+// Apply the saved appearance before waiting for authentication.
+applyDocumentTheme(useAppearance().settings, window.matchMedia('(prefers-color-scheme: dark)').matches);
 
 // --- 创建核心实例 ---
 const pinia = createPinia();

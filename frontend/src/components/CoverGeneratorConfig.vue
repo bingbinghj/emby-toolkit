@@ -633,7 +633,7 @@ onMounted(() => {
 .style-card.is-selected { border-color:var(--accent-color); box-shadow:0 0 0 2px var(--accent-color); }
 .cover-style-options { width:100%; }
 .style-card-label { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px; }
-.style-card-label > span { font-size:12px; color:var(--accent-color); }
+.style-card-label > span { font-size:12px; color:var(--ui-primary-text); }
 .style-img {
   display:block;
   width: 100%;

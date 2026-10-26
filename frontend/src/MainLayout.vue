@@ -17,7 +17,7 @@
           <button v-if="authStore.isAdmin" class="mp-task-trigger" :class="{ running: taskStatus?.is_running }" aria-label="通知中心" title="通知中心" @click="notificationOpen = true">
             <n-icon :component="NotificationsOutline" :size="19" /><span v-if="taskStatus?.is_running" class="mp-notification-dot" />
           </button>
-          <n-dropdown trigger="click" :options="themeMenuOptions" :value="themeMode" @select="emit('update:theme-mode', $event)"><n-button quaternary circle aria-label="选择主题" :title="`主题：${themeOptions.find(option => option.key === themeMode)?.label || '跟随系统'}`"><template #icon><n-icon :component="PaletteIcon" /></template></n-button></n-dropdown>
+          <n-button quaternary circle aria-label="主题与壁纸" title="主题与壁纸" @click="themeCustomizerOpen = true"><template #icon><n-icon :component="PaletteIcon" /></template></n-button>
           <n-dropdown v-if="authStore.isLoggedIn" trigger="click" :options="userOptions" @select="handleUserSelect"><button class="mp-user-avatar" :aria-label="`${authStore.username} 的用户菜单`"><img v-if="authStore.avatarUrl && !avatarLoadFailed" :src="authStore.avatarUrl" alt="" @error="avatarLoadFailed = true" /><template v-else>{{ (authStore.username || 'U').slice(0, 1).toUpperCase() }}</template><span /></button></n-dropdown>
         </div>
       </header>
@@ -29,6 +29,12 @@
         <NotificationCenter v-if="notificationOpen" :task="taskStatus" @close="notificationOpen = false" />
       </div>
     </n-modal>
+
+    <n-drawer v-model:show="themeCustomizerOpen" placement="right" :width="isMobile ? '100vw' : 400" class="mp-theme-drawer">
+      <n-drawer-content :native-scrollbar="false" body-content-style="padding: 0;">
+        <ThemeCustomizer v-if="themeCustomizerOpen" @close="themeCustomizerOpen = false" />
+      </n-drawer-content>
+    </n-drawer>
 
     <!-- ★★★ 自定义菜单编辑器模态框 ★★★ -->
     <n-modal v-model:show="isMenuEditorVisible" preset="card" class="menu-editor-modal" style="width: min(650px, calc(100vw - 32px));" title="自定义侧边栏菜单 (全局生效)">
@@ -110,7 +116,7 @@ import {
 } from 'naive-ui';
 import { useAuthStore } from './stores/auth';
 import NotificationCenter from './components/NotificationCenter.vue';
-import { themeOptions } from './theme.js';
+import ThemeCustomizer from './components/ThemeCustomizer.vue';
 import UiIcon from './components/UiIcon.vue';
 import {
   ListOutline as ReviewListIcon,
@@ -133,6 +139,7 @@ const isMobile = ref(window.innerWidth < 960);
 const collapsed = ref(false);
 const mobileMenuOpen = ref(false);
 const notificationOpen = ref(false);
+const themeCustomizerOpen = ref(false);
 
 const checkMobile = () => {
   isMobile.value = window.innerWidth < 960;
@@ -147,10 +154,8 @@ onMounted(() => {
 onUnmounted(() => window.removeEventListener('resize', checkMobile));
 
 const props = defineProps({
-  themeMode: String,
   taskStatus: Object
 });
-const emit = defineEmits(['update:theme-mode']);
 
 const router = useRouter();
 const route = useRoute();
@@ -170,7 +175,6 @@ watch(() => route.fullPath, () => {
 const activeMenuKey = computed(() => route.name === 'MediaCenterLibrary' ? 'MediaCenter' : route.name);
 const renderIcon = (iconComponent, size = 18) => () => h(NIcon, { size }, { default: () => h(iconComponent) });
 
-const themeMenuOptions = themeOptions.map(option => ({ ...option, icon: () => h(UiIcon, { name: 'theme' }) }));
 
 const userOptions = computed(() => {
   const options = [];
