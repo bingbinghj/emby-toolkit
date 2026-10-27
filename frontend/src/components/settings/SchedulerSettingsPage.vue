@@ -125,12 +125,14 @@
       </template>
     </n-modal>
 
-    <n-modal v-model:show="showSyncModeModal" preset="dialog" :show-icon="false" :mask-closable="false" class="glass-modal"><template #header>选择处理模式</template>
+    <n-modal v-model:show="showSyncModeModal" preset="dialog" :show-icon="false" :mask-closable="false" class="glass-modal" style="width: min(560px, calc(100vw - 32px));"><template #header>选择处理模式</template>
       <n-text>您希望如何执行此任务？</n-text>
       <template #action>
+        <div class="sync-mode-actions">
         <n-button @click="showSyncModeModal = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
         <n-button @click="runTaskFromModal(false)"><template #icon><UiIcon name="play" /></template>快速模式（增量）</n-button>
         <n-button type="warning" @click="runTaskFromModal(true)"><template #icon><UiIcon name="play" /></template>深度模式 (全量)</n-button>
+        </div>
       </template>
     </n-modal>
   </n-layout>
@@ -348,6 +350,8 @@ watch([configModel, availableTasksForTgMenu], ([newConfig, tgMenuTasks]) => {
 
 <style scoped>
 .scheduler-content { display:grid; gap:24px; }
+.sync-mode-actions { display:grid; grid-template-columns:auto 1fr 1fr; gap:10px; width:100%; }
+@media (max-width:540px) { .sync-mode-actions { grid-template-columns:minmax(0,1fr); } }
 .scheduler-overview { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:24px; align-items:stretch; }
 .scheduler-overview > * { min-width:0; height:100%; }
 @container (max-width:899px) { .scheduler-overview { grid-template-columns:minmax(0,1fr); } }

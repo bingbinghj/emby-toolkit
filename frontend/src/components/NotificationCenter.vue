@@ -24,7 +24,7 @@
             <template #icon><n-icon :component="task.state === 'paused' ? PlayOutline : PauseOutline" /></template>
             {{ task.state === 'pausing' ? '正在暂停…' : task.state === 'paused' ? '继续任务' : '暂停任务' }}
           </n-button>
-          <n-popconfirm @positive-click="stopTask" positive-text="停止任务" negative-text="取消" :positive-button-props="{ type: 'error' }">
+          <n-popconfirm :to="true" placement="top-end" :width="320" style="max-width: calc(100vw - 64px)" @positive-click="stopTask" positive-text="停止任务" negative-text="取消" :positive-button-props="{ type: 'error' }">
             <template #trigger><n-button size="small" type="error" secondary :loading="controlAction === 'stop'" :disabled="!!controlAction || task.stop_requested || task.state === 'stopping'"><template #icon><n-icon :component="StopOutline" /></template>{{ task.stop_requested || task.state === 'stopping' ? '正在停止…' : '停止任务' }}</n-button></template>
             停止后将完成必要的收尾操作，当前任务不会继续处理新项目。
           </n-popconfirm>
@@ -118,9 +118,9 @@ h2 { margin:0; font-size:20px; font-weight:600; }
 .notification-task { flex-shrink:0; padding:16px; border:1px solid var(--ui-border); border-radius:10px; background:var(--ui-surface-muted); }
 .notification-task-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
 .notification-task-heading strong { min-width:0; overflow-wrap:anywhere; font-size:14px; }
-.notification-task-message { margin:8px 0 12px; color:var(--ui-text-muted); font-size:12px; line-height:1.7; }
+.notification-task-message { margin:8px 0 12px; max-height:5.1em; overflow:auto; color:var(--ui-text-muted); font-size:12px; line-height:1.7; overflow-wrap:anywhere; }
 .notification-task-controls { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:10px; margin-top:14px; }
-.notification-task-phase { flex:1; color:var(--ui-text-muted); font-size:12px; }
+.notification-task-phase { flex:1; min-width:0; max-height:3.2em; overflow:auto; overflow-wrap:anywhere; color:var(--ui-text-muted); font-size:12px; }
 .notification-toolbar { display:flex; align-items:center; gap:12px; flex-shrink:0; }
 .notification-toolbar > .n-input { min-width:0; }
 .notification-filter { width:145px; flex-shrink:0; }
@@ -142,6 +142,7 @@ h2 { margin:0; font-size:20px; font-weight:600; }
   .notification-center, .notification-live { gap:12px; }
   .notification-log { padding:8px; }
   .notification-task { padding:12px; }
+  .notification-task-phase { flex-basis:100%; }
   .notification-footer > span { flex-basis:100%; }
 }
 </style>

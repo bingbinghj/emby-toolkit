@@ -91,7 +91,7 @@
             <span>关闭一级菜单显示，可将其下开启的二级菜单自动提升为一级。</span>
           </span>
           <n-space>
-            <n-popconfirm @positive-click="resetMenuConfig" negative-text="取消" positive-text="确定">
+            <n-popconfirm :to="true" placement="top-start" style="max-width: min(360px, 70vw)" @positive-click="resetMenuConfig" negative-text="取消" positive-text="确定">
               <template #trigger>
                 <n-button type="error" ghost :loading="isSavingMenu"><template #icon><UiIcon name="refresh" /></template>恢复默认</n-button>
               </template>

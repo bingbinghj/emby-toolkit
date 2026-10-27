@@ -603,7 +603,7 @@
               @update:value="handleMediaInfoVersionChange"
             />
           </div>
-          <n-popconfirm @positive-click="deleteCurrentMediaVersion">
+          <n-popconfirm :to="true" placement="bottom-start" style="max-width: min(360px, 70vw)" @positive-click="deleteCurrentMediaVersion">
             <template #trigger>
               <n-button
                 type="error"
@@ -726,7 +726,7 @@
               />
             </td>
             <td style="text-align: center;">
-              <n-popconfirm @positive-click="removeMediaInfoStream(stream)">
+              <n-popconfirm :to="true" placement="top-end" style="max-width: min(360px, 70vw)" @positive-click="removeMediaInfoStream(stream)">
                 <template #trigger>
                   <n-button
                     text
@@ -754,7 +754,7 @@
 
       <template #action>
         <n-space justify="space-between">
-          <n-popconfirm @positive-click="repairCurrentAudioTracks">
+          <n-popconfirm :to="true" placement="top-start" style="max-width: min(360px, 70vw)" @positive-click="repairCurrentAudioTracks">
             <template #trigger>
               <n-button
                 type="warning"

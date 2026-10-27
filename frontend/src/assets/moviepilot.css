@@ -144,7 +144,8 @@ html, body { font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', 
 .n-card.n-modal .n-card__footer { border-top:1px solid var(--ui-border); }
 .n-modal-container :is(.n-form-item-feedback-wrapper, .n-form-item-feedback) { color:var(--ui-text-muted); font-size:12px; line-height:1.65; }
 .n-popover { max-width:calc(100vw - 24px); }
-.n-dialog__action, .n-popconfirm__action { flex-wrap:wrap; }
+.n-dialog__action, .n-popconfirm__action { flex-wrap:wrap; gap:10px; }
+.n-dialog .n-dialog__action > :not(:last-child), .n-popconfirm .n-popconfirm__action > .n-button:not(:last-child) { margin-right:0; }
 .fullscreen-container { height:100dvh; min-height:0; overflow:auto; }
 .login-layout, .setup-layout { background:transparent !important; }
 .n-modal .n-card,.n-card.glass-modal,.n-dialog.glass-modal { border-radius:12px !important; background:var(--modal-solid-bg-color) !important; backdrop-filter:none !important; }
