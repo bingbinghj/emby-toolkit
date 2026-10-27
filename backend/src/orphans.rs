@@ -258,6 +258,30 @@ fn parent(value: &Value) -> String {
 fn name(value: &Value) -> String {
     text(value, &["name", "file_name", "fn", "n"])
 }
+fn is_directory(value: &Value) -> bool {
+    ["fc", "file_category", "type"]
+        .iter()
+        .any(|key| matches!(value[*key].as_str(), Some("0")) || value[*key] == 0)
+        || ["is_dir", "is_folder", "is_directory"]
+            .iter()
+            .any(|key| value[*key] == true || value[*key] == 1 || value[*key] == "1")
+}
+fn sidecar(filename: &str, stem: &str) -> bool {
+    if filename == format!("{stem}-mediainfo.json") {
+        return true;
+    }
+    let Some(suffix) = filename.strip_prefix(&format!("{stem}.")) else {
+        return false;
+    };
+    let extension = suffix.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    matches!(
+        extension.as_str(),
+        "srt" | "ass" | "ssa" | "sub" | "idx" | "vtt" | "sup"
+    ) || matches!(
+        suffix.to_ascii_lowercase().as_str(),
+        "nfo" | "jpg" | "jpeg" | "png" | "webp"
+    )
+}
 fn slash(value: &str) -> String {
     value
         .replace('\\', "/")
@@ -503,9 +527,18 @@ impl Reader<'_> {
             return Err(ApiError::bad("115搜索失败"));
         }
         let hits = list(&response["data"]);
+        let count = response["count"]
+            .as_u64()
+            .or_else(|| response["count"].as_str().and_then(|s| s.parse().ok()));
+        if count.is_some_and(|count| count > hits.len() as u64) {
+            return Err(ApiError::bad("115搜索结果不完整，拒绝移动"));
+        }
         let Some(video) = hits.iter().find(|item| id(item) == fid) else {
             return Ok(("search_missing", 0));
         };
+        if is_directory(video) {
+            return Err(ApiError::bad("115搜索命中目录而非视频，拒绝移动"));
+        }
         let current = parent(video);
         let verified = &candidate["verified"];
         if verified.is_object()
@@ -530,6 +563,9 @@ impl Reader<'_> {
             self.after();
             let response = response?;
             let exists = p115::success(&response);
+            if !exists && !p115::missing(&response) {
+                return Err(ApiError::bad("无法确认115父目录已失效，拒绝移动"));
+            }
             self.parents.insert(current.clone(), exists);
             exists
         };
@@ -540,10 +576,17 @@ impl Reader<'_> {
             target = self.directory(root, &parts, true).await?;
             children = self.children(&target, false).await?;
         }
+        let video_name = name(video);
+        let stem = std::path::Path::new(&video_name)
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy();
         let related = hits
             .iter()
             .filter(|item| {
-                parent(item) == current && name(item).starts_with(&string(candidate, "stem"))
+                parent(item) == current
+                    && !is_directory(item)
+                    && (id(item) == fid || sidecar(&name(item), &stem))
             })
             .collect::<Vec<_>>();
         let mut ids = vec![];

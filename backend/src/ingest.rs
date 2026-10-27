@@ -793,7 +793,7 @@ async fn review(
     sqlx::query("INSERT INTO processed_log(item_id,item_name,score) VALUES($1,$2,$3) ON CONFLICT(item_id) DO UPDATE SET item_name=EXCLUDED.item_name,score=EXCLUDED.score,processed_at=NOW()")
         .bind(&id).bind(&name).bind(score as f32).execute(&mut *transaction).await?;
     if let Some(reason) = reason {
-        sqlx::query("INSERT INTO failed_log(item_id,item_name,item_type,reason,score) VALUES($1,$2,$3,$4,$5) ON CONFLICT(item_id) DO UPDATE SET item_name=EXCLUDED.item_name,item_type=EXCLUDED.item_type,reason=EXCLUDED.reason,score=EXCLUDED.score,failed_at=NOW()")
+        sqlx::query("INSERT INTO failed_log(item_id,item_name,item_type,reason,error_message,score) VALUES($1,$2,$3,$4,$4,$5) ON CONFLICT(item_id) DO UPDATE SET item_name=EXCLUDED.item_name,item_type=EXCLUDED.item_type,reason=EXCLUDED.reason,error_message=EXCLUDED.error_message,score=EXCLUDED.score,failed_at=NOW()")
         .bind(&id).bind(&name).bind(kind).bind(reason).bind(score as f32).execute(&mut *transaction).await?;
     } else {
         sqlx::query("DELETE FROM failed_log WHERE item_id=$1")
@@ -807,4 +807,62 @@ async fn review(
         string(item, "Id")
     );
     Ok(score)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL in DATABASE_URL"]
+    async fn review_failure_updates_the_message_used_by_the_actor_editor() {
+        let url = std::env::var("DATABASE_URL").unwrap();
+        let root = sqlx::PgPool::connect(&url).await.unwrap();
+        let schema = format!("review_message_{}", uuid::Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&root)
+            .await
+            .unwrap();
+        let search_path = format!("SET search_path TO {schema}");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .after_connect(move |connection, _| {
+                let search_path = search_path.clone();
+                Box::pin(async move {
+                    sqlx::query(&search_path).execute(connection).await?;
+                    Ok(())
+                })
+            })
+            .connect(&url)
+            .await
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let state = AppState::new(pool, directory.path().into()).await.unwrap();
+        let item = json!({"Id":"movie","Type":"Movie","Name":"电影","Path":directory.path().join("movie.strm")});
+        let score = review(&state, &item, &[], true).await.unwrap();
+        assert_eq!(score, 0.0);
+        let initial: Value =
+            sqlx::query_scalar("SELECT to_jsonb(f) FROM failed_log f WHERE item_id='movie'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        sqlx::query("UPDATE failed_log SET error_message='旧原因' WHERE item_id='movie'")
+            .execute(&state.db)
+            .await
+            .unwrap();
+        review(&state, &item, &[], true).await.unwrap();
+        let updated: Value =
+            sqlx::query_scalar("SELECT to_jsonb(f) FROM failed_log f WHERE item_id='movie'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        state.db.close().await;
+        sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+            .execute(&root)
+            .await
+            .unwrap();
+        root.close().await;
+        assert_eq!(initial["error_message"], initial["reason"]);
+        assert_eq!(updated["error_message"], updated["reason"]);
+        assert_eq!(updated["error_message"], "缺失媒体信息: ");
+    }
 }

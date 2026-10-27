@@ -276,9 +276,14 @@ async fn emby(
         "Emby Webhook 已接受：事件 {event}，Emby {id}，处理父项 {top}，目标分集 {} 个",
         ids.len()
     );
+    let queue_id = if event == "metadata.update" {
+        &id
+    } else {
+        &top
+    };
     enqueue(
         &state,
-        format!("emby:{top}:{event}"),
+        format!("emby:{queue_id}:{event}"),
         json!({"source":"emby","id":top,"episode_ids":ids,"event":event,"original":item}),
     )
     .await;

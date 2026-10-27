@@ -390,7 +390,7 @@ onBeforeUnmount(() => {
 .library-art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .library-art-icon, .library-art-title, .library-count { z-index: 2; }
 .library-art-icon { position: absolute; left: 16px; opacity: .9; }
-.library-count { position:absolute; top:10px; right:10px; display:grid; min-width:28px; height:24px; padding:0 8px; place-items:center; border:1px solid rgba(255,255,255,.32); border-radius:6px; color:#fff; background:#52b54b; font-size:11px; font-weight:600; }
+.library-count { position:absolute; top:10px; right:10px; display:grid; min-width:28px; aspect-ratio:1; padding:6px; box-sizing:border-box; place-items:center; border:1px solid rgba(255,255,255,.32); border-radius:50%; color:#fff; background:#52b54b; font-size:11px; font-weight:600; line-height:1; white-space:nowrap; }
 .library-card-body { display: flex; min-width: 0; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 9px 4px 0; text-align: center; }
 .library-card-body strong { width:100%; overflow:hidden; font-size:14px; text-overflow:ellipsis; white-space:nowrap; }
 .library-card-body span, .result-count { flex-shrink: 0; color: var(--ui-text-muted); font-size: 12px; }

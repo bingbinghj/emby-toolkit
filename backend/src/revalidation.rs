@@ -86,6 +86,7 @@ struct Resolver<'a> {
     context: Option<&'a JobContext>,
     previous: Option<tokio::time::Instant>,
     invalid_roots: HashSet<String>,
+    directories: BTreeMap<String, Vec<Value>>,
 }
 impl<'a> Resolver<'a> {
     fn new(audit: Option<&'a AuditReader<'a>>) -> Self {
@@ -94,6 +95,7 @@ impl<'a> Resolver<'a> {
             context: None,
             previous: None,
             invalid_roots: HashSet::new(),
+            directories: BTreeMap::new(),
         }
     }
     async fn request<T>(&mut self, future: impl Future<Output = Result<T>>) -> Result<T> {
@@ -240,6 +242,7 @@ async fn resolve_current(
                     state, &info, relative, context,
                 ))
                 .await?;
+            resolver.directories.clear();
             let restored = normalized(&restored);
             if ["id", "pick_code", "sha1", "name", "size"]
                 .iter()
@@ -274,7 +277,13 @@ async fn locate(
     let mut parent = root.clone();
     for (index, part) in parts.iter().enumerate() {
         let last = index + 1 == parts.len();
-        let all = match children(state, &parent, resolver).await {
+        // Reuse complete intermediate directories only within this batch. File
+        // listings stay fresh so a later Item cannot inherit an older PC/SHA1.
+        let all = match if !last && resolver.directories.contains_key(&parent) {
+            Ok(resolver.directories[&parent].clone())
+        } else {
+            children(state, &parent, resolver).await
+        } {
             Ok(all) => all,
             Err(error) => {
                 if parent == root && error.0 == axum::http::StatusCode::NOT_FOUND {
@@ -286,6 +295,12 @@ async fn locate(
                 return Err(error);
             }
         };
+        if !last {
+            resolver
+                .directories
+                .entry(parent.clone())
+                .or_insert_with(|| all.clone());
+        }
         let matches = all
             .iter()
             .filter(|raw| {
@@ -565,6 +580,13 @@ pub async fn ids(state: &AppState, ids: &[String], context: &JobContext) -> Resu
         .collect::<Vec<_>>();
     let mut failed = failed_ids.len();
     let mut updated = 0;
+    let mut checked = failed;
+    let mut skipped = 0;
+    let total = failed + counts.values().filter(|count| **count == 1).count();
+    let mut previous_progress = tokio::time::Instant::now();
+    context
+        .update(0, "指纹校验", &format!("开始校验 {total} 个媒体项"))
+        .await;
     let mut resolver = Resolver::new(None);
     resolver.context = Some(context);
     for row in &mut rows {
@@ -574,7 +596,19 @@ pub async fn ids(state: &AppState, ids: &[String], context: &JobContext) -> Resu
                 continue;
             }
             context.checkpoint().await?;
+            if checked > 0 && checked % 20 == 0 || previous_progress.elapsed().as_secs() >= 15 {
+                context
+                    .update(
+                        (100 * checked / total.max(1)) as u64,
+                        "指纹校验",
+                        &format!("已检查 {checked}/{total}，成功 {updated}，跳过 {skipped}，未完成 {failed}"),
+                    )
+                    .await;
+                previous_progress = tokio::time::Instant::now();
+            }
+            checked += 1;
             if crate::emby::path_ignored(state, &string(asset, "path")).await? {
+                skipped += 1;
                 continue;
             }
             let result = async {
@@ -616,6 +650,14 @@ pub async fn ids(state: &AppState, ids: &[String], context: &JobContext) -> Resu
             }
         }
     }
+    context.checkpoint().await?;
+    context
+        .update(
+            100,
+            "指纹校验",
+            &format!("校验结束：已检查 {checked}/{total}，成功 {updated}，跳过 {skipped}，未完成 {failed}"),
+        )
+        .await;
     Ok(
         json!({"updated":updated,"failed":failed,"failed_ids":failed_ids,"message":format!("指纹重新校验结束：成功 {updated}，未完成 {failed}")}),
     )

@@ -336,11 +336,12 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
         } else {
             tmdb::aggregate(state, &work.0, &numbers).await
         };
-        let data = data.unwrap_or_else(|_| json!({}));
+        let mut data = data.unwrap_or_else(|_| json!({}));
         if config["ai_translate_on_sync"] == true {
             let mut pruned = data.clone();
             crate::translation::prune(&work.1, &mut pruned);
             crate::translation::metadata_tree(state, &work.1, &mut pruned, "").await?;
+            merge_translations(&mut data, pruned);
         }
         let mut records = records(
             &work,
@@ -379,6 +380,21 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
     Ok(
         json!({"updated":updated,"offline":offline,"failures":failures,"failed":fingerprints["failed"].as_u64().unwrap_or(0),"fingerprints":fingerprints,"message":format!("同步完成！新增/更新: {updated} 个媒体项, 标记离线: {offline} 个媒体项。") }),
     )
+}
+fn merge_translations(data: &mut Value, translated: Value) {
+    match (data, translated) {
+        (Value::Object(data), Value::Object(translated)) => {
+            for (key, value) in translated {
+                merge_translations(data.entry(key).or_insert(Value::Null), value);
+            }
+        }
+        (Value::Array(data), Value::Array(translated)) => {
+            for (data, value) in data.iter_mut().zip(translated) {
+                merge_translations(data, value);
+            }
+        }
+        (data, translated) => *data = translated,
+    }
 }
 pub async fn records(
     work: &(String, String),

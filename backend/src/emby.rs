@@ -149,15 +149,17 @@ pub async fn idle(state: &AppState, context: &JobContext) -> Result<()> {
     Err(ApiError::bad("等待 Emby 后台任务完成超时"))
 }
 pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Result<()> {
+    context.checkpoint().await?;
     let tasks = state.emby(Method::GET, "ScheduledTasks", &[], None).await?;
     let task = tasks
         .as_array()
         .and_then(|tasks| tasks.iter().find(|t| t["Key"] == key))
         .ok_or_else(|| ApiError::bad(format!("未找到 Emby 任务：{key}")))?;
     let id = string(task, "Id");
-    let running = task["State"] == "Running";
+    let running = matches!(task["State"].as_str(), Some("Running" | "Cancelling"));
     let previous = task["LastExecutionResult"]["StartTimeUtc"].clone();
     if !running {
+        context.checkpoint().await?;
         state
             .emby(
                 Method::POST,
@@ -168,18 +170,22 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
             .await?;
     }
     for _ in 0..900 {
-        context.checkpoint().await?;
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        context.sleep(Duration::from_secs(2)).await?;
         let tasks = state.emby(Method::GET, "ScheduledTasks", &[], None).await?;
         let task = tasks
             .as_array()
             .and_then(|tasks| tasks.iter().find(|t| t["Id"] == id))
             .ok_or_else(|| ApiError::bad("等待期间 Emby 任务消失"))?;
-        if task["State"] != "Running"
+        if task["State"] == "Idle"
             && (running || task["LastExecutionResult"]["StartTimeUtc"] != previous)
         {
-            if task["LastExecutionResult"]["Status"] == "Failed" {
-                return Err(ApiError::bad(format!("Emby 任务失败：{key}")));
+            if task["LastExecutionResult"]["Status"] != "Completed" {
+                let status = task["LastExecutionResult"]["Status"]
+                    .as_str()
+                    .unwrap_or("未知");
+                return Err(ApiError::bad(format!(
+                    "Emby 任务未成功完成：{key}（{status}）"
+                )));
             }
             return Ok(());
         }
