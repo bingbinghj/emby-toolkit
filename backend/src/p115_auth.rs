@@ -190,7 +190,29 @@ async fn oauth_status(State(state): State<AppState>) -> Result<Json<Value>> {
     )
     .await?;
     let patch = token_patch(&response["data"])?;
-    save_tokens(&state, &patch).await?;
+    let user_info = async {
+        state
+            .http
+            .get(format!("{}/open/user/info", state.p115.endpoints.openapi))
+            .bearer_auth(string(&patch, "access_token"))
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await?
+            .json::<Value>()
+            .await
+    }
+    .await;
+    match user_info {
+        Err(error) if error.is_timeout() => {
+            return Ok(Json(waiting("等待扫码...")));
+        }
+        other => {
+            other?;
+        }
+    }
+    if let Err(error) = save_tokens(&state, &patch).await {
+        tracing::error!("115 扫码授权成功，但保存 Token 失败：{}", error.1);
+    }
     session.verifier.clear();
     let result = json!({"success":true,"status":"success","message":"授权成功！"});
     session.result = Some(result.clone());

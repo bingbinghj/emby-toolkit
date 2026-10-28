@@ -54,22 +54,23 @@ pub async fn current_id(state: &AppState, id: &str) -> Result<String> {
     if base.is_empty() || key.is_empty() {
         return Err(ApiError::bad("Emby 服务器配置不完整"));
     }
-    let response = state
-        .http
-        .get(format!(
-            "{base}/Users/{}/Items/{id}",
-            string(&config, "emby_user_id")
-        ))
-        .header("X-Emby-Token", key)
-        .timeout(Duration::from_secs(
-            config["emby_api_timeout"]
-                .as_u64()
-                .filter(|seconds| *seconds > 0)
-                .unwrap_or(60),
-        ))
-        .query(&[("Fields", "Id,Path")])
-        .send()
-        .await?;
+    let response = crate::emby::send(
+        state
+            .http
+            .get(format!(
+                "{base}/Users/{}/Items/{id}",
+                string(&config, "emby_user_id")
+            ))
+            .header("X-Emby-Token", key)
+            .timeout(Duration::from_secs(
+                config["emby_api_timeout"]
+                    .as_u64()
+                    .filter(|seconds| *seconds > 0)
+                    .unwrap_or(60),
+            ))
+            .query(&[("Fields", "Id,Path")]),
+    )
+    .await?;
     if response.status() != StatusCode::NOT_FOUND {
         response.error_for_status()?;
         return Ok(id.into());

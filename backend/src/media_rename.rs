@@ -216,6 +216,9 @@ async fn probe_fields(state: &AppState, source: &Source, context: Option<&JobCon
     let path = source.cloud.clone().unwrap_or(source.target.path.clone());
     if source.ext == ".iso" {
         let probe = if std::path::Path::new(&path).is_file() {
+            let Ok(_slot) = crate::strm::slot(state, "main", context).await else {
+                return json!({});
+            };
             crate::p115_iso::probe_file(std::path::Path::new(&path), context).await
         } else {
             let pc = source
@@ -231,6 +234,9 @@ async fn probe_fields(state: &AppState, source: &Source, context: Option<&JobCon
                 .and_then(|cache| cache["size"].as_u64())
                 .unwrap_or(0);
             if pc.is_empty() {
+                let Ok(_slot) = crate::strm::slot(state, "main", context).await else {
+                    return json!({});
+                };
                 crate::p115_iso::probe_reader(
                     crate::p115_iso::RangeReader::http(state.http.clone(), &path, "Mozilla/5.0")
                         .with_context(context),
@@ -244,12 +250,18 @@ async fn probe_fields(state: &AppState, source: &Source, context: Option<&JobCon
             }
         };
         if let Ok(raw) = probe {
+            let Ok(_slot) = crate::strm::slot(state, "secondary", context).await else {
+                return json!({});
+            };
             return rename::probe_fields(&raw);
         }
         if context.is_some_and(JobContext::is_cancelled) {
             return json!({});
         }
     }
+    let Ok(_slot) = crate::strm::slot(state, "main", context).await else {
+        return json!({});
+    };
     let mut command = tokio::process::Command::new("ffprobe");
     command.kill_on_drop(true).args([
         "-v",
@@ -261,7 +273,12 @@ async fn probe_fields(state: &AppState, source: &Source, context: Option<&JobCon
         "-i",
         &path,
     ]);
-    match tokio::time::timeout(std::time::Duration::from_secs(30), command.output()).await {
+    let output = tokio::time::timeout(std::time::Duration::from_secs(30), command.output()).await;
+    drop(_slot);
+    let Ok(_slot) = crate::strm::slot(state, "secondary", context).await else {
+        return json!({});
+    };
+    match output {
         Ok(Ok(output)) if output.status.success() => serde_json::from_slice(&output.stdout)
             .map(|raw| rename::probe_fields(&raw))
             .unwrap_or(json!({})),

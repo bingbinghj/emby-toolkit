@@ -407,9 +407,9 @@ async fn version(
 pub async fn additional_parts(state: &AppState, id: &str, info: &Value) -> Result<Vec<Value>> {
     let user = string(&*state.config.read().await, "emby_user_id");
     let mut parts = vec![];
-    let mut seen = HashSet::new();
+    let mut positions = std::collections::HashMap::new();
     for source in info["MediaSources"].as_array().into_iter().flatten() {
-        let source_id = string(source, "Id");
+        let source_id = string(source, "Id").trim().to_string();
         if source_id.is_empty() {
             continue;
         }
@@ -424,12 +424,27 @@ pub async fn additional_parts(state: &AppState, id: &str, info: &Value) -> Resul
                 ],
                 None,
             )
-            .await?;
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                tracing::warn!(
+                    "[Emby额外分段] 查询 Item {id} / MediaSource 失败：{}",
+                    error.1
+                );
+                continue;
+            }
+        };
         for part in response["Items"].as_array().into_iter().flatten() {
-            let part_id = string(part, "Id");
-            let parent = string(part, "ParentId");
-            if !part_id.is_empty() && (parent.is_empty() || parent == id) && seen.insert(part_id) {
-                parts.push(part.clone());
+            let part_id = string(part, "Id").trim().to_string();
+            let parent = string(part, "ParentId").trim().to_string();
+            if !part_id.is_empty() && (parent.is_empty() || parent == id) {
+                if let Some(position) = positions.get(&part_id) {
+                    parts[*position] = part.clone();
+                } else {
+                    positions.insert(part_id, parts.len());
+                    parts.push(part.clone());
+                }
             }
         }
     }

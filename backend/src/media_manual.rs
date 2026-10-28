@@ -363,9 +363,24 @@ pub async fn translate_cast(state: &AppState, body: &Value) -> Result<Value> {
             )
             .bind(text)
             .fetch_optional(&state.db)
-            .await?
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("读取演员编辑翻译缓存失败，继续翻译：{error}");
+                None
+            })
             .flatten();
-            if let Some(value) = value.filter(|v| !v.is_empty()) {
+            if value
+                .as_ref()
+                .is_some_and(|value| !value.is_empty() && !crate::translation::chinese(value))
+                && let Err(error) =
+                    sqlx::query("DELETE FROM translation_cache WHERE original_text=$1")
+                        .bind(text)
+                        .execute(&state.db)
+                        .await
+            {
+                tracing::warn!("清理无效演员编辑翻译缓存失败，继续翻译：{error}");
+            }
+            if let Some(value) = value.filter(|v| !v.is_empty() && crate::translation::chinese(v)) {
                 cached.insert(text.clone(), value);
             }
         }
@@ -395,7 +410,9 @@ pub async fn translate_cast(state: &AppState, body: &Value) -> Result<Value> {
                 .load(std::sync::atomic::Ordering::SeqCst)
     {
         for (source, value) in &translated {
-            sqlx::query("INSERT INTO translation_cache(original_text,translated_text,engine_used) VALUES($1,$2,$3) ON CONFLICT(original_text) DO UPDATE SET translated_text=EXCLUDED.translated_text,last_updated_at=NOW()") .bind(source).bind(value).bind(string(&config,"ai_provider")).execute(&state.db).await?;
+            if let Err(error) = sqlx::query("INSERT INTO translation_cache(original_text,translated_text,engine_used) VALUES($1,$2,$3) ON CONFLICT(original_text) DO UPDATE SET translated_text=EXCLUDED.translated_text,engine_used=EXCLUDED.engine_used,last_updated_at=NOW()") .bind(source).bind(value).bind(string(&config,"ai_provider")).execute(&state.db).await {
+                tracing::warn!("保存演员编辑翻译缓存失败，已获取的译文仍可用：{error}");
+            }
         }
     }
     cached.extend(translated);

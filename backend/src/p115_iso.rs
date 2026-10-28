@@ -15,8 +15,6 @@ use std::{
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 const SECTOR: u64 = 2048;
-const MAX_READ: usize = 64 * 1024 * 1024;
-const MAX_CACHE: usize = 256 * 1024 * 1024;
 const WEB_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const ALIPAY_UA: &str = "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 AlipayDefined(nt:WIFI,ws:390|844|3.0) AliApp(AP/10.5.33.8143) AlipayClient/10.5.33.8143 Language/zh-Hans Region/CN";
 
@@ -69,17 +67,11 @@ impl RangeReader {
         let end = start
             .checked_add(length as u64)
             .ok_or_else(|| ApiError::bad("ISO Range 地址溢出"))?;
-        if length > MAX_READ {
-            return Err(ApiError::bad("ISO 元数据读取范围过大"));
-        }
         for (cached_start, data) in &self.intervals {
             if start >= *cached_start && end <= *cached_start + data.len() as u64 {
                 let offset = (start - *cached_start) as usize;
                 return Ok(data[offset..offset + length].to_vec());
             }
-        }
-        if self.bytes.checked_add(length).is_none_or(|n| n > MAX_CACHE) || self.requests >= 4096 {
-            return Err(ApiError::bad("ISO 元数据读取超过限制"));
         }
         self.requests += 1;
         let content = match &self.source {
@@ -114,22 +106,6 @@ impl RangeReader {
                         "Range 读取失败: HTTP={}, expected={length}",
                         response.status().as_u16()
                     )));
-                }
-                let valid_range = response
-                    .headers()
-                    .get("Content-Range")
-                    .and_then(|h| h.to_str().ok())
-                    .and_then(|h| h.strip_prefix("bytes "))
-                    .and_then(|h| h.split_once('/'))
-                    .and_then(|(range, total)| range.split_once('-').map(|(a, b)| (a, b, total)))
-                    .is_some_and(|(a, b, total)| {
-                        a.parse::<u64>().ok() == Some(start)
-                            && b.parse::<u64>().ok() == Some(end - 1)
-                            && (total == "*"
-                                || total.parse::<u64>().is_ok_and(|total| total >= end))
-                    });
-                if !valid_range {
-                    return Err(ApiError::bad("Range 响应 Content-Range 与请求不符"));
                 }
                 let mut data = Vec::with_capacity(length);
                 while let Some(chunk) = response.chunk().await? {
@@ -334,9 +310,6 @@ impl UdfIsoReader {
                 iso.meta_blob = slice(&entry, fields.start, fields.length)?.to_vec();
             } else {
                 for ad in Self::allocations(&entry)? {
-                    if iso.meta_blob.len().saturating_add(ad.length) > MAX_READ {
-                        return Err(ApiError::bad("UDF Metadata File 过大"));
-                    }
                     let chunk = iso
                         .reader
                         .read(iso.physical_offset(ad.lbn), ad.length)
@@ -419,9 +392,6 @@ impl UdfIsoReader {
     pub async fn file_data(&mut self, entry: &[u8], part: u16) -> Result<Vec<u8>> {
         let fields = Self::fields(entry)?;
         let mut data = vec![];
-        if fields.info_len > MAX_READ as u64 {
-            return Err(ApiError::bad("UDF 元数据文件过大"));
-        }
         if fields.allocation == 3 {
             return Ok(slice(
                 entry,
@@ -431,9 +401,6 @@ impl UdfIsoReader {
             .to_vec());
         }
         for ad in Self::allocations(entry)? {
-            if data.len().saturating_add(ad.length) > MAX_READ {
-                return Err(ApiError::bad("UDF 元数据文件过大"));
-            }
             data.extend_from_slice(
                 &self
                     .read_partition(ad.part.unwrap_or(part), ad.lbn, ad.length)
@@ -1150,29 +1117,38 @@ pub async fn probe_115(
     size: u64,
     context: Option<&JobContext>,
 ) -> Result<Value> {
+    let _slot = crate::strm::slot(state, "main", context).await?;
     let mut last = None;
-    for ua in [WEB_UA, ALIPAY_UA] {
-        if let Some(context) = context {
-            context.checkpoint().await?;
-        }
-        let result = async {
-            let url = crate::p115::download_url_with_user_agent(state, pc, ua).await?;
-            probe_reader(
-                RangeReader::http(state.http.clone(), url, ua).with_context(context),
-                name,
-                size,
-                "115-native",
-            )
-            .await
-        }
-        .await;
-        match result {
-            Ok(raw) => return Ok(raw),
-            Err(error) => {
-                if context.is_some_and(JobContext::is_cancelled) {
-                    return Err(error);
+    for openapi in [false, true] {
+        for ua in [WEB_UA, ALIPAY_UA] {
+            if let Some(context) = context {
+                context.checkpoint().await?;
+            }
+            let result = if openapi {
+                crate::p115::openapi_downurl_with_user_agent(state, pc, ua).await
+            } else {
+                crate::p115::download_url_with_user_agent(state, pc, ua).await
+            };
+            match result {
+                Ok(url) => {
+                    return probe_reader(
+                        RangeReader::http(state.http.clone(), url, ua).with_context(context),
+                        name,
+                        size,
+                        if openapi {
+                            "openapi_downurl"
+                        } else {
+                            "download_url"
+                        },
+                    )
+                    .await;
                 }
-                last = Some(error);
+                Err(error) => {
+                    if context.is_some_and(JobContext::is_cancelled) {
+                        return Err(error);
+                    }
+                    last = Some(error);
+                }
             }
         }
     }

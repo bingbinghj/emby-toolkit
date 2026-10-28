@@ -64,18 +64,36 @@ fn relative(path: &str, config: &Value) -> Result<Vec<String>> {
     }
     Err(ApiError::bad("文件路径无法映射到已配置的 STRM/CD2 根目录"))
 }
+static AUDIT_REQUEST_CLOCK: std::sync::LazyLock<
+    std::sync::Arc<tokio::sync::Mutex<Option<tokio::time::Instant>>>,
+> = std::sync::LazyLock::new(Default::default);
 pub struct AuditReader<'a> {
     pub context: &'a JobContext,
-    pub previous: tokio::sync::Mutex<Option<tokio::time::Instant>>,
-    pub invalid_roots: tokio::sync::Mutex<HashSet<String>>,
+    previous: std::sync::Arc<tokio::sync::Mutex<Option<tokio::time::Instant>>>,
+    cache: bool,
+    directories: tokio::sync::Mutex<(u64, BTreeMap<String, Vec<Value>>)>,
 }
-impl AuditReader<'_> {
+impl<'a> AuditReader<'a> {
+    pub fn new(context: &'a JobContext, cache: bool) -> Self {
+        Self {
+            context,
+            previous: AUDIT_REQUEST_CLOCK.clone(),
+            cache,
+            directories: tokio::sync::Mutex::new((context.pause_generation(), BTreeMap::new())),
+        }
+    }
+    pub fn verifier(&self) -> Self {
+        let mut verifier = Self::new(self.context, false);
+        verifier.previous = self.previous.clone();
+        verifier
+    }
     async fn request(&self) -> Result<tokio::sync::MutexGuard<'_, Option<tokio::time::Instant>>> {
         self.context.checkpoint().await?;
         let mut previous = self.previous.lock().await;
-        if let Some(before) = *previous {
-            tokio::time::sleep_until(before + std::time::Duration::from_secs(5)).await;
-            self.context.checkpoint().await?;
+        if let Some(before) = *previous
+            && let Some(remaining) = std::time::Duration::from_secs(5).checked_sub(before.elapsed())
+        {
+            self.context.sleep(remaining).await?;
         }
         *previous = Some(tokio::time::Instant::now());
         Ok(previous)
@@ -88,6 +106,7 @@ struct Resolver<'a> {
     invalid_roots: HashSet<String>,
     directories: BTreeMap<String, Vec<Value>>,
     source: &'static str,
+    allow_search: bool,
 }
 impl<'a> Resolver<'a> {
     fn new(audit: Option<&'a AuditReader<'a>>) -> Self {
@@ -98,6 +117,7 @@ impl<'a> Resolver<'a> {
             invalid_roots: HashSet::new(),
             directories: BTreeMap::new(),
             source: "现场查询",
+            allow_search: audit.is_none(),
         }
     }
     async fn request<T>(&mut self, future: impl Future<Output = Result<T>>) -> Result<T> {
@@ -123,6 +143,42 @@ impl<'a> Resolver<'a> {
     }
 }
 async fn children(
+    state: &AppState,
+    parent: &str,
+    resolver: &mut Resolver<'_>,
+) -> Result<Vec<Value>> {
+    let Some(reader) = resolver.audit else {
+        return read_children(state, parent, resolver).await;
+    };
+    loop {
+        reader.context.checkpoint().await?;
+        let generation = reader.context.pause_generation();
+        if reader.cache {
+            let mut cached = reader.directories.lock().await;
+            if cached.0 != generation {
+                cached.0 = generation;
+                cached.1.clear();
+            }
+            if let Some(items) = cached.1.get(parent) {
+                return Ok(items.clone());
+            }
+        }
+        let items = read_children(state, parent, resolver).await?;
+        if reader.context.pause_generation() != generation {
+            continue;
+        }
+        if reader.cache {
+            let mut cached = reader.directories.lock().await;
+            if cached.0 != generation {
+                cached.0 = generation;
+                cached.1.clear();
+            }
+            cached.1.insert(parent.into(), items.clone());
+        }
+        return Ok(items);
+    }
+}
+async fn read_children(
     state: &AppState,
     parent: &str,
     resolver: &mut Resolver<'_>,
@@ -214,13 +270,23 @@ async fn resolve_current(
         return Ok((info, relative));
     }
     let parts = relative(target, &config);
+    if !resolver.allow_search {
+        let found = locate(state, &config, &parts?, resolver).await?;
+        resolver.source = "云端目录";
+        return Ok(found);
+    }
     if let Ok(parts) = &parts {
         match locate(state, &config, parts, resolver).await {
             Ok(found) => {
                 resolver.source = "云端目录";
                 return Ok(found);
             }
-            Err(error) if resolver.context.is_some_and(JobContext::is_cancelled) => {
+            Err(error)
+                if resolver
+                    .context
+                    .or(resolver.audit.map(|reader| reader.context))
+                    .is_some_and(JobContext::is_cancelled) =>
+            {
                 return Err(error);
             }
             Err(error) => tracing::debug!("115 目录定位失败，尝试搜索：{}", error.1),
@@ -272,13 +338,7 @@ async fn locate(
     if root.is_empty() {
         return Err(ApiError::bad("请先配置 115 云端媒体库根目录 CID"));
     }
-    if resolver.invalid_roots.contains(&root)
-        || if let Some(audit) = resolver.audit {
-            audit.invalid_roots.lock().await.contains(&root)
-        } else {
-            false
-        }
-    {
+    if resolver.allow_search && resolver.invalid_roots.contains(&root) {
         return Err(ApiError::bad("115 云端媒体库根目录已失效"));
     }
     let mut parent = root.clone();
@@ -286,23 +346,27 @@ async fn locate(
         let last = index + 1 == parts.len();
         // Reuse complete intermediate directories only within this batch. File
         // listings stay fresh so a later Item cannot inherit an older PC/SHA1.
-        let all = match if !last && resolver.directories.contains_key(&parent) {
+        let all = match if resolver.allow_search
+            && resolver.audit.is_none()
+            && !last
+            && resolver.directories.contains_key(&parent)
+        {
             Ok(resolver.directories[&parent].clone())
         } else {
             children(state, &parent, resolver).await
         } {
             Ok(all) => all,
             Err(error) => {
-                if parent == root && error.0 == axum::http::StatusCode::NOT_FOUND {
+                if resolver.allow_search
+                    && parent == root
+                    && error.0 == axum::http::StatusCode::NOT_FOUND
+                {
                     resolver.invalid_roots.insert(root.clone());
-                    if let Some(audit) = resolver.audit {
-                        audit.invalid_roots.lock().await.insert(root.clone());
-                    }
                 }
                 return Err(error);
             }
         };
-        if !last {
+        if resolver.allow_search && resolver.audit.is_none() && !last {
             resolver
                 .directories
                 .entry(parent.clone())
@@ -388,7 +452,6 @@ async fn search_file(
         ],
     );
     let mut names = HashSet::new();
-    let mut verified = BTreeMap::new();
     for candidate in &candidates {
         let ext = media_paths::extension(candidate);
         if ext.is_empty() || ext == ".strm" {
@@ -403,67 +466,84 @@ async fn search_file(
         if !names.insert(name.to_string()) {
             continue;
         }
-        let response = resolver.request(p115::search(state, name)).await?;
+        let response = match resolver.request(p115::search(state, name)).await {
+            Ok(response) => response,
+            Err(error)
+                if resolver
+                    .context
+                    .or(resolver.audit.map(|reader| reader.context))
+                    .is_some_and(JobContext::is_cancelled) =>
+            {
+                return Err(error);
+            }
+            Err(error) => {
+                tracing::debug!("[补齐115指纹] 115 搜索失败 name={name}：{}", error.1);
+                continue;
+            }
+        };
         if !p115::success(&response) {
-            return Err(ApiError::bad("115 搜索失败"));
+            continue;
         }
-        let hits = response["data"]
-            .as_array()
-            .ok_or_else(|| ApiError::bad("115 搜索结果格式无效"))?;
-        let count = response["count"]
-            .as_u64()
-            .or_else(|| response["count"].as_str().and_then(|s| s.parse().ok()));
-        if count.is_some_and(|count| count > hits.len() as u64)
-            || (count.is_none() && hits.len() >= 100)
+        for hit in list(&response["data"])
+            .iter()
+            .filter(|hit| !is_directory(hit))
         {
-            return Err(ApiError::bad("115 搜索结果不完整，无法确认唯一文件"));
-        }
-        let mut seen = HashSet::new();
-        for hit in hits.iter().filter(|hit| !is_directory(hit)) {
             let listed = normalized(hit);
             if listed["name"] != name
-                || size.is_some_and(|s| identity::size(&listed["size"]) != Some(s))
+                || size
+                    .filter(|size| *size > 0)
+                    .is_some_and(|size| identity::size(&listed["size"]) != Some(size))
             {
                 continue;
             }
-            let fid = string(&listed, "id")
-                .parse::<u64>()
-                .map_err(|_| ApiError::bad("115 搜索结果缺少有效文件ID"))?;
-            if !seen.insert(fid) {
+            let Ok(fid) = string(&listed, "id").parse::<u64>() else {
+                continue;
+            };
+            let raw = match resolver.request(p115::file_info(state, fid)).await {
+                Ok(raw) => raw,
+                Err(error)
+                    if resolver
+                        .context
+                        .or(resolver.audit.map(|reader| reader.context))
+                        .is_some_and(JobContext::is_cancelled) =>
+                {
+                    return Err(error);
+                }
+                Err(error) => {
+                    tracing::debug!("[补齐115指纹] 115 详情路径匹配失败 fid={fid}：{}", error.1);
+                    continue;
+                }
+            };
+            if !search_path_matches(&raw, name, &candidates) {
                 continue;
             }
-            let raw = resolver.request(p115::file_info(state, fid)).await?;
             let info = normalized(&raw);
-            if info["id"].as_str().and_then(|id| id.parse::<u64>().ok()) != Some(fid)
-                || info["name"] != name
-                || identity::size(&info["size"]).is_none()
-                || size.is_some_and(|s| identity::size(&info["size"]) != Some(s))
-                || ["pick_code", "sha1", "parent_id"]
-                    .iter()
-                    .any(|key| string(&info, key).is_empty())
-                || fingerprints::file_id(&string(&info, "pick_code")) != Some(fid)
-                || (!string(&listed, "pick_code").is_empty()
-                    && listed["pick_code"] != info["pick_code"])
-                || !search_path_matches(&raw, name, &candidates)
+            let info = if ["id", "name", "pick_code", "sha1"]
+                .iter()
+                .any(|key| !string(&info, key).is_empty())
             {
-                continue;
-            }
-            verified.insert(fid, info);
+                info
+            } else {
+                listed
+            };
+            let relative = relative(target, config)
+                .or_else(|_| relative(path, config))
+                .ok()
+                .map(|mut parts| {
+                    let filename = string(&info, "name");
+                    *parts.last_mut().unwrap() = if filename.is_empty() {
+                        name.into()
+                    } else {
+                        filename
+                    };
+                    parts.join("/")
+                });
+            return Ok((info, relative));
         }
     }
-    if verified.len() != 1 {
-        return Err(ApiError::bad("115 搜索目标不存在、身份不一致或不唯一"));
-    }
-    let info = verified.into_values().next().unwrap();
-    let relative = relative(target, config)
-        .or_else(|_| relative(path, config))
-        .ok()
-        .map(|mut parts| {
-            *parts.last_mut().unwrap() = string(&info, "name");
-            parts.join("/")
-        });
-    Ok((info, relative))
+    Err(ApiError::bad("115 搜索目标不存在或路径不一致"))
 }
+
 pub async fn observation(state: &AppState, item: &Value) -> (String, String, Option<u64>) {
     let path = string(item, "Path");
     let sources = list(&item["MediaSources"]);
@@ -578,8 +658,13 @@ async fn write_resolved(
         .bind(string(info, "id"))
         .execute(&mut *transaction)
         .await?;
+    let cache_size = if fill_only {
+        identity::size(&info["size"]).unwrap_or(0)
+    } else {
+        identity::size(&info["size"]).ok_or_else(|| ApiError::bad("115 文件大小无效"))?
+    };
     sqlx::query("INSERT INTO p115_filesystem_cache(id,parent_id,name,sha1,pick_code,local_path,size,preid) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(parent_id,name) DO UPDATE SET id=EXCLUDED.id,sha1=EXCLUDED.sha1,pick_code=EXCLUDED.pick_code,local_path=EXCLUDED.local_path,size=EXCLUDED.size,preid=EXCLUDED.preid,updated_at=NOW()")
-        .bind(string(info,"id")).bind(string(info,"parent_id")).bind(string(info,"name")).bind(string(info,"sha1").to_uppercase()).bind(string(info,"pick_code")).bind(relative).bind(identity::size(&info["size"]).unwrap() as i64).bind(preid).execute(&mut *transaction).await?;
+        .bind(string(info,"id")).bind(string(info,"parent_id")).bind(string(info,"name")).bind(string(info,"sha1").to_uppercase()).bind(string(info,"pick_code")).bind(relative).bind(cache_size as i64).bind(preid).execute(&mut *transaction).await?;
     if !fill_only || need_sha1 || need_pc {
         sqlx::query("UPDATE media_metadata SET asset_details_json=$1,file_sha1_json=$2,file_pickcode_json=$3,last_updated_at=NOW() WHERE tmdb_id=$4 AND item_type=$5").bind(json!(assets)).bind(json!(hashes)).bind(json!(pcs)).bind(string(snapshot,"tmdb_id")).bind(string(snapshot,"item_type")).execute(&mut *transaction).await?;
     }
@@ -828,10 +913,11 @@ async fn repair_selected(
                 });
                 let pc = pc.as_deref();
                 let mut cached = fingerprints::cached(state, pc, &candidates).await?;
-                if cached.is_none() && pc.is_none() {
-                    if let Some(target_pc) = fingerprints::pickcode(target) {
-                        cached = fingerprints::cached(state, Some(&target_pc), &candidates).await?;
-                    }
+                if cached.is_none()
+                    && pc.is_none()
+                    && let Some(target_pc) = fingerprints::pickcode(target)
+                {
+                    cached = fingerprints::cached(state, Some(&target_pc), &candidates).await?;
                 }
                 if let Some(info) = cached.as_ref().filter(|info| {
                     let mut effective = (*info).clone();
@@ -1043,6 +1129,7 @@ pub async fn ids(state: &AppState, ids: &[String], context: &JobContext) -> Resu
         .await;
     let mut resolver = Resolver::new(None);
     resolver.context = Some(context);
+    resolver.allow_search = false;
     for row in &mut rows {
         for (index, asset) in list(&row["asset_details_json"]).iter().enumerate() {
             let id = string(asset, "emby_item_id");

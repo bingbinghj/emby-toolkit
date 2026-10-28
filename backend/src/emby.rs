@@ -6,13 +6,255 @@ use crate::{
 };
 use reqwest::Method;
 use serde_json::Value;
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
+
+pub async fn ancestor_context(
+    state: &AppState,
+    item: &Value,
+    library: Option<&Value>,
+) -> (HashMap<String, String>, String) {
+    let mut parents = HashMap::new();
+    let guid = library
+        .map(|library| string(library, "Guid"))
+        .unwrap_or_default();
+    let source = string(item, "_SourceLibraryId");
+    let mut current = string(item, "Id");
+    for _ in 0..10 {
+        let details = match crate::media_edit::details(state, &current, "ParentId").await {
+            Ok(details) => details,
+            Err(error) => {
+                tracing::warn!("实时构建爬树地图失败：{}", error.1);
+                break;
+            }
+        };
+        let parent = string(&details, "ParentId");
+        if parent == source && !guid.is_empty() && guid.to_lowercase() != "none" {
+            let composite = format!("{guid}_{parent}");
+            parents.insert(current, composite.clone());
+            parents.insert(composite, "1".into());
+            break;
+        }
+        if parent.is_empty() || parent == "1" {
+            break;
+        }
+        parents.insert(current, parent.clone());
+        current = parent;
+    }
+    (parents, guid)
+}
+
+pub struct Response {
+    response: reqwest::Response,
+    _permit: Option<tokio::sync::SemaphorePermit<'static>>,
+}
+impl From<reqwest::Response> for Response {
+    fn from(response: reqwest::Response) -> Self {
+        Self {
+            response,
+            _permit: None,
+        }
+    }
+}
+impl Response {
+    pub fn status(&self) -> reqwest::StatusCode {
+        self.response.status()
+    }
+    pub fn headers(&self) -> &reqwest::header::HeaderMap {
+        self.response.headers()
+    }
+    pub fn error_for_status(self) -> std::result::Result<Self, reqwest::Error> {
+        self.response.error_for_status_ref()?;
+        Ok(self)
+    }
+    pub async fn bytes(self) -> std::result::Result<axum::body::Bytes, reqwest::Error> {
+        self.response.bytes().await
+    }
+    pub async fn json<T: serde::de::DeserializeOwned>(
+        self,
+    ) -> std::result::Result<T, reqwest::Error> {
+        self.response.json().await
+    }
+    pub async fn text(self) -> std::result::Result<String, reqwest::Error> {
+        self.response.text().await
+    }
+    pub async fn chunk(
+        &mut self,
+    ) -> std::result::Result<Option<axum::body::Bytes>, reqwest::Error> {
+        self.response.chunk().await
+    }
+}
+pub async fn send(
+    request: reqwest::RequestBuilder,
+) -> std::result::Result<Response, reqwest::Error> {
+    static REQUESTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(10);
+    let permit = REQUESTS.acquire().await.expect("Emby 请求槽位不会关闭");
+    let retryable = request.try_clone();
+    let mut next = request;
+    for attempt in 0..=5 {
+        let response = next.send().await;
+        let retry = match &response {
+            Ok(response) => {
+                matches!(response.status().as_u16(), 500 | 502 | 503 | 504)
+                    || (matches!(response.status().as_u16(), 413 | 429)
+                        && response.headers().contains_key("Retry-After"))
+            }
+            Err(error) => error.is_connect() || error.is_timeout(),
+        };
+        if attempt == 5 || !retry || retryable.is_none() {
+            let response = if retry && attempt == 5 {
+                response.and_then(reqwest::Response::error_for_status)
+            } else {
+                response
+            };
+            return response.map(|response| Response {
+                response,
+                _permit: Some(permit),
+            });
+        }
+        let delay = response
+            .as_ref()
+            .ok()
+            .and_then(|response| retry_after(response.headers()))
+            .unwrap_or_else(|| {
+                Duration::from_secs(if attempt == 0 { 0 } else { 2_u64.pow(attempt) })
+            });
+        tracing::warn!("Emby 请求暂时失败，准备重试 {}/5。", attempt + 1);
+        drop(response);
+        tokio::time::sleep(delay).await;
+        next = retryable
+            .as_ref()
+            .unwrap()
+            .try_clone()
+            .expect("已验证请求可以重放");
+    }
+    unreachable!()
+}
+pub(crate) fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let value = headers.get("Retry-After")?.to_str().ok()?;
+    let seconds = value.trim().parse::<i64>().ok().or_else(|| {
+        chrono::DateTime::parse_from_rfc2822(value)
+            .ok()
+            .map(|date| date.timestamp() - chrono::Utc::now().timestamp())
+    })?;
+    (seconds > 0).then(|| Duration::from_secs(seconds as u64))
+}
 
 pub fn library_ignored(config: &Value, library: &str) -> bool {
     !library.is_empty()
         && crate::media_edit::list(&config["libraries_to_ignore"])
             .iter()
             .any(|id| id.as_str() == Some(library))
+}
+pub async fn by_ids(
+    state: &AppState,
+    ids: &[String],
+    fields: &str,
+    context: Option<&JobContext>,
+) -> Result<Vec<Value>> {
+    if ids.is_empty() || !state.configured().await {
+        return Ok(vec![]);
+    }
+    let mut items = vec![];
+    for (index, batch) in ids.chunks(100).enumerate() {
+        if let Some(context) = context {
+            context.checkpoint().await?;
+        }
+        match state
+            .emby(
+                Method::GET,
+                "Items",
+                &[("Ids", batch.join(",")), ("Fields", fields.into())],
+                None,
+            )
+            .await
+        {
+            Ok(response) => items.extend(crate::media_edit::list(&response["Items"])),
+            Err(error) => tracing::error!(
+                "根据 ID 列表批量获取 Emby 项目时，处理批次 {} 失败：{}",
+                index + 1,
+                error.1
+            ),
+        }
+    }
+    Ok(items)
+}
+
+pub async fn existing_ids(
+    state: &AppState,
+    ids: &[String],
+    context: Option<&JobContext>,
+) -> Result<HashSet<String>> {
+    let mut normalized = vec![];
+    let mut seen = HashSet::new();
+    for id in ids.iter().map(|id| id.trim()).filter(|id| !id.is_empty()) {
+        if seen.insert(id) {
+            normalized.push(id);
+        }
+    }
+    let result = async {
+        let mut existing = HashSet::new();
+        for batch in normalized.chunks(100) {
+            if let Some(context) = context {
+                context.checkpoint().await?;
+            }
+            let config = state.config.read().await.clone();
+            let response = send(
+                state
+                    .http
+                    .get(format!(
+                        "{}/Items",
+                        string(&config, "emby_server_url").trim_end_matches('/')
+                    ))
+                    .query(&[
+                        ("api_key", string(&config, "emby_api_key")),
+                        ("Ids", batch.join(",")),
+                        ("Fields", "Id".into()),
+                        ("Limit", batch.len().to_string()),
+                    ])
+                    .timeout(Duration::from_secs(
+                        config["emby_api_timeout"]
+                            .as_u64()
+                            .filter(|timeout| *timeout > 0)
+                            .unwrap_or(60),
+                    )),
+            )
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+            let items = response["Items"]
+                .as_array()
+                .ok_or_else(|| ApiError::bad("Emby 存活响应缺少 Items 数组"))?;
+            if response.get("TotalRecordCount").is_some_and(|count| {
+                count
+                    .as_f64()
+                    .or_else(|| count.as_bool().map(|value| f64::from(u8::from(value))))
+                    != Some(items.len() as f64)
+            }) {
+                return Err(ApiError::bad("Emby 存活响应分页不完整"));
+            }
+            for item in items {
+                let id = match item.get("Id") {
+                    Some(Value::String(id)) if !id.is_empty() => id.clone(),
+                    Some(Value::Number(id)) if id.as_f64().is_some_and(|id| id != 0.0) => {
+                        id.to_string()
+                    }
+                    Some(Value::Bool(true)) => "True".into(),
+                    _ => return Err(ApiError::bad("Emby 存活响应存在无效 Item")),
+                };
+                if !batch.contains(&id.as_str()) {
+                    return Err(ApiError::bad("Emby 存活响应包含未请求的 Item"));
+                }
+                existing.insert(id);
+            }
+        }
+        Ok(existing)
+    }
+    .await;
+    result.inspect_err(|error| tracing::error!("批量核对 Emby Item 存活状态失败：{}", error.1))
 }
 
 pub async fn processing_libraries(state: &AppState) -> Result<Vec<String>> {

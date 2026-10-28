@@ -64,11 +64,20 @@ pub async fn missing(
     aggregate: &Value,
     context: Option<&JobContext>,
 ) -> Result<usize> {
+    missing_with_overwrite(state, files, aggregate, context, &[]).await
+}
+pub async fn missing_with_overwrite(
+    state: &AppState,
+    files: &[PathBuf],
+    aggregate: &Value,
+    context: Option<&JobContext>,
+    force_overwrite_episodes: &[String],
+) -> Result<usize> {
     if state.config.read().await["extract_thumb"] != true {
         return Ok(0);
     }
     let numbers = regex::Regex::new(r"(?i)s(\d{1,4})e(\d{1,4})").unwrap();
-    let mut captured = 0;
+    let mut tasks = vec![];
     for file in files {
         if let Some(context) = context {
             context.checkpoint().await?;
@@ -84,6 +93,7 @@ pub async fn missing(
         };
         let season: u32 = captures[1].parse().unwrap_or_default();
         let episode: u32 = captures[2].parse().unwrap_or_default();
+        let overwrite = force_overwrite_episodes.contains(&format!("S{season}E{episode}"));
         let episodes = &aggregate["episodes_details"];
         let keyed = &episodes[format!("S{season}E{episode}")];
         let data = if keyed.is_object() {
@@ -107,20 +117,42 @@ pub async fn missing(
             "{}-thumb.jpg",
             file.file_stem().unwrap_or_default().to_string_lossy()
         ));
-        if target.is_file() {
+        if !overwrite && target.is_file() {
             continue;
         }
-        match capture(state, file, &target, &data, context).await {
+        tasks.push((file.clone(), target, data, overwrite));
+    }
+    if tasks.is_empty() {
+        return Ok(0);
+    }
+    use futures_util::{FutureExt, StreamExt, stream};
+    let limit = crate::strm::thread_limit(state, "main").await;
+    let pending = stream::iter(tasks).map(|(file, target, data, overwrite)| async move {
+        if let Some(context) = context { context.checkpoint().await?; }
+        let name = file.file_name().unwrap_or_default().to_string_lossy();
+        match capture(state, &file, &target, &data, context, overwrite).await {
             Ok(true) => {
-                captured += 1;
                 tracing::info!(file = %name, "[视频截图] 分集图已生成");
+                Ok(1)
             }
-            Ok(false) => {}
-            Err(error) if context.is_some_and(JobContext::is_cancelled) => return Err(error),
+            Ok(false) => Ok(0),
+            Err(error) if context.is_some_and(JobContext::is_cancelled) => Err(error),
             Err(error) => {
-                tracing::warn!(file = %name, error = %error.1, "[视频截图] 截取失败，保留现有图片")
+                tracing::warn!(file = %name, error = %error.1, "[视频截图] 截取失败，保留现有图片"); Ok(0)
             }
         }
+    }.boxed()).buffer_unordered(limit);
+    tokio::pin!(pending);
+    let mut captured = 0;
+    let mut cancelled = None;
+    while let Some(result) = pending.next().await {
+        match result {
+            Ok(done) => captured += done,
+            Err(error) => cancelled = Some(error),
+        }
+    }
+    if let Some(error) = cancelled {
+        return Err(error);
     }
     if let Some(context) = context {
         context.checkpoint().await?;
@@ -151,7 +183,7 @@ pub async fn movie_missing(
     {
         return Ok(0);
     }
-    match capture(state, file, &landscape, data, context).await {
+    match capture(state, file, &landscape, data, context, false).await {
         Ok(true) => {
             if let Some(context) = context {
                 context.checkpoint().await?;
@@ -176,36 +208,17 @@ pub async fn movie_missing(
     }
 }
 
-async fn safe_destination(state: &AppState, target: &Path) -> Result<PathBuf> {
-    let root =
-        tokio::fs::canonicalize(string(&*state.config.read().await, "local_strm_root")).await?;
-    let parent = tokio::fs::canonicalize(target.parent().unwrap_or(Path::new(""))).await?;
-    if !parent.starts_with(&root) {
-        return Err(ApiError::bad("截图目录越过本地媒体根目录"));
-    }
-    Ok(root)
-}
-
 async fn capture(
     state: &AppState,
     file: &Path,
     target: &Path,
     data: &Value,
     context: Option<&JobContext>,
+    overwrite: bool,
 ) -> Result<bool> {
     let stage = target.with_file_name(format!(".etk-thumb-{}.jpg", uuid::Uuid::new_v4().simple()));
     let result = {
         let operation = async {
-            let root = safe_destination(state, target).await?;
-            let source = tokio::fs::canonicalize(file).await?;
-            if !source.starts_with(&root)
-                || source.components().any(|c| {
-                    ["cd2", "115", "115open"]
-                        .contains(&c.as_os_str().to_string_lossy().to_lowercase().as_str())
-                })
-            {
-                return Err(ApiError::bad("视频截图目标不在安全本地媒体目录"));
-            }
             let (pc, sha, _) =
                 crate::fingerprints::lookup(state, file.to_str().unwrap_or("")).await?;
             let pc = pc.ok_or_else(|| ApiError::bad("视频截图缺少可验证115 PC"))?;
@@ -214,7 +227,11 @@ async fn capture(
             )
             .bind(sha)
             .fetch_optional(&state.db)
-            .await?
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("读取截图媒体信息缓存失败，使用默认截图位置：{error}");
+                None
+            })
             .flatten();
             let name = file.file_name().unwrap_or_default().to_string_lossy();
             let (timestamp, filter) = capture_options(&info.unwrap_or(json!({})), &name, data);
@@ -251,9 +268,14 @@ async fn capture(
                     "-y",
                 ])
                 .arg(&stage);
-            let output = tokio::time::timeout(Duration::from_secs(45), command.output())
+            let _slot = crate::strm::slot(state, "main", context).await?;
+            if overwrite && target.exists() {
+                tokio::fs::remove_file(target).await?;
+            }
+            let output = tokio::time::timeout(Duration::from_secs(30), command.output())
                 .await
                 .map_err(|_| ApiError::bad("视频截图超时"))??;
+            drop(_slot);
             if !output.status.success()
                 || !tokio::fs::metadata(&stage)
                     .await
@@ -264,8 +286,7 @@ async fn capture(
             if let Some(context) = context {
                 context.checkpoint().await?;
             }
-            safe_destination(state, target).await?;
-            if target.exists() {
+            if !overwrite && target.exists() {
                 return Ok(false);
             }
             tokio::fs::rename(&stage, target).await?;

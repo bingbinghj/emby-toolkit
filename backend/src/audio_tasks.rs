@@ -136,9 +136,11 @@ async fn reference(
             };
             if let Some(path) = path {
                 if is_iso {
+                    let _slot = crate::strm::slot(state, "main", Some(context)).await?;
                     raw = Some(crate::p115_iso::probe_file(&path, Some(context)).await?);
                     evidence = "CD2 蓝光 CLPI/PID".into();
                 } else {
+                    let _slot = crate::strm::slot(state, "main", Some(context)).await?;
                     let mut command = tokio::process::Command::new("ffprobe");
                     command
                         .kill_on_drop(true)
@@ -151,9 +153,11 @@ async fn reference(
                             "-show_format",
                         ])
                         .arg(&path);
-                    if let Ok(Ok(output)) =
+                    let output =
                         tokio::time::timeout(std::time::Duration::from_secs(45), command.output())
-                            .await
+                            .await;
+                    drop(_slot);
+                    if let Ok(Ok(output)) = output
                         && output.status.success()
                     {
                         raw = serde_json::from_slice(&output.stdout).ok();
@@ -597,251 +601,357 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
     context
         .activity("读取音轨备份", "正在检查音轨纠正任务生成的备份")
         .await;
+    let backups = state.data_dir.join("backups/truehd-core-shift");
+    if tokio::fs::symlink_metadata(&backups)
+        .await
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        return Err(ApiError::bad("音轨备份目录不能为符号链接"));
+    }
+    let empty = |backup_files: usize, skipped: usize| json!({"backup_files":backup_files,"restored":0,"already_restored":0,"skipped":skipped,"failed":0});
+    if !backups.is_dir() {
+        context
+            .update(100, "无需还原", "没有可还原的音轨纠正备份。")
+            .await;
+        return Ok(empty(0, 0));
+    }
+    let backups = tokio::fs::canonicalize(backups).await?;
+    if !backups.starts_with(tokio::fs::canonicalize(&state.data_dir).await?) {
+        return Err(ApiError::bad("音轨备份目录越界"));
+    }
+    let batch_pattern = regex::Regex::new(r"^\d{8}-\d{6}$").unwrap();
+    let file_pattern = regex::Regex::new(r"^(.+)-([0-9a-f]{12})\.json$").unwrap();
+    let mut selected = BTreeMap::<(String, String), (PathBuf, Value)>::new();
+    let mut pending = vec![backups.clone()];
+    let mut backup_files = 0;
+    let mut skipped = 0;
+    while let Some(directory) = pending.pop() {
+        let mut files = tokio::fs::read_dir(&directory).await?;
+        while let Some(entry) = files.next_entry().await? {
+            let path = entry.path();
+            let kind = entry.file_type().await?;
+            if kind.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if kind.is_symlink() && path.is_dir() {
+                skipped += 1;
+                continue;
+            }
+            if !name.to_lowercase().ends_with(".json") {
+                continue;
+            }
+            backup_files += 1;
+            let relative = path.strip_prefix(&backups).unwrap();
+            let parts = relative.components().collect::<Vec<_>>();
+            let Some(captures) = file_pattern.captures(&name) else {
+                skipped += 1;
+                continue;
+            };
+            if !kind.is_file()
+                || parts.len() != 2
+                || !batch_pattern.is_match(&parts[0].as_os_str().to_string_lossy())
+            {
+                skipped += 1;
+                continue;
+            }
+            let info = match tokio::fs::read(&path)
+                .await
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            {
+                Some(info)
+                    if crate::media_info::container(&info).is_some_and(|c| {
+                        list(&c["MediaStreams"]).iter().any(|s| {
+                            matches!(s["Type"].as_str(), Some("Video" | "Audio" | "Subtitle"))
+                        })
+                    }) =>
+                {
+                    info
+                }
+                _ => {
+                    skipped += 1;
+                    continue;
+                }
+            };
+            let key = (captures[1].to_string(), captures[2].to_string());
+            if selected
+                .get(&key)
+                .is_none_or(|(previous, _)| previous < &path)
+            {
+                selected.insert(key, (path, info));
+            }
+        }
+    }
+    if selected.is_empty() {
+        context
+            .update(100, "无需还原", "没有有效的音轨纠正备份，无需还原。")
+            .await;
+        return Ok(empty(backup_files, skipped));
+    }
     let root =
         tokio::fs::canonicalize(string(&*state.config.read().await, "local_strm_root")).await?;
-    if protected(&root) {
-        return Err(ApiError::bad("媒体根目录位于115源目录"));
+    if !root.is_dir() || protected(&root) {
+        return Err(ApiError::bad("媒体根目录不存在或位于115源目录"));
     }
-    let backups = backup_root(state).await?;
-    let mut selected = BTreeMap::<String, (PathBuf, Value)>::new();
-    let mut directories = tokio::fs::read_dir(&backups).await?;
-    let batch = regex::Regex::new(r"^\d{8}-\d{6}$").unwrap();
-    let file = regex::Regex::new(r"^([A-Za-z0-9_-]+)-([0-9a-f]{12})\.json$").unwrap();
-    while let Some(dir) = directories.next_entry().await? {
-        if !dir.file_type().await?.is_dir() || !batch.is_match(&dir.file_name().to_string_lossy()) {
-            continue;
-        }
-        let mut files = tokio::fs::read_dir(dir.path()).await?;
-        while let Some(entry) = files.next_entry().await? {
-            if !entry.file_type().await?.is_file() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().to_string();
-            let Some(c) = file.captures(&name) else {
-                continue;
-            };
-            let Ok(info) = serde_json::from_slice::<Value>(&tokio::fs::read(entry.path()).await?)
-            else {
-                continue;
-            };
-            if !crate::media_info::recoverable(&info) {
-                continue;
-            }
-            let id = c[1].to_string();
-            let Ok(target) = media_edit::repair_target(state, &id).await else {
-                continue;
-            };
-            let Some(path) = target.candidates.iter().find(|p| p.is_file()) else {
-                continue;
-            };
-            let path = tokio::fs::canonicalize(path).await?;
-            if !path.starts_with(&root)
-                || protected(&path)
-                || path_hash(path.to_str().unwrap()) != c[2]
-            {
-                continue;
-            }
-            let key = format!("{id}:{}", &c[2]);
-            if selected.get(&key).is_none_or(|(p, _)| p < &entry.path()) {
-                selected.insert(key, (entry.path(), json!({"id":id,"info":info})));
-            }
-        }
-    }
+    let seed_ids = selected
+        .keys()
+        .map(|(id, _)| id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut processed = HashSet::new();
     let mut updated = 0;
     let mut unchanged = 0;
-    let mut skipped = 0;
-    let mut processed = HashSet::new();
+    let mut failed = 0;
     let mut failures = vec![];
-    for (index, (_, entry)) in selected.values().enumerate() {
+    for (index, id) in seed_ids.iter().enumerate() {
+        if processed.contains(id) {
+            continue;
+        }
         context.checkpoint().await?;
-        let id = string(entry, "id");
-        if processed.contains(&id) {
+        let snapshots = match restore_snapshots(state, id, &root).await {
+            Ok(snapshots) => snapshots,
+            Err(error) => {
+                processed.insert(id.clone());
+                skipped += 1;
+                tracing::warn!("[音轨备份还原] 跳过 Item {id}：{}", error.1);
+                continue;
+            }
+        };
+        if crate::emby::path_ignored(state, &snapshots[0].1).await? {
             continue;
         }
-        let target = media_edit::repair_target(state, &id).await?;
-        let label = target
-            .path
-            .replace('\\', "/")
-            .rsplit('/')
-            .next()
-            .unwrap_or("")
-            .to_string();
-        context
-            .update_counted(
-                index as u64,
-                selected.len() as u64,
-                "还原音轨备份",
-                &format!("正在检查 {label}（Item {id}）的关联版本备份"),
-            )
-            .await;
-        if crate::emby::path_ignored(state, &target.path).await? {
-            continue;
-        }
+        let backed_members = snapshots
+            .iter()
+            .filter(|(member, _, _, _)| selected.keys().any(|(id, _)| id == member))
+            .count();
+        processed.extend(snapshots.iter().map(|snapshot| snapshot.0.clone()));
         let mut members = vec![];
         let mut complete = true;
-        for version in target
-            .versions
-            .iter()
-            .map(|v| string(v, "emby_id"))
-            .chain(std::iter::once(id.clone()))
-            .collect::<std::collections::BTreeSet<_>>()
-        {
-            let target = media_edit::repair_target(state, &version).await?;
-            let Some(path) = target.candidates.iter().find(|p| p.is_file()) else {
+        for (member, item_path, path, original) in snapshots {
+            let key = (member.clone(), path_hash(path.to_str().unwrap()));
+            let Some((_, info)) = selected.get(&key) else {
                 complete = false;
                 break;
             };
-            let path = tokio::fs::canonicalize(path).await?;
-            if !path.starts_with(&root) || protected(&path) {
-                complete = false;
-                break;
-            }
-            let key = format!("{version}:{}", path_hash(path.to_str().unwrap()));
-            let Some((_, backup)) = selected.get(&key) else {
-                complete = false;
-                break;
-            };
-            let original = media_edit::load(state, &target).await?;
-            members.push((version, path, original, backup["info"].clone()));
+            members.push((member, item_path, path, original, info.clone()));
         }
         if !complete {
-            skipped += 1;
-            tracing::warn!(
-                "[音轨备份还原] 跳过 {label}（Item {id}）：关联版本备份不完整或路径不可写"
-            );
+            skipped += backed_members;
+            tracing::warn!("[音轨备份还原] 跳过 Item {id}：关联版本没有匹配当前路径的备份");
             continue;
         }
-        processed.extend(members.iter().map(|(id, _, _, _)| id.clone()));
-        if members.iter().all(|(_, _, old, backup)| old == backup) {
-            unchanged += members.len();
-            tracing::info!("[音轨备份还原] {label}（Item {id}）已与备份一致，无需还原");
-            continue;
-        }
-        let rebuilt = members
+        let same = members
             .iter()
-            .map(|(member, _, _, backup)| (member.clone(), backup.clone()))
-            .collect::<BTreeMap<_, _>>();
-        let result = crate::strm::with_settings(state, "preserve", || async {
+            .filter(|(_, _, _, old, backup)| old == backup)
+            .count();
+        if same == members.len() {
+            unchanged += same;
+            continue;
+        }
+        let paths = members
+            .iter()
+            .map(|(_, path, _, _, _)| path.clone())
+            .collect::<Vec<_>>();
+        let mut stages = BTreeMap::new();
+        let mut rollbacks = BTreeMap::new();
+        let mut clear_attempted = false;
+        let mut rollback_failed = false;
+        let result = async {
             let outcome = async {
-                for (member, path, _, _) in &members {
-                    restore_member(state, member, path, &root).await?;
+                for (member, item_path, path, original, backup) in &members {
+                    let current = media_edit::details(state, member, "Path,Type,Chapters").await?;
+                    if string(&current, "Path") != *item_path {
+                        return Err(ApiError::bad("Emby路径在准备还原期间变化，未清理Emby数据"));
+                    }
+                    let empty = json!([]);
+                    let current_chapters = crate::media_info::clean_chapters(
+                        if current["Type"] == "Audio" && current["Chapters"].is_null() {
+                            &empty
+                        } else {
+                            &current["Chapters"]
+                        },
+                    )?;
+                    let mut backup = backup.clone();
+                    let mut original = original.clone();
+                    crate::media_info::preserve_chapters(&mut backup, &current_chapters)?;
+                    crate::media_info::preserve_chapters(&mut original, &current_chapters)?;
+                    stages.insert(member.clone(), restore_stage(path, &backup).await?);
+                    rollbacks.insert(member.clone(), restore_stage(path, &original).await?);
                 }
-                for (member, path, old, backup) in &members {
-                    if old == backup {
-                        continue;
-                    }
-                    let target = restore_member(state, member, path, &root).await?;
-                    if crate::media_info::container(old) != crate::media_info::container(backup) {
-                        let body =
-                            json!({"mediainfo":backup,"sha1":target.sha,"media_path":target.path});
-                        let (status, value) = crate::media_save::save_with_rebuilt(
-                            state, member, &body, &rebuilt, context,
-                        )
-                        .await?;
-                        if status >= 400 {
-                            return Err(ApiError::bad(string(&value, "error")));
-                        }
-                    }
-                    let latest = media_edit::details(state, member, "Chapters").await?;
-                    let mut restored = backup.clone();
-                    crate::media_info::preserve_chapters(&mut restored, &latest["Chapters"])?;
-                    restore_member(state, member, path, &root).await?;
-                    tokio::fs::write(path, serde_json::to_vec_pretty(&restored).unwrap()).await?;
-                    if let Some(sha) = target.sha {
-                        sqlx::query(
-                            "UPDATE p115_mediainfo_cache SET mediainfo_json=$1 WHERE sha1=$2",
-                        )
-                        .bind(restored)
-                        .bind(sha)
-                        .execute(&state.db)
-                        .await?;
-                    }
+                context.checkpoint().await?;
+                clear_attempted = true;
+                let config = state.config.read().await.clone();
+                crate::emby::send(
+                    state
+                        .http
+                        .post(format!(
+                            "{}/Items/{id}/ClearMediaInfo",
+                            string(&config, "emby_server_url").trim_end_matches('/')
+                        ))
+                        .query(&[("api_key", string(&config, "emby_api_key"))])
+                        .timeout(std::time::Duration::from_secs(
+                            config["emby_api_timeout"]
+                                .as_u64()
+                                .filter(|seconds| *seconds > 0)
+                                .unwrap_or(60),
+                        )),
+                )
+                .await?
+                .error_for_status()?;
+                for (member, _, path, _, _) in &members {
+                    tokio::fs::rename(stages.remove(member).unwrap(), path).await?;
                 }
+                crate::strm::with_optional_preserve(state, || {
+                    crate::media_save::refresh(state, &paths)
+                })
+                .await?;
                 Ok::<_, ApiError>(())
             }
             .await;
-            if outcome.is_err() {
-                for (member, path, original, _) in &members {
-                    let target = restore_member(state, member, path, &root).await?;
-                    tokio::fs::write(path, serde_json::to_vec_pretty(original).unwrap()).await?;
-                    if let Some(sha) = target.sha {
-                        sqlx::query(
-                            "UPDATE p115_mediainfo_cache SET mediainfo_json=$1 WHERE sha1=$2",
-                        )
-                        .bind(original)
-                        .bind(sha)
-                        .execute(&state.db)
-                        .await?;
+            if outcome.is_err() && clear_attempted {
+                let rollback = async {
+                    for (member, _, path, _, _) in &members {
+                        tokio::fs::rename(rollbacks.remove(member).unwrap(), path).await?;
                     }
+                    crate::strm::with_optional_preserve(state, || {
+                        crate::media_save::refresh(state, &paths)
+                    })
+                    .await
                 }
-                let _ = crate::media_save::refresh(state, std::slice::from_ref(&target.path)).await;
+                .await;
+                if let Err(error) = rollback {
+                    rollback_failed = true;
+                    tracing::error!("[音轨备份还原] Item {id} 无法恢复任务前状态：{}", error.1);
+                }
             }
             outcome
-        })
+        }
         .await;
-        match result {
-            Ok(()) => {
-                tracing::info!(
-                    "[音轨备份还原] {label}（Item {id}）已还原 {} 个关联版本",
-                    members.len()
-                );
-                for (_, _, old, backup) in &members {
-                    if crate::media_info::container(old) == crate::media_info::container(backup) {
-                        unchanged += 1;
-                    } else {
-                        updated += 1;
-                    }
-                }
-            }
-            Err(error) if context.is_cancelled() => return Err(error),
-            Err(error) => {
-                tracing::error!(
-                    "[音轨备份还原] {label}（Item {id}）还原失败，已尝试恢复任务前状态：{}",
-                    error.1
-                );
-                failures.push(format!("{id}: {}", error.1));
+        for path in stages.values() {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        if !rollback_failed {
+            for path in rollbacks.values() {
+                let _ = tokio::fs::remove_file(path).await;
             }
         }
+        match result {
+            Ok(()) => {
+                updated += members.len() - same;
+                unchanged += same;
+                tracing::info!(
+                    "[音轨备份还原] 已还原 Item {id} 的 {} 个版本，备份继续保留",
+                    members.len()
+                );
+            }
+            Err(error) => {
+                failed += members.len();
+                failures.push(format!("{id}: {}", error.1));
+                tracing::error!("[音轨备份还原] Item {id} 还原失败：{}", error.1);
+            }
+        }
+        context
+            .update_counted(
+                index as u64 + 1,
+                seed_ids.len() as u64,
+                "还原音轨备份",
+                &format!("已还原 {updated}，无需还原 {unchanged}，跳过 {skipped}，失败 {failed}"),
+            )
+            .await;
     }
-    context.checkpoint().await?;
     let message = format!(
-        "音轨备份还原完成：还原 {updated} 项，已有 {unchanged} 项与备份一致，跳过 {skipped} 项，失败 {} 项",
-        failures.len()
+        "检查 {backup_files} 个备份，还原 {updated} 个，无需还原 {unchanged} 个，跳过 {skipped} 个，失败 {failed} 个。"
     );
-    context
-        .update_counted(
-            selected.len() as u64,
-            selected.len() as u64,
-            "还原音轨备份",
-            &message,
-        )
-        .await;
+    context.update(100, "还原音轨备份", &message).await;
     Ok(
-        json!({"restored":updated,"already_restored":unchanged,"skipped":skipped,"failures":failures,"message":message}),
+        json!({"backup_files":backup_files,"restored":updated,"already_restored":unchanged,"skipped":skipped,"failed":failed,"failures":failures,"message":message}),
     )
 }
-async fn restore_member(
+async fn restore_snapshots(
     state: &AppState,
     id: &str,
-    expected: &std::path::Path,
     root: &std::path::Path,
-) -> Result<media_edit::Target> {
-    let current_root =
-        tokio::fs::canonicalize(string(&*state.config.read().await, "local_strm_root")).await?;
-    let target = media_edit::repair_target(state, id).await?;
-    let path = target
-        .candidates
-        .iter()
-        .find(|path| path.is_file())
-        .ok_or_else(|| ApiError::bad("关联版本缺失媒体信息"))?;
-    let path = tokio::fs::canonicalize(path).await?;
-    if current_root != root
-        || protected(&current_root)
-        || !path.starts_with(root)
-        || protected(&path)
-        || path != expected
-    {
-        return Err(ApiError::bad("关联版本媒体信息路径不可写"));
+) -> Result<Vec<(String, String, PathBuf, Value)>> {
+    let details =
+        media_edit::details(state, id, "Path,PartCount,MediaSources,ExtraType,Name").await?;
+    let sources = list(&details["MediaSources"]);
+    let mut ids = vec![id.to_string()];
+    for source in &sources {
+        let source_id = string(source, "ItemId");
+        let source_id = if source_id.is_empty() {
+            let raw = string(source, "Id");
+            if raw.to_lowercase().starts_with("mediasource_") {
+                raw.split_once('_').unwrap().1.trim().to_string()
+            } else {
+                String::new()
+            }
+        } else {
+            source_id
+        };
+        if source_id.is_empty() && sources.len() > 1 {
+            return Err(ApiError::bad("关联版本缺少 ItemId"));
+        }
+        if !source_id.is_empty() && !ids.contains(&source_id) {
+            ids.push(source_id);
+        }
     }
-    Ok(target)
+    let mut snapshots = vec![];
+    for member in ids {
+        let item = if member == id {
+            details.clone()
+        } else {
+            media_edit::details(state, &member, "Path,PartCount,ExtraType").await?
+        };
+        let item_path = string(&item, "Path");
+        if item_path.is_empty()
+            || !string(&item, "ExtraType").is_empty()
+            || item["PartCount"].as_u64().unwrap_or(0) > 1
+        {
+            return Err(ApiError::bad("关联版本缺少原生路径，或属于分段/附加内容"));
+        }
+        let mut existing = None;
+        for path in
+            crate::media_paths::info_candidates(&item_path, root.to_str().unwrap(), "", "").await
+        {
+            if let Ok(path) = tokio::fs::canonicalize(path).await
+                && path.starts_with(root)
+                && !protected(&path)
+                && path.is_file()
+            {
+                existing = Some(path);
+                break;
+            }
+        }
+        let path = existing.ok_or_else(|| ApiError::bad("关联版本的本地媒体信息 JSON 不存在"))?;
+        if snapshots
+            .iter()
+            .any(|(_, _, previous, _)| previous == &path)
+        {
+            return Err(ApiError::bad("关联版本共用媒体信息 JSON"));
+        }
+        let info = serde_json::from_slice(&tokio::fs::read(&path).await?)
+            .map_err(|_| ApiError::bad("关联版本媒体信息 JSON 无法读取"))?;
+        snapshots.push((member, item_path, path, info));
+    }
+    Ok(snapshots)
+}
+async fn restore_stage(path: &std::path::Path, info: &Value) -> Result<PathBuf> {
+    use tokio::io::AsyncWriteExt;
+    let stage = path.with_file_name(format!(
+        ".{}.truehd-core-stage-{}",
+        path.file_name().unwrap().to_string_lossy(),
+        uuid::Uuid::new_v4().simple()
+    ));
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&stage)
+        .await?;
+    file.write_all(
+        &serde_json::to_vec_pretty(info).map_err(|_| ApiError::bad("媒体信息 JSON 无效"))?,
+    )
+    .await?;
+    file.sync_all().await?;
+    Ok(stage)
 }

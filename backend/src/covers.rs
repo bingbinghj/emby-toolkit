@@ -259,7 +259,14 @@ pub async fn generate(
             let mut query=vec![("ParentId",id.clone()),("Recursive","true".into()),("IncludeItemTypes",kind.into()),("Limit",if multi{"45"}else{"5"}.into()),("SortBy",if config["sort_by"]=="Random"{"Random"}else{"DateCreated"}.into()),("SortOrder","Descending".into()),("Fields","ImageTags,BackdropImageTags,PrimaryImageTag,PrimaryImageItemId".into())];
             if !selected.is_empty(){query=vec![("Ids",selected.join(",")),("Fields","Id,Name,Type,ImageTags,BackdropImageTags,PrimaryImageTag,PrimaryImageItemId".into())];}else if config["sort_by"]=="Random"{query.retain(|(key,_)|*key!="SortOrder");}
             let items = if paths.is_empty() {
-                state.emby(reqwest::Method::GET,&format!("Users/{user}/Items"),&query,None).await?
+                if selected.is_empty() {
+                    state.emby(reqwest::Method::GET,&format!("Users/{user}/Items"),&query,None).await?
+                } else {
+                    let app_config = state.config.read().await.clone();
+                    state.http.get(format!("{}/Users/{user}/Items",string(&app_config,"emby_server_url").trim_end_matches('/')))
+                        .header("X-Emby-Token",string(&app_config,"emby_api_key")).query(&query)
+                        .timeout(std::time::Duration::from_secs(30)).send().await?.error_for_status()?.json().await?
+                }
             } else { json!({"Items":[]}) };
             let count=state.emby(reqwest::Method::GET,&format!("Users/{user}/Items"),&[("ParentId",id.clone()),("Recursive","true".into()),("IncludeItemTypes",kind.into()),("Limit","0".into())],None).await?;
             let total = count["TotalRecordCount"].as_i64().unwrap_or(0);
@@ -272,14 +279,13 @@ pub async fn generate(
                     context.activity("读取封面来源", &format!("媒体库《{name}》正在读取《{}》的封面（第 {} 张）", string(&item, "Name"), index + 1)).await;
                     let image_path=image_path(&item,&config,multi).unwrap();
                     let app_config = state.config.read().await.clone();
-                    let response = state
+                    let response = crate::emby::send(state
                         .http
                         .get(format!(
                             "{}{image_path}",
                             string(&app_config, "emby_server_url").trim_end_matches('/')
                         ))
-                        .header("X-Emby-Token", string(&app_config, "emby_api_key"))
-                        .send()
+                        .header("X-Emby-Token", string(&app_config, "emby_api_key")))
                         .await?;
                     if !response.status().is_success() {
                         continue;
@@ -320,8 +326,11 @@ pub async fn generate(
             .map_err(|_| ApiError::bad("封面渲染失败"))??;
             let output = string(&config, "covers_output");
             if !output.is_empty() {
-                tokio::fs::create_dir_all(&output).await?;
-                tokio::fs::write(PathBuf::from(output).join(format!("{name}.jpg")), &bytes).await?;
+                let saved = async {
+                    tokio::fs::create_dir_all(&output).await?;
+                    tokio::fs::write(PathBuf::from(output).join(format!("{name}.jpg")), &bytes).await
+                }.await;
+                if let Err(error) = saved { tracing::error!("另存封面失败：{error}，继续上传媒体库《{name}》封面。"); }
             }
             let app_config = state.config.read().await.clone();
             context.activity("上传封面", &format!("正在将媒体库《{name}》的封面上传到 Emby")).await;
@@ -334,6 +343,7 @@ pub async fn generate(
                 .header("X-Emby-Token", string(&app_config, "emby_api_key"))
                 .header("Content-Type", "image/jpeg")
                 .body(bytes)
+                .timeout(std::time::Duration::from_secs(30))
                 .send()
                 .await?
                 .error_for_status()?;

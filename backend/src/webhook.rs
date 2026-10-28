@@ -216,6 +216,17 @@ async fn emby(
     let item = &body["Item"];
     let id = string(item, "Id");
     let kind = string(item, "Type");
+    if event == "deep.delete" {
+        tracing::info!("收到神医助手深度删除通知，准备清理本地数据库与缓存...");
+        let result = match deep_delete(&state, item).await {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::error!("深度删除清理本地数据库与缓存失败：{}", error.1);
+                json!({"status":"deep_delete_processed"})
+            }
+        };
+        return Ok((StatusCode::OK, Json(result)));
+    }
     if id.is_empty()
         || !matches!(
             kind.as_str(),
@@ -240,9 +251,6 @@ async fn emby(
         "Emby Webhook 已收到：事件 {event}，Emby {id}，类型 {kind}，名称 {}",
         string(item, "Name")
     );
-    if event == "deep.delete" {
-        return Ok((StatusCode::OK, Json(deep_delete(&state, item).await?)));
-    }
     let path = if string(item, "Path").is_empty() {
         string(&details(&state, &id, "Path").await?, "Path")
     } else {
@@ -387,15 +395,12 @@ async fn delete_fid(state: &AppState, slot: &DeleteSlot, config: &Value) -> Resu
 }
 pub async fn deep_delete(state: &AppState, item: &Value) -> Result<Value> {
     let id = string(item, "Id");
-    if state.webhooks.manual_delete_marked(&id).await {
-        return Ok(json!({"status":"deep_delete_managed_by_etk"}));
-    }
-    // Neither a webhook nor an empty list response proves that an Item is gone.
-    if crate::versions::existing(state, std::slice::from_ref(&id))
-        .await?
-        .contains(&id)
-    {
+    if id.is_empty() {
         return Ok(json!({"status":"deep_delete_processed"}));
+    }
+    if state.webhooks.manual_delete_marked(&id).await {
+        tracing::info!("[深度删除] Item {id} 由 ETK 版本删除流程处理，跳过重复的 115/数据库清理。");
+        return Ok(json!({"status":"deep_delete_managed_by_etk"}));
     }
     let config = state.config.read().await.clone();
     let kind = string(item, "Type");
@@ -405,6 +410,26 @@ pub async fn deep_delete(state: &AppState, item: &Value) -> Result<Value> {
     .bind(json!([id]))
     .fetch_all(&state.db)
     .await?;
+    let mut deleted = BTreeSet::from([id.clone()]);
+    if !matches!(kind.as_str(), "Series" | "Season") {
+        let linked = rows
+            .first()
+            .map(|row| {
+                list(&row["emby_item_ids_json"])
+                    .iter()
+                    .filter_map(|value| value.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !linked.is_empty() {
+            match crate::versions::existing(state, &linked).await {
+                Ok(existing) => {
+                    deleted.extend(linked.into_iter().filter(|id| !existing.contains(id)));
+                }
+                Err(_) => tracing::warn!("Emby 关联版本查询失败，仅清理本次通知的版本"),
+            }
+        }
+    }
     let mut slots = vec![];
     for row in rows {
         let exact = delete_slots(&row);
@@ -435,8 +460,9 @@ pub async fn deep_delete(state: &AppState, item: &Value) -> Result<Value> {
         };
         let children: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE parent_series_tmdb_id=$1 AND in_library=true AND item_type IN ('Season','Episode') AND ($2='Series' OR (item_type='Episode' AND season_number=$3))")
             .bind(parent).bind(&kind).bind(row["season_number"].as_i64().map(|n| n as i32)).fetch_all(&state.db).await?;
+        let mut candidates = vec![];
         for child in children {
-            slots.extend(delete_slots(&child).into_iter().filter(|slot| {
+            candidates.extend(delete_slots(&child).into_iter().filter(|slot| {
                 let asset_id = string(&slot.asset, "emby_item_id");
                 (asset_id.is_empty() || asset_id == slot.id)
                     && delete_path(&string(&slot.asset, "path"), &config).is_some_and(|path| {
@@ -446,15 +472,25 @@ pub async fn deep_delete(state: &AppState, item: &Value) -> Result<Value> {
                     })
             }));
         }
+        let child_ids = candidates
+            .iter()
+            .map(|slot| slot.id.clone())
+            .collect::<Vec<_>>();
+        if child_ids.is_empty() {
+            continue;
+        }
+        match crate::versions::existing(state, &child_ids).await {
+            Ok(existing) => {
+                deleted.extend(child_ids.into_iter().filter(|id| !existing.contains(id)));
+                slots.extend(candidates);
+            }
+            Err(_) => tracing::warn!("Emby 子项存活核对失败，保留子项文件和缓存"),
+        }
     }
-    let mut ids: BTreeSet<_> = slots.iter().map(|slot| slot.id.clone()).collect();
-    ids.insert(id);
-    let existing =
-        crate::versions::existing(state, &ids.iter().cloned().collect::<Vec<_>>()).await?;
-    let mut deleted = vec![];
-    for id in ids {
-        if !existing.contains(&id) && !state.webhooks.manual_delete_marked(&id).await {
-            deleted.push(id);
+    let mut removed = vec![];
+    for id in deleted {
+        if !state.webhooks.manual_delete_marked(&id).await {
+            removed.push(id);
         }
     }
     if config["p115_enable_sync_delete"] == true {
@@ -462,7 +498,7 @@ pub async fn deep_delete(state: &AppState, item: &Value) -> Result<Value> {
         let mut retained_fids = BTreeSet::new();
         for slot in &slots {
             if let Some(fid) = delete_fid(state, slot, &config).await? {
-                if deleted.contains(&slot.id) {
+                if removed.contains(&slot.id) {
                     fids.insert(fid);
                 } else {
                     retained_fids.insert(fid);
@@ -477,12 +513,24 @@ pub async fn deep_delete(state: &AppState, item: &Value) -> Result<Value> {
                         .bind(&fids)
                         .execute(&state.db)
                         .await?;
+                    tracing::warn!(
+                        "[115联动删除] 已删除 115 文件: {} ({kind})，FID={}",
+                        string(item, "Name"),
+                        fids.join(",")
+                    );
                 }
                 Err(error) => tracing::error!("115 深度联动删除失败，保留文件缓存: {}", error.1),
             }
         }
     }
-    crate::versions::unbind(state, &deleted).await?;
+    if config["p115_enable_sync_delete"] != true {
+        tracing::info!("[115联动删除] 未启用，跳过 115 文件删除。");
+    }
+    tracing::info!(
+        "[深度删除] 开始清理本地数据库与缓存: {} ({kind})",
+        string(item, "Name")
+    );
+    crate::versions::unbind(state, &removed).await?;
     Ok(json!({"status":"deep_delete_processed"}))
 }
 pub async fn collect_files(
@@ -853,15 +901,16 @@ async fn sync_moviepilot_media_info(state: &AppState, path: &str) -> Result<()> 
     let base = string(&config, "emby_server_url");
     let key = string(&config, "emby_api_key");
     for endpoint in ["emby/Items/SyncMediaInfo", "Items/SyncMediaInfo"] {
-        let response = state
-            .http
-            .post(format!("{}/{endpoint}", base.trim_end_matches('/')))
-            .header("X-Emby-Token", &key)
-            .query(&[("Path", path)])
-            .json(&Value::Null)
-            .timeout(Duration::from_secs(600))
-            .send()
-            .await?;
+        let response = crate::emby::send(
+            state
+                .http
+                .post(format!("{}/{endpoint}", base.trim_end_matches('/')))
+                .header("X-Emby-Token", &key)
+                .query(&[("Path", path)])
+                .json(&Value::Null)
+                .timeout(Duration::from_secs(600)),
+        )
+        .await?;
         if endpoint.starts_with("emby/") && response.status() == reqwest::StatusCode::NOT_FOUND {
             continue;
         }

@@ -6,14 +6,16 @@ use crate::{
 use futures_util::FutureExt;
 use reqwest::Method;
 use serde_json::{Value, json};
-use std::{collections::HashSet, future::Future};
+use std::{collections::HashSet, future::Future, sync::Arc};
 use tokio::sync::Mutex;
 
 #[derive(Default)]
 pub struct Service {
     gate: Mutex<()>,
     token: Mutex<Option<String>>,
+    pub(crate) threads: Arc<crate::concurrency::Service>,
 }
+pub use crate::concurrency::{slot, thread_limit};
 async fn ui(
     state: &AppState,
     method: Method,
@@ -41,16 +43,16 @@ async fn ui(
         if let Some(body) = body {
             request = request.json(body);
         }
-        let response = request.send().await?;
+        let response = crate::emby::send(request).await?;
         if attempt == 0 && matches!(response.status().as_u16(), 400 | 401 | 403) {
             let name = string(&config, "emby_admin_user");
             let password = string(&config, "emby_admin_pass");
             if name.is_empty() {
                 return Err(ApiError::bad("神医配置页需要 Emby 管理员凭证"));
             }
-            let response:Value=state.http.post(format!("{}/Users/AuthenticateByName",base.trim_end_matches('/')))
+            let response:Value=crate::emby::send(state.http.post(format!("{}/Users/AuthenticateByName",base.trim_end_matches('/')))
                 .header("X-Emby-Authorization","MediaBrowser Client=\"EmbyToolkit\", Device=\"Server\", DeviceId=\"etk-rust-strm\", Version=\"1.0\"")
-                .json(&json!({"Username":name,"Pw":password})).send().await?.error_for_status()?.json().await?;
+                .json(&json!({"Username":name,"Pw":password}))).await?.error_for_status()?.json().await?;
             if response["User"]["Policy"]["IsAdministrator"] != true {
                 return Err(ApiError::forbidden());
             }
@@ -76,9 +78,9 @@ pub async fn admin_system(state: &AppState) -> Result<Value> {
     if name.is_empty() {
         return Err(ApiError::bad("无法获取Emby管理员令牌，不能读取系统目录"));
     }
-    let response:Value=state.http.post(format!("{}/Users/AuthenticateByName",string(&config,"emby_server_url").trim_end_matches('/')))
+    let response:Value=crate::emby::send(state.http.post(format!("{}/Users/AuthenticateByName",string(&config,"emby_server_url").trim_end_matches('/')))
         .header("X-Emby-Authorization","MediaBrowser Client=\"EmbyToolkit\", Device=\"Server\", DeviceId=\"etk-rust-strm\", Version=\"1.0\"")
-        .json(&json!({"Username":name,"Pw":string(&config,"emby_admin_pass")})).send().await?.error_for_status()?.json().await?;
+        .json(&json!({"Username":name,"Pw":string(&config,"emby_admin_pass")}))).await?.error_for_status()?.json().await?;
     if response["User"]["Policy"]["IsAdministrator"] != true {
         return Err(ApiError::forbidden());
     }

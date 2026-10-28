@@ -24,7 +24,7 @@ ENV LANG=C.UTF-8 TZ=Asia/Shanghai CONFIG_DIR=/config APP_DATA_DIR=/config \
     ETK_STATIC_DIR=/app/static ETK_BIND=0.0.0.0:5257 PUID=0 PGID=0 UMASK=000
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates tzdata curl bash gosu dumb-init ffmpeg procps && \
+    ca-certificates tzdata curl bash gosu dumb-init ffmpeg procps bzip2 xz-utils && \
     rm -rf /var/lib/apt/lists/* && \
     groupadd -r -g 918 embytoolkit && \
     useradd -r -g embytoolkit -d /embytoolkit -s /bin/bash -u 918 embytoolkit && \

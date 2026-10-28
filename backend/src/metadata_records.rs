@@ -102,8 +102,8 @@ pub fn pending(kind: &str, package: &Value, cast: &[Value], item: &Value) -> Res
         .unwrap_or(json!(chrono::Utc::now().to_rfc3339()));
     record["actors_json"] = json!(
         cast.iter()
-            .filter(|p| p["id"].as_i64().is_some_and(|id| id != 0))
-            .map(|p| json!({"tmdb_id":p["id"],"character":p["character"],"order":p["order"]}))
+            .filter(|p| p["id"] != 0 && crate::cast::person_id(&p["id"]).is_some())
+            .map(|p| json!({"tmdb_id":crate::cast::person_id(&p["id"]),"character":p["character"],"order":p["order"]}))
             .collect::<Vec<_>>()
     );
     record["official_rating_json"] = package

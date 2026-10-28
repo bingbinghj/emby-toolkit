@@ -144,10 +144,14 @@ fn title_year(text: &str) -> (String, Option<String>) {
 }
 async fn ensure(path: &Path, roots: &[PathBuf]) -> Result<PathBuf> {
     let resolved = tokio::fs::canonicalize(path).await?;
-    if !roots.iter().any(|root| resolved.starts_with(root)) {
-        return Err(ApiError::bad("实时监控路径超出配置目录"));
+    for root in roots {
+        if let Ok(root) = tokio::fs::canonicalize(root).await
+            && resolved.starts_with(root)
+        {
+            return Ok(path.to_path_buf());
+        }
     }
-    Ok(resolved)
+    Err(ApiError::bad("实时监控路径超出配置目录"))
 }
 async fn before_write(path: &Path, roots: &[PathBuf]) -> Result<()> {
     ensure(
@@ -574,7 +578,6 @@ async fn prepare_group(
         dummy["Genres"] = top["genres"].clone();
         crate::douban::premerge_in_job(state, &dummy, top, context).await?;
         crate::translation::metadata_tree(state, &kind, &mut data, &string(&dummy, "Name")).await?;
-        crate::translation::overview_fallback(state, &kind, &mut data, &scope).await?;
         let top = if kind == "Series" {
             &data["series_details"]
         } else {
@@ -998,7 +1001,7 @@ pub async fn refresh_files(
                         if let Some(item) = item {
                             let current = check_active(state, &[], context, cancel, false).await?;
                             ensure(&directory, &current.roots).await?;
-                            let response = state.http.post(format!("{}/Items/{}/Refresh", string(&config, "emby_server_url").trim_end_matches('/'), string(item, "Id")))
+                            let response = crate::emby::send(state.http.post(format!("{}/Items/{}/Refresh", string(&config, "emby_server_url").trim_end_matches('/'), string(item, "Id")))
                                 .header("X-Emby-Token", string(&config, "emby_api_key"))
                                 .query(&[
                                     ("Recursive", "true"),
@@ -1006,7 +1009,7 @@ pub async fn refresh_files(
                                     ("ImageRefreshMode", "Default"),
                                     ("ReplaceAllImages", "false"),
                                     ("ReplaceAllMetadata", "false"),
-                                ]).send().await.and_then(reqwest::Response::error_for_status);
+                                ])).await.and_then(crate::emby::Response::error_for_status);
                             match response {
                                 Ok(_) => { directory_failure = None; break; },
                                 Err(error) => {

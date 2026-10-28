@@ -39,6 +39,8 @@ impl AppState {
         {
             config.as_object_mut().unwrap().extend(stored);
         }
+        migrate_cookie_priority(&db, &mut config).await;
+        config["emby_server_id"] = Value::Null;
         let logs = crate::logs::LogStore::open(&data_dir.join("logs"))?;
         logs.configure(&config);
         Ok(Self {
@@ -74,6 +76,8 @@ impl AppState {
         if let Some(Value::Object(stored)) = db::setting(&self.db, "dynamic_app_config").await? {
             config.as_object_mut().unwrap().extend(stored);
         }
+        migrate_cookie_priority(&self.db, &mut config).await;
+        config["emby_server_id"] = self.config.read().await["emby_server_id"].clone();
         self.logs.configure(&config);
         *self.config.write().await = config;
         Ok(())
@@ -98,10 +102,70 @@ impl AppState {
                 next[key] = config[key].clone();
             }
         }
-        db::save_setting(&self.db, "dynamic_app_config", &next).await?;
+        next["emby_server_id"] = config["emby_server_id"].clone();
+        let mut persisted = next.clone();
+        persisted.as_object_mut().unwrap().remove("emby_server_id");
+        db::save_setting(&self.db, "dynamic_app_config", &persisted).await?;
         self.logs.configure(&next);
         *config = next;
         Ok(())
+    }
+    pub async fn refresh_server_identity(&self) {
+        let config = self.config.read().await.clone();
+        let base = string(&config, "emby_server_url");
+        let key = string(&config, "emby_api_key");
+        let mut id = Value::Null;
+        if !base.is_empty() && !key.is_empty() {
+            let result = async {
+                let cached = db::setting(&self.db, "emby_server_id_cache")
+                    .await?
+                    .unwrap_or(Value::Null);
+                let truthy = |value: &Value| match value {
+                    Value::Null => false,
+                    Value::Bool(value) => *value,
+                    Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
+                    Value::String(value) => !value.is_empty(),
+                    Value::Array(value) => !value.is_empty(),
+                    Value::Object(value) => !value.is_empty(),
+                };
+                let timeout = if truthy(&cached) { 5 } else { 20 };
+                tracing::debug!("正在尝试连接 Emby 获取 Server ID (超时设定: {timeout}s)...");
+                let info = async {
+                    crate::emby::send(
+                        self.http
+                            .get(format!("{}/System/Info", base.trim_end_matches('/')))
+                            .query(&[("api_key", &key)])
+                            .timeout(Duration::from_secs(timeout)),
+                    )
+                    .await?
+                    .error_for_status()?
+                    .json::<Value>()
+                    .await
+                }
+                .await
+                .inspect_err(|error| {
+                    tracing::warn!("获取 Emby 服务器信息失败 (可能是服务器离线): {error}");
+                });
+                if let Ok(info) = info
+                    && truthy(&info["Id"])
+                {
+                    id = info["Id"].clone();
+                    tracing::trace!("成功获取到 Emby Server ID: {id}");
+                    db::save_setting(&self.db, "emby_server_id_cache", &id).await?;
+                } else if truthy(&cached) {
+                    id = cached;
+                    tracing::warn!("无法连接 Emby 服务器，已使用缓存的 Server ID: {id} 继续启动。");
+                } else {
+                    tracing::error!("无法连接 Emby 且本地无缓存 Server ID，部分功能可能受限。");
+                }
+                Ok::<_, ApiError>(())
+            }
+            .await;
+            if let Err(error) = result {
+                tracing::warn!("缓存 Emby Server ID 失败：{}", error.1);
+            }
+        }
+        self.config.write().await["emby_server_id"] = id;
     }
     pub async fn emby(
         &self,
@@ -133,7 +197,7 @@ impl AppState {
         if let Some(body) = body {
             request = request.json(&body);
         }
-        let response = request.send().await?.error_for_status()?;
+        let response = crate::emby::send(request).await?.error_for_status()?;
         if response.status() == reqwest::StatusCode::NO_CONTENT {
             return Ok(json!({"success":true}));
         }
@@ -149,6 +213,32 @@ impl AppState {
             .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
             .unwrap_or(0.0);
         context.sleep(Duration::from_secs_f64(seconds)).await
+    }
+}
+async fn migrate_cookie_priority(db: &PgPool, config: &mut Value) {
+    let migrated = db::setting(db, "p115_cookie_priority_default_v1")
+        .await
+        .unwrap_or(None);
+    if migrated.is_some_and(|value| value == true) {
+        return;
+    }
+    if config["p115_api_priority"] != "cookie" {
+        config["p115_api_priority"] = json!("cookie");
+        if let Err(error) = db::save_setting(db, "dynamic_app_config", config).await {
+            tracing::warn!(
+                "保存 115 Cookie 优先级迁移失败，将在下次启动重试：{}",
+                error.1
+            );
+            return;
+        }
+        tracing::info!("115 接口默认优先级已迁移为 Cookie。");
+    }
+    if let Err(error) = db::save_setting(db, "p115_cookie_priority_default_v1", &json!(true)).await
+    {
+        tracing::warn!(
+            "保存 115 Cookie 优先级迁移标记失败，将在下次启动重试：{}",
+            error.1
+        );
     }
 }
 pub fn string(value: &Value, key: &str) -> String {

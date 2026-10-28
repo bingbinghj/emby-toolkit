@@ -190,14 +190,36 @@ async fn write(
         let query = format!(
             "INSERT INTO media_metadata ({columns},last_synced_at) SELECT {columns},NOW() FROM jsonb_populate_record(NULL::media_metadata,$1::jsonb) ON CONFLICT(tmdb_id,item_type) DO UPDATE SET {updates}last_synced_at=NOW()"
         );
-        sqlx::query(&query)
+        if preserve_top_title {
+            sqlx::query("SAVEPOINT sync_record")
+                .execute(&mut *transaction)
+                .await?;
+        }
+        let result = sqlx::query(&query)
             .bind(&*record)
             .execute(&mut *transaction)
             .await
             .inspect_err(|_| {
                 tracing::error!("元数据库记录写入失败：《{media_name}》，类型 {kind}，TMDb {id}")
-            })?;
-        tracing::debug!("元数据库记录已写入事务：《{media_name}》，类型 {kind}，TMDb {id}");
+            });
+        let written = result.is_ok();
+        if let Err(error) = result {
+            if !preserve_top_title {
+                return Err(error.into());
+            }
+            sqlx::query("ROLLBACK TO SAVEPOINT sync_record")
+                .execute(&mut *transaction)
+                .await?;
+            tracing::error!("写入失败 {id}：{error}，继续本批其他媒体项。");
+        }
+        if preserve_top_title {
+            sqlx::query("RELEASE SAVEPOINT sync_record")
+                .execute(&mut *transaction)
+                .await?;
+        }
+        if written {
+            tracing::debug!("元数据库记录已写入事务：《{media_name}》，类型 {kind}，TMDb {id}");
+        }
     }
     transaction
         .commit()

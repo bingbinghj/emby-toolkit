@@ -8,6 +8,12 @@ use std::{net::SocketAddr, path::PathBuf};
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
+    if args
+        .get(1)
+        .is_some_and(|arg| ["media-archive", "restore-media-short-names"].contains(&arg.as_str()))
+    {
+        return emby_toolkit::media_archive::run(&args[1..]);
+    }
     if args.get(1).is_some_and(|s| s == "--clear-activity-log") {
         let path = args
             .get(2)
@@ -29,9 +35,10 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(LogWriter(state.logs.clone()))
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,emby_toolkit=debug".into()),
+                .unwrap_or_else(|_| "info,emby_toolkit=trace".into()),
         )
         .init();
+    state.refresh_server_identity().await;
     let bind: SocketAddr = std::env::var("ETK_BIND")
         .unwrap_or_else(|_| "0.0.0.0:5257".into())
         .parse()?;

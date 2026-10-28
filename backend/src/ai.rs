@@ -14,6 +14,7 @@ pub struct Service {
     pub cache_gate: RwLock<()>,
     pub cache_revision: std::sync::atomic::AtomicU64,
     last_request: Mutex<Option<std::time::Instant>>,
+    translations: Mutex<(u64, BTreeMap<String, String>)>,
 }
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -362,6 +363,36 @@ pub(crate) fn purpose_label(purpose: &str) -> &str {
         _ => purpose,
     }
 }
+pub async fn generate_jokes(
+    state: &AppState,
+    inputs: &BTreeMap<String, String>,
+) -> Result<BTreeMap<String, Value>> {
+    if inputs.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let config = state.config.read().await.clone();
+    let defaults: Value = serde_json::from_str(include_str!("../assets/defaults.json")).unwrap();
+    let prompts = db::setting(&state.db, "ai_user_prompts")
+        .await?
+        .unwrap_or(json!({}));
+    let prompt = prompts["batch_joke_fallback"]
+        .as_str()
+        .or_else(|| defaults["DEFAULT_AI_PROMPTS"]["batch_joke_fallback"].as_str())
+        .unwrap_or("");
+    // 原版笑话请求整批直发，不读写翻译缓存，也不净化或校验返回文本。
+    Ok(
+        match request(state, &config, prompt, &python_json(&json!(inputs)), 0.8).await {
+            Ok(value) => value
+                .as_object()
+                .map(|values| values.clone().into_iter().collect())
+                .unwrap_or_default(),
+            Err(error) => {
+                tracing::warn!("[老六笑话生成] AI 翻车了：{}", error.1);
+                BTreeMap::new()
+            }
+        },
+    )
+}
 pub async fn translate(
     state: &AppState,
     inputs: &BTreeMap<String, String>,
@@ -391,10 +422,22 @@ async fn translate_inner(
     if inputs.is_empty() {
         return Ok(BTreeMap::new());
     }
+    if purpose == "batch_joke_fallback" {
+        return Ok(generate_jokes(state, inputs)
+            .await?
+            .into_iter()
+            .filter_map(|(key, value)| value.as_str().map(|text| (key, text.to_string())))
+            .collect());
+    }
+    let mut memory = state.ai.translations.lock().await;
     let revision = state
         .ai
         .cache_revision
         .load(std::sync::atomic::Ordering::SeqCst);
+    if memory.0 != revision {
+        memory.0 = revision;
+        memory.1.clear();
+    }
     let config = state.config.read().await.clone();
     let purpose_name = purpose_label(purpose);
     let media_context = context["title"]
@@ -443,16 +486,27 @@ async fn translate_inner(
             context,
             &actors[id],
         );
-        let cached: Option<String> = sqlx::query_scalar(
-            "SELECT translated_text FROM translation_cache WHERE original_text=$1",
-        )
-        .bind(&key)
-        .fetch_optional(&state.db)
-        .await?
-        .flatten();
+        let cached: Option<String> = if let Some(value) = memory.1.get(&key) {
+            Some(value.clone())
+        } else {
+            sqlx::query_scalar(
+                "SELECT translated_text FROM translation_cache WHERE original_text=$1",
+            )
+            .bind(&key)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("读取翻译结果缓存失败，继续翻译：{error}");
+                None
+            })
+            .flatten()
+        };
         if let Some(cached) = cached.filter(|s| {
             !s.is_empty() && (purpose != "batch_joke_fallback" || s.starts_with("【老六占位简介】"))
         }) {
+            if persist {
+                memory.1.insert(key.clone(), cached.clone());
+            }
             output.insert(id.clone(), cached);
         } else {
             missing.insert(id.clone(), source.clone());
@@ -573,12 +627,12 @@ async fn translate_inner(
                                     .cache_revision
                                     .load(std::sync::atomic::Ordering::SeqCst)
                         {
-                            sqlx::query("INSERT INTO translation_cache(original_text,translated_text,engine_used) VALUES($1,$2,$3) ON CONFLICT(original_text) DO UPDATE SET translated_text=EXCLUDED.translated_text,engine_used=EXCLUDED.engine_used,last_updated_at=NOW()")
-                            .bind(&keys[id]).bind(&value).bind(string(&config,"ai_provider")).execute(&state.db).await?;
-                            tracing::debug!(
-                                "AI 翻译结果缓存已写入：用途 {purpose_name}，批次 {}",
-                                index + 1
-                            );
+                            memory.1.insert(keys[id].clone(), value.clone());
+                            match sqlx::query("INSERT INTO translation_cache(original_text,translated_text,engine_used) VALUES($1,$2,$3) ON CONFLICT(original_text) DO UPDATE SET translated_text=EXCLUDED.translated_text,engine_used=EXCLUDED.engine_used,last_updated_at=NOW()")
+                            .bind(&keys[id]).bind(&value).bind(string(&config,"ai_provider")).execute(&state.db).await {
+                                Ok(_) => tracing::debug!("AI 翻译结果缓存已写入：用途 {purpose_name}，批次 {}", index + 1),
+                                Err(error) => tracing::warn!("保存翻译结果缓存失败，本次进程内仍可复用：{error}"),
+                            }
                         } else {
                             tracing::debug!(
                                 "AI 翻译结果缓存跳过：用途 {purpose_name}，批次 {}，预览或缓存版本已变化",

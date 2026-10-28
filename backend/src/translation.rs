@@ -1,13 +1,13 @@
 use crate::{AppState, ai, error::Result, media_edit::list, metadata, state::string};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 pub async fn overview_fallback(
     state: &AppState,
     kind: &str,
     data: &mut Value,
-    scope: &[(i64, i64)],
-) -> Result<BTreeSet<String>> {
+    payload: &mut Value,
+) -> Result<()> {
     let config = state.config.read().await.clone();
     if config["ai_joke_fallback"] != true
         || string(&config, "ai_api_key").trim().is_empty()
@@ -18,58 +18,50 @@ pub async fn overview_fallback(
         )
         || !matches!(kind, "Movie" | "Series")
     {
-        return Ok(BTreeSet::new());
+        return Ok(());
     }
     let top = data.get("series_details").unwrap_or(data);
     let series_id = top["id"]
         .as_u64()
         .map(|id| id.to_string())
         .unwrap_or_else(|| string(top, "id"));
-    let title = string(top, if kind == "Movie" { "title" } else { "name" });
+    let title = string(payload, "title");
+    let title = if title.is_empty() {
+        string(payload, "name")
+    } else {
+        title
+    };
     let mut missing = BTreeMap::new();
     let mut paths = BTreeMap::new();
-    let mut filled = BTreeSet::new();
-    for (path, node_kind) in nodes(kind, data) {
-        let node = data.pointer_mut(&path).unwrap();
-        if node_kind == "Season" || !string(node, "overview").is_empty() {
-            continue;
-        }
-        let key = if node_kind == "Episode" {
-            let (Some(season), Some(number)) = (
-                node["season_number"].as_i64(),
-                node["episode_number"].as_i64(),
-            ) else {
-                continue;
-            };
-            if !scope.contains(&(season, number)) {
+    if string(payload, "overview").is_empty() {
+        missing.insert("main".into(), title.clone());
+    }
+    if kind == "Series" && data.get("episodes_details").is_some() {
+        let old = metadata::reconstruct_full(state, &series_id, kind, false)
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("从数据库重建元数据失败：{}", error.1);
+                None
+            })
+            .map(|(payload, _)| payload)
+            .unwrap_or(Value::Null);
+        for (path, node_kind) in nodes(kind, data) {
+            if node_kind != "Episode" {
                 continue;
             }
-            format!("S{season}E{number}")
-        } else {
-            "main".into()
-        };
-        let cached: Option<String> = if node_kind == "Episode" {
-            sqlx::query_scalar("SELECT overview FROM media_metadata WHERE item_type='Episode' AND parent_series_tmdb_id=$1 AND season_number=$2 AND episode_number=$3 AND overview LIKE '%【老六占位简介】%' LIMIT 1")
-                .bind(&series_id).bind(node["season_number"].as_i64().map(|n| n as i32)).bind(node["episode_number"].as_i64().map(|n| n as i32)).fetch_optional(&state.db).await?
-        } else {
-            metadata::row(state, &series_id, kind)
-                .await?
-                .map(|row| string(&row, "overview"))
-        };
-        if let Some(cached) = cached.filter(|text| text.contains("【老六占位简介】")) {
-            node["overview"] = json!(cached);
-            tracing::debug!("占位简介缓存继承：《{title}》，TMDb {series_id}，目标 {key}");
-            filled.insert(key);
-        } else {
-            missing.insert(
-                key.clone(),
-                if key == "main" {
-                    title.clone()
-                } else {
-                    format!("{title} {key}")
-                },
-            );
-            paths.insert(key, path);
+            let node = data.pointer_mut(&path).unwrap();
+            let key = format!("S{}E{}", node["season_number"], node["episode_number"]);
+            paths.insert(key.clone(), path);
+            if !string(node, "overview").is_empty() {
+                continue;
+            }
+            let cached = string(&old["episodes_details"][&key], "overview");
+            if cached.contains("【老六占位简介】") {
+                node["overview"] = json!(cached);
+                tracing::debug!("占位简介缓存继承：《{title}》，TMDb {series_id}，目标 {key}");
+            } else {
+                missing.insert(key.clone(), format!("{} {key}", string(payload, "name")));
+            }
         }
     }
     if !missing.is_empty() {
@@ -77,24 +69,22 @@ pub async fn overview_fallback(
             "占位简介生成开始：《{title}》，TMDb {series_id}，缺失简介 {} 处",
             missing.len()
         );
-        let generated = ai::translate(
-            state,
-            &missing,
-            "batch_joke_fallback",
-            &Value::Null,
-            &Value::Null,
-        )
-        .await?;
-        for (key, text) in generated {
-            data.pointer_mut(&paths[&key]).unwrap()["overview"] = json!(text);
-            filled.insert(key);
+        let generated = ai::generate_jokes(state, &missing).await?;
+        if let Some(text) = generated.get("main") {
+            payload["overview"] = text.clone();
+            if data["series_details"].is_object() {
+                data["series_details"]["overview"] = text.clone();
+            }
         }
-        tracing::info!(
-            "占位简介处理结束：《{title}》，TMDb {series_id}，填充或继承 {} 处",
-            filled.len()
-        );
+        // 原版先复制分集骨架，再回填聚合数据；后置笑话不改已复制的分集简介。
+        for (key, path) in paths {
+            if let Some(text) = generated.get(&key) {
+                data.pointer_mut(&path).unwrap()["overview"] = text.clone();
+            }
+        }
+        tracing::info!("占位简介处理结束：《{title}》，TMDb {series_id}");
     }
-    Ok(filled)
+    Ok(())
 }
 
 pub fn chinese(text: &str) -> bool {
@@ -442,10 +432,25 @@ pub async fn metadata_tree(
                 )
                 .bind(source)
                 .fetch_optional(&state.db)
-                .await?
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::warn!("读取人物翻译缓存失败，继续翻译：{error}");
+                    None
+                })
                 .flatten()
             };
-            if let Some(value) = cached.filter(|v| !v.is_empty()) {
+            if cached
+                .as_ref()
+                .is_some_and(|value| !value.is_empty() && !chinese(value))
+                && let Err(error) =
+                    sqlx::query("DELETE FROM translation_cache WHERE original_text=$1")
+                        .bind(source)
+                        .execute(&state.db)
+                        .await
+            {
+                tracing::warn!("清理无效人物翻译缓存失败，继续翻译：{error}");
+            }
+            if let Some(value) = cached.filter(|v| !v.is_empty() && chinese(v)) {
                 output.insert(id.clone(), value);
             } else {
                 missing.insert(id.clone(), source.clone());
@@ -471,14 +476,18 @@ pub async fn metadata_tree(
                     .cache_revision
                     .load(std::sync::atomic::Ordering::SeqCst)
         {
+            let mut saved = 0;
             for (id, value) in &translated {
-                sqlx::query("INSERT INTO translation_cache(original_text,translated_text,engine_used) VALUES($1,$2,$3) ON CONFLICT(original_text) DO UPDATE SET translated_text=EXCLUDED.translated_text,last_updated_at=NOW()")
-            .bind(&inputs[id]).bind(value).bind(string(&*state.config.read().await,"ai_provider")).execute(&state.db).await?;
+                match sqlx::query("INSERT INTO translation_cache(original_text,translated_text,engine_used) VALUES($1,$2,$3) ON CONFLICT(original_text) DO UPDATE SET translated_text=EXCLUDED.translated_text,engine_used=EXCLUDED.engine_used,last_updated_at=NOW()")
+                .bind(&inputs[id]).bind(value).bind(string(&*state.config.read().await,"ai_provider")).execute(&state.db).await {
+                    Ok(_) => saved += 1,
+                    Err(error) => tracing::warn!("保存人物翻译缓存失败，已获取的译文仍可用：{error}"),
+                }
             }
-            if !translated.is_empty() {
+            if saved > 0 {
                 tracing::info!(
                     "人物翻译缓存写入完成：用途 {purpose_name}，条目 {} 个",
-                    translated.len()
+                    saved
                 );
             }
         } else if !translated.is_empty() {

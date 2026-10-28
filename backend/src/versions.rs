@@ -152,35 +152,7 @@ pub async fn unbind(state: &AppState, removed: &[String]) -> Result<u64> {
     Ok(count as u64)
 }
 pub async fn existing(state: &AppState, ids: &[String]) -> Result<HashSet<String>> {
-    let mut result = HashSet::new();
-    // Query each ID through the server endpoint: only an explicit 404 proves deletion.
-    for id in ids {
-        if id.is_empty()
-            || !id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
-        {
-            return Err(ApiError::bad("无效的 Emby ID"));
-        }
-        let config = state.config.read().await.clone();
-        let base = string(&config, "emby_server_url");
-        let key = string(&config, "emby_api_key");
-        let response = state
-            .http
-            .get(format!("{}/Items/{id}", base.trim_end_matches('/')))
-            .header("X-Emby-Token", key)
-            .send()
-            .await?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            continue;
-        }
-        let response: Value = response.error_for_status()?.json().await?;
-        if response["Id"].as_str() != Some(id.as_str()) {
-            return Err(ApiError::bad("Emby ID 核验响应不一致，已保留绑定"));
-        }
-        result.insert(id.clone());
-    }
-    Ok(result)
+    crate::emby::existing_ids(state, ids, None).await
 }
 pub async fn reconcile(state: &AppState, current: &[String]) -> Result<u64> {
     if current.is_empty() {

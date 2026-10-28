@@ -224,37 +224,59 @@ pub async fn refresh(state: &AppState, paths: &[String]) -> Result<()> {
             if directory.as_os_str().is_empty() || directory == std::path::Path::new("/") {
                 break;
             }
+            if !directory.exists() {
+                directory.pop();
+                continue;
+            }
             let path = directory.to_string_lossy().to_string();
-            let response = state
-                .emby(
-                    Method::GET,
-                    "Items",
-                    &[
-                        ("Recursive", "true".into()),
-                        ("Path", path.clone()),
-                        ("Fields", "Id,Path,Name".into()),
-                    ],
-                    None,
+            let attempt: Result<bool> = async {
+                let base = string(&config, "emby_server_url");
+                let key = string(&config, "emby_api_key");
+                let response = crate::emby::send(
+                    state
+                        .http
+                        .get(format!("{}/Items", base.trim_end_matches('/')))
+                        .header("X-Emby-Token", &key)
+                        .query(&[
+                            ("Recursive", "true"),
+                            ("Path", path.as_str()),
+                            ("Fields", "Id,Path,Name"),
+                        ]),
                 )
                 .await?;
-            if let Some(item) = response["Items"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|v| string(v, "Path") == path)
-            {
-                emby_post(
-                    state,
-                    &format!("Items/{}/Refresh", string(item, "Id")),
-                    &[
-                        ("Recursive", "true".into()),
-                        ("MetadataRefreshMode", "Default".into()),
-                        ("ImageRefreshMode", "Default".into()),
-                        ("ReplaceAllImages", "false".into()),
-                        ("ReplaceAllMetadata", "false".into()),
-                    ],
-                )
-                .await?;
+                if response.status() != StatusCode::OK {
+                    return Ok(false);
+                }
+                let response: Value = response.json().await?;
+                if let Some(item) = response["Items"].as_array().and_then(|items| items.first()) {
+                    crate::emby::send(
+                        state
+                            .http
+                            .post(format!(
+                                "{}/Items/{}/Refresh",
+                                base.trim_end_matches('/'),
+                                string(item, "Id")
+                            ))
+                            .header("X-Emby-Token", &key)
+                            .query(&[
+                                ("Recursive", "true"),
+                                ("MetadataRefreshMode", "Default"),
+                                ("ImageRefreshMode", "Default"),
+                                ("ReplaceAllImages", "false"),
+                                ("ReplaceAllMetadata", "false"),
+                            ]),
+                    )
+                    .await?;
+                    tracing::info!(
+                        "[精准扫描] 已通知 Emby 对 {} 立即扫描！",
+                        item["Name"].as_str().unwrap_or(&path)
+                    );
+                    return Ok(true);
+                }
+                Ok(false)
+            }
+            .await;
+            if matches!(attempt, Ok(true)) {
                 refreshed = true;
                 break;
             }
@@ -263,7 +285,9 @@ pub async fn refresh(state: &AppState, paths: &[String]) -> Result<()> {
             }
         }
         if !refreshed {
-            return Err(ApiError::bad("未找到 Emby 可刷新目录，媒体信息文件已保留"));
+            tracing::warn!(
+                "[精准扫描] 未能在 Emby 中找到有效父目录，将等待自动扫描；媒体信息文件已保留。"
+            );
         }
     }
     Ok(())

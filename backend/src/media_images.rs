@@ -33,8 +33,11 @@ fn empty(status: StatusCode) -> Response {
     )
         .into_response()
 }
-async fn proxy(response: reqwest::Result<reqwest::Response>, fallback: StatusCode) -> Response {
-    if let Ok(response) = response
+async fn proxy<R: Into<crate::emby::Response>>(
+    response: reqwest::Result<R>,
+    fallback: StatusCode,
+) -> Response {
+    if let Ok(response) = response.map(Into::into)
         && response.status().is_success()
     {
         let status = response.status();
@@ -306,22 +309,17 @@ async fn submit(
                 string(&config, "emby_server_url").trim_end_matches('/')
             );
             let key = string(&config, "emby_api_key");
-            let _ = work
-                .http
-                .delete(&url)
-                .header("X-Emby-Token", &key)
-                .send()
-                .await;
+            let _ = crate::emby::send(work.http.delete(&url).header("X-Emby-Token", &key)).await;
             let mut success = false;
             for body in [bytes.clone(), STANDARD.encode(bytes).into_bytes()] {
-                let response = work
-                    .http
-                    .post(&url)
-                    .header("X-Emby-Token", &key)
-                    .header(header::CONTENT_TYPE, &content_type)
-                    .body(body)
-                    .send()
-                    .await?;
+                let response = crate::emby::send(
+                    work.http
+                        .post(&url)
+                        .header("X-Emby-Token", &key)
+                        .header(header::CONTENT_TYPE, &content_type)
+                        .body(body),
+                )
+                .await?;
                 if response.status().is_success() {
                     success = true;
                     break;

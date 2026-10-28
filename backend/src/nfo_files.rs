@@ -108,10 +108,16 @@ pub(crate) fn prepare(kind: &str, data: &mut Value, options: &Options<'_>) {
                     let name = string(&studio, "name").trim().to_lowercase();
                     let mapping = list(options.studio_mapping).into_iter().find(|m| {
                         !string(m, "label").is_empty()
-                            && (list(&m[ids]).contains(&studio["id"])
-                                || list(&m["en"]).iter().any(|v| {
-                                    v.as_str().is_some_and(|s| s.trim().to_lowercase() == name)
-                                }))
+                            && (list(&m[ids]).iter().any(|id| {
+                                let number = |value: &Value| {
+                                    value
+                                        .as_i64()
+                                        .or_else(|| value.as_str()?.trim().parse::<i64>().ok())
+                                };
+                                number(id).is_some() && number(id) == number(&studio["id"])
+                            }) || list(&m["en"]).iter().any(|v| {
+                                v.as_str().is_some_and(|s| s.trim().to_lowercase() == name)
+                            }))
                     });
                     studio["name"] = mapping?["label"].clone();
                     Some(studio)

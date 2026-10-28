@@ -59,7 +59,11 @@ pub async fn probe(
             ),
         }
     }
-    let url = crate::p115::download_url(state, pc).await?;
+    let url = match crate::p115::download_url(state, pc).await {
+        Ok(url) => url,
+        Err(_) => crate::p115::openapi_downurl_with_user_agent(state, pc, "Mozilla/5.0").await?,
+    };
+    let _slot = crate::strm::slot(state, "main", Some(context)).await?;
     let mut command = tokio::process::Command::new("ffprobe");
     command.kill_on_drop(true).args([
         "-hide_banner",
@@ -83,6 +87,7 @@ pub async fn probe(
     let output = tokio::time::timeout(Duration::from_secs(45), command.output())
         .await
         .map_err(|_| ApiError::bad("ffprobe 提取超时"))??;
+    drop(_slot);
     if !output.status.success() {
         return Err(ApiError::bad("ffprobe 提取失败，保留现有媒体信息"));
     }

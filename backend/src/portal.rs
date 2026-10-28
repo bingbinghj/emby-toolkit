@@ -139,23 +139,25 @@ async fn avatar(
         let key = string(&config, "emby_api_key");
         drop(config);
         let endpoint = format!("{}/Users/{id}/Images/Primary", url.trim_end_matches('/'));
-        let _ = state
-            .http
-            .delete(&endpoint)
-            .header("X-Emby-Token", &key)
-            .header("Content-Type", &mime)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await;
-        state
-            .http
-            .post(endpoint)
-            .header("X-Emby-Token", key)
-            .header("Content-Type", mime)
-            .body(STANDARD.encode(bytes))
-            .send()
-            .await?
-            .error_for_status()?;
+        let _ = crate::emby::send(
+            state
+                .http
+                .delete(&endpoint)
+                .header("X-Emby-Token", &key)
+                .header("Content-Type", &mime)
+                .timeout(std::time::Duration::from_secs(10)),
+        )
+        .await;
+        crate::emby::send(
+            state
+                .http
+                .post(endpoint)
+                .header("X-Emby-Token", key)
+                .header("Content-Type", mime)
+                .body(STANDARD.encode(bytes)),
+        )
+        .await?
+        .error_for_status()?;
         let details = state
             .emby(reqwest::Method::GET, &format!("Users/{id}"), &[], None)
             .await;

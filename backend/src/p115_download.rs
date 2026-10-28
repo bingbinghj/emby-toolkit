@@ -15,7 +15,7 @@ type UrlCache = HashMap<(String, String), (String, Instant)>;
 pub(super) struct Service {
     cache: Mutex<UrlCache>,
     next_cookie_request: Mutex<Option<Instant>>,
-    open_lock: Mutex<()>,
+    request_lock: Mutex<()>,
 }
 impl Service {
     pub(super) async fn clear(&self) {
@@ -138,8 +138,8 @@ async fn cookie_url(state: &AppState, pc: &str, ua: &str) -> Result<String> {
     result
 }
 async fn open_url(state: &AppState, pc: &str, ua: &str) -> Result<String> {
-    let _guard = state.p115.downloads.open_lock.lock().await;
-    if let Some(url) = state.p115.downloads.cached(pc, ua).await {
+    let key = format!("openapi_{pc}");
+    if let Some(url) = state.p115.downloads.cached(&key, ua).await {
         return Ok(url);
     }
     state.p115.rate_limit(state).await;
@@ -154,7 +154,7 @@ async fn open_url(state: &AppState, pc: &str, ua: &str) -> Result<String> {
     if success(&response)
         && let Some(url) = extract_url(&response["data"])
     {
-        state.p115.downloads.save(pc, ua, &url).await;
+        state.p115.downloads.save(&key, ua, &url).await;
         return Ok(url);
     }
     Err(ApiError::bad("115 未返回文件下载地址"))
@@ -180,6 +180,7 @@ async fn repair(state: &AppState, old_pc: &str, ua: &str, cookie: bool) -> Resul
     } else {
         open_url(state, &new_pc, ua).await?
     };
+    let writeback = async {
     let mut transaction = state.db.begin().await?;
     sqlx::query("UPDATE p115_filesystem_cache SET pick_code=NULL,updated_at=NOW() WHERE pick_code=$1 AND id<>$2")
         .bind(&new_pc).bind(&fid).execute(&mut *transaction).await?;
@@ -200,7 +201,14 @@ async fn repair(state: &AppState, old_pc: &str, ua: &str, cookie: bool) -> Resul
     sqlx::query("UPDATE media_metadata SET file_pickcode_json=(SELECT COALESCE(jsonb_agg(CASE WHEN value=to_jsonb($1::text) THEN to_jsonb($2::text) ELSE value END ORDER BY ord),'[]'::jsonb) FROM jsonb_array_elements(file_pickcode_json) WITH ORDINALITY arr(value,ord)),last_updated_at=NOW() WHERE file_pickcode_json ? $1")
         .bind(old_pc).bind(&new_pc).execute(&mut *transaction).await?;
     transaction.commit().await?;
-    state.p115.downloads.save(old_pc, ua, &url).await;
+    Ok::<_, ApiError>(())
+    }.await;
+    if let Err(error) = writeback {
+        tracing::warn!(
+            "115 旧 PC 已取得新直链，但缓存/媒体引用回写失败：{}",
+            error.1
+        );
+    }
     tracing::info!(
         "115 旧 PC 已通过文件 ID 修复：文件 {}，ID {fid}，缓存和媒体引用已同步",
         super::text(&info, &["name", "file_name", "fn", "n"])
@@ -214,21 +222,44 @@ pub async fn download_url_with_user_agent(state: &AppState, pc: &str, ua: &str) 
     if pc.is_empty() || !pc.bytes().all(|b| b.is_ascii_alphanumeric()) {
         return Err(ApiError::bad("115 PC 无效"));
     }
+    if string(&tokens(state).await?, "cookie").is_empty() {
+        return Err(ApiError::bad("未配置 115 Cookie，无法获取 115 内部直链"));
+    }
     if let Some(url) = state.p115.downloads.cached(pc, ua).await {
         return Ok(url);
     }
-    if !string(&tokens(state).await?, "cookie").is_empty() {
-        match cookie_url(state, pc, ua).await {
-            Ok(url) => return Ok(url),
-            Err(error) if error.0 == StatusCode::METHOD_NOT_ALLOWED => return Err(error),
-            Err(_) => {}
+    let _guard = state.p115.downloads.request_lock.lock().await;
+    match cookie_url(state, pc, ua).await {
+        Ok(url) => Ok(url),
+        Err(error)
+            if error.0 == StatusCode::METHOD_NOT_ALLOWED
+                || error.0 == StatusCode::GATEWAY_TIMEOUT =>
+        {
+            Err(error)
         }
-        match repair(state, pc, ua, true).await {
-            Ok(url) => return Ok(url),
-            Err(error) if error.0 == StatusCode::METHOD_NOT_ALLOWED => return Err(error),
-            Err(_) => {}
-        }
+        Err(error) => repair(state, pc, ua, true).await.or(Err(error)),
     }
+}
+pub async fn openapi_downurl_with_user_agent(
+    state: &AppState,
+    pc: &str,
+    ua: &str,
+) -> Result<String> {
+    if pc.is_empty() || !pc.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err(ApiError::bad("115 PC 无效"));
+    }
+    if string(&tokens(state).await?, "access_token").is_empty() {
+        return Err(ApiError::bad("未配置 115 Token"));
+    }
+    if let Some(url) = state
+        .p115
+        .downloads
+        .cached(&format!("openapi_{pc}"), ua)
+        .await
+    {
+        return Ok(url);
+    }
+    let _guard = state.p115.downloads.request_lock.lock().await;
     match open_url(state, pc, ua).await {
         Ok(url) => Ok(url),
         Err(error) => repair(state, pc, ua, false).await.or(Err(error)),

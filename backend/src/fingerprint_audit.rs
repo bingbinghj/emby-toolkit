@@ -286,6 +286,7 @@ async fn check(
     state: &AppState,
     item: &Value,
     reader: &crate::revalidation::AuditReader<'_>,
+    verifier: &crate::revalidation::AuditReader<'_>,
 ) -> Result<(String, Value)> {
     let (mut row, index) = snapshot(state, item).await?;
     let asset = &row["asset_details_json"][index];
@@ -352,7 +353,7 @@ async fn check(
         &observed.1,
         &observed.0,
         observed.2,
-        Some(reader),
+        Some(verifier),
     )
     .await?
     .0;
@@ -441,11 +442,8 @@ pub async fn scan(
     progress["state"] = json!("running");
     progress.as_object_mut().unwrap().remove("error");
     save(state, &mut progress).await?;
-    let reader = crate::revalidation::AuditReader {
-        context,
-        previous: tokio::sync::Mutex::new(None),
-        invalid_roots: tokio::sync::Mutex::new(Default::default()),
-    };
+    let reader = crate::revalidation::AuditReader::new(context, true);
+    let verifier = reader.verifier();
     let outcome = async {
         for ordinal in list(&progress["pending"]) {
             context.checkpoint().await?;
@@ -457,7 +455,7 @@ pub async fn scan(
             let item_id = string(item, "item_id");
             let path = string(item, "path");
             context.update_counted(total.saturating_sub(list(&progress["pending"]).len() as u64), total, "全库指纹", &format!("正在检查 Item {item_id}：{path}")).await;
-            let result = check(state, item, &reader).await;
+            let result = check(state, item, &reader, &verifier).await;
             let (kind, details) = match result {
                 Ok(v) => v,
                 Err(error) if context.is_cancelled() || error.0 == StatusCode::CONFLICT => return Err(error),

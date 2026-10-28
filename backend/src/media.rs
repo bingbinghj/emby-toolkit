@@ -187,7 +187,13 @@ async fn user_views(
         .and_then(|v| v.to_str().ok())
         .or_else(|| params.get("api_key").map(String::as_str))
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| ApiError::bad("缺少用户访问令牌(api_key或X-Emby-Token)"))?;
+        .ok_or_else(|| ApiError::bad("缺少用户访问令牌(api_key或X-Emby-Token)"))?
+        .to_string();
+    let mut params = params;
+    params.insert("api_key".into(), token.clone());
+    let mut forwarded = headers;
+    forwarded.remove("Host");
+    forwarded.remove("Accept-Encoding");
     let base = string(&*state.config.read().await, "emby_server_url");
     let response = state
         .http
@@ -195,8 +201,11 @@ async fn user_views(
             "{}/emby/Users/{id}/Views",
             base.trim_end_matches('/')
         ))
+        .headers(forwarded)
+        .header("Accept-Encoding", "identity")
         .header("X-Emby-Token", token)
         .query(&params)
+        .timeout(std::time::Duration::from_secs(15))
         .send()
         .await?
         .error_for_status()?

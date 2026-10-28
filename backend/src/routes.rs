@@ -124,7 +124,8 @@ async fn auth_status(State(state): State<AppState>, headers: HeaderMap) -> Resul
         ));
     }
     if let Some(session) = state.sessions.from_headers(&headers)
-        && db::is_admin(&state.db, &session.user_id).await?
+        && (state.sessions.administrator_claim(&headers) == Some(true)
+            || db::is_admin(&state.db, &session.user_id).await?)
     {
         return Ok(Json(
             json!({"status":"logged_in", "user":{"id":session.user_id,"name":session.name,"is_admin":true}}),
@@ -137,38 +138,73 @@ async fn login(State(state): State<AppState>, Json(body): Json<Value>) -> Result
     if !state.configured().await {
         return Ok((StatusCode::PRECONDITION_REQUIRED, Json(json!({"status":"error", "code":"SETUP_REQUIRED","message":"系统尚未配置 Emby 连接"}))).into_response());
     }
+    let failure = || {
+        (StatusCode::UNAUTHORIZED, Json(json!({"status":"error","message":"登录失败：用户名/密码错误，或无法连接 Emby 服务器"}))).into_response()
+    };
     let username = string(&body, "username");
     if username.is_empty() {
-        return Err(ApiError::bad("用户名不能为空"));
+        return Ok(failure());
     }
     let config = state.config.read().await;
     let url = format!(
         "{}/Users/AuthenticateByName",
         string(&config, "emby_server_url").trim_end_matches('/')
     );
+    let timeout = config["emby_api_timeout"]
+        .as_u64()
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(60);
     drop(config);
-    let result = state.http.post(url)
-        .header("X-Emby-Authorization", "MediaBrowser Client=\"EmbyToolkit\", Device=\"Server\", DeviceId=\"etk-rust\", Version=\"1.0\"")
-        .json(&json!({"Username":username,"Pw":string(&body,"password")})).send().await?;
-    if !result.status().is_success() {
-        return Err(ApiError(
-            StatusCode::UNAUTHORIZED,
-            "登录失败：用户名/密码错误，或无法连接 Emby 服务器".into(),
-        ));
+    let result = crate::emby::send(state.http.post(url)
+        .header("X-Emby-Authorization", "Emby Client=\"Emby Web\", Device=\"Chrome\", DeviceId=\"my-emby-toolkit-auth-v4\", Version=\"4.8.0.80\"")
+        .json(&json!({"Username":username,"Pw":string(&body,"password"),"LoginType":"Manual"}))
+        .timeout(std::time::Duration::from_secs(timeout))).await;
+    let result = match result {
+        Ok(result) if result.status() == StatusCode::OK => result,
+        Ok(result) => {
+            tracing::error!(
+                "登录失败，Emby 返回的原始错误信息：{}",
+                result.text().await.unwrap_or_default()
+            );
+            return Ok(failure());
+        }
+        Err(error) => {
+            tracing::error!("认证用户 {username} 时发生网络请求错误：{error}");
+            return Ok(failure());
+        }
+    };
+    let data: Value = match result.json().await {
+        Ok(data) => data,
+        Err(_) => return Ok(failure()),
+    };
+    if string(&data, "AccessToken").is_empty()
+        || data["User"].as_object().is_none_or(|user| user.is_empty())
+    {
+        tracing::error!("登录成功但响应格式不正确：缺少 User 或 AccessToken");
+        return Ok(failure());
     }
-    let data: Value = result.json().await?;
     let user = &data["User"];
     if !user["Policy"]["IsAdministrator"].as_bool().unwrap_or(false) {
-        return Err(ApiError::forbidden());
+        return Ok((
+            StatusCode::FORBIDDEN,
+            [(
+                header::SET_COOKIE,
+                "etk_session=; Max-Age=0; HttpOnly; SameSite=Lax; Path=/",
+            )],
+            Json(json!({"status":"error","message":"登录失败：仅允许 Emby 管理员登录"})),
+        )
+            .into_response());
     }
     let id = string(user, "Id");
     if id.is_empty() {
         return Err(ApiError::bad("Emby 未返回用户 ID"));
     }
     let name = string(user, "Name");
-    sqlx::query("INSERT INTO emby_users(id,name,is_administrator,policy_json,last_seen_at,last_updated_at) VALUES($1,$2,TRUE,$3,NOW(),NOW()) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,is_administrator=TRUE,policy_json=EXCLUDED.policy_json,last_seen_at=NOW(),last_updated_at=NOW()")
-        .bind(&id).bind(&name).bind(&user["Policy"]).execute(&state.db).await?;
-    let token = state.sessions.sign(&Session {
+    if let Err(error) = sqlx::query("INSERT INTO emby_users(id,name,is_administrator,policy_json,last_seen_at,last_updated_at) VALUES($1,$2,TRUE,$3,NOW(),NOW()) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,is_administrator=TRUE,policy_json=EXCLUDED.policy_json,last_seen_at=NOW(),last_updated_at=NOW()")
+        .bind(&id).bind(&name).bind(&user["Policy"]).execute(&state.db).await {
+        tracing::warn!("登录时同步用户信息失败：{error}");
+    }
+    let token = state.sessions.sign_administrator(&Session {
         user_id: id.clone(),
         name: name.clone(),
         setup_mode: false,
@@ -190,13 +226,7 @@ async fn can_configure(state: &AppState, headers: &HeaderMap) -> Result<bool> {
         return Ok(true);
     }
     if let Some(session) = state.sessions.from_headers(headers) {
-        let recovery = session.setup_mode
-            && state
-                .recovery_tokens
-                .read()
-                .await
-                .get(&format!("setup:{}", session.name))
-                .is_some_and(|expires| *expires > chrono::Utc::now().timestamp());
+        let recovery = session.setup_mode;
         return Ok(recovery || db::is_admin(&state.db, &session.user_id).await?);
     }
     Ok(false)
@@ -208,16 +238,7 @@ async fn setup(
 ) -> Result<Response> {
     let configured = state.configured().await;
     let session = state.sessions.from_headers(&headers);
-    let capability = session
-        .filter(|session| session.setup_mode)
-        .map(|session| format!("setup:{}", session.name));
-    let tokens = state.recovery_tokens.read().await;
-    let allowed = capability.as_ref().is_some_and(|capability| {
-        tokens
-            .get(capability)
-            .is_some_and(|expires| *expires > chrono::Utc::now().timestamp())
-    });
-    drop(tokens);
+    let allowed = session.is_some_and(|session| session.setup_mode);
     if configured && !allowed {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
@@ -233,31 +254,25 @@ async fn setup(
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(ApiError::bad("Emby URL 只支持 HTTP/HTTPS"));
     }
-    let response = state
-        .http
-        .get(format!("{}/emby/System/Info", url.trim_end_matches('/')))
-        .header("X-Emby-Token", &key)
-        .send()
-        .await
-        .map_err(|_| ApiError::bad("连接测试失败: 无法连接到服务器，请检查 URL 或网络"))?
-        .error_for_status()
-        .map_err(|error| {
-            ApiError::bad(match error.status().map(|status| status.as_u16()) {
-                Some(401) => "连接测试失败: API Key 无效或无权限".into(),
-                Some(404) => "连接测试失败: 找不到 Emby 服务器 (404)，请检查 URL".into(),
-                Some(status) => format!("连接测试失败: 连接失败 (HTTP {status})"),
-                None => "连接测试失败: 无法连接到服务器，请检查 URL 或网络".into(),
-            })
-        })?;
-    drop(response);
-    let mut tokens = state.recovery_tokens.write().await;
-    if state.configured().await
-        && !capability.as_ref().is_some_and(|capability| {
-            tokens
-                .get(capability)
-                .is_some_and(|expires| *expires > chrono::Utc::now().timestamp())
+    let response = crate::emby::send(
+        state
+            .http
+            .get(format!("{}/emby/System/Info", url.trim_end_matches('/')))
+            .header("X-Emby-Token", &key),
+    )
+    .await
+    .map_err(|_| ApiError::bad("连接测试失败: 无法连接到服务器，请检查 URL 或网络"))?
+    .error_for_status()
+    .map_err(|error| {
+        ApiError::bad(match error.status().map(|status| status.as_u16()) {
+            Some(401) => "连接测试失败: API Key 无效或无权限".into(),
+            Some(404) => "连接测试失败: 找不到 Emby 服务器 (404)，请检查 URL".into(),
+            Some(status) => format!("连接测试失败: 连接失败 (HTTP {status})"),
+            None => "连接测试失败: 无法连接到服务器，请检查 URL 或网络".into(),
         })
-    {
+    })?;
+    drop(response);
+    if state.configured().await && !allowed {
         return Err(ApiError(
             StatusCode::FORBIDDEN,
             "系统已配置，且无重置权限".into(),
@@ -266,9 +281,6 @@ async fn setup(
     state
         .save_config(&json!({"emby_server_url":url,"emby_api_key":key}))
         .await?;
-    if let Some(capability) = capability {
-        tokens.remove(&capability);
-    }
     Ok((
         [(
             header::SET_COOKIE,
@@ -284,11 +296,25 @@ async fn request_recovery(State(state): State<AppState>) -> Json<Value> {
     let now = chrono::Utc::now().timestamp();
     let mut tokens = state.recovery_tokens.write().await;
     tokens.retain(|_, expires| *expires > now);
-    if tokens.len() >= 4 {
-        tokens.clear();
-    }
     tokens.insert(token.clone(), now + 300);
-    tracing::warn!("收到恢复连接配置请求。安全令牌: {token}；有效期 5 分钟，仅在本人请求时使用。");
+    tracing::error!(
+        python_level = "CRITICAL",
+        "============================================================"
+    );
+    tracing::error!(
+        python_level = "CRITICAL",
+        "【安全警告】收到重置连接配置请求。"
+    );
+    tracing::error!(
+        python_level = "CRITICAL",
+        "若这是您本人的操作，请在页面输入以下安全令牌进入设置模式:"
+    );
+    tracing::error!(python_level = "CRITICAL", "安全令牌:  {token}");
+    tracing::error!(python_level = "CRITICAL", "令牌有效期: 5 分钟");
+    tracing::error!(
+        python_level = "CRITICAL",
+        "============================================================"
+    );
     Json(json!({"status":"ok","message":"安全令牌已写入 Docker 日志，请查阅后输入。"}))
 }
 async fn verify_recovery(
@@ -305,20 +331,17 @@ async fn verify_recovery(
     if expiry <= chrono::Utc::now().timestamp() {
         return Err(ApiError(StatusCode::FORBIDDEN, "令牌无效或已过期".into()));
     }
-    let capability = uuid::Uuid::new_v4().simple().to_string();
-    state
-        .recovery_tokens
-        .write()
-        .await
-        .insert(format!("setup:{capability}"), expiry);
     let token = state.sessions.sign(&Session {
         user_id: String::new(),
-        name: capability,
+        name: "setup".into(),
         setup_mode: true,
-        expires: expiry,
+        expires: chrono::Utc::now().timestamp() + 2678400,
     });
     Ok((
-        [(header::SET_COOKIE, auth::cookie(&token))],
+        [(
+            header::SET_COOKIE,
+            format!("etk_session={token}; HttpOnly; SameSite=Lax; Path=/"),
+        )],
         Json(json!({"status":"ok","message":"验证成功"})),
     )
         .into_response())
@@ -327,13 +350,7 @@ async fn config_get(State(state): State<AppState>, headers: HeaderMap) -> Result
     if !can_configure(&state, &headers).await? {
         return Err(ApiError::forbidden());
     }
-    let mut config = state.config.read().await.clone();
-    config["emby_server_id"] = state
-        .emby(reqwest::Method::GET, "System/Info", &[], None)
-        .await
-        .ok()
-        .map_or(Value::Null, |info| info["Id"].clone());
-    Ok(Json(config))
+    Ok(Json(state.config.read().await.clone()))
 }
 async fn config_save(
     State(state): State<AppState>,
@@ -396,16 +413,17 @@ async fn config_save(
         && value["libraries_to_ignore"].is_array()
     {
         let libraries = async {
-            let response = state
-                .http
-                .get(format!(
-                    "{}/emby/Users/{user}/Views",
-                    base.trim_end_matches('/')
-                ))
-                .header("X-Emby-Token", key)
-                .send()
-                .await?
-                .error_for_status()?;
+            let response = crate::emby::send(
+                state
+                    .http
+                    .get(format!(
+                        "{}/emby/Users/{user}/Views",
+                        base.trim_end_matches('/')
+                    ))
+                    .header("X-Emby-Token", key),
+            )
+            .await?
+            .error_for_status()?;
             response.json::<Value>().await
         }
         .await;
@@ -426,6 +444,7 @@ async fn config_save(
         }
     }
     state.save_config(&value).await?;
+    state.refresh_server_identity().await;
     Ok(Json(
         json!({"message":"配置已成功保存并自动净化！","saved_fields":value}),
     ))

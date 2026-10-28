@@ -295,15 +295,16 @@ async fn log_position(state: &AppState) -> Result<u64> {
 }
 async fn delete_image(state: &AppState, id: &str) -> Result<bool> {
     let config = state.config.read().await.clone();
-    let response = state
-        .http
-        .delete(format!(
-            "{}/Items/{id}/Images/Primary",
-            string(&config, "emby_server_url").trim_end_matches('/')
-        ))
-        .header("X-Emby-Token", string(&config, "emby_api_key"))
-        .send()
-        .await?;
+    let response = crate::emby::send(
+        state
+            .http
+            .delete(format!(
+                "{}/Items/{id}/Images/Primary",
+                string(&config, "emby_server_url").trim_end_matches('/')
+            ))
+            .header("X-Emby-Token", string(&config, "emby_api_key")),
+    )
+    .await?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         return Ok(false);
     }

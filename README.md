@@ -55,3 +55,13 @@ docker build -t emby-toolkit .
 镜像包含 Rust 服务、Vue 静态页面和 ffmpeg/ffprobe，启动日志为“应用程序启动”。
 
 设置按卡片独立保存；Emby 媒体库采用忽略名单，默认不选即处理全部。媒体中心使用右侧字母导航，通知中心以居中窗口浏览实时与分页历史日志。
+
+原媒体归档和短文件名恢复工具已移植到同一 Rust 可执行文件，无需 Python：
+
+```sh
+docker exec emby-toolkit /app/emby-toolkit media-archive pack /media/Movie /backup/movie.tar.gz
+docker exec emby-toolkit /app/emby-toolkit media-archive unpack /backup/movie.tar.gz /media --keep-archive
+docker exec emby-toolkit /app/emby-toolkit restore-media-short-names /media/Movie --dry-run
+```
+
+归档解包保留原验证顺序，成功后默认删除归档；短文件名恢复支持预览，配对不唯一或目标已存在时停止。

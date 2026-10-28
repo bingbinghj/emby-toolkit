@@ -123,19 +123,18 @@ pub async fn feedback(
             }
         }
     }
-    let parents = children
+    let mut parents = children
         .iter()
         .filter(|i| !string(i, "ParentId").is_empty())
         .map(|i| (string(i, "Id"), string(i, "ParentId")))
         .collect::<HashMap<_, _>>();
+    let (ancestors, library_guid) = emby::ancestor_context(state, &item, library.as_ref()).await;
+    parents.extend(ancestors);
     let context_data = OnlineContext {
         seasons: &seasons,
         episodes: &episodes,
         parents: &parents,
-        library_guid: library
-            .as_ref()
-            .and_then(|l| l["Guid"].as_str())
-            .unwrap_or(""),
+        library_guid: &library_guid,
         episode_ids,
         skip_series_record: false,
     };
@@ -217,6 +216,21 @@ async fn process(
     context: &JobContext,
     pending: bool,
 ) -> Result<Value> {
+    let mut item = item.clone();
+    let library = if pending {
+        None
+    } else {
+        emby::library_for_path(state, &string(&item, "Path"))
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!("读取媒体库路径失败，保留现有库信息：{}", error.1);
+                None
+            })
+    };
+    if let Some(library) = &library {
+        item["_SourceLibraryId"] = library["ItemId"].clone();
+    }
+    let item = &mut item;
     let media_name = string(item, "Name");
     context.checkpoint().await?;
     if emby::path_ignored(state, &string(item, "Path")).await? {
@@ -321,17 +335,11 @@ async fn process(
         .filter(|e| episode_ids.is_empty() || episode_ids.contains(&string(e, "Id")))
         .filter_map(|e| Some((e["ParentIndexNumber"].as_i64()?, e["IndexNumber"].as_i64()?)))
         .collect::<Vec<_>>();
-    crate::translation::overview_fallback(state, &kind, &mut data, &target_scope).await?;
     let source = if kind == "Series" {
         &data["series_details"]
     } else {
         &data
     };
-    let raw = list(&source["credits"]["cast"]);
-    let cast = crate::persons::process(state, &raw, item).await?;
-    for director in crate::nfo::directors(source) {
-        crate::persons::upsert(state, &director).await?;
-    }
     let defaults: Value = serde_json::from_str(include_str!("../assets/defaults.json")).unwrap();
     let rating_mapping = crate::db::setting(&state.db, "rating_mapping")
         .await?
@@ -347,14 +355,48 @@ async fn process(
         &rating_mapping,
         &priority,
     );
-    tracing::info!(
-        "元数据骨架格式化完成：《{media_name}》，TMDb {tmdb}，类型 {kind}，演员 {} 位",
-        cast.len()
-    );
     if kind == "Series" {
         payload["credits"]["crew"] = json!(crate::nfo::directors(source));
         payload["episode_group_id"] = data["episode_group_id"].clone();
     }
+    if string(&payload, "tagline").is_empty() {
+        let cached: Option<String> = sqlx::query_scalar(
+            "SELECT tagline FROM media_metadata WHERE tmdb_id=$1 AND item_type=$2 LIMIT 1",
+        )
+        .bind(&tmdb)
+        .bind(&kind)
+        .fetch_optional(&state.db)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!("[数据库保底] 补回字段失败：{error}");
+            None
+        })
+        .flatten();
+        if let Some(value) = cached.filter(|value| !value.is_empty()) {
+            payload["tagline"] = json!(value);
+            tracing::info!("[数据库保底] 已补回字段：tagline");
+        }
+    }
+    if list(&item["Genres"]).is_empty() && !list(&source["genres"]).is_empty() {
+        item["Genres"] = source["genres"].clone();
+    }
+    let raw = list(&source["credits"]["cast"]);
+    let mut cast_item = item.clone();
+    cast_item["People"] =
+        json!(crate::persons::enrich_provider_ids(state, &list(&item["People"]), context).await?);
+    let cast = crate::persons::process(state, &raw, &cast_item).await?;
+    for director in crate::nfo::directors(source) {
+        if let Err(error) = crate::persons::upsert(state, &director).await {
+            tracing::warn!("同步导演信息至数据库时失败：{}", error.1);
+        }
+    }
+    if !pending {
+        crate::translation::overview_fallback(state, &kind, &mut data, &mut payload).await?;
+    }
+    tracing::info!(
+        "元数据骨架格式化完成：《{media_name}》，TMDb {tmdb}，类型 {kind}，演员 {} 位",
+        cast.len()
+    );
     let config = state.config.read().await.clone();
     let studio = crate::db::setting(&state.db, "studio_mapping")
         .await?
@@ -388,12 +430,22 @@ async fn process(
             string(item, "Id")
         );
     }
-    let parents = HashMap::new();
+    let mut parents = children
+        .iter()
+        .filter(|child| !string(child, "ParentId").is_empty())
+        .map(|child| (string(child, "Id"), string(child, "ParentId")))
+        .collect::<HashMap<_, _>>();
+    let (ancestors, library_guid) = if pending {
+        (HashMap::new(), String::new())
+    } else {
+        emby::ancestor_context(state, item, library.as_ref()).await
+    };
+    parents.extend(ancestors);
     let input = OnlineContext {
         seasons: &seasons,
         episodes: &episodes,
         parents: &parents,
-        library_guid: "",
+        library_guid: &library_guid,
         episode_ids,
         skip_series_record: false,
     };
@@ -669,8 +721,6 @@ pub async fn prepare_cached(
     } else {
         false
     };
-    let fallback =
-        crate::translation::overview_fallback(state, &kind, &mut payload, &scope).await?;
     let config = state.config.read().await.clone();
     let defaults: Value = serde_json::from_str(include_str!("../assets/defaults.json")).unwrap();
     let studios = crate::db::setting(&state.db, "studio_mapping")
@@ -694,7 +744,7 @@ pub async fn prepare_cached(
         ..Default::default()
     };
     crate::nfo_files::sync(&kind, item, &payload, &cast, &options).await?;
-    if patched || !fallback.is_empty() {
+    if patched {
         let mut new = payload.clone();
         new["seasons_details"] = json!(
             list(&payload["seasons_details"])
@@ -709,13 +759,13 @@ pub async fn prepare_cached(
                 .as_object()
                 .into_iter()
                 .flatten()
-                .filter(|(k, _)| !old_episodes.contains(*k) || fallback.contains(*k))
+                .filter(|(k, _)| !old_episodes.contains(*k))
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect::<serde_json::Map<_, _>>()
         );
         let mut pending =
             crate::metadata_records::pending(&kind, &new, &cast, &json!({"Id":"pending"}))?;
-        pending.retain(|r| r["item_type"] != "Series" || fallback.contains("main"));
+        pending.retain(|r| r["item_type"] != "Series");
         metadata::ingest(state, &mut pending, false).await?;
     }
     let path = std::path::Path::new(item["Path"].as_str().unwrap_or(""));

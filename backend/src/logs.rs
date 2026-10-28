@@ -27,9 +27,14 @@ pub struct LogFormat;
 struct LogFields {
     message: String,
     details: Vec<String>,
+    level_override: Option<String>,
 }
 impl LogFields {
     fn push(&mut self, field: &tracing::field::Field, value: String) {
+        if field.name() == "python_level" {
+            self.level_override = Some(value);
+            return;
+        }
         if field.name() == "message" {
             self.message = value;
             return;
@@ -125,7 +130,11 @@ where
         event: &tracing::Event<'_>,
     ) -> std::fmt::Result {
         let metadata = event.metadata();
-        let level = if *metadata.level() == tracing::Level::WARN {
+        let mut fields = LogFields::default();
+        event.record(&mut fields);
+        let level = if fields.level_override.as_deref() == Some("CRITICAL") {
+            "CRITICAL"
+        } else if *metadata.level() == tracing::Level::WARN {
             "WARNING"
         } else {
             metadata.level().as_str()
@@ -136,8 +145,6 @@ where
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S,%3f"),
             metadata.target()
         )?;
-        let mut fields = LogFields::default();
-        event.record(&mut fields);
         let body = redact(&fields.body());
         if *metadata.level() <= tracing::Level::INFO
             && metadata.target().starts_with("emby_toolkit::")
@@ -246,7 +253,7 @@ impl LogStore {
 }
 fn frontend_entry(text: &str) -> Option<String> {
     let parts: Vec<_> = text.trim_end().splitn(4, " - ").collect();
-    if parts.len() != 4 || !matches!(parts[2], "INFO" | "WARNING" | "ERROR") {
+    if parts.len() != 4 || !matches!(parts[2], "INFO" | "WARNING" | "ERROR" | "CRITICAL") {
         return None;
     }
     Some(format!(
@@ -284,12 +291,12 @@ impl Drop for LogGuard {
     fn drop(&mut self) {
         if !self.buffer.is_empty() {
             let redacted = redact(&String::from_utf8_lossy(&self.buffer));
-            if self.store.append(redacted.as_bytes()).is_err() {
+            if redacted.split(" - ").nth(2) != Some("TRACE")
+                && self.store.append(redacted.as_bytes()).is_err()
+            {
                 let _ = std::io::stderr().write_all(b"ETK: unable to write log file\n");
             }
-            if frontend_entry(&redacted).is_some() {
-                let _ = std::io::stdout().write_all(redacted.as_bytes());
-            }
+            let _ = std::io::stdout().write_all(redacted.as_bytes());
         }
     }
 }

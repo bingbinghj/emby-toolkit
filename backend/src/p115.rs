@@ -17,7 +17,7 @@ use tokio::sync::Mutex;
 mod auth;
 #[path = "p115_download.rs"]
 mod download;
-pub use download::{download_url, download_url_with_user_agent};
+pub use download::{download_url, download_url_with_user_agent, openapi_downurl_with_user_agent};
 
 pub struct Endpoints {
     pub qrcode: String,

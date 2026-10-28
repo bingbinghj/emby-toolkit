@@ -34,10 +34,9 @@ impl Settings {
         let mut roots = BTreeSet::new();
         for value in list(&config["monitor_paths"]) {
             if let Some(path) = value.as_str()
-                && let Ok(path) = tokio::fs::canonicalize(path).await
-                && path.is_dir()
+                && Path::new(path).is_dir()
             {
-                roots.insert(path);
+                roots.insert(PathBuf::from(path));
             }
         }
         let mut minimal = vec![];
@@ -88,8 +87,17 @@ impl Settings {
             return None;
         }
         let canonical = tokio::fs::canonicalize(path).await.ok()?;
-        (canonical.is_file() && self.roots.iter().any(|root| canonical.starts_with(root)))
-            .then_some(canonical)
+        if !canonical.is_file() {
+            return None;
+        }
+        for root in &self.roots {
+            if let Ok(root) = tokio::fs::canonicalize(root).await
+                && canonical.starts_with(root)
+            {
+                return Some(path.to_path_buf());
+            }
+        }
+        None
     }
     pub fn excluded(&self, path: &Path) -> bool {
         path_excluded(path, &self.exclude)
@@ -189,7 +197,7 @@ pub async fn stable_files(
                         .is_some_and(|e| e.eq_ignore_ascii_case("strm")),
                 )
             {
-                result.push(canonical);
+                result.push(path.clone());
                 completed.push(path.clone());
             }
         }
@@ -262,9 +270,9 @@ impl Service {
                         if !settings.enabled{queue.clear();deadline=None;}
                     }
                     if settings.enabled&&!queue.is_empty()&&deadline.is_some_and(|d|d<=tokio::time::Instant::now()){
-                        if self.state.jobs.status().await["is_running"]==true{continue;}
                         let paths=queue.iter().cloned().collect::<Vec<_>>();let work=self.state.clone();let snapshot=settings.clone();let shutdown=batch_cancel.clone();
-                        let submitted=self.state.jobs.submit("实时监控入库预处理",move|context|async move{process_batch(&work,&snapshot,&paths,&context,&shutdown).await}).await;
+                        let manager=Arc::new(crate::jobs::JobManager::default());
+                        let submitted=manager.submit("实时监控入库预处理",move|context|async move{process_batch(&work,&snapshot,&paths,&context,&shutdown).await}).await;
                         match submitted{Ok(_)=>{queue.clear();deadline=None;},Err(error)if error.0==axum::http::StatusCode::CONFLICT=>{},Err(error)=>tracing::warn!(reason=%error.1,"实时监控队列提交失败，保留待处理文件")}
                     }
                 }
@@ -284,23 +292,29 @@ async fn process_batch(
     context: &JobContext,
     cancel: &CancellationToken,
 ) -> Result<Value> {
-    let stable = stable_files(settings, paths, context, cancel).await?;
-    let (scrape, refresh): (Vec<_>, Vec<_>) = stable
-        .into_iter()
+    let (scrape, refresh): (Vec<_>, Vec<_>) = paths
+        .iter()
+        .cloned()
         .partition(|path| !settings.excluded(path));
-    let mut result = if scrape.is_empty() {
-        json!({"prepared":0,"failed":0})
-    } else {
+    let scrape_work = async {
+        let stable = stable_files(settings, &scrape, context, cancel).await?;
+        if stable.is_empty() {
+            return Ok(json!({"prepared":0,"failed":0}));
+        }
         crate::monitor_ingest::prepare_batch(
             state,
-            &group_paths(&scrape),
+            &group_paths(&stable),
             &settings.roots,
             context,
             cancel,
         )
-        .await?
+        .await
     };
-    if !refresh.is_empty() {
+    let refresh_work = async {
+        let refresh = stable_files(settings, &refresh, context, cancel).await?;
+        if refresh.is_empty() {
+            return Ok::<_, ApiError>(0);
+        }
         context.checkpoint().await?;
         let mut remaining = settings.refresh_delay;
         while remaining > 0 {
@@ -328,7 +342,10 @@ async fn process_batch(
             )
             .await?;
         }
-    }
-    result["refresh_only"] = json!(refresh.len());
+        Ok(refresh.len())
+    };
+    let (scrape_result, refresh_result) = tokio::join!(scrape_work, refresh_work);
+    let mut result = scrape_result?;
+    result["refresh_only"] = json!(refresh_result?);
     Ok(result)
 }

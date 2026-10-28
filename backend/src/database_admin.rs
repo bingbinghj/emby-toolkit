@@ -85,11 +85,7 @@ pub async fn export_data(pool: &PgPool, names: &[String]) -> Result<Value> {
 async fn export(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Response> {
     let names = selected(&state.db, &body["tables"]).await?;
     let data = export_data(&state.db, &names).await?;
-    let server = state
-        .emby(reqwest::Method::GET, "System/Info", &[], None)
-        .await
-        .ok()
-        .map_or(Value::Null, |v| v["Id"].clone());
+    let server = state.config.read().await["emby_server_id"].clone();
     let backup = json!({"metadata":{"export_date":chrono::Utc::now().to_rfc3339(),"app_version":"10.7.5","source_emby_server_id":server,"tables":names},"data":data});
     let compressed = tokio::task::spawn_blocking(move || {
         let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -212,9 +208,6 @@ async fn import(
             }
             import_data(&state.db, &backup, &names, Some(&context)).await?;
             drop(_gate);
-            if names.iter().any(|n| n == "app_settings") {
-                state.reload_config().await?;
-            }
             Ok(json!({"message":format!("已恢复 {} 个数据表",names.len())}))
         })
         .await?;
@@ -334,7 +327,9 @@ pub async fn import_data(
         }
     }
     transaction.commit().await?;
-    correct_sequences(pool).await?;
+    if let Err(error) = correct_sequences(pool).await {
+        tracing::error!("数据库导入已提交，后续 ID 计数器校准失败：{}", error.1);
+    }
     Ok(())
 }
 pub async fn correct_sequences(pool: &PgPool) -> Result<Vec<String>> {
@@ -441,27 +436,39 @@ async fn clear_tables(
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>> {
-    let names = selected(&state.db, &body["tables"]).await?;
-    let _gate = state.ai.cache_gate.write().await;
-    if names.iter().any(|n| n == "translation_cache") {
-        state
-            .ai
-            .cache_revision
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    }
-    let mut transaction = state.db.begin().await?;
+    let names = body["tables"]
+        .as_array()
+        .filter(|names| !names.is_empty())
+        .ok_or_else(|| ApiError::bad("请求体必须包含非空 tables 数组"))?;
+    let valid = regex::Regex::new(r"^[_\p{XID_Start}]\p{XID_Continue}*$").unwrap();
     let mut count = 0;
-    for name in &names {
-        count += sqlx::query(&format!("DELETE FROM {}", identifier(name)?))
-            .execute(&mut *transaction)
+    for name in names {
+        let Some(name) = name.as_str().filter(|name| valid.is_match(name)) else {
+            tracing::warn!("非法表名跳过清空：{name}");
+            continue;
+        };
+        let _gate = if name == "translation_cache" {
+            Some(state.ai.cache_gate.write().await)
+        } else {
+            None
+        };
+        let quoted = format!("\"{}\"", name.replace('"', "\"\""));
+        count += sqlx::query(&format!("DELETE FROM {quoted}"))
+            .execute(&state.db)
             .await?
             .rows_affected();
+        if name == "translation_cache" {
+            state
+                .ai
+                .cache_revision
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
-    transaction.commit().await?;
     Ok(Json(
-        json!({"message":format!("共清空 {} 个表，删除 {count} 行数据",names.len())}),
+        json!({"message":format!("操作成功！共清空 {} 个表，删除 {count} 行数据。",names.len())}),
     ))
 }
+
 async fn cleanup_offline(State(state): State<AppState>) -> Result<Json<Value>> {
     let count = sqlx::query("DELETE FROM media_metadata WHERE in_library=FALSE")
         .execute(&state.db)

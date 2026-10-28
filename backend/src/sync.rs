@@ -46,6 +46,14 @@ fn tags(item: &Value) -> Value {
     )
 }
 pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result<Value> {
+    cache_with_batch(state, full, 10, context).await
+}
+pub async fn cache_with_batch(
+    state: &AppState,
+    full: bool,
+    batch_size: i64,
+    context: &JobContext,
+) -> Result<Value> {
     let config = state.config.read().await.clone();
     let libraries = emby::processing_libraries(state).await?;
     if libraries.is_empty() {
@@ -197,7 +205,7 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
         .collect::<Vec<_>>();
     let mut offline = 0;
     if !missing.is_empty() {
-        match versions::existing(state, &missing).await {
+        match emby::existing_ids(state, &missing, Some(context)).await {
             Ok(existing) => {
                 let removed = missing
                     .iter()
@@ -215,6 +223,7 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
                 }
                 offline = versions::unbind(state, &removed).await?;
             }
+            Err(error) if context.is_cancelled() => return Err(error),
             Err(_) => tracing::warn!("Emby 离线核对失败，保留未扫描到的绑定和指纹"),
         }
     }
@@ -275,86 +284,95 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
     let total = dirty.len();
     let mut updated = 0;
     let mut failures = vec![];
-    for (index, work) in dirty.into_iter().enumerate() {
-        if index > 0 {
-            state.item_delay(context).await?;
-        }
+    if batch_size == 0 {
+        return Err(crate::error::ApiError(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "分批大小不能为 0".into(),
+        ));
+    }
+    let dirty = dirty.into_iter().collect::<Vec<_>>();
+    let chunks = if batch_size < 0 {
+        vec![]
+    } else {
+        dirty.chunks(batch_size as usize).collect::<Vec<_>>()
+    };
+    for (batch_index, batch) in chunks.into_iter().enumerate() {
         context.checkpoint().await?;
-        let title = work_titles
-            .get(&work)
-            .cloned()
-            .filter(|title| !title.is_empty())
-            .unwrap_or_else(|| format!("未命名媒体（TMDb {}）", work.0));
-        context
-            .update(
-                20 + (index as u64 * 80 / total.max(1) as u64),
-                "阶段3/3：同步元数据",
-                &format!("正在同步《{title}》 · {}/{}", index + 1, total),
-            )
-            .await;
-        let ids = top_ids.get(&work).cloned().unwrap_or_default();
-        let numbers = season_scope
-            .get(&work)
-            .cloned()
-            .unwrap_or_else(|| {
-                ids.iter()
-                    .flat_map(|id| all_seasons.get(id).cloned().unwrap_or_default())
-                    .collect()
-            })
-            .into_iter()
-            .collect::<Vec<_>>();
-        let mut tops = vec![];
-        let mut children = vec![];
-        for id in ids {
+        let mut groups = vec![];
+        for (offset, work) in batch.iter().enumerate() {
             context.checkpoint().await?;
-            match crate::media_edit::details(state, &id, FIELDS).await {
-                Ok(mut top) if top["Type"] == work.1 => {
-                    if emby::path_ignored(state, &string(&top, "Path")).await? {
-                        continue;
-                    }
-                    let library = source_libraries.get(&id).cloned().unwrap_or_default();
-                    top["_SourceLibraryId"] = json!(library);
-                    if work.1 == "Series" {
-                        match emby::items(state, &id, FIELDS, context).await {
-                            Ok(items) => {
-                                for mut child in items {
-                                    if child_scope(&child)
-                                        .is_some_and(|(_, n)| numbers.contains(&n))
-                                    {
-                                        child["_SourceLibraryId"] = json!(library);
-                                        children.push(child);
-                                    }
+            let index = batch_index * batch_size as usize + offset;
+            let title = work_titles
+                .get(work)
+                .cloned()
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| format!("未命名媒体（TMDb {}）", work.0));
+            context
+                .update(
+                    20 + (index as u64 * 80 / total.max(1) as u64),
+                    "阶段3/3：同步元数据",
+                    &format!("正在同步《{title}》 · {}/{}", index + 1, total),
+                )
+                .await;
+            let ids = top_ids.get(work).cloned().unwrap_or_default();
+            let numbers = season_scope
+                .get(work)
+                .cloned()
+                .unwrap_or_else(|| {
+                    ids.iter()
+                        .flat_map(|id| all_seasons.get(id).cloned().unwrap_or_default())
+                        .collect()
+                })
+                .into_iter()
+                .collect::<Vec<_>>();
+            let mut tops = vec![];
+            let mut children = vec![];
+            let ids = ids.into_iter().collect::<Vec<_>>();
+            for mut top in emby::by_ids(state, &ids, FIELDS, Some(context)).await? {
+                let id = string(&top, "Id");
+                if top["Type"] != work.1 {
+                    continue;
+                }
+                if emby::path_ignored(state, &string(&top, "Path")).await? {
+                    continue;
+                }
+                let library = source_libraries.get(&id).cloned().unwrap_or_default();
+                top["_SourceLibraryId"] = json!(library);
+                if work.1 == "Series" {
+                    match emby::items(state, &id, FIELDS, context).await {
+                        Ok(items) => {
+                            for mut child in items {
+                                if child_scope(&child).is_some_and(|(_, n)| numbers.contains(&n)) {
+                                    child["_SourceLibraryId"] = json!(library);
+                                    children.push(child);
                                 }
                             }
-                            Err(error) => {
-                                tracing::warn!(
-                                    "[同步媒体] 《{title}》读取分集失败（Item {id}）：{}",
-                                    error.1
-                                );
-                                failures.push(format!("{id}: {}", error.1));
-                                continue;
-                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                "[同步媒体] 《{title}》读取分集失败（Item {id}）：{}",
+                                error.1
+                            );
+                            failures.push(format!("{id}: {}", error.1));
+                            continue;
                         }
                     }
-                    tops.push(top);
                 }
-                Ok(_) => {}
-                Err(error) => {
-                    tracing::warn!(
-                        "[同步媒体] 《{title}》读取媒体失败（Item {id}）：{}",
-                        error.1
-                    );
-                    failures.push(format!("{id}: {}", error.1));
-                }
+                tops.push(top);
             }
+            if tops.is_empty() {
+                tracing::info!("[同步媒体] 跳过《{title}》：未取得可处理的在库版本");
+                continue;
+            }
+            if work.1 == "Series" && !numbers.is_empty() {
+                tracing::info!("[同步按季刮削] 《{title}》本次仅聚合第 {:?} 季", numbers);
+            }
+            groups.push((work.clone(), tops, children, numbers, title));
         }
-        if tops.is_empty() {
-            tracing::info!("[同步媒体] 跳过《{title}》：未取得可处理的在库版本");
-            continue;
-        }
-        if work.1 == "Series" && !numbers.is_empty() {
-            tracing::info!("[同步按季刮削] 《{title}》本次仅聚合第 {:?} 季", numbers);
-        }
+        use futures_util::{FutureExt, StreamExt, stream};
+        let limit = crate::strm::thread_limit(state, "secondary").await;
+        let pending = stream::iter(groups.clone()).map(|(work, _, _, numbers, title)| async move {
+            context.checkpoint().await?;
         let data = if work.1 == "Movie" {
             tmdb::details(state, "Movie", &work.0).await
         } else if numbers.is_empty() {
@@ -362,40 +380,79 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
         } else {
             tmdb::aggregate(state, &work.0, &numbers).await
         };
-        let mut data = data.unwrap_or_else(|error| {
+        let data = data.unwrap_or_else(|error| {
             tracing::warn!(
                 "[同步媒体] 《{title}》读取 TMDb 元数据失败，使用现有媒体信息：{}",
                 error.1
             );
             json!({})
         });
-        if config["ai_translate_on_sync"] == true {
-            let mut pruned = data.clone();
-            crate::translation::prune(&work.1, &mut pruned);
-            crate::translation::metadata_tree(state, &work.1, &mut pruned, "").await?;
-            merge_translations(&mut data, pruned);
+            Ok::<_, crate::error::ApiError>((work.clone(), data))
+        }.boxed()).buffer_unordered(limit);
+        tokio::pin!(pending);
+        let mut metadata = BTreeMap::new();
+        while let Some(result) = pending.next().await {
+            let (work, data) = result?;
+            metadata.insert(work, data);
         }
-        let mut records = records(
-            &work,
-            &tops,
-            &children,
-            &data,
-            &parents,
-            &guids,
-            [&mapping, &rating_mapping, &rating_priority],
-        )
-        .await;
-        match metadata::upsert(state, &mut records, true).await {
-            Ok(()) => {
-                updated += records.len();
-                tracing::info!("[同步媒体] 《{title}》已写入 {} 个媒体项", records.len());
-            }
-            Err(error) => {
-                tracing::warn!("[同步媒体] 《{title}》写入失败：{}", error.1);
-                failures.push(format!("{}: {}", work.0, error.1));
+        for (work, _, _, _, _) in &groups {
+            context.checkpoint().await?;
+            let data = metadata.get_mut(work).unwrap();
+            if config["ai_translate_on_sync"] == true {
+                let mut pruned = data.clone();
+                crate::translation::prune(&work.1, &mut pruned);
+                crate::translation::metadata_tree(state, &work.1, &mut pruned, "").await?;
+                merge_translations(data, pruned);
             }
         }
+        let mut batch_records = vec![];
+        for (work, tops, children, _, title) in &groups {
+            context.checkpoint().await?;
+            let mut records = records(
+                work,
+                tops,
+                children,
+                &metadata[work],
+                &parents,
+                &guids,
+                [&mapping, &rating_mapping, &rating_priority],
+            )
+            .await;
+            tracing::info!("[同步媒体] 《{title}》准备写入 {} 个媒体项", records.len());
+            batch_records.append(&mut records);
+        }
+        let active_children = batch_records
+            .iter()
+            .filter(|row| matches!(row["item_type"].as_str(), Some("Season" | "Episode")))
+            .map(|row| string(row, "tmdb_id"))
+            .collect::<Vec<_>>();
+        if !batch_records.is_empty() {
+            match metadata::upsert(state, &mut batch_records, true).await {
+                Ok(()) => updated += batch_records.len(),
+                Err(error) => {
+                    tracing::warn!("[同步媒体] 本批写入失败：{}", error.1);
+                    failures.push(error.1);
+                }
+            }
+        }
+        for (work, _, _, numbers, _) in &groups {
+            if work.1 == "Series" && !numbers.is_empty() {
+                offline += sqlx::query("UPDATE media_metadata SET in_library=false,asset_details_json=NULL,file_sha1_json='[]'::jsonb,file_pickcode_json='[]'::jsonb WHERE parent_series_tmdb_id=$1 AND season_number=ANY($2) AND item_type IN ('Season','Episode') AND in_library=true AND COALESCE(emby_item_ids_json,'[]'::jsonb)='[]'::jsonb AND NOT(tmdb_id=ANY($3))")
+                    .bind(&work.0).bind(numbers).bind(&active_children).execute(&state.db).await?.rows_affected();
+            }
+        }
+        let processed = ((batch_index + 1) * batch_size as usize).min(total);
+        context
+            .update(
+                20 + processed as u64 * 80 / total.max(1) as u64,
+                "阶段3/3：同步元数据",
+                &format!("处理进度 {processed}/{total}..."),
+            )
+            .await;
     }
+    sqlx::query("DELETE FROM media_metadata WHERE in_library=false AND tmdb_id LIKE '%-%'")
+        .execute(&state.db)
+        .await?;
     let fingerprints = if fingerprint_ids.is_empty() {
         Value::Null
     } else {
@@ -406,9 +463,6 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
         )
         .await?
     };
-    sqlx::query("DELETE FROM media_metadata WHERE in_library=false AND tmdb_id LIKE '%-%'")
-        .execute(&state.db)
-        .await?;
     let message = format!(
         "同步完成！新增/更新 {updated} 个媒体项，标记离线 {offline} 个，元数据失败 {} 项，指纹未完成 {} 项。",
         failures.len(),

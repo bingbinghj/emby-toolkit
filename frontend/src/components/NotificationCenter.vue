@@ -34,6 +34,7 @@
         <n-input v-model:value="keyword" clearable placeholder="搜索实时日志" aria-label="搜索实时日志" size="small"><template #prefix><n-icon :component="SearchOutline" /></template></n-input>
         <n-select v-model:value="logFilter" :options="filterOptions" aria-label="日志类型" size="small" class="notification-filter" />
         <label class="notification-follow"><n-switch v-model:value="following" size="small" aria-label="自动跟随日志" />自动跟随</label>
+        <n-button size="small" secondary @click="downloadLogs" :disabled="!filteredLogs.length">导出日志</n-button>
       </div>
       <div ref="logRef" class="notification-log" role="region" aria-label="实时日志内容" tabindex="0" @scroll="handleScroll">
         <div v-for="(line, index) in filteredLogs" :key="index" class="notification-line" :class="lineClass(line)"><span class="notification-line-number" aria-hidden="true">{{ index + 1 }}</span><span>{{ line }}</span></div>
@@ -89,6 +90,14 @@ function togglePause() {
 function stopTask() { return control('stop'); }
 const latestLogs = computed(() => props.task.logs || []);
 const hasNewLogs = computed(() => latestLogs.value.join('\n') !== displayedLogs.value.join('\n'));
+function downloadLogs() {
+  const url = URL.createObjectURL(new Blob([filteredLogs.value.join('\n')], { type: 'text/plain;charset=utf-8' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `etk-${new Date().toISOString().replace(/[:.]/g, '-')}.log`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 const filteredLogs = computed(() => displayedLogs.value.filter(line =>
   (!keyword.value.trim() || line.toLowerCase().includes(keyword.value.trim().toLowerCase())) &&
   (logFilter.value === 'all' || (logFilter.value === 'progress' ? /\[任务(?:进度|开始|结束|暂停|继续)\]/.test(line) : /\b(WARNING|ERROR|CRITICAL)\b/.test(line)))

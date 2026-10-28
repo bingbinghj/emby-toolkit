@@ -8,9 +8,8 @@ use crate::{
 use serde_json::{Value, json};
 
 pub async fn upsert(state: &AppState, person: &Value) -> Result<()> {
-    let id = person["id"]
-        .as_i64()
-        .or_else(|| person["tmdb_id"].as_i64())
+    let id = crate::cast::person_id(&person["id"])
+        .or_else(|| crate::cast::person_id(&person["tmdb_id"]))
         .filter(|n| *n > 0 && *n <= i32::MAX as i64)
         .ok_or_else(|| ApiError::bad("演员缺少合法 TMDb ID"))? as i32;
     let name = string(person, "name");
@@ -88,6 +87,52 @@ pub async fn process(state: &AppState, source: &[Value], item: &Value) -> Result
 pub async fn preview(state: &AppState, source: &[Value], item: &Value) -> Result<Vec<Value>> {
     process_inner(state, source, item, false).await
 }
+fn cast_id(actor: &Value) -> String {
+    match &actor["id"] {
+        Value::Number(number) if number.as_f64() != Some(0.0) => number.to_string(),
+        Value::String(id) if !id.is_empty() && id != "None" => id.clone(),
+        _ => String::new(),
+    }
+}
+pub async fn enrich_provider_ids(
+    state: &AppState,
+    people: &[Value],
+    context: &crate::jobs::JobContext,
+) -> Result<Vec<Value>> {
+    let mut positions = std::collections::HashMap::new();
+    let mut actors = vec![];
+    let mut pending = vec![];
+    for person in people.iter().filter(|person| person["Type"] == "Actor") {
+        let id = string(person, "Id");
+        if id.is_empty() {
+            continue;
+        }
+        let position = if let Some(position) = positions.get(&id) {
+            *position
+        } else {
+            let position = actors.len();
+            positions.insert(id.clone(), position);
+            actors.push(person.clone());
+            position
+        };
+        actors[position] = person.clone();
+        if string(&person["ProviderIds"], "Tmdb").is_empty() && !chinese(&string(person, "Name")) {
+            pending.push(id);
+        }
+    }
+    if !pending.is_empty() {
+        tracing::info!(
+            "[演员数据管家] 正在批量获取 {} 位演员的外部 ID...",
+            pending.len()
+        );
+        for person in crate::emby::by_ids(state, &pending, "ProviderIds", Some(context)).await? {
+            if let Some(position) = positions.get(&string(&person, "Id")) {
+                actors[*position]["ProviderIds"] = person["ProviderIds"].clone();
+            }
+        }
+    }
+    Ok(actors)
+}
 async fn process_inner(
     state: &AppState,
     source: &[Value],
@@ -123,16 +168,31 @@ async fn process_inner(
     {
         let id = string(&person["ProviderIds"], "Tmdb");
         let name = string(person, "Name");
-        let translated:Option<String>=sqlx::query_scalar("SELECT original_text FROM translation_cache WHERE translated_text=$1 AND original_text NOT LIKE 'ai-result:%' LIMIT 1").bind(&name).fetch_optional(&state.db).await?;
-        if let Some(actor) = raw.iter().find(|a| {
-            a["id"].as_i64().map(|n| n.to_string()).as_deref() == Some(&id)
-                || string(a, "name").trim().eq_ignore_ascii_case(name.trim())
-                || translated
-                    .as_ref()
-                    .is_some_and(|name| string(a, "name").trim().eq_ignore_ascii_case(name.trim()))
-        }) {
+        let matched = raw
+            .iter()
+            .rev()
+            .find(|a| !id.is_empty() && cast_id(a) == id)
+            .or_else(|| {
+                raw.iter()
+                    .rev()
+                    .find(|a| string(a, "name").trim().to_lowercase() == name.trim().to_lowercase())
+            });
+        let matched = if matched.is_some() {
+            matched
+        } else {
+            let translated: Option<String> = sqlx::query_scalar("SELECT original_text FROM translation_cache WHERE translated_text=$1 AND original_text NOT LIKE 'ai-result:%' LIMIT 1")
+                .bind(&name).fetch_optional(&state.db).await.unwrap_or_else(|error| {
+                    tracing::warn!("反查演员翻译缓存失败，继续处理其他演员：{error}"); None
+                });
+            translated.as_ref().and_then(|name| {
+                raw.iter()
+                    .rev()
+                    .find(|a| string(a, "name").trim().to_lowercase() == name.trim().to_lowercase())
+            })
+        };
+        if let Some(actor) = matched {
             let mut actor = actor.clone();
-            used.insert(string(&actor, "name").trim().to_string());
+            used.insert(cast_id(&actor));
             let douban_matched = actor["_douban_matched"] == true;
             if !douban_matched && actor["_douban_matched"] != "name" && chinese(&name) {
                 actor["name"] = json!(name);
@@ -151,19 +211,28 @@ async fn process_inner(
         }
     }
     for actor in raw {
-        if !used.contains(string(&actor, "name").trim()) {
+        if !used.contains(&cast_id(&actor)) {
             let mut actor = actor;
             actor["emby_person_id"] = Value::Null;
             result.push(actor);
         }
     }
+    let mut unique = vec![];
+    let mut positions = std::collections::HashMap::new();
+    for actor in result {
+        let id = cast_id(&actor);
+        if id.is_empty() {
+            continue;
+        }
+        if let Some(position) = positions.get(&id) {
+            unique[*position] = actor;
+        } else {
+            positions.insert(id, unique.len());
+            unique.push(actor);
+        }
+    }
+    let mut result = unique;
     result.sort_by_key(|a| a["order"].as_i64().unwrap_or(999));
-    result.truncate(
-        config["max_actors_to_process"]
-            .as_u64()
-            .filter(|n| *n > 0)
-            .unwrap_or(30) as usize,
-    );
     if config["remove_actors_without_avatars"] != false {
         result.retain(|p| p["profile_path"].as_str().is_some_and(|s| !s.is_empty()));
     }
@@ -172,9 +241,14 @@ async fn process_inner(
         if let Some(actor) = actor.as_object_mut() {
             actor.remove("_douban_matched");
         }
-        actor["provider_ids"] = json!({"Tmdb":actor["id"].as_i64().map(|n|n.to_string()),"Imdb":actor["imdb_id"],"Douban":actor["douban_id"]});
-        if persist {
-            upsert(state, actor).await?;
+        actor["provider_ids"] =
+            json!({"Tmdb":cast_id(actor),"Imdb":actor["imdb_id"],"Douban":actor["douban_id"]});
+        if persist && let Err(error) = upsert(state, actor).await {
+            tracing::warn!(
+                "演员 {} 数据库回写失败，继续处理其他演员：{}",
+                string(actor, "name"),
+                error.1
+            );
         }
     }
     tracing::info!(

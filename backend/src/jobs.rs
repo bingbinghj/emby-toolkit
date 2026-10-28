@@ -2,7 +2,14 @@ use crate::error::{ApiError, Result};
 use axum::http::StatusCode;
 use futures_util::FutureExt;
 use serde_json::{Value, json};
-use std::{collections::HashMap, future::Future, sync::Arc};
+use std::{
+    collections::{HashMap, VecDeque},
+    future::Future,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
@@ -27,6 +34,7 @@ pub struct JobContext {
     progress: Arc<Mutex<Value>>,
     activity: Activity,
     last_progress_log: Arc<std::sync::Mutex<ProgressLog>>,
+    pause_generation: Arc<AtomicU64>,
 }
 impl JobContext {
     pub async fn cancelled(&self) {
@@ -42,6 +50,9 @@ impl JobContext {
     pub fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
     }
+    pub(crate) fn pause_generation(&self) -> u64 {
+        self.pause_generation.load(Ordering::Acquire)
+    }
     pub async fn checkpoint(&self) -> Result<()> {
         loop {
             let wake = self.wake.notified();
@@ -56,6 +67,7 @@ impl JobContext {
             }
             if state["state"] == "pausing" {
                 state["state"] = json!("paused");
+                self.pause_generation.fetch_add(1, Ordering::AcqRel);
                 let name = state["last_action"].as_str().unwrap_or("后台任务");
                 tracing::info!(task_id=%self.id,"[任务暂停] {name} · 已到达安全暂停点，保留当前进度");
             }
@@ -69,11 +81,12 @@ impl JobContext {
     }
     pub async fn update_counted(&self, completed: u64, total: u64, phase: &str, message: &str) {
         self.update_status(
-            Some(if total == 0 {
-                100
-            } else {
-                completed.saturating_mul(100) / total
-            }),
+            Some(
+                completed
+                    .saturating_mul(100)
+                    .checked_div(total)
+                    .unwrap_or(100),
+            ),
             Some((completed, total)),
             phase,
             message,
@@ -136,6 +149,7 @@ struct Inner {
     shutting_down: bool,
     latest: Value,
     results: HashMap<String, Value>,
+    history_order: VecDeque<String>,
 }
 #[derive(Default)]
 pub struct JobManager {
@@ -186,6 +200,7 @@ impl JobManager {
             progress: Arc::new(Mutex::new(state)),
             activity: Arc::new(std::sync::Mutex::new(None)),
             last_progress_log: Arc::new(std::sync::Mutex::new(None)),
+            pause_generation: Arc::new(AtomicU64::new(0)),
         };
         inner.active = Some(context.clone());
         drop(inner);
@@ -303,13 +318,10 @@ impl JobManager {
             let mut inner = manager.inner.lock().await;
             inner.latest = state.clone();
             inner.results.insert(context.id.clone(), state.clone());
+            inner.history_order.push_back(context.id.clone());
             inner.active = None;
-            if inner.results.len() > 100
-                && let Some(key) = inner
-                    .results
-                    .keys()
-                    .find(|key| **key != context.id)
-                    .cloned()
+            if inner.history_order.len() > 30
+                && let Some(key) = inner.history_order.pop_front()
             {
                 inner.results.remove(&key);
             }
@@ -345,8 +357,17 @@ impl JobManager {
         let inner = self.inner.lock().await;
         let active = inner.active.clone();
         let latest = inner.latest.clone();
-        let mut history: Vec<_> = inner.results.values().cloned().collect();
-        history.sort_by_key(|v| std::cmp::Reverse(v["finished_at"].as_i64().unwrap_or(0)));
+        let history: Vec<_> = inner
+            .history_order
+            .iter()
+            .rev()
+            .filter_map(|id| inner.results.get(id))
+            .map(|value| {
+                let mut value = value.clone();
+                value.as_object_mut().unwrap().remove("result");
+                value
+            })
+            .collect();
         drop(inner);
         let mut status = if let Some(active) = active {
             let mut state = active.progress.lock().await.clone();
@@ -364,6 +385,7 @@ impl JobManager {
         } else {
             latest
         };
+        status.as_object_mut().unwrap().remove("result");
         status["history"] = json!(history);
         status
     }

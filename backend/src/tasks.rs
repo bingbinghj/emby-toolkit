@@ -19,7 +19,9 @@ async fn available(Query(params): Query<std::collections::HashMap<String, String
     let catalog: Value = serde_json::from_str(include_str!("../assets/task_catalog.json")).unwrap();
     let context = params
         .get("context")
-        .map(String::as_str)
+        .map(|value| value.trim().to_ascii_lowercase())
+        .unwrap_or_else(|| "chain".into());
+    let context = Some(context.as_str())
         .filter(|s| ["chain", "manual", "all"].contains(s))
         .unwrap_or("chain");
     Json(catalog[context].clone())
@@ -31,16 +33,49 @@ async fn run(
     let task = body["task_name"]
         .as_str()
         .ok_or_else(|| ApiError::bad("请求体中缺少 'task_name' 参数"))?;
-    let result = submit_task(
+    let allowed: &[&str] = match task {
+        "populate-metadata" => &["force_full_update", "batch_size"],
+        "enrich-aliases" | "role-translation" | "restore_mediainfo" => &["force_full_update"],
+        _ => &[],
+    };
+    let unsupported = body
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|key| key.as_str() != "task_name" && !allowed.contains(&key.as_str()))
+        .cloned()
+        .collect();
+    let result = submit_with_batch(
         &state,
         task,
-        body["force_full_update"].as_bool().unwrap_or(false),
+        task_truthy(&body["force_full_update"]),
+        body.get("batch_size").cloned().unwrap_or(json!(10)),
+        unsupported,
     )
     .await?;
     Ok((StatusCode::ACCEPTED, Json(result)))
 }
 
 pub async fn submit_task(state: &AppState, task: &str, full: bool) -> Result<Value> {
+    submit_with_batch(state, task, full, json!(10), vec![]).await
+}
+fn task_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
+        Value::String(value) => !value.is_empty(),
+        Value::Array(value) => !value.is_empty(),
+        Value::Object(value) => !value.is_empty(),
+    }
+}
+async fn submit_with_batch(
+    state: &AppState,
+    task: &str,
+    full: bool,
+    batch_size: Value,
+    unsupported: Vec<String>,
+) -> Result<Value> {
     if ![
         "populate-metadata",
         "clear-mediainfo",
@@ -93,8 +128,15 @@ pub async fn submit_task(state: &AppState, task: &str, full: bool) -> Result<Val
     let id = state
         .jobs
         .submit(&name, move |context| async move {
+            if !unsupported.is_empty() {
+                return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("任务 {task} 不支持参数：{}", unsupported.join(", "))));
+            }
             match task.as_str() {
-                "populate-metadata"=>crate::sync::cache(&work, full, &context).await,
+                "populate-metadata"=>{
+                    let batch_size = batch_size.as_i64().or_else(|| batch_size.as_bool().map(i64::from))
+                        .ok_or_else(|| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "分批大小必须是整数".into()))?;
+                    crate::sync::cache_with_batch(&work, full, batch_size, &context).await
+                },
                 "clear-mediainfo"=>{context.checkpoint().await?;let count=sqlx::query("DELETE FROM p115_mediainfo_cache").execute(&work.db).await?.rows_affected();Ok(json!({"message":format!("媒体信息备份已清空，共删除 {count} 条记录。"),"deleted":count}))},
                 "repair-p115-fingerprints"=>crate::revalidation::repair(&work,&context).await,
                 "role-translation"=>translate_roles(&work,full,&context).await,
@@ -239,8 +281,32 @@ async fn translate_roles(
     if config["ai_translate_actor_role"] != true {
         return Ok(json!({"updated":0,"message":"AI翻译功能未启用，跳过任务。"}));
     }
+    let mut ignored_ids = std::collections::HashSet::<String>::new();
+    if !crate::media_edit::list(&config["libraries_to_ignore"]).is_empty() {
+        let rows: Vec<(Value, Value)> = sqlx::query_as(
+            "SELECT COALESCE(emby_item_ids_json,'[]'::jsonb),asset_details_json FROM media_metadata WHERE asset_details_json IS NOT NULL",
+        )
+        .fetch_all(&state.db)
+        .await?;
+        for (ids, assets) in rows {
+            let ids = crate::media_edit::list(&ids);
+            for (index, asset) in crate::media_edit::list(&assets).iter().enumerate() {
+                if crate::emby::library_ignored(
+                    &config,
+                    &crate::state::string(asset, "source_library_id"),
+                ) && let Some(id) = asset["emby_item_id"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .or_else(|| ids.get(index).and_then(Value::as_str))
+                {
+                    ignored_ids.insert(id.to_string());
+                }
+            }
+        }
+    }
     if full {
-        sqlx::query("DELETE FROM processed_log")
+        sqlx::query("DELETE FROM processed_log WHERE NOT (item_id=ANY($1))")
+            .bind(ignored_ids.iter().cloned().collect::<Vec<_>>())
             .execute(&state.db)
             .await?;
     }
@@ -250,11 +316,44 @@ async fn translate_roles(
         .await;
     for library in crate::emby::processing_libraries(state).await? {
         media.extend(
-            crate::emby::items(state, &library, "Id,Type,Name", context)
+            crate::emby::items(state, &library, "Id,Type,Name,MediaSources", context)
                 .await?
                 .into_iter()
                 .filter(|i| matches!(i["Type"].as_str(), Some("Movie" | "Series"))),
         );
+    }
+    if !media.is_empty() {
+        let mut alive = ignored_ids;
+        for item in &media {
+            alive.insert(crate::state::string(item, "Id"));
+            if item["Type"] == "Movie" {
+                for source in crate::media_edit::list(&item["MediaSources"]) {
+                    let id = crate::state::string(&source, "Id").replace("mediasource_", "");
+                    if !id.is_empty() {
+                        alive.insert(id);
+                    }
+                }
+            }
+        }
+        let removed: Vec<String> =
+            sqlx::query_scalar("SELECT item_id FROM processed_log WHERE NOT (item_id=ANY($1))")
+                .bind(alive.into_iter().collect::<Vec<_>>())
+                .fetch_all(&state.db)
+                .await?;
+        if !removed.is_empty() {
+            let mut transaction = state.db.begin().await?;
+            for table in ["failed_log", "processed_log"] {
+                sqlx::query(&format!("DELETE FROM {table} WHERE item_id=ANY($1)"))
+                    .bind(&removed)
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+            transaction.commit().await?;
+            tracing::info!(
+                "[角色中文化] 已清理 {} 个已删除媒体项的处理和复核记录",
+                removed.len()
+            );
+        }
     }
     let mut updated = 0;
     let mut failures = vec![];
@@ -344,7 +443,21 @@ async fn enrich_persons(
     let mut deleted = 0;
     let mut failures = vec![];
     let total = rows.len();
-    for (index, row) in rows.into_iter().enumerate() {
+    use futures_util::{FutureExt, StreamExt, stream};
+    let limit = crate::strm::thread_limit(state, "secondary").await;
+    let pending = stream::iter(rows)
+        .map(|row| {
+            async move {
+                let id = row["tmdb_person_id"].as_i64().unwrap() as i32;
+                let result = crate::tmdb::person(state, id).await;
+                (row, result)
+            }
+            .boxed()
+        })
+        .buffer_unordered(limit);
+    tokio::pin!(pending);
+    let mut index = 0;
+    while let Some((row, result)) = pending.next().await {
         context.checkpoint().await?;
         let id = row["tmdb_person_id"].as_i64().unwrap() as i32;
         let name = row["primary_name"]
@@ -359,7 +472,7 @@ async fn enrich_persons(
                 &format!("正在补充人物：{name}（TMDb {id}）"),
             )
             .await;
-        match crate::tmdb::person(state, id).await {
+        match result {
             Ok(person) => {
                 let original = person["english_name_from_translations"]
                     .as_str()
@@ -404,6 +517,7 @@ async fn enrich_persons(
                 failures.push(format!("{id}: {}", error.1));
             }
         }
+        index += 1;
     }
     context.checkpoint().await?;
     let message = format!(
@@ -578,9 +692,9 @@ async fn purge_persons(state: &AppState, context: &crate::jobs::JobContext) -> R
         return Ok(json!({"deleted":0,"message":"未发现幽灵演员"}));
     }
     context.checkpoint().await?;
-    let login: Value = state.http.post(format!("{}/Users/AuthenticateByName",crate::state::string(&config,"emby_server_url").trim_end_matches('/')))
+    let login: Value = crate::emby::send(state.http.post(format!("{}/Users/AuthenticateByName",crate::state::string(&config,"emby_server_url").trim_end_matches('/')))
         .header("X-Emby-Authorization","MediaBrowser Client=\"EmbyToolkit\", Device=\"Server\", DeviceId=\"etk-rust\", Version=\"1.0\"")
-        .json(&json!({"Username":config["emby_admin_user"],"Pw":config["emby_admin_pass"]})).send().await?.error_for_status()?.json().await?;
+        .json(&json!({"Username":config["emby_admin_user"],"Pw":config["emby_admin_pass"]}))).await?.error_for_status()?.json().await?;
     let token = crate::state::string(&login, "AccessToken");
     let user = crate::state::string(&login["User"], "Id");
     if token.is_empty() || user.is_empty() || login["User"]["Policy"]["IsAdministrator"] != true {
@@ -601,16 +715,17 @@ async fn purge_persons(state: &AppState, context: &crate::jobs::JobContext) -> R
                 &format!("正在删除未被引用的演员：{name}（Item {id}）"),
             )
             .await;
-        let response = state
-            .http
-            .post(format!(
-                "{}/Items/{id}/DeletePerson",
-                crate::state::string(&config, "emby_server_url").trim_end_matches('/')
-            ))
-            .header("X-Emby-Token", &token)
-            .query(&[("UserId", &user)])
-            .send()
-            .await;
+        let response = crate::emby::send(
+            state
+                .http
+                .post(format!(
+                    "{}/Items/{id}/DeletePerson",
+                    crate::state::string(&config, "emby_server_url").trim_end_matches('/')
+                ))
+                .header("X-Emby-Token", &token)
+                .query(&[("UserId", &user)]),
+        )
+        .await;
         match response {
             Ok(response) if response.status().is_success() => {
                 deleted += 1;

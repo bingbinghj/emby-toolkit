@@ -48,8 +48,16 @@ impl SessionSigner {
         Ok(Self(key))
     }
     pub fn sign(&self, session: &Session) -> String {
+        self.sign_value(&serde_json::to_value(session).expect("session serializable"))
+    }
+    pub fn sign_administrator(&self, session: &Session) -> String {
+        let mut value = serde_json::to_value(session).expect("session serializable");
+        value["emby_is_admin"] = serde_json::json!(true);
+        self.sign_value(&value)
+    }
+    fn sign_value(&self, value: &serde_json::Value) -> String {
         let payload =
-            URL_SAFE_NO_PAD.encode(serde_json::to_vec(session).expect("session serializable"));
+            URL_SAFE_NO_PAD.encode(serde_json::to_vec(value).expect("session serializable"));
         let mut mac = Hmac::<Sha256>::new_from_slice(&self.0).expect("HMAC key");
         mac.update(payload.as_bytes());
         format!(
@@ -76,6 +84,24 @@ impl SessionSigner {
             .find_map(|pair| {
                 let (key, value) = pair.trim().split_once('=')?;
                 (key == "etk_session").then(|| self.verify(value)).flatten()
+            })
+    }
+    pub fn administrator_claim(&self, headers: &HeaderMap) -> Option<bool> {
+        headers
+            .get(header::COOKIE)?
+            .to_str()
+            .ok()?
+            .split(';')
+            .find_map(|pair| {
+                let (key, token) = pair.trim().split_once('=')?;
+                if key != "etk_session" {
+                    return None;
+                }
+                self.verify(token)?;
+                let (payload, _) = token.split_once('.')?;
+                let value: serde_json::Value =
+                    serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).ok()?).ok()?;
+                value["emby_is_admin"].as_bool()
             })
     }
 }

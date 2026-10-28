@@ -77,8 +77,13 @@ pub fn format(raw: &[Value], item: &Value, config: &Value) -> Vec<Value> {
     cast
 }
 pub fn relations(cast: &[Value]) -> Value {
-    json!(cast.iter().filter(|p|p["id"].as_i64().is_some_and(|id|id!=0))
-        .map(|p|json!({"tmdb_id":p["id"],"character":p["character"],"order":p.get("order").cloned().unwrap_or(json!(999))})).collect::<Vec<_>>())
+    json!(cast.iter().filter(|p|p["id"]!=0 && person_id(&p["id"]).is_some())
+        .map(|p|json!({"tmdb_id":person_id(&p["id"]),"character":p["character"],"order":p.get("order").cloned().unwrap_or(json!(999))})).collect::<Vec<_>>())
+}
+pub(crate) fn person_id(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str()?.trim().parse().ok())
 }
 pub fn manual(raw: &[Value], item: &Value, config: &Value) -> Vec<Value> {
     let mut actors = raw.to_vec();
@@ -132,7 +137,8 @@ pub fn episode(
         actors
             .iter()
             .filter(|p| {
-                p["id"].as_i64().is_some_and(|id| id != 0)
+                p["id"] != 0
+                    && person_id(&p["id"]).is_some()
                     && (config["remove_actors_without_avatars"] == false
                         || p["profile_path"].as_str().is_some_and(|s| !s.is_empty()))
             })

@@ -113,6 +113,7 @@ pub(crate) async fn fetch(
     image: &str,
     context: &crate::jobs::JobContext,
 ) -> Result<Vec<u8>> {
+    let _slot = crate::strm::slot(state, "secondary", Some(context)).await?;
     let base = std::env::var("ETK_TMDB_IMAGE_BASE")
         .unwrap_or_else(|_| "https://image.tmdb.org/t/p/original".into());
     tokio::select! {
@@ -132,6 +133,17 @@ pub async fn download(
     item: &Value,
     aggregate: &Value,
     context: &crate::jobs::JobContext,
+) -> Result<usize> {
+    download_with_overwrite(state, kind, id, item, aggregate, context, &[]).await
+}
+pub async fn download_with_overwrite(
+    state: &AppState,
+    kind: &str,
+    id: &str,
+    item: &Value,
+    aggregate: &Value,
+    context: &crate::jobs::JobContext,
+    force_overwrite_episodes: &[String],
 ) -> Result<usize> {
     let media_name = string(item, "Name");
     tracing::info!(
@@ -197,7 +209,9 @@ pub async fn download(
             break;
         }
     }
-    let data = data.unwrap_or_default();
+    let Some(data) = data else {
+        return Ok(0);
+    };
     let mut pending = vec![root.to_path_buf()];
     let mut files = vec![];
     if kind == "Series" {
@@ -219,9 +233,28 @@ pub async fn download(
         "图片资产下载计划：《{media_name}》，TMDb {id}，目标 {} 个",
         plan.len()
     );
-    for (path, image) in plan {
+    use futures_util::{FutureExt, StreamExt, stream};
+    let episode = regex::Regex::new(r"(?i)s(\d{1,4})e(\d{1,4})").unwrap();
+    let limit = crate::strm::thread_limit(state, "secondary").await;
+    let pending = stream::iter(plan)
+        .map(|(path, image)| {
+            let overwrite = episode
+                .captures(
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(""),
+                )
+                .is_some_and(|numbers| {
+                    force_overwrite_episodes.contains(&format!(
+                        "S{}E{}",
+                        numbers[1].parse::<i64>().unwrap(),
+                        numbers[2].parse::<i64>().unwrap()
+                    ))
+                });
+            let media_name = media_name.clone();
+            async move {
         context.checkpoint().await?;
-        if tokio::fs::metadata(&path)
+        if !overwrite && tokio::fs::metadata(&path)
             .await
             .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
         {
@@ -229,7 +262,7 @@ pub async fn download(
                 "图片下载跳过：《{media_name}》，TMDb {id}，文件 {} 已存在",
                 path.display()
             );
-            continue;
+            return Ok(0);
         }
         tracing::debug!(
             "图片下载开始：《{media_name}》，TMDb {id}，文件 {}",
@@ -248,18 +281,38 @@ pub async fn download(
                     "图片下载完成：《{media_name}》，TMDb {id}，文件 {}，{size} 字节",
                     path.display()
                 );
-                count += 1;
+                Ok(1)
             }
-            Err(error) if context.is_cancelled() => return Err(error),
-            Err(error) => tracing::warn!(
+            Err(error) if context.is_cancelled() => Err(error),
+            Err(error) => { tracing::warn!(
                 "图片下载失败：《{media_name}》，TMDb {id}，文件 {}，{}，继续处理其它图片",
                 path.display(),
                 error.1
-            ),
+            ); Ok(0) },
+        }
+        }.boxed()
+        })
+        .buffer_unordered(limit);
+    tokio::pin!(pending);
+    let mut cancelled = None;
+    while let Some(result) = pending.next().await {
+        match result {
+            Ok(done) => count += done,
+            Err(error) => cancelled = Some(error),
         }
     }
+    if let Some(error) = cancelled {
+        return Err(error);
+    }
     if kind == "Series" {
-        count += crate::video_images::missing(state, &files, aggregate, Some(context)).await?;
+        count += crate::video_images::missing_with_overwrite(
+            state,
+            &files,
+            aggregate,
+            Some(context),
+            force_overwrite_episodes,
+        )
+        .await?;
     } else if kind == "Movie" {
         let mut movie_data = data.clone();
         if movie_data["runtime"].is_null() {

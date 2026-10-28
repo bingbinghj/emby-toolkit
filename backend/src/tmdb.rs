@@ -18,6 +18,7 @@ pub async fn get(state: &AppState, path: &str, query: &[(&str, String)]) -> Resu
     let mut parameters =
         std::collections::BTreeMap::from([("api_key", key), ("language", "zh-CN".into())]);
     parameters.extend(query.iter().map(|(k, v)| (*k, v.clone())));
+    let _slot = crate::strm::slot(state, "secondary", None).await?;
     tracing::debug!("TMDb 请求开始：资源 {path}");
     for attempt in 0..4 {
         let response = state
@@ -27,9 +28,15 @@ pub async fn get(state: &AppState, path: &str, query: &[(&str, String)]) -> Resu
             .timeout(Duration::from_secs(15))
             .send()
             .await;
+        let retry_after = response
+            .as_ref()
+            .ok()
+            .and_then(|response| crate::emby::retry_after(response.headers()));
         match response {
             Ok(response)
-                if matches!(response.status().as_u16(), 429 | 500 | 502 | 503 | 504)
+                if (matches!(response.status().as_u16(), 429 | 500 | 502 | 503 | 504)
+                    || (response.status().as_u16() == 413
+                        && response.headers().contains_key("Retry-After")))
                     && attempt < 3 =>
             {
                 tracing::warn!(
@@ -67,7 +74,14 @@ pub async fn get(state: &AppState, path: &str, query: &[(&str, String)]) -> Resu
                 return Ok(data);
             }
         }
-        tokio::time::sleep(Duration::from_secs(2_u64.pow(attempt))).await;
+        tokio::time::sleep(retry_after.unwrap_or_else(|| {
+            Duration::from_secs(if attempt == 0 {
+                0
+            } else {
+                2_u64.pow(attempt + 1)
+            })
+        }))
+        .await;
     }
     unreachable!()
 }
@@ -228,7 +242,13 @@ pub async fn aggregate(state: &AppState, id: &str, numbers: &[i64]) -> Result<Va
     numbers.sort_unstable();
     numbers.dedup();
     tracing::info!("TMDb 按季范围确认：《{media_name}》，TMDb {id}，本次季 {numbers:?}");
-    for number in numbers {
+    use futures_util::{FutureExt, StreamExt, stream};
+    let limit = crate::strm::thread_limit(state, "secondary").await;
+    let pending = stream::iter(numbers).map(|number| {
+        let images = images.clone();
+        let media_name = media_name.clone();
+        async move {
+        let mut episodes = json!({});
         tracing::info!("TMDb 季详情获取开始：《{media_name}》，TMDb {id}，第 {number} 季");
         let mut details = match get(
             state,
@@ -246,7 +266,7 @@ pub async fn aggregate(state: &AppState, id: &str, numbers: &[i64]) -> Result<Va
                     "TMDb 季详情获取失败，跳过该季：《{media_name}》，TMDb {id}，第 {number} 季，{}",
                     error.1
                 );
-                continue;
+                return None;
             }
         };
         if let Some(poster) = details["images"]["posters"][0]["file_path"].as_str() {
@@ -307,8 +327,20 @@ pub async fn aggregate(state: &AppState, id: &str, numbers: &[i64]) -> Result<Va
             "TMDb 季详情获取完成：《{media_name}》，TMDb {id}，第 {number} 季，分集 {} 个",
             list(&details["episodes"]).len()
         );
-        seasons.push(details);
+        Some((details, episodes))
+        }.boxed()
+    }).buffer_unordered(limit);
+    tokio::pin!(pending);
+    while let Some(result) = pending.next().await {
+        if let Some((details, children)) = result {
+            seasons.push(details);
+            episodes
+                .as_object_mut()
+                .unwrap()
+                .extend(children.as_object().unwrap().clone());
+        }
     }
+    seasons.sort_by_key(|season| season["season_number"].as_i64());
     tracing::info!(
         "TMDb 按季聚合完成：《{media_name}》，TMDb {id}，季 {} 个，分集 {} 个",
         seasons.len(),
