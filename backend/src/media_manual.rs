@@ -118,7 +118,7 @@ async fn edit(State(state): State<AppState>, Path(id): Path<String>) -> Result<J
     let result = edit_data(&state, &id).await;
     match &result {
         Ok(Json(data)) => {
-            tracing::info!(item_id = %id, actors = data["current_emby_cast"].as_array().map_or(0, Vec::len), "打开演员编辑页完成")
+            tracing::info!(item_id = %id, actors = data["current_emby_cast"].as_array().map_or(0, Vec::len), "打开《{}》演员编辑页完成", string(data, "item_name"))
         }
         Err(error) => tracing::warn!(item_id = %id, error = %error.1, "打开演员编辑页失败"),
     }
@@ -181,12 +181,13 @@ async fn submit(
 }
 pub async fn save(state: &AppState, id: &str, body: &Value, context: &JobContext) -> Result<Value> {
     context.checkpoint().await?;
+    let item=details(state,id,"Id,Type,Name,Path,People,ProviderIds,Genres,ParentId,ParentIndexNumber,IndexNumber,SeriesId").await?;
+    let media_name = string(&item, "Name");
     tracing::info!(
         item_id = id,
         actors = list(&body["cast"]).len(),
-        "[手动处理] 开始保存演员、角色与目标NFO"
+        "[手动处理] 开始保存《{media_name}》演员、角色与目标NFO"
     );
-    let item=details(state,id,"Id,Type,Name,Path,People,ProviderIds,Genres,ParentId,ParentIndexNumber,IndexNumber,SeriesId").await?;
     let row = record(state, id, &item).await?;
     let kind = string(&row, "item_type");
     let tmdb = string(&row, "tmdb_id");
@@ -237,7 +238,11 @@ pub async fn save(state: &AppState, id: &str, body: &Value, context: &JobContext
         ..Default::default()
     };
     let written = crate::nfo_files::sync(&kind, &item, &payload, &actors, &options).await?;
-    tracing::info!(item_id = id, written, "[手动处理] 目标NFO写入完成");
+    tracing::info!(
+        item_id = id,
+        written,
+        "[手动处理] 《{media_name}》目标NFO写入完成"
+    );
     let path = std::path::PathBuf::from(string(&item, "Path"));
     let nfo = match kind.as_str() {
         "Season" => path.join("season.nfo"),
@@ -280,7 +285,7 @@ pub async fn save(state: &AppState, id: &str, body: &Value, context: &JobContext
         crate::emby::refresh_item(state, &refresh, true, context)
     })
     .await?;
-    tracing::info!(item_id = id, refresh_id = %refresh, "[手动处理] 已提交目标媒体刷新，开始保存数据库结果");
+    tracing::info!(item_id = id, refresh_id = %refresh, "[手动处理] 已提交《{media_name}》刷新，开始保存数据库结果");
     let mut transaction = state.db.begin().await?;
     sqlx::query("UPDATE media_metadata SET actors_json=$1,last_updated_at=NOW() WHERE tmdb_id=$2 AND item_type=$3").bind(crate::cast::relations(&actors)).bind(&tmdb).bind(&kind).execute(&mut *transaction).await?;
     for actor in &actors {

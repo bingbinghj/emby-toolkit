@@ -147,6 +147,7 @@ pub struct ExtractionLog {
     processed: BTreeSet<usize>,
     pub paths: BTreeSet<String>,
     pub encoders: BTreeSet<String>,
+    last_activity: Option<String>,
 }
 impl ExtractionLog {
     pub fn feed(&mut self, lines: &[String]) {
@@ -173,6 +174,8 @@ impl ExtractionLog {
                 self.total = c[1].parse().ok();
             }
             if let Some(c) = PROGRESS.captures(line) {
+                self.last_activity =
+                    Some(format!("正在提取视频 {}/{}：{}", &c[1], &c[2], c[3].trim()));
                 if let Ok(n) = c[1].parse() {
                     self.processed.insert(n);
                 }
@@ -386,7 +389,10 @@ async fn run_native(
                     .update(
                         start + ((end - start) as f64 * progress.clamp(0.0, 100.0) / 100.0) as u64,
                         "神医提取",
-                        &format!("神医提取进度 {progress:.1}%"),
+                        &trace
+                            .last_activity
+                            .clone()
+                            .unwrap_or_else(|| format!("神医提取进度 {progress:.1}%")),
                     )
                     .await;
             }
@@ -413,7 +419,10 @@ async fn item(state: &AppState, id: &str) -> Result<Value> {
         "Items",
         &[
             ("Ids", id.into()),
-            ("Fields", "Path,Chapters,MediaSources,Tags,ParentId".into()),
+            (
+                "Fields",
+                "Name,Path,Chapters,MediaSources,Tags,ParentId".into(),
+            ),
         ],
     )
     .await?;
@@ -456,7 +465,10 @@ async fn targets(
             &[
                 ("Path", path.clone()),
                 ("Recursive", "true".into()),
-                ("Fields", "Path,Chapters,MediaSources,Tags,ParentId".into()),
+                (
+                    "Fields",
+                    "Name,Path,Chapters,MediaSources,Tags,ParentId".into(),
+                ),
             ],
         )
         .await?;
@@ -493,11 +505,26 @@ async fn targets(
 }
 async fn remaining(state: &AppState, targets: &Targets, context: &JobContext) -> Result<Targets> {
     let mut result = BTreeMap::new();
-    for (id, (_, options)) in targets {
+    for (id, (before, options)) in targets {
         context.checkpoint().await?;
+        context
+            .activity(
+                "验收缩略图",
+                &format!(
+                    "正在验收《{}》：{}（Item {id}）",
+                    string(before, "Name"),
+                    string(before, "Path")
+                ),
+            )
+            .await;
         let item = item(state, id).await?;
         if missing(state, &item, options).await? {
             result.insert(id.clone(), (item, options.clone()));
+        } else {
+            tracing::info!(
+                "[缩略图修复] {}（Item {id}）章节图或 BIF 已齐全",
+                string(&item, "Path")
+            );
         }
     }
     Ok(result)
@@ -628,7 +655,13 @@ async fn fallback(
             .update(
                 55 + 10 * (index + 1) as u64 / targets.len() as u64,
                 "检查失败原因",
-                &format!("检查失败文件：{}", string(item, "Path")),
+                &format!(
+                    "检查失败文件 {}/{}：《{}》 · {}",
+                    index + 1,
+                    targets.len(),
+                    string(item, "Name"),
+                    string(item, "Path")
+                ),
             )
             .await;
         let result = async {
@@ -665,9 +698,28 @@ async fn fallback(
         .await;
         context.checkpoint().await?;
         match result {
-            Ok(Some(rule)) => rules.push(rule),
-            Ok(None) => tracing::warn!("未找到可自动修复的原因：{}", string(item, "Path")),
-            Err(error) => tracing::warn!("无法验证缩略图失败原因：{}", error.1),
+            Ok(Some(rule)) => {
+                let reasons = [
+                    ("ignore_editlist", "忽略零时长 MP4 edit list"),
+                    ("clamp_end", "末尾章节取帧前移 1 秒"),
+                ]
+                .into_iter()
+                .filter(|(key, _)| rule[*key] == true)
+                .map(|(_, reason)| reason)
+                .collect::<Vec<_>>()
+                .join("、");
+                tracing::info!("[缩略图修复] {}：{reasons}", string(item, "Path"));
+                rules.push(rule);
+            }
+            Ok(None) => tracing::warn!(
+                "[缩略图修复] 未找到可自动修复的原因：{}",
+                string(item, "Path")
+            ),
+            Err(error) => tracing::warn!(
+                "[缩略图修复] 无法验证 {}：{}",
+                string(item, "Path"),
+                error.1
+            ),
         }
     }
     if rules.is_empty() {
@@ -763,6 +815,9 @@ async fn fallback(
     result
 }
 pub async fn repair(state: &AppState, context: &JobContext) -> Result<Value> {
+    context
+        .update(0, "神医提取", "检查配置并启动神医提取")
+        .await;
     let config = crate::strm::config(state).await?;
     if config["PersistMediaInfoMode"] == "Restore" {
         return Err(ApiError::bad(
@@ -805,6 +860,29 @@ pub async fn repair(state: &AppState, context: &JobContext) -> Result<Value> {
         tracing::warn!("自定义编码器补图未完成：{}", error.1);
     }
     let remaining = remaining(state, &targets, context).await?;
+    for (id, (item, options)) in &remaining {
+        let missing = if number(&options["ThumbnailImagesIntervalSeconds"]) > 0.0 {
+            "BIF"
+        } else {
+            "章节图"
+        };
+        tracing::error!(
+            "[缩略图修复] 仍缺少{missing}：{}（Item {id}）",
+            string(item, "Path")
+        );
+    }
+    context
+        .update(
+            100,
+            "验收",
+            &format!(
+                "缩略图修复完成：本次 {} 个文件，已完成 {} 个，仍缺失 {} 个",
+                paths.len(),
+                paths.len().saturating_sub(remaining.len()),
+                remaining.len()
+            ),
+        )
+        .await;
     Ok(
         json!({"repaired":paths.len().saturating_sub(remaining.len()),"failed":remaining.len(),"message":format!("缩略图修复完成：本次{}个文件，仍缺失{}个",paths.len(),remaining.len())}),
     )

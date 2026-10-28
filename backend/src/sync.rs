@@ -52,12 +52,12 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
         return Ok(json!({"updated":0,"message":"没有需要处理的媒体库"}));
     }
     tracing::info!(
-        libraries = libraries.len(),
-        full,
-        "[同步媒体] 开始扫描媒体库与缓存差异"
+        "[同步媒体] 开始{}同步，扫描 {} 个处理媒体库",
+        if full { "全量" } else { "增量" },
+        libraries.len()
     );
     context
-        .update(0, "建立差异基准", "读取在线版本和作品绑定")
+        .update(0, "阶段1/3：建立差异基准", "读取在线版本和作品绑定")
         .await;
     let rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m")
         .fetch_all(&state.db)
@@ -66,6 +66,7 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
     let mut online = HashSet::new();
     let mut top_online = HashSet::new();
     let mut top_ids: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    let mut work_titles = HashMap::new();
     for row in &rows {
         let ids = list(&row["emby_item_ids_json"])
             .iter()
@@ -80,6 +81,7 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
             }
         }
         if matches!(work.1.as_str(), "Movie" | "Series") {
+            work_titles.insert(work.clone(), string(row, "title"));
             top_ids.entry(work.clone()).or_default().extend(ids.clone());
         }
         if work.1 == "Series" {
@@ -91,13 +93,15 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
     let mut scanned = vec![];
     let mut parents = HashMap::new();
     let mut source_libraries = HashMap::new();
+    context
+        .update(10, "阶段2/3：扫描Emby", "正在扫描 Emby 并计算媒体差异")
+        .await;
     for library in &libraries {
         context.checkpoint().await?;
         let items = emby::items(state, library, FIELDS, context).await?;
         tracing::info!(
-            library_id = library,
-            items = items.len(),
-            "[同步媒体] 媒体库扫描完成"
+            "[同步媒体] 媒体库 {library} 扫描完成，读取 {} 个项目",
+            items.len()
         );
         for item in &items {
             let id = string(item, "Id");
@@ -108,6 +112,9 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
             if let Some(work) = key(item)
                 && matches!(work.1.as_str(), "Movie" | "Series")
             {
+                if !string(item, "Name").is_empty() {
+                    work_titles.insert(work.clone(), string(item, "Name"));
+                }
                 top_ids.entry(work.clone()).or_default().insert(id.clone());
                 if work.1 == "Series" {
                     series.insert(id, work.0);
@@ -273,11 +280,16 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
             state.item_delay(context).await?;
         }
         context.checkpoint().await?;
+        let title = work_titles
+            .get(&work)
+            .cloned()
+            .filter(|title| !title.is_empty())
+            .unwrap_or_else(|| format!("未命名媒体（TMDb {}）", work.0));
         context
             .update(
                 20 + (index as u64 * 80 / total.max(1) as u64),
-                "同步元数据",
-                &format!("{} {}/{}", work.0, index + 1, total),
+                "阶段3/3：同步元数据",
+                &format!("正在同步《{title}》 · {}/{}", index + 1, total),
             )
             .await;
         let ids = top_ids.get(&work).cloned().unwrap_or_default();
@@ -315,6 +327,10 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
                                 }
                             }
                             Err(error) => {
+                                tracing::warn!(
+                                    "[同步媒体] 《{title}》读取分集失败（Item {id}）：{}",
+                                    error.1
+                                );
                                 failures.push(format!("{id}: {}", error.1));
                                 continue;
                             }
@@ -323,11 +339,21 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
                     tops.push(top);
                 }
                 Ok(_) => {}
-                Err(error) => failures.push(format!("{id}: {}", error.1)),
+                Err(error) => {
+                    tracing::warn!(
+                        "[同步媒体] 《{title}》读取媒体失败（Item {id}）：{}",
+                        error.1
+                    );
+                    failures.push(format!("{id}: {}", error.1));
+                }
             }
         }
         if tops.is_empty() {
+            tracing::info!("[同步媒体] 跳过《{title}》：未取得可处理的在库版本");
             continue;
+        }
+        if work.1 == "Series" && !numbers.is_empty() {
+            tracing::info!("[同步按季刮削] 《{title}》本次仅聚合第 {:?} 季", numbers);
         }
         let data = if work.1 == "Movie" {
             tmdb::details(state, "Movie", &work.0).await
@@ -336,7 +362,13 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
         } else {
             tmdb::aggregate(state, &work.0, &numbers).await
         };
-        let mut data = data.unwrap_or_else(|_| json!({}));
+        let mut data = data.unwrap_or_else(|error| {
+            tracing::warn!(
+                "[同步媒体] 《{title}》读取 TMDb 元数据失败，使用现有媒体信息：{}",
+                error.1
+            );
+            json!({})
+        });
         if config["ai_translate_on_sync"] == true {
             let mut pruned = data.clone();
             crate::translation::prune(&work.1, &mut pruned);
@@ -354,8 +386,14 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
         )
         .await;
         match metadata::upsert(state, &mut records, true).await {
-            Ok(()) => updated += records.len(),
-            Err(error) => failures.push(format!("{}: {}", work.0, error.1)),
+            Ok(()) => {
+                updated += records.len();
+                tracing::info!("[同步媒体] 《{title}》已写入 {} 个媒体项", records.len());
+            }
+            Err(error) => {
+                tracing::warn!("[同步媒体] 《{title}》写入失败：{}", error.1);
+                failures.push(format!("{}: {}", work.0, error.1));
+            }
         }
     }
     let fingerprints = if fingerprint_ids.is_empty() {
@@ -371,14 +409,14 @@ pub async fn cache(state: &AppState, full: bool, context: &JobContext) -> Result
     sqlx::query("DELETE FROM media_metadata WHERE in_library=false AND tmdb_id LIKE '%-%'")
         .execute(&state.db)
         .await?;
-    tracing::info!(
-        updated,
-        offline,
-        failures = failures.len(),
-        "[同步媒体] 版本绑定、元数据与指纹处理结束"
+    let message = format!(
+        "同步完成！新增/更新 {updated} 个媒体项，标记离线 {offline} 个，元数据失败 {} 项，指纹未完成 {} 项。",
+        failures.len(),
+        fingerprints["failed"].as_u64().unwrap_or(0)
     );
+    tracing::info!("[同步媒体] {message}");
     Ok(
-        json!({"updated":updated,"offline":offline,"failures":failures,"failed":fingerprints["failed"].as_u64().unwrap_or(0),"fingerprints":fingerprints,"message":format!("同步完成！新增/更新: {updated} 个媒体项, 标记离线: {offline} 个媒体项。") }),
+        json!({"updated":updated,"offline":offline,"failures":failures,"failed":fingerprints["failed"].as_u64().unwrap_or(0),"fingerprints":fingerprints,"message":message}),
     )
 }
 fn merge_translations(data: &mut Value, translated: Value) {

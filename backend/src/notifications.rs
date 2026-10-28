@@ -262,10 +262,10 @@ pub async fn media(
     }
     let image: Option<String> = sqlx::query_scalar("SELECT COALESCE(NULLIF(m.backdrop_path,''),NULLIF(m.poster_path,''),CASE WHEN m.item_type='Episode' THEN COALESCE(NULLIF(p.backdrop_path,''),NULLIF(p.poster_path,'')) END) FROM media_metadata m LEFT JOIN media_metadata p ON m.parent_series_tmdb_id=p.tmdb_id AND p.item_type='Series' WHERE m.emby_item_ids_json @> $1 LIMIT 1")
         .bind(json!([string(item,"Id")])).fetch_optional(&state.db).await
-        .unwrap_or_else(|error| { tracing::warn!("[通知] 读取通知图片失败：{error}"); None }).flatten();
+        .unwrap_or_else(|error| { tracing::warn!("[通知] 《{title}》读取通知图片失败：{error}"); None }).flatten();
     let mut targets = sqlx::query_scalar::<_,Option<String>>("SELECT e.telegram_chat_id FROM emby_users u JOIN emby_users_extended e ON u.id=e.emby_user_id WHERE u.is_administrator=true AND e.telegram_chat_id IS NOT NULL")
         .fetch_all(&state.db).await
-        .unwrap_or_else(|error| { tracing::warn!("[通知] 读取管理员接收列表失败：{error}"); vec![] })
+        .unwrap_or_else(|error| { tracing::warn!("[通知] 《{title}》读取管理员接收列表失败：{error}"); vec![] })
         .into_iter().flatten().collect::<BTreeSet<_>>();
     let channel = string(&config, "telegram_channel_id");
     if !channel.is_empty() {
@@ -276,7 +276,7 @@ pub async fn media(
         if target.is_empty() {
             continue;
         }
-        tracing::info!(item_id = %string(item, "Id"), "[通知] 开始发送入库结果");
+        tracing::info!(item_id = %string(item, "Id"), "[通知] 开始发送《{title}》入库结果");
         let target = if target.starts_with("https://t.me/") {
             format!("@{}", target.rsplit('/').next().unwrap_or(""))
         } else {
@@ -294,14 +294,16 @@ pub async fn media(
             )
         };
         match send(state, &token, method, &payload).await {
-            Ok(()) => tracing::info!(item_id = %string(item, "Id"), "[通知] 入库结果已发送"),
+            Ok(()) => {
+                tracing::info!(item_id = %string(item, "Id"), "[通知] 《{title}》入库结果已发送")
+            }
             Err(error) => {
-                tracing::warn!(item_id = %string(item, "Id"), target, "[通知] 入库结果发送失败：{}", error.1)
+                tracing::warn!(item_id = %string(item, "Id"), target, "[通知] 《{title}》入库结果发送失败：{}", error.1)
             }
         }
         for page in &pages {
             if let Err(error) = send(state, &token, "sendMessage", &json!({"chat_id":target,"text":page,"parse_mode":"MarkdownV2","disable_web_page_preview":true,"disable_notification":false})).await {
-                tracing::warn!(item_id = %string(item, "Id"), target, "[通知] 后续消息发送失败：{}", error.1);
+                tracing::warn!(item_id = %string(item, "Id"), target, "[通知] 《{title}》后续消息发送失败：{}", error.1);
             }
         }
     }

@@ -948,7 +948,7 @@ pub async fn sidecar_moves(
             });
             moves.push((nfos.remove(0).0, destination));
         } else {
-            tracing::warn!("短文件名NFO内容不同，跳过自动恢复");
+            tracing::warn!("短文件名NFO内容不同，跳过自动恢复：{}", target.display());
         }
     }
     Ok(moves)

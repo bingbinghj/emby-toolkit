@@ -58,7 +58,7 @@ pub async fn overview_fallback(
         };
         if let Some(cached) = cached.filter(|text| text.contains("【老六占位简介】")) {
             node["overview"] = json!(cached);
-            tracing::debug!("占位简介缓存继承：TMDb {series_id}，目标 {key}");
+            tracing::debug!("占位简介缓存继承：《{title}》，TMDb {series_id}，目标 {key}");
             filled.insert(key);
         } else {
             missing.insert(
@@ -74,7 +74,7 @@ pub async fn overview_fallback(
     }
     if !missing.is_empty() {
         tracing::info!(
-            "占位简介生成开始：TMDb {series_id}，缺失简介 {} 处",
+            "占位简介生成开始：《{title}》，TMDb {series_id}，缺失简介 {} 处",
             missing.len()
         );
         let generated = ai::translate(
@@ -90,7 +90,7 @@ pub async fn overview_fallback(
             filled.insert(key);
         }
         tracing::info!(
-            "占位简介处理结束：TMDb {series_id}，填充或继承 {} 处",
+            "占位简介处理结束：《{title}》，TMDb {series_id}，填充或继承 {} 处",
             filled.len()
         );
     }
@@ -240,27 +240,37 @@ pub async fn metadata_tree(
                 "tagline",
             ),
         ] {
+            let field_name = match field {
+                "title" | "name" => "标题",
+                "overview" => "简介",
+                "tagline" => "标语",
+                _ => field,
+            };
             if !enabled {
                 continue;
             }
             let current = string(node, field);
             if chinese(&current) || (purpose == "title" && current.is_empty()) {
                 tracing::debug!(
-                    "元数据字段翻译跳过：类型 {kind}，TMDb {id}，字段 {field} 已有中文或空标题"
+                    "元数据字段翻译跳过：作品 {item_name}，类型 {kind}，TMDb {id}，字段 {field_name} 已有中文或空标题"
                 );
                 continue;
             }
             let stored = string(&local, if purpose == "title" { "title" } else { field });
             if chinese(&stored) {
                 node[field] = json!(stored);
-                tracing::debug!("元数据字段翻译缓存命中：类型 {kind}，TMDb {id}，字段 {field}");
+                tracing::debug!(
+                    "元数据字段翻译缓存命中：作品 {item_name}，类型 {kind}，TMDb {id}，字段 {field_name}"
+                );
                 continue;
             }
             if current.is_empty()
                 && matches!(kind.as_str(), "Movie" | "Series")
                 && purpose != "title"
             {
-                tracing::info!("元数据翻译英文源补抓开始：类型 {kind}，TMDb {id}，字段 {field}");
+                tracing::info!(
+                    "元数据翻译英文源补抓开始：作品 {item_name}，类型 {kind}，TMDb {id}，字段 {field_name}"
+                );
                 let endpoint = format!("/{}/{id}", if kind == "Movie" { "movie" } else { "tv" });
                 if let Ok(english) =
                     crate::tmdb::get(state, &endpoint, &[("language", "en-US".into())]).await
@@ -374,8 +384,9 @@ pub async fn metadata_tree(
         let Some(fields) = fields.get(purpose) else {
             continue;
         };
+        let purpose_name = ai::purpose_label(purpose);
         tracing::info!(
-            "元数据字段翻译开始：名称 {item_name}，用途 {purpose}，条目 {} 个",
+            "元数据字段翻译开始：名称 {item_name}，用途 {purpose_name}，条目 {} 个",
             fields.len()
         );
         let inputs = fields
@@ -400,7 +411,7 @@ pub async fn metadata_tree(
         )
         .await?;
         tracing::info!(
-            "元数据字段翻译返回：名称 {item_name}，用途 {purpose}，可用结果 {} 个",
+            "元数据字段翻译返回：名称 {item_name}，用途 {purpose_name}，可用结果 {} 个",
             output.len()
         );
         for (id, value) in output {
@@ -419,6 +430,7 @@ pub async fn metadata_tree(
         context: &Value,
         actors: &Value,
     ) -> Result<BTreeMap<String, String>> {
+        let purpose_name = ai::purpose_label(purpose);
         let mut output = BTreeMap::new();
         let mut missing = BTreeMap::new();
         for (id, source) in inputs {
@@ -441,7 +453,7 @@ pub async fn metadata_tree(
         }
         if !inputs.is_empty() {
             tracing::info!(
-                "人物翻译缓存检查完成：用途 {purpose}，命中 {} 个，待请求 {} 个",
+                "人物翻译缓存检查完成：用途 {purpose_name}，命中 {} 个，待请求 {} 个",
                 output.len(),
                 missing.len()
             );
@@ -465,12 +477,12 @@ pub async fn metadata_tree(
             }
             if !translated.is_empty() {
                 tracing::info!(
-                    "人物翻译缓存写入完成：用途 {purpose}，条目 {} 个",
+                    "人物翻译缓存写入完成：用途 {purpose_name}，条目 {} 个",
                     translated.len()
                 );
             }
         } else if !translated.is_empty() {
-            tracing::debug!("人物翻译缓存写入跳过：用途 {purpose}，质量模式或缓存版本已变化");
+            tracing::debug!("人物翻译缓存写入跳过：用途 {purpose_name}，质量模式或缓存版本已变化");
         }
         output.extend(translated);
         Ok(output)

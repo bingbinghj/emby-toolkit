@@ -23,6 +23,96 @@ use tracing_subscriber::{
 };
 
 pub struct LogFormat;
+#[derive(Default)]
+struct LogFields {
+    message: String,
+    details: Vec<String>,
+}
+impl LogFields {
+    fn push(&mut self, field: &tracing::field::Field, value: String) {
+        if field.name() == "message" {
+            self.message = value;
+            return;
+        }
+        let redacted = redact(&format!("{}={value}", field.name()));
+        let value = redacted
+            .split_once('=')
+            .map_or(value.as_str(), |(_, value)| value);
+        let label = match field.name() {
+            "task_id" => "任务ID",
+            "item_id" | "original_id" => "Emby ID",
+            "refresh_id" => "刷新ID",
+            "tmdb_id" => "TMDb ID",
+            "douban_id" => "豆瓣ID",
+            "user_id" => "用户ID",
+            "name" => "名称",
+            "kind" => "类型",
+            "error" => "错误",
+            "reason" => "原因",
+            "file" | "path" => "路径",
+            "root" => "根目录",
+            "target" => "目标",
+            "query" => "关键词",
+            "people" | "actors" => "人物数",
+            "versions" => "版本数",
+            "added" => "新增人数",
+            "photos" => "头像数",
+            "watched" => "监控目录数",
+            "targets" => "目标数",
+            "restored" => "已还原",
+            "skipped_tracks" => "跳过轨道数",
+            "written" => "NFO写入",
+            "count" | "total" | "total_items" | "items" => "数量",
+            "requested" => "待处理",
+            "translated" => "已翻译",
+            "failures" => "失败数",
+            "matched" => "匹配数",
+            "libraries" => "媒体库数",
+            "library_id" => "媒体库ID",
+            "container" => "容器",
+            "provider" => "来源",
+            "result" => "结果",
+            "progress" => "进度",
+            "phase" => "阶段",
+            "state" => "状态",
+            "summary" => "查询摘要",
+            "db.statement" => "SQL",
+            "rows_affected" => "影响行数",
+            "rows_returned" => "返回行数",
+            "elapsed" => "耗时",
+            "elapsed_secs" => return,
+            "slow_threshold" => "告警阈值",
+            name => name,
+        };
+        self.details
+            .push(format!("{label}：{}", value.replace(['\r', '\n'], " ")));
+    }
+    fn body(mut self) -> String {
+        if self.message == "slow statement: execution time exceeded alert threshold" {
+            self.message = "数据库查询较慢，超过告警阈值".into();
+        }
+        if !self.details.is_empty() {
+            self.message.push_str(" · ");
+            self.message.push_str(&self.details.join("，"));
+        }
+        self.message
+    }
+}
+impl tracing::field::Visit for LogFields {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        let value = format!("{value:?}");
+        self.push(
+            field,
+            serde_json::from_str::<String>(&value).unwrap_or(value),
+        );
+    }
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.push(field, value.into());
+    }
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        self.push(field, if value { "是" } else { "否" }.into());
+    }
+}
 impl<S, N> FormatEvent<S, N> for LogFormat
 where
     S: tracing::Subscriber + for<'a> LookupSpan<'a>,
@@ -30,7 +120,7 @@ where
 {
     fn format_event(
         &self,
-        ctx: &FmtContext<'_, S, N>,
+        _ctx: &FmtContext<'_, S, N>,
         mut writer: Writer<'_>,
         event: &tracing::Event<'_>,
     ) -> std::fmt::Result {
@@ -46,8 +136,16 @@ where
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S,%3f"),
             metadata.target()
         )?;
-        ctx.field_format().format_fields(writer.by_ref(), event)?;
-        writeln!(writer)
+        let mut fields = LogFields::default();
+        event.record(&mut fields);
+        let body = redact(&fields.body());
+        if *metadata.level() <= tracing::Level::INFO
+            && metadata.target().starts_with("emby_toolkit::")
+            && metadata.target() != "emby_toolkit::jobs"
+        {
+            crate::jobs::record_activity(&body);
+        }
+        writeln!(writer, "{body}")
     }
 }
 

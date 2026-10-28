@@ -319,11 +319,29 @@ async fn management(
             continue;
         }
         state.p115.rate_limit(state).await;
-        tracing::debug!(
-            "115 管理请求开始：接口 {}，路径 {}",
-            if use_open { "OpenAPI" } else { "Cookie" },
-            if use_open { open_path } else { cookie_path }
-        );
+        let path = if use_open { open_path } else { cookie_path };
+        let api = if use_open { "OpenAPI" } else { "Cookie" };
+        let fields = if use_open {
+            &open_fields
+        } else {
+            &cookie_fields
+        };
+        let target = fields
+            .iter()
+            .filter_map(|(key, value)| {
+                let label = match key.as_str() {
+                    "cid" | "pid" => "目录ID",
+                    "file_id" | "fid" | "fid[0]" => "文件ID",
+                    "offset" => "分页偏移",
+                    "limit" => "分页数量",
+                    "search_value" => "搜索词",
+                    _ => return None,
+                };
+                Some(format!("{label}={value}"))
+            })
+            .collect::<Vec<_>>()
+            .join("，");
+        tracing::debug!("[115] 正在请求 {api} {path}：{target}");
         let result: Result<Value> = if use_open && !string(&auth, "access_token").is_empty() {
             let fields = open_fields
                 .iter()
@@ -370,21 +388,29 @@ async fn management(
         match result {
             Ok(response) if success(&response) || missing(&response) => {
                 tracing::debug!(
-                    "115 管理请求结束：接口 {}，路径 {}，成功 {}，目标不存在 {}",
-                    if use_open { "OpenAPI" } else { "Cookie" },
-                    if use_open { open_path } else { cookie_path },
-                    success(&response),
-                    missing(&response)
+                    "[115] {api} {path} 请求结束：{}；{target}",
+                    if missing(&response) {
+                        "目标文件不存在或已删除"
+                    } else {
+                        "成功"
+                    }
                 );
                 return Ok(response);
             }
             Ok(response) => {
+                tracing::warn!(
+                    "[115] {api} {path} 返回失败：错误码 {}，{}；{target}，尝试备用凭证",
+                    text(&response, &["errno", "code"]),
+                    text(&response, &["message", "error_msg", "msg", "error"])
+                );
                 last = Some(Ok(response));
-                tracing::warn!("115 管理接口返回失败，尝试备用凭证");
             }
             Err(error) => {
+                tracing::warn!(
+                    "[115] {api} {path} 请求失败：{}；{target}，尝试备用凭证",
+                    error.1
+                );
                 last = Some(Err(error));
-                tracing::warn!("115 管理接口请求失败，尝试备用凭证");
             }
         }
         tokio::time::sleep(Duration::from_millis(300)).await;

@@ -355,17 +355,17 @@ impl Changes {
     async fn rollback(&self, state: &AppState) {
         for (id, name) in self.cloud.iter().rev() {
             if let Err(error) = crate::p115::rename(state, id, name).await {
-                tracing::error!("115改名回滚失败: {}", error.1);
+                tracing::error!("115改名回滚失败：目标名称 {name}，文件 {id}，{}", error.1);
             }
         }
         for (path, bytes) in self.contents.iter().rev() {
             if let Err(error) = tokio::fs::write(path, bytes).await {
-                tracing::error!(%error,"内容回滚失败");
+                tracing::error!(%error,"文件内容回滚失败：{}", path.display());
             }
         }
         for (old, new) in self.moves.iter().rev() {
             if let Err(error) = tokio::fs::rename(new, old).await {
-                tracing::error!(%error,"文件改名回滚失败");
+                tracing::error!(%error,"文件改名回滚失败：{} → {}", new.display(), old.display());
             }
         }
     }

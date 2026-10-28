@@ -35,8 +35,18 @@ async fn write(
     replace_children: bool,
 ) -> Result<()> {
     tracing::info!(
-        "元数据库写入开始：记录 {} 条，保留顶层标题 {preserve_top_title}，迁移子项绑定 {replace_children}",
-        records.len()
+        "元数据库写入开始：记录 {} 条，顶层标题处理 {}，子项绑定处理 {}",
+        records.len(),
+        if preserve_top_title {
+            "保留现有标题"
+        } else {
+            "同步本次标题"
+        },
+        if replace_children {
+            "迁移旧绑定"
+        } else {
+            "保留其他子项绑定"
+        }
     );
     let record_count = records.len();
     let mut transaction = state.db.begin().await?;
@@ -53,12 +63,13 @@ async fn write(
     for record in records.iter_mut() {
         let kind = string(record, "item_type");
         let id = string(record, "tmdb_id");
+        let media_name = string(record, "title");
         let numeric = !id.is_empty()
             && id.bytes().all(|b| b.is_ascii_digit())
             && id.bytes().any(|b| b != b'0');
         let valid = numeric || (matches!(kind.as_str(), "Season" | "Episode") && id.contains('-'));
         if !valid || !matches!(kind.as_str(), "Movie" | "Series" | "Season" | "Episode") {
-            tracing::warn!("元数据库记录拒绝：类型 {kind}，TMDb {id} 无效");
+            tracing::warn!("元数据库记录拒绝：《{media_name}》，类型 {kind}，TMDb {id} 无效");
             return Err(ApiError::bad("媒体记录缺少合法的类型和 TMDb ID"));
         }
         let fields = record
@@ -130,6 +141,7 @@ async fn write(
     for record in records {
         let id = string(record, "tmdb_id");
         let kind = string(record, "item_type");
+        let media_name = string(record, "title");
         let old: Option<Value> = sqlx::query_scalar(
             "SELECT to_jsonb(m) FROM media_metadata m WHERE tmdb_id=$1 AND item_type=$2 FOR UPDATE",
         )
@@ -182,8 +194,10 @@ async fn write(
             .bind(&*record)
             .execute(&mut *transaction)
             .await
-            .inspect_err(|_| tracing::error!("元数据库记录写入失败：类型 {kind}，TMDb {id}"))?;
-        tracing::debug!("元数据库记录已写入事务：类型 {kind}，TMDb {id}");
+            .inspect_err(|_| {
+                tracing::error!("元数据库记录写入失败：《{media_name}》，类型 {kind}，TMDb {id}")
+            })?;
+        tracing::debug!("元数据库记录已写入事务：《{media_name}》，类型 {kind}，TMDb {id}");
     }
     transaction
         .commit()
@@ -383,6 +397,7 @@ pub async fn reconstruct_full(
         tracing::info!("元数据缓存未命中：类型 {kind}，TMDb {id}，缺少主记录");
         return Ok(None);
     };
+    let media_name = string(&top, "title");
     let children: Vec<Value> = if kind == "Series" {
         sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE parent_series_tmdb_id=$1 AND item_type IN ('Season','Episode') ORDER BY season_number,episode_number,tmdb_id").bind(id).fetch_all(&state.db).await?
     } else {
@@ -414,7 +429,9 @@ pub async fn reconstruct_full(
     };
     let cast = expand(&top);
     if cast.is_empty() && !allow_empty_cast {
-        tracing::info!("元数据缓存不可复用：类型 {kind}，TMDb {id}，缺少演员缓存");
+        tracing::info!(
+            "元数据缓存不可复用：《{media_name}》，类型 {kind}，TMDb {id}，缺少演员缓存"
+        );
         return Ok(None);
     }
     let mut payload = reconstruct(&top);
@@ -449,7 +466,7 @@ pub async fn reconstruct_full(
         }
     }
     tracing::info!(
-        "元数据缓存恢复完成：类型 {kind}，TMDb {id}，演员 {} 位，季 {} 个，分集 {} 个",
+        "元数据缓存恢复完成：《{media_name}》，类型 {kind}，TMDb {id}，演员 {} 位，季 {} 个，分集 {} 个",
         cast.len(),
         list(&payload["seasons_details"]).len(),
         payload["episodes_details"]

@@ -297,6 +297,9 @@ fn removed_are_cores(info: &Value, report: &Value) -> bool {
         })
 }
 pub async fn repair_all(state: &AppState, context: &JobContext) -> Result<Value> {
+    context
+        .activity("扫描高清音轨", "正在扫描媒体库中的高清音轨兼容核心结构")
+        .await;
     let user = string(&*state.config.read().await, "emby_user_id");
     if user.is_empty() {
         return Err(ApiError::bad("未配置 Emby 用户 ID"));
@@ -323,6 +326,15 @@ pub async fn repair_all(state: &AppState, context: &JobContext) -> Result<Value>
         if crate::emby::library_ignored(&*state.config.read().await, &library_id) {
             continue;
         }
+        context
+            .activity(
+                "扫描高清音轨",
+                &format!(
+                    "正在扫描媒体库《{}》，已读取 {scanned} 个媒体项",
+                    string(library, "Name")
+                ),
+            )
+            .await;
         let items = crate::emby::query_items(
             state,
             &[
@@ -375,10 +387,21 @@ pub async fn repair(state: &AppState, ids: &[String], context: &JobContext) -> R
     let batch = backup_root(state)
         .await?
         .join(chrono::Local::now().format("%Y%m%d-%H%M%S").to_string());
-    for id in ids {
+    for (index, id) in ids.iter().enumerate() {
         context.checkpoint().await?;
+        let mut label = format!("Item {id}");
+        context
+            .update_counted(
+                index as u64,
+                ids.len() as u64,
+                "音轨纠正",
+                &format!("正在读取第 {} 个媒体的音轨信息（Item {id}）", index + 1),
+            )
+            .await;
         let outcome=async{
-            let item=media_edit::details(state,id,"Path,MediaSources,MediaStreams,PartCount,ExtraType").await?;
+            let item=media_edit::details(state,id,"Name,Path,MediaSources,MediaStreams,PartCount,ExtraType").await?;
+            label=format!("《{}》 · {}（Item {id}）", string(&item,"Name"), string(&item,"Path").replace('\\',"/").rsplit('/').next().unwrap_or(""));
+            context.activity("分析音轨", &format!("正在核对 {label} 的高清音轨与兼容核心")).await;
             if crate::emby::path_ignored(state,&string(&item,"Path")).await?{return Ok(("skipped",json!({"item_id":id,"reason":"忽略媒体库"})));}
             if item["PartCount"].as_u64().unwrap_or(0)>1||!string(&item,"ExtraType").is_empty(){return Ok(("skipped",json!({"item_id":id,"reason":"分段或附加内容"})));}
             let target=media_edit::repair_target(state,id).await?;
@@ -418,6 +441,14 @@ pub async fn repair(state: &AppState, ids: &[String], context: &JobContext) -> R
         }.await;
         match outcome {
             Ok((kind, item)) => {
+                if kind == "repaired" {
+                    tracing::info!(
+                        "[音轨纠正] {label} 已纠正 {} 组兼容核心错位",
+                        item["pair_count"].as_u64().unwrap_or(0)
+                    );
+                } else {
+                    tracing::warn!("[音轨纠正] 跳过 {label}：{}", string(&item, "reason"));
+                }
                 let key = match kind {
                     "repaired" => "repaired_items",
                     "ambiguous" => "ambiguous_items",
@@ -429,7 +460,9 @@ pub async fn repair(state: &AppState, ids: &[String], context: &JobContext) -> R
                     result["candidates"] = json!(result["candidates"].as_u64().unwrap() + 1);
                 }
             }
+            Err(error) if context.is_cancelled() => return Err(error),
             Err(error) => {
+                tracing::error!("[音轨纠正] {label} 失败：{}", error.1);
                 result["failed"] = json!(result["failed"].as_u64().unwrap() + 1);
                 result["failed_items"]
                     .as_array_mut()
@@ -438,10 +471,19 @@ pub async fn repair(state: &AppState, ids: &[String], context: &JobContext) -> R
             }
         }
     }
+    context.checkpoint().await?;
     result["message"] = json!(format!(
         "高清音轨纠正完成：成功 {}，歧义 {}，失败 {}",
         result["repaired"], result["ambiguous"], result["failed"]
     ));
+    context
+        .update_counted(
+            ids.len() as u64,
+            ids.len() as u64,
+            "音轨纠正",
+            &string(&result, "message"),
+        )
+        .await;
     let reports = state.data_dir.join("reports/truehd-core-repair");
     tokio::fs::create_dir_all(&reports).await?;
     let path = reports.join(format!(
@@ -552,6 +594,9 @@ pub async fn clear(state: &AppState, context: &JobContext) -> Result<Value> {
     Ok(json!({"message":message,"deleted_files":deleted_files,"deleted_reports":deleted_reports}))
 }
 pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
+    context
+        .activity("读取音轨备份", "正在检查音轨纠正任务生成的备份")
+        .await;
     let root =
         tokio::fs::canonicalize(string(&*state.config.read().await, "local_strm_root")).await?;
     if protected(&root) {
@@ -607,13 +652,28 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
     let mut skipped = 0;
     let mut processed = HashSet::new();
     let mut failures = vec![];
-    for (_, entry) in selected.values() {
+    for (index, (_, entry)) in selected.values().enumerate() {
         context.checkpoint().await?;
         let id = string(entry, "id");
         if processed.contains(&id) {
             continue;
         }
         let target = media_edit::repair_target(state, &id).await?;
+        let label = target
+            .path
+            .replace('\\', "/")
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        context
+            .update_counted(
+                index as u64,
+                selected.len() as u64,
+                "还原音轨备份",
+                &format!("正在检查 {label}（Item {id}）的关联版本备份"),
+            )
+            .await;
         if crate::emby::path_ignored(state, &target.path).await? {
             continue;
         }
@@ -646,11 +706,15 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
         }
         if !complete {
             skipped += 1;
+            tracing::warn!(
+                "[音轨备份还原] 跳过 {label}（Item {id}）：关联版本备份不完整或路径不可写"
+            );
             continue;
         }
         processed.extend(members.iter().map(|(id, _, _, _)| id.clone()));
         if members.iter().all(|(_, _, old, backup)| old == backup) {
             unchanged += members.len();
+            tracing::info!("[音轨备份还原] {label}（Item {id}）已与备份一致，无需还原");
             continue;
         }
         let rebuilt = members
@@ -717,6 +781,10 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
         .await;
         match result {
             Ok(()) => {
+                tracing::info!(
+                    "[音轨备份还原] {label}（Item {id}）已还原 {} 个关联版本",
+                    members.len()
+                );
                 for (_, _, old, backup) in &members {
                     if crate::media_info::container(old) == crate::media_info::container(backup) {
                         unchanged += 1;
@@ -725,11 +793,31 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
                     }
                 }
             }
-            Err(error) => failures.push(format!("{id}: {}", error.1)),
+            Err(error) if context.is_cancelled() => return Err(error),
+            Err(error) => {
+                tracing::error!(
+                    "[音轨备份还原] {label}（Item {id}）还原失败，已尝试恢复任务前状态：{}",
+                    error.1
+                );
+                failures.push(format!("{id}: {}", error.1));
+            }
         }
     }
+    context.checkpoint().await?;
+    let message = format!(
+        "音轨备份还原完成：还原 {updated} 项，已有 {unchanged} 项与备份一致，跳过 {skipped} 项，失败 {} 项",
+        failures.len()
+    );
+    context
+        .update_counted(
+            selected.len() as u64,
+            selected.len() as u64,
+            "还原音轨备份",
+            &message,
+        )
+        .await;
     Ok(
-        json!({"restored":updated,"already_restored":unchanged,"skipped":skipped,"failures":failures,"message":"音轨备份还原完成"}),
+        json!({"restored":updated,"already_restored":unchanged,"skipped":skipped,"failures":failures,"message":message}),
     )
 }
 async fn restore_member(

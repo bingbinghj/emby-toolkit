@@ -439,7 +439,7 @@ async fn edit(State(state): State<AppState>, Path(id): Path<String>) -> Result<J
     let result = edit_data(&state, &id).await;
     match &result {
         Ok(Json(data)) => {
-            tracing::info!(item_id = %id, versions = data["versions"].as_array().map_or(0, Vec::len), "打开音轨字幕编辑页完成")
+            tracing::info!(item_id = %id, versions = data["versions"].as_array().map_or(0, Vec::len), "打开音轨字幕编辑页完成，媒体路径 {}", string(data, "media_path"))
         }
         Err(error) => tracing::warn!(item_id = %id, error = %error.1, "打开音轨字幕编辑页失败"),
     }

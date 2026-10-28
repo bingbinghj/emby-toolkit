@@ -266,9 +266,13 @@ async fn fill_inner(
 fn log_report(report: &Value) {
     for entry in list(&report["pending"]) {
         tracing::warn!(
-            "[语言标题] Item {} {}#{} Language={}：{}",
+            "[语言标题] Item {} {}#{}，语言 {}：{}",
             string(&entry, "item_id"),
-            string(&entry, "type"),
+            match entry["type"].as_str() {
+                Some("Audio") => "音轨",
+                Some("Subtitle") => "字幕",
+                _ => "媒体流",
+            },
             entry["ordinal"].as_u64().unwrap_or(0),
             string(&entry, "language"),
             string(&entry, "reason")

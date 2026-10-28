@@ -133,13 +133,14 @@ pub async fn download(
     aggregate: &Value,
     context: &crate::jobs::JobContext,
 ) -> Result<usize> {
+    let media_name = string(item, "Name");
     tracing::info!(
         "图片资产下载开始：类型 {kind}，TMDb {id}，名称 {}",
         string(item, "Name")
     );
     let raw = string(item, "Path");
     if raw.is_empty() || raw.starts_with("http") {
-        tracing::info!("图片资产下载跳过：TMDb {id}，缺少本地路径");
+        tracing::info!("图片资产下载跳过：《{media_name}》，TMDb {id}，缺少本地路径");
         return Ok(0);
     }
     let path = Path::new(&raw);
@@ -155,7 +156,7 @@ pub async fn download(
         directory
     };
     if !root.is_dir() {
-        tracing::info!("图片资产下载跳过：TMDb {id}，本地目录不存在");
+        tracing::info!("图片资产下载跳过：《{media_name}》，TMDb {id}，本地目录不存在");
         return Ok(0);
     }
     let config = state.config.read().await.clone();
@@ -172,7 +173,7 @@ pub async fn download(
             .unwrap_or("zh")
             == "zh",
     ) {
-        tracing::debug!("图片语言策略查询：TMDb {id}，语言 {languages}");
+        tracing::debug!("图片语言策略查询：《{media_name}》，TMDb {id}，语言 {languages}");
         if let Ok(response) = tmdb::get(
             state,
             &endpoint,
@@ -214,17 +215,26 @@ pub async fn download(
     }
     let mut count = 0;
     let plan = plan(kind, root, &data, aggregate, &files);
-    tracing::info!("图片资产下载计划：TMDb {id}，目标 {} 个", plan.len());
+    tracing::info!(
+        "图片资产下载计划：《{media_name}》，TMDb {id}，目标 {} 个",
+        plan.len()
+    );
     for (path, image) in plan {
         context.checkpoint().await?;
         if tokio::fs::metadata(&path)
             .await
             .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
         {
-            tracing::debug!("图片下载跳过：TMDb {id}，文件 {} 已存在", path.display());
+            tracing::debug!(
+                "图片下载跳过：《{media_name}》，TMDb {id}，文件 {} 已存在",
+                path.display()
+            );
             continue;
         }
-        tracing::debug!("图片下载开始：TMDb {id}，文件 {}", path.display());
+        tracing::debug!(
+            "图片下载开始：《{media_name}》，TMDb {id}，文件 {}",
+            path.display()
+        );
         let result = async {
             let bytes = fetch(state, &image, context).await?;
             context.checkpoint().await?;
@@ -235,14 +245,14 @@ pub async fn download(
         match result {
             Ok(size) => {
                 tracing::debug!(
-                    "图片下载完成：TMDb {id}，文件 {}，{size} 字节",
+                    "图片下载完成：《{media_name}》，TMDb {id}，文件 {}，{size} 字节",
                     path.display()
                 );
                 count += 1;
             }
             Err(error) if context.is_cancelled() => return Err(error),
             Err(error) => tracing::warn!(
-                "图片下载失败：TMDb {id}，文件 {}，{}，继续处理其它图片",
+                "图片下载失败：《{media_name}》，TMDb {id}，文件 {}，{}，继续处理其它图片",
                 path.display(),
                 error.1
             ),
@@ -258,6 +268,6 @@ pub async fn download(
         count += crate::video_images::movie_missing(state, path, root, &movie_data, Some(context))
             .await?;
     }
-    tracing::info!("图片资产下载完成：TMDb {id}，新增 {count} 个");
+    tracing::info!("图片资产下载完成：《{media_name}》，TMDb {id}，新增 {count} 个");
     Ok(count)
 }

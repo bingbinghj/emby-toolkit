@@ -163,6 +163,7 @@ pub async fn sync(
     cast: &[Value],
     options: &Options<'_>,
 ) -> Result<usize> {
+    let media_name = string(item, "Name");
     tracing::info!(
         "NFO 同步开始：类型 {kind}，Emby {}，名称 {}，目标季 {:?}，目标季集 {:?}",
         string(item, "Id"),
@@ -172,7 +173,10 @@ pub async fn sync(
     );
     let raw = string(item, "Path");
     if raw.is_empty() || raw.starts_with("http") {
-        tracing::info!("NFO 同步跳过：Emby {}，缺少本地路径", string(item, "Id"));
+        tracing::info!(
+            "NFO 同步跳过：《{media_name}》，Emby {}，缺少本地路径",
+            string(item, "Id")
+        );
         return Ok(0);
     }
     let path = Path::new(&raw);
@@ -187,7 +191,10 @@ pub async fn sync(
         directory
     };
     if !root.is_dir() {
-        tracing::info!("NFO 同步跳过：Emby {}，本地目录不存在", string(item, "Id"));
+        tracing::info!(
+            "NFO 同步跳过：《{media_name}》，Emby {}，本地目录不存在",
+            string(item, "Id")
+        );
         return Ok(0);
     }
     let mut data = package.clone();
@@ -391,7 +398,7 @@ pub async fn sync(
         _ => (),
     }
     tracing::info!(
-        "NFO 同步完成：类型 {kind}，Emby {}，写入 {written} 个",
+        "NFO 同步完成：《{media_name}》，类型 {kind}，Emby {}，写入 {written} 个",
         string(item, "Id")
     );
     Ok(written)

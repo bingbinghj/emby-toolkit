@@ -56,8 +56,12 @@ async fn search(
 ) -> Result<Json<Value>> {
     let result = search_items(&state, &params).await;
     match &result {
-        Ok(Json(data)) => tracing::info!(total_items = %data["total_items"], "手动搜索媒体库完成"),
-        Err(error) => tracing::warn!(error = %error.1, "手动搜索媒体库失败"),
+        Ok(Json(data)) => {
+            tracing::info!(total_items = %data["total_items"], "手动搜索媒体库完成，搜索词 {}", params.get("query").map_or("", String::as_str))
+        }
+        Err(error) => {
+            tracing::warn!(error = %error.1, "手动搜索媒体库失败，搜索词 {}", params.get("query").map_or("", String::as_str))
+        }
     }
     result
 }

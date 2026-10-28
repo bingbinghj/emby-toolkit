@@ -20,6 +20,12 @@ pub async fn probe(
     context: &JobContext,
 ) -> Result<(Value, Value)> {
     context.checkpoint().await?;
+    context
+        .activity(
+            "提取媒体信息",
+            &format!("正在提取 {filename} 的媒体流和章节信息"),
+        )
+        .await;
     if crate::media_paths::extension(filename) == ".iso" {
         let size: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
             "SELECT size FROM p115_filesystem_cache WHERE pick_code=$1 LIMIT 1",
@@ -47,7 +53,10 @@ pub async fn probe(
                 return Ok((info, raw));
             }
             Err(error) if context.is_cancelled() => return Err(error),
-            Err(error) => tracing::warn!(reason=%error.1,"ISO 专用解析失败，回退 ffprobe"),
+            Err(error) => tracing::warn!(
+                "[媒体信息提取] {filename} 的 ISO 专用解析失败，回退 ffprobe：{}",
+                error.1
+            ),
         }
     }
     let url = crate::p115::download_url(state, pc).await?;
@@ -147,6 +156,7 @@ async fn cached_info(
                     .is_some_and(|c| !string(c, "Container").eq_ignore_ascii_case("strm"))
                 && crate::media_paths::matches_container(&cache["mediainfo_json"], filename)
             {
+                tracing::info!("[媒体信息还原] {filename} 命中已有媒体信息备份");
                 return Ok(cache["mediainfo_json"].clone());
             }
             let raw = &cache["raw_ffprobe_json"];
@@ -168,6 +178,7 @@ async fn cached_info(
                 if let Some(info) = crate::probe::build(raw, &json!({"fn":filename}), &mappings)
                     .filter(crate::media_info::recoverable)
                 {
+                    tracing::info!("[媒体信息还原] {filename} 已从原始探测缓存重建媒体信息");
                     return Ok(info);
                 }
             }
@@ -188,6 +199,9 @@ pub async fn restore(state: &AppState, full: bool, context: &JobContext) -> Resu
     restore_files(state, full, context).await
 }
 async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Result<Value> {
+    context
+        .activity("扫描本地媒体", "正在扫描需要还原媒体信息的 STRM 文件")
+        .await;
     let config = state.config.read().await.clone();
     let root = PathBuf::from(string(&config, "local_strm_root"));
     if string(&config, "local_strm_root").is_empty() || !root.is_dir() {
@@ -195,6 +209,7 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
     }
     let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE in_library=true AND item_type IN ('Movie','Episode')").fetch_all(&state.db).await?;
     let mut assets = BTreeMap::<PathBuf, Vec<(String, Value)>>::new();
+    let mut labels = BTreeMap::new();
     for row in rows {
         let ids = list(&row["emby_item_ids_json"]);
         for (index, asset) in list(&row["asset_details_json"]).into_iter().enumerate() {
@@ -227,6 +242,9 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
                     .and_then(Value::as_str)
                     .unwrap_or("")
                     .to_string();
+                labels
+                    .entry(path.clone())
+                    .or_insert_with(|| crate::revalidation::media_label(&row, &asset, index));
                 assets.entry(path).or_default().push((id, asset));
             }
         }
@@ -254,8 +272,23 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
     let mut updated = 0;
     let mut failures = vec![];
     let mut affected = std::collections::BTreeSet::new();
-    for (path, bindings) in assets {
+    let total = assets.len();
+    for (index, (path, bindings)) in assets.into_iter().enumerate() {
         context.checkpoint().await?;
+        let label = labels.get(&path).cloned().unwrap_or_else(|| {
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        });
+        context
+            .update_counted(
+                index as u64,
+                total as u64,
+                "还原媒体信息",
+                &format!("正在检查 {label}"),
+            )
+            .await;
         if crate::emby::path_ignored(state, path.to_str().unwrap_or("")).await? {
             continue;
         }
@@ -267,24 +300,32 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
             let existing = match tokio::fs::read(&final_path).await {
                 Ok(existing) => existing,
                 Err(error) => {
-                    tracing::warn!(file=%final_path.display(), %error, "已有媒体信息文件无法读取，保留并继续其它文件");
+                    tracing::warn!(
+                        "[媒体信息还原] {} 无法读取，保留并继续其他文件：{error}",
+                        final_path.display()
+                    );
                     continue;
                 }
             };
             let info = match serde_json::from_slice::<Value>(&existing) {
                 Ok(info) => info,
                 Err(error) => {
-                    tracing::warn!(file=%final_path.display(), %error, "已有媒体信息JSON无法解析，保留并继续其它文件");
+                    tracing::warn!(
+                        "[媒体信息还原] {} 的 JSON 无法解析，保留并继续其他文件：{error}",
+                        final_path.display()
+                    );
                     continue;
                 }
             };
             if crate::media_info::container(&info)
                 .is_none_or(|c| !string(c, "Container").eq_ignore_ascii_case("strm"))
             {
+                tracing::info!("[媒体信息还原] 跳过 {label}：已有可用媒体信息文件");
                 continue;
             }
         }
         let result=async {
+            context.activity("还原媒体信息", &format!("正在还原 {label} 的媒体流和章节信息")).await;
             if bindings.iter().any(|(_,a)|a["fingerprint_pending"]==true){return Err(ApiError::bad("文件身份待校验"));}
             let source=tokio::fs::read_to_string(&path).await?;
             let source=source.trim().replace('\\',"/");
@@ -343,12 +384,38 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
             Ok::<_,ApiError>(())
         }.await;
         match result {
-            Ok(()) => updated += 1,
-            Err(error) => failures.push(format!("{}: {}", path.display(), error.1)),
+            Ok(()) => {
+                updated += 1;
+                tracing::info!("[媒体信息还原] {label} 已恢复：{}", final_path.display());
+            }
+            Err(error) if context.is_cancelled() => return Err(error),
+            Err(error) => {
+                tracing::warn!("[媒体信息还原] {label} 失败：{}", error.1);
+                failures.push(format!("{}: {}", path.display(), error.1));
+            }
         }
     }
     for id in affected {
+        context
+            .activity(
+                "刷新Emby",
+                &format!("媒体信息文件已恢复，正在刷新所属媒体库（Item {id}）"),
+            )
+            .await;
         crate::emby::refresh_item(state, &id, true, context).await?;
     }
-    Ok(json!({"updated":updated,"failures":failures,"message":"媒体信息还原完成"}))
+    context
+        .update_counted(
+            total as u64,
+            total as u64,
+            "媒体信息还原",
+            &format!(
+                "媒体信息还原完成：恢复 {updated} 个文件，失败 {} 个",
+                failures.len()
+            ),
+        )
+        .await;
+    Ok(
+        json!({"updated":updated,"failures":failures,"message":format!("媒体信息还原完成：恢复 {updated} 个文件，失败 {} 个", failures.len())}),
+    )
 }

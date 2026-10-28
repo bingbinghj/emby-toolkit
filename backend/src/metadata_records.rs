@@ -31,8 +31,12 @@ fn runtime(value: &Value) -> Value {
     )
 }
 pub fn pending(kind: &str, package: &Value, cast: &[Value], item: &Value) -> Result<Vec<Value>> {
+    let media_name = string(
+        package.get("series_details").unwrap_or(package),
+        if kind == "Movie" { "title" } else { "name" },
+    );
     tracing::debug!(
-        "元数据记录构建开始：类型 {kind}，Emby {}，演员 {} 位",
+        "元数据记录构建开始：《{media_name}》，类型 {kind}，Emby {}，演员 {} 位",
         string(item, "Id"),
         cast.len()
     );
@@ -332,7 +336,7 @@ pub fn pending(kind: &str, package: &Value, cast: &[Value], item: &Value) -> Res
         }
     }
     tracing::debug!(
-        "元数据记录构建完成：类型 {kind}，TMDb {provider}，记录 {} 条",
+        "元数据记录构建完成：《{media_name}》，类型 {kind}，TMDb {provider}，记录 {} 条",
         records.len()
     );
     Ok(records)
@@ -355,9 +359,10 @@ pub async fn online(
     item: &Value,
     context: &OnlineContext<'_>,
 ) -> Result<Vec<Value>> {
+    let media_name = string(item, "Name");
     let id = string(item, "Id");
     tracing::info!(
-        "在线媒体资产绑定开始：类型 {kind}，Emby {id}，目标分集 {} 个",
+        "在线媒体资产绑定开始：《{media_name}》，类型 {kind}，Emby {id}，目标分集 {} 个",
         context.episode_ids.len()
     );
     if id.is_empty() || id == "pending" {
@@ -396,7 +401,7 @@ pub async fn online(
         }
         online_assets(state, &mut records[0], &versions, item, context, true).await?;
         tracing::info!(
-            "在线电影资产绑定完成：Emby {id}，版本 {} 个，记录 {} 条",
+            "在线电影资产绑定完成：《{media_name}》，Emby {id}，版本 {} 个，记录 {} 条",
             versions.len(),
             records.len()
         );
@@ -487,7 +492,7 @@ pub async fn online(
             "overview":first["Overview"],"air_date":first["PremiereDate"]}]);
         let mut child = pending("Series", &fallback, cast, item)?.pop().unwrap();
         tracing::debug!(
-            "分集资产使用内部元数据 ID：Emby {id}，S{}E{}，版本 {} 个",
+            "分集资产使用内部元数据 ID：《{media_name}》，Emby {id}，S{}E{}，版本 {} 个",
             key.0,
             key.1,
             versions.len()
@@ -516,7 +521,7 @@ pub async fn online(
         records.retain(|r| r["item_type"] != "Series");
     }
     tracing::info!(
-        "在线媒体资产绑定完成：类型 {kind}，Emby {id}，记录 {} 条",
+        "在线媒体资产绑定完成：《{media_name}》，类型 {kind}，Emby {id}，记录 {} 条",
         records.len()
     );
     Ok(records)

@@ -178,6 +178,9 @@ pub async fn generate(
     if config["enabled"] != true {
         return Ok(json!({"updated":0,"message":"封面生成器未启用"}));
     }
+    context
+        .activity("读取媒体库", "正在获取需要生成封面的媒体库列表")
+        .await;
     let user = string(&*state.config.read().await, "emby_user_id");
     let views = state
         .emby(
@@ -212,6 +215,12 @@ pub async fn generate(
             continue;
         }
         context.checkpoint().await?;
+        context
+            .activity(
+                "生成媒体库封面",
+                &format!("正在处理媒体库《{name}》，已完成 {updated} 个"),
+            )
+            .await;
         let result = async {
             let mut paths = vec![];
             let custom_root=string(&config,"covers_input");
@@ -242,7 +251,7 @@ pub async fn generate(
             let cached:Vec<Value>=if paths.is_empty() {
                 match sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE in_library=true AND EXISTS(SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(asset_details_json)='array' THEN asset_details_json ELSE '[]' END) a WHERE a->>'source_library_id'=$1) AND item_type=ANY(string_to_array($2,',')) ORDER BY CASE WHEN $3 THEN random() END, date_added DESC").bind(&id).bind(kind).bind(config["sort_by"]=="Random").fetch_all(&state.db).await {
                     Ok(rows)=>rows,
-                    Err(error)=>{tracing::warn!(%error,"封面数据库查询失败，回退Emby图片选择");vec![]}
+                    Err(error)=>{tracing::warn!("[封面生成] 媒体库《{name}》查询图片缓存失败，回退 Emby 图片选择：{}", error);vec![]}
                 }
             }else{vec![]};
             let rating_mapping=db::setting(&state.db,"rating_mapping").await?.unwrap_or_else(||serde_json::from_str::<Value>(include_str!("../assets/defaults.json")).unwrap()["DEFAULT_RATING_MAPPING"].clone());
@@ -260,6 +269,7 @@ pub async fn generate(
                 let mut items=list(&items["Items"]);
                 if config["sort_by"]=="Random"{use rand::seq::SliceRandom;items.shuffle(&mut rand::thread_rng());}
                 for (index,item) in items.into_iter().filter(|item|image_path(item,&config,multi).is_some()).take(if multi{9}else{1}).enumerate() {
+                    context.activity("读取封面来源", &format!("媒体库《{name}》正在读取《{}》的封面（第 {} 张）", string(&item, "Name"), index + 1)).await;
                     let image_path=image_path(&item,&config,multi).unwrap();
                     let app_config = state.config.read().await.clone();
                     let response = state
@@ -300,6 +310,7 @@ pub async fn generate(
                 images.push(image.to_rgba8());
             }
             let title = title(&config, &name);
+            context.activity("渲染封面", &format!("正在渲染媒体库《{name}》的封面")).await;
             let render_config = config.clone();
             let fonts = fonts.clone();
             let bytes = tokio::task::spawn_blocking(move || {
@@ -313,6 +324,7 @@ pub async fn generate(
                 tokio::fs::write(PathBuf::from(output).join(format!("{name}.jpg")), &bytes).await?;
             }
             let app_config = state.config.read().await.clone();
+            context.activity("上传封面", &format!("正在将媒体库《{name}》的封面上传到 Emby")).await;
             state
                 .http
                 .post(format!(
@@ -329,11 +341,30 @@ pub async fn generate(
         }
         .await;
         match result {
-            Ok(()) => updated += 1,
-            Err(error) => failures.push(format!("{name}: {}", error.1)),
+            Ok(()) => {
+                updated += 1;
+                tracing::info!("[封面生成] 媒体库《{name}》封面已生成并上传");
+            }
+            Err(error) if context.is_cancelled() => return Err(error),
+            Err(error) => {
+                tracing::warn!("[封面生成] 媒体库《{name}》生成失败：{}", error.1);
+                failures.push(format!("{name}: {}", error.1));
+            }
         }
     }
-    Ok(json!({"updated":updated,"failures":failures,"message":"所有媒体库封面已处理完毕"}))
+    context
+        .update(
+            100,
+            "封面生成",
+            &format!(
+                "封面生成完成：成功 {updated} 个媒体库，失败 {} 个",
+                failures.len()
+            ),
+        )
+        .await;
+    Ok(
+        json!({"updated":updated,"failures":failures,"message":format!("封面生成完成：成功 {updated} 个媒体库，失败 {} 个", failures.len())}),
+    )
 }
 fn rating(row: &Value, mapping: &Value) -> i64 {
     let value = row["custom_rating"]

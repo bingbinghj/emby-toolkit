@@ -19,6 +19,35 @@ pub fn pickcode(url: &str) -> Option<String> {
         .iter()
         .find_map(|p| p.captures(url).map(|c| c[1].to_string()))
 }
+pub(crate) fn missing(value: &Value) -> bool {
+    let value = match value {
+        Value::String(value) => value.trim().to_lowercase(),
+        Value::Number(value) => value.to_string(),
+        _ => String::new(),
+    };
+    matches!(value.as_str(), "" | "none" | "null" | "[]" | "{}")
+}
+pub(crate) fn cache_complete(info: &Value) -> bool {
+    ["id", "parent_id", "name", "sha1", "pick_code"]
+        .iter()
+        .all(|key| !missing(&info[*key]))
+        && crate::identity::size(&info["size"]).is_some_and(|size| size > 0)
+}
+pub(crate) async fn cached(
+    state: &AppState,
+    pc: Option<&str>,
+    paths: &[String],
+) -> Result<Option<Value>> {
+    let id = pc.and_then(file_id).map(|id| id.to_string());
+    // Keep these exact lookups on the existing PC, ID and local_path indexes.
+    Ok(if pc.is_some() {
+        sqlx::query_scalar("SELECT jsonb_build_object('id',id,'parent_id',parent_id,'name',name,'sha1',sha1,'pick_code',pick_code,'size',size,'local_path',local_path) FROM p115_filesystem_cache WHERE pick_code=$1 OR id=$2 ORDER BY CASE WHEN pick_code=$1 THEN 0 ELSE 1 END LIMIT 1")
+            .bind(pc).bind(id).fetch_optional(&state.db).await?
+    } else {
+        sqlx::query_scalar("SELECT jsonb_build_object('id',id,'parent_id',parent_id,'name',name,'sha1',sha1,'pick_code',pick_code,'size',size,'local_path',local_path) FROM p115_filesystem_cache WHERE local_path=ANY($1) ORDER BY array_position($1,local_path) LIMIT 1")
+            .bind(paths).fetch_optional(&state.db).await?
+    })
+}
 pub async fn lookup(
     state: &AppState,
     path: &str,

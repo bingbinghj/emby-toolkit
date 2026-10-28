@@ -453,11 +453,32 @@ pub async fn scan(
                 return Err(ApiError::bad("扫描期间配置变化，请重新扫描"));
             }
             let item = &inventory["items"][ordinal.as_u64().unwrap() as usize];
+            let total = progress["total"].as_u64().unwrap();
+            let item_id = string(item, "item_id");
+            let path = string(item, "path");
+            context.update_counted(total.saturating_sub(list(&progress["pending"]).len() as u64), total, "全库指纹", &format!("正在检查 Item {item_id}：{path}")).await;
             let result = check(state, item, &reader).await;
             let (kind, details) = match result {
                 Ok(v) => v,
-                Err(error) if error.0 == StatusCode::CONFLICT => return Err(error),
+                Err(error) if context.is_cancelled() || error.0 == StatusCode::CONFLICT => return Err(error),
                 Err(error) => ("unknown".into(), json!({"error":error.1})),
+            };
+            let message = match kind.as_str() {
+                "consistent" => {
+                    tracing::info!("[全库指纹] 一致，跳过 Item {item_id}：{path}");
+                    format!("一致，跳过 Item {item_id}：{path}")
+                }
+                "repaired" => {
+                    tracing::info!("[全库指纹] 已更新 Item {item_id}：{path}，PC={}→{}，SHA1={}→{}，FID={}", string(&details["old"], "pc"), string(&details["new"], "pick_code"), string(&details["old"], "sha1"), string(&details["new"], "sha1"), string(&details["new"], "id"));
+                    format!("已更新 Item {item_id} 的 PC/SHA1 和 115 文件缓存：{path}")
+                }
+                _ => {
+                    let reason = string(&details, "error");
+                    let emby_size = crate::identity::size(&details["emby_size"]).map(|n| n.to_string()).unwrap_or_else(|| "未知".into());
+                    let cloud_size = crate::identity::size(&details["new"]["size"]).map(|n| n.to_string()).unwrap_or_else(|| "未知".into());
+                    tracing::warn!("[全库指纹] 未更新 Item {item_id}：{path}，{reason}（Emby={emby_size}，云端={cloud_size} 字节）");
+                    format!("未更新 Item {item_id}：{path}，{reason}")
+                }
             };
             if kind != "consistent" {
                 let mut entry = item.clone();
@@ -492,13 +513,12 @@ pub async fn scan(
             progress["pending"].as_array_mut().unwrap().remove(0);
             save(state, &mut progress).await?;
             context
-                .update(
-                    100 * (progress["total"].as_u64().unwrap()
-                        - list(&progress["pending"]).len() as u64)
-                        / progress["total"].as_u64().unwrap().max(1),
+                .update_counted(
+                    total.saturating_sub(list(&progress["pending"]).len() as u64),
+                    total,
                     "全库指纹",
                     &format!(
-                        "一致 {}，已更新 {}，未确认 {}",
+                        "{message}；一致 {}，已更新 {}，未确认 {}",
                         progress["counts"]["consistent"],
                         progress["counts"]["repaired"],
                         progress["counts"]["unknown"]
@@ -506,6 +526,7 @@ pub async fn scan(
                 )
                 .await;
         }
+        context.checkpoint().await?;
         Ok::<_, ApiError>(())
     }
     .await;
@@ -521,7 +542,21 @@ pub async fn scan(
         "attention"
     });
     save(state, &mut progress).await?;
+    let message = format!(
+        "全库指纹扫描完成：一致 {}，已更新 {}，未确认 {}，可查看报告",
+        progress["counts"]["consistent"],
+        progress["counts"]["repaired"],
+        progress["counts"]["unknown"]
+    );
+    context
+        .update_counted(
+            progress["total"].as_u64().unwrap(),
+            progress["total"].as_u64().unwrap(),
+            "全库指纹",
+            &message,
+        )
+        .await;
     Ok(
-        json!({"run_id":progress["run_id"],"counts":progress["counts"],"warnings":progress["counts"]["unknown"],"message":"全库指纹扫描已完成，可查看报告"}),
+        json!({"run_id":progress["run_id"],"counts":progress["counts"],"warnings":progress["counts"]["unknown"],"message":message}),
     )
 }

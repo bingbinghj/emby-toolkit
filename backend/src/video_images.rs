@@ -159,18 +159,18 @@ pub async fn movie_missing(
             if !fanart.exists()
                 && let Err(error) = tokio::fs::copy(&landscape, &fanart).await
             {
-                tracing::warn!(error = %error, "[视频截图] 电影备用背景图复制失败");
+                tracing::warn!(error = %error, "[视频截图] 电影备用背景图复制失败：{}", fanart.display());
             }
             if let Some(context) = context {
                 context.checkpoint().await?;
             }
-            tracing::info!("[视频截图] 电影背景图已生成");
+            tracing::info!("[视频截图] 电影背景图已生成：{}", landscape.display());
             Ok(1)
         }
         Ok(false) => Ok(0),
         Err(error) if context.is_some_and(JobContext::is_cancelled) => Err(error),
         Err(error) => {
-            tracing::warn!(error = %error.1, "[视频截图] 电影截取失败，保留现有图片");
+            tracing::warn!(error = %error.1, "[视频截图] 电影截取失败，保留现有图片：{}", file.display());
             Ok(0)
         }
     }

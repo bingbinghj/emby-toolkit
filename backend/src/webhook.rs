@@ -273,7 +273,8 @@ async fn emby(
             .to_string();
     }
     tracing::info!(
-        "Emby Webhook 已接受：事件 {event}，Emby {id}，处理父项 {top}，目标分集 {} 个",
+        "Emby Webhook 已接受：事件 {event}，Emby {id}，名称 {}，处理父项 {top}，目标分集 {} 个",
+        string(item, "Name"),
         ids.len()
     );
     let queue_id = if event == "metadata.update" {
@@ -591,7 +592,7 @@ async fn moviepilot(
         return Err(ApiError::bad("episode_group is required for TV"));
     }
     tracing::info!(
-        "MoviePilot Webhook 已收到：事件 {}，TMDb {}，类型 {}，文件 {} 个",
+        "MoviePilot Webhook 已收到：事件 {}，TMDb {}，类型 {}，文件 {} 个，根路径 {root}",
         string(&body, "event"),
         string(&body, "tmdb_id"),
         string(&body, "media_type"),
@@ -626,7 +627,7 @@ async fn moviepilot(
     body["batch_key"] = json!(key);
     body["files"] = json!(files);
     tracing::info!(
-        "MoviePilot Webhook 已接受：批次 {key}，有效文件 {} 个",
+        "MoviePilot Webhook 已接受：批次 {key}，有效文件 {} 个，根路径 {root}",
         files.len()
     );
     enqueue(&state, key.clone(), body).await;
@@ -641,12 +642,13 @@ pub async fn process_emby(
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
     let id = string(event, "id");
-    let item = details(state, &id, "Id,Type,Path,MediaSources,MediaStreams").await?;
+    let item = details(state, &id, "Id,Type,Name,Path,MediaSources,MediaStreams").await?;
+    let media_name = string(&item, "Name");
     if crate::emby::path_ignored(state, &string(&item, "Path")).await? {
         return Ok(json!({"updated":0,"status":"ignored_library"}));
     }
     tracing::info!(
-        "Emby 入库处理开始：Emby {id}，事件 {}",
+        "Emby 入库处理开始：《{media_name}》，Emby {id}，事件 {}",
         string(event, "event")
     );
     let episodes = list(&event["episode_ids"])
@@ -655,7 +657,7 @@ pub async fn process_emby(
         .map(str::to_string)
         .collect::<Vec<_>>();
     if event["event"] == "metadata.update" {
-        tracing::info!("Emby 元数据更新事件：Emby {id}，同步元数据库");
+        tracing::info!("Emby 元数据更新事件：《{media_name}》，Emby {id}，同步元数据库");
         return mirror(state, &string(&event["original"], "Id")).await;
     }
     if event["event"] == "image.update" {
@@ -670,7 +672,12 @@ pub async fn process_emby(
         crate::media_preflight::run(state, &item, context).await?;
         for episode in &episodes {
             context.checkpoint().await?;
-            let item = details(state, episode, "Id,Type,Path,MediaSources,MediaStreams").await?;
+            let item = details(
+                state,
+                episode,
+                "Id,Type,Name,Path,MediaSources,MediaStreams",
+            )
+            .await?;
             crate::media_preflight::run(state, &item, context).await?;
         }
     }
@@ -678,10 +685,16 @@ pub async fn process_emby(
         Ok(result) => Ok(result),
         Err(error) => {
             if enhanced {
-                tracing::error!("已预增强项目缓存回流失败：Emby {id}，{}", error.1);
+                tracing::error!(
+                    "已预增强项目缓存回流失败：《{media_name}》，Emby {id}，{}",
+                    error.1
+                );
                 return Err(error);
             }
-            tracing::info!("缓存回流不可用，执行完整刮削：Emby {id}，{}", error.1);
+            tracing::info!(
+                "缓存回流不可用，执行完整刮削：《{media_name}》，Emby {id}，{}",
+                error.1
+            );
             let item = details(
                 state,
                 &id,
@@ -701,7 +714,7 @@ pub async fn process_emby(
         state.webhooks.enhanced.lock().await.remove(&id);
     }
     tracing::info!(
-        "Emby 入库处理完成：Emby {id}，更新 {} 条记录",
+        "Emby 入库处理完成：《{media_name}》，Emby {id}，更新 {} 条记录",
         result["updated"].as_u64().unwrap_or(0)
     );
     Ok(result)
@@ -762,7 +775,10 @@ async fn mirror(state: &AppState, id: &str) -> Result<Value> {
         .collect::<Vec<_>>()
         .join(",");
     sqlx::query(&format!("UPDATE media_metadata SET {update},last_synced_at=NOW() FROM jsonb_populate_record(NULL::media_metadata,$1) r WHERE media_metadata.tmdb_id=$2 AND media_metadata.item_type=$3")).bind(row).bind(tmdb).bind(kind).execute(&state.db).await?;
-    tracing::info!("Emby 元数据同步完成：Emby {id}");
+    tracing::info!(
+        "Emby 元数据同步完成：《{}》，Emby {id}",
+        string(&item, "Name")
+    );
     Ok(json!({"updated":1,"message":"Emby 元数据已同步"}))
 }
 
@@ -914,10 +930,11 @@ pub async fn process_moviepilot(
         return Ok(json!({"updated":0,"status":"ignored_library"}));
     }
     tracing::info!(
-        "MoviePilot 后置增强开始：TMDb {}，批次 {}，输入文件 {} 个",
+        "MoviePilot 后置增强开始：TMDb {}，批次 {}，输入文件 {} 个，根路径 {}",
         string(event, "tmdb_id"),
         string(event, "batch_key"),
-        list(&event["files"]).len()
+        list(&event["files"]).len(),
+        string(event, "root_path")
     );
     let mut updated = 0;
     let mut failures = vec![];
@@ -1068,16 +1085,17 @@ pub async fn process_moviepilot(
         if index > 0 {
             state.item_delay(context).await?;
         }
-        tracing::info!(
-            "MoviePilot 单组增强开始：Emby {id}，目标分集 {} 个",
-            episodes.len()
-        );
         let item = details(
             state,
             &id,
             "Id,Type,Name,Path,People,Genres,ProviderIds,MediaSources,DateCreated",
         )
         .await?;
+        let media_name = string(&item, "Name");
+        tracing::info!(
+            "MoviePilot 单组增强开始：《{media_name}》，Emby {id}，目标分集 {} 个",
+            episodes.len()
+        );
         let prepared = crate::ingest::prepare_cached(
             state,
             &item,
@@ -1117,24 +1135,36 @@ pub async fn process_moviepilot(
                         episodes.clone()
                     };
                     if let Err(error) = crate::versions::reconcile(state, &current).await {
-                        tracing::warn!("MoviePilot 版本核对失败：Emby {id}，{}", error.1);
+                        tracing::warn!(
+                            "MoviePilot 版本核对失败：《{media_name}》，Emby {id}，{}",
+                            error.1
+                        );
                         failures.push(error.1);
                     }
                     if state.config.read().await["emby_webhook_ingest_enabled"] != true
                         && let Err(error) =
                             finalize(state, &id, &episodes, !known.is_empty(), context).await
                     {
-                        tracing::warn!("MoviePilot 入库收尾失败：Emby {id}，{}", error.1);
+                        tracing::warn!(
+                            "MoviePilot 入库收尾失败：《{media_name}》，Emby {id}，{}",
+                            error.1
+                        );
                         failures.push(error.1);
                     }
                 }
                 Err(error) => {
-                    tracing::error!("MoviePilot 缓存回流失败：Emby {id}，{}", error.1);
+                    tracing::error!(
+                        "MoviePilot 缓存回流失败：《{media_name}》，Emby {id}，{}",
+                        error.1
+                    );
                     failures.push(error.1);
                 }
             },
             Err(error) => {
-                tracing::error!("MoviePilot 单组增强失败：Emby {id}，{}", error.1);
+                tracing::error!(
+                    "MoviePilot 单组增强失败：《{media_name}》，Emby {id}，{}",
+                    error.1
+                );
                 failures.push(error.1);
             }
         }
@@ -1163,6 +1193,7 @@ pub async fn finalize(
         "Id,Type,Name,Path,Overview,ProductionYear,ProviderIds",
     )
     .await?;
+    let media_name = string(&item, "Name");
     let targets = if item["Type"] == "Movie" {
         vec![id.into()]
     } else {
@@ -1170,21 +1201,24 @@ pub async fn finalize(
     };
     let config = state.config.read().await.clone();
     let fingerprint_report = if !targets.is_empty() && config["monitor_sha1_pc_search"] != false {
-        tracing::info!("入库资产指纹补齐开始：Emby {id}，目标 {} 个", targets.len());
-        let mut report = crate::revalidation::ids(state, &targets, context).await?;
+        tracing::info!(
+            "入库资产指纹补齐开始：《{media_name}》，Emby {id}，目标 {} 个",
+            targets.len()
+        );
+        let mut report = crate::revalidation::repair_ids(state, &targets, context).await?;
         let failed = list(&report["failed_ids"])
             .iter()
             .filter_map(|id| id.as_str().map(str::to_string))
             .collect::<Vec<_>>();
         if !failed.is_empty() {
             tracing::warn!(
-                "首轮有 {} 个资产指纹未补齐，等待 5 秒后重试一次",
+                "《{media_name}》首轮有 {} 个资产指纹未补齐，等待 5 秒后重试一次",
                 failed.len()
             );
             context.checkpoint().await?;
             tokio::time::sleep(Duration::from_secs(5)).await;
             context.checkpoint().await?;
-            let retry = crate::revalidation::ids(state, &failed, context).await?;
+            let retry = crate::revalidation::repair_ids(state, &failed, context).await?;
             let updated =
                 report["updated"].as_u64().unwrap_or(0) + retry["updated"].as_u64().unwrap_or(0);
             report["updated"] = json!(updated);
@@ -1197,7 +1231,7 @@ pub async fn finalize(
             report["retry"] = retry;
         }
         tracing::info!(
-            "入库资产指纹补齐结束：Emby {id}，成功 {}，未完成 {}",
+            "入库资产指纹补齐结束：《{media_name}》，Emby {id}，成功 {}，未完成 {}",
             report["updated"].as_u64().unwrap_or(0),
             report["failed"].as_u64().unwrap_or(0)
         );
@@ -1206,17 +1240,20 @@ pub async fn finalize(
         json!({})
     };
     let audio_report = if config["auto_repair_truehd_core_on_ingest"] == true {
-        tracing::info!("入库音轨检查开始：Emby {id}，目标 {} 个", targets.len());
+        tracing::info!(
+            "入库音轨检查开始：《{media_name}》，Emby {id}，目标 {} 个",
+            targets.len()
+        );
         match crate::audio_tasks::repair(state, &targets, context).await {
             Ok(report) => {
                 tracing::info!(
-                    "入库音轨检查结束：Emby {id}，失败 {} 项",
+                    "入库音轨检查结束：《{media_name}》，Emby {id}，失败 {} 项",
                     report["failed"].as_u64().unwrap_or(0)
                 );
                 report
             }
             Err(error) => {
-                tracing::warn!("当前入库音轨检查失败：{}", error.1);
+                tracing::warn!("当前入库音轨检查失败：《{media_name}》，{}", error.1);
                 json!({"failed":1,"error":error.1})
             }
         }
@@ -1229,13 +1266,18 @@ pub async fn finalize(
     );
     crate::emby::finalize_refresh(state, &item, context)
         .await
-        .inspect_err(|error| tracing::error!("入库最终元数据刷新失败：Emby {id}，{}", error.1))?;
-    tracing::info!("入库最终元数据刷新完成：Emby {id}");
+        .inspect_err(|error| {
+            tracing::error!(
+                "入库最终元数据刷新失败：《{media_name}》，Emby {id}，{}",
+                error.1
+            )
+        })?;
+    tracing::info!("入库最终元数据刷新完成：《{media_name}》，Emby {id}");
     // Fingerprint/audio repair and the final metadata refresh may replace media-info data.
     // Fill afterwards, then confirm the actual stream titles returned by Emby.
     let title_report = if config["auto_fill_language_titles_on_ingest"] == true {
         tracing::info!(
-            "入库音轨字幕标题填充开始：Emby {id}，目标 {} 个",
+            "入库音轨字幕标题填充开始：《{media_name}》，Emby {id}，目标 {} 个",
             targets.len()
         );
         crate::titles::fill_in_job(state, &targets, true, context).await?
@@ -1249,12 +1291,12 @@ pub async fn finalize(
         && let Err(error) =
             crate::covers::generate(state, Some(&[string(&library, "ItemId")]), context).await
     {
-        tracing::warn!("入库封面生成失败：{}", error.1);
+        tracing::warn!("入库封面生成失败：《{media_name}》，{}", error.1);
     }
     if let Err(error) =
         crate::notifications::media(state, &item, updated, episode_ids, &title_report).await
     {
-        tracing::warn!("入库通知失败：{}", error.1);
+        tracing::warn!("入库通知失败：《{media_name}》，{}", error.1);
     }
     tracing::info!(
         "入库收尾处理结束：Emby {id}，名称 {}，指纹未完成 {} 个，音轨失败 {} 个",

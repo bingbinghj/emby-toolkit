@@ -294,7 +294,16 @@ pub async fn prepare_batch(
             .update(
                 (index * 90 / groups.len().max(1)) as u64,
                 "预入库刮削",
-                &format!("处理第 {}/{} 组文件", index + 1, groups.len()),
+                &format!(
+                    "正在处理 {}（同组 {} 个文件） · {}/{}",
+                    group
+                        .first()
+                        .map(|path| path.file_name().unwrap_or_default().to_string_lossy())
+                        .unwrap_or_default(),
+                    group.len(),
+                    index + 1,
+                    groups.len()
+                ),
             )
             .await;
         match prepare_group(state, group, roots, context, cancel).await {
@@ -638,7 +647,7 @@ async fn prepare_group(
             Ok(count) => count,
             Err(error) => {
                 check_active(state, &paths, context, cancel, true).await?;
-                tracing::warn!(reason=%error.1, "实时监控图片下载失败，保留 NFO 并继续入库通知");
+                tracing::warn!(reason=%error.1, "实时监控图片下载失败，保留 NFO 并继续入库通知：《{}》", string(&item, "Name"));
                 0
             }
         }
@@ -852,7 +861,7 @@ async fn download_images(
         let response = match response {
             Ok(response) => response,
             Err(error) => {
-                tracing::warn!(reason=%error.1, "实时监控图片语言候选查询失败，继续下一候选");
+                tracing::warn!(reason=%error.1, "实时监控图片语言候选查询失败，继续下一候选：TMDb {id}");
                 continue;
             }
         };

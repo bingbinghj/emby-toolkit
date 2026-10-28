@@ -105,6 +105,7 @@ async fn details_with_append(
     )
     .await?;
     let title_field = if movie { "title" } else { "name" };
+    let media_name = string(&data, title_field);
     let english = if movie {
         "english_title"
     } else {
@@ -143,12 +144,16 @@ async fn details_with_append(
             .is_none_or(|s| s.chars().count() < 2);
     if need_title || need_overview {
         tracing::info!(
-            "TMDb 英文补抓开始：类型 {kind}，TMDb {id}，标题 {need_title}，简介 {need_overview}"
+            "TMDb 英文补抓开始：《{media_name}》，类型 {kind}，TMDb {id}，缺少标题源 {}，缺少简介源 {}",
+            if need_title { "是" } else { "否" },
+            if need_overview { "是" } else { "否" }
         );
         let fallback = match get(state, &path, &[("language", "en-US".into())]).await {
             Ok(value) => value,
             Err(_) => {
-                tracing::warn!("TMDb 英文补抓失败，保留原数据：类型 {kind}，TMDb {id}");
+                tracing::warn!(
+                    "TMDb 英文补抓失败，保留原数据：《{media_name}》，类型 {kind}，TMDb {id}"
+                );
                 return Ok(data);
             }
         };
@@ -180,6 +185,7 @@ pub async fn aggregate(state: &AppState, id: &str, numbers: &[i64]) -> Result<Va
     tracing::info!("TMDb 按季聚合开始：TMDb {id}，目标季 {numbers:?}");
     let mut series = details_with_append(state, "Series", id,
         Some("credits,aggregate_credits,keywords,external_ids,content_ratings,alternative_titles,translations")).await?;
+    let media_name = string(&series, "name");
     let cast = series["aggregate_credits"]["cast"]
         .as_array()
         .into_iter()
@@ -221,9 +227,9 @@ pub async fn aggregate(state: &AppState, id: &str, numbers: &[i64]) -> Result<Va
         .collect::<Vec<_>>();
     numbers.sort_unstable();
     numbers.dedup();
-    tracing::info!("TMDb 按季范围确认：TMDb {id}，本次季 {numbers:?}");
+    tracing::info!("TMDb 按季范围确认：《{media_name}》，TMDb {id}，本次季 {numbers:?}");
     for number in numbers {
-        tracing::info!("TMDb 季详情获取开始：TMDb {id}，第 {number} 季");
+        tracing::info!("TMDb 季详情获取开始：《{media_name}》，TMDb {id}，第 {number} 季");
         let mut details = match get(
             state,
             &format!("/tv/{id}/season/{number}"),
@@ -237,7 +243,7 @@ pub async fn aggregate(state: &AppState, id: &str, numbers: &[i64]) -> Result<Va
             Ok(data) => data,
             Err(error) => {
                 tracing::warn!(
-                    "TMDb 季详情获取失败，跳过该季：TMDb {id}，第 {number} 季，{}",
+                    "TMDb 季详情获取失败，跳过该季：《{media_name}》，TMDb {id}，第 {number} 季，{}",
                     error.1
                 );
                 continue;
@@ -298,13 +304,13 @@ pub async fn aggregate(state: &AppState, id: &str, numbers: &[i64]) -> Result<Va
         }
         details["episodes"] = json!(season_episodes);
         tracing::info!(
-            "TMDb 季详情获取完成：TMDb {id}，第 {number} 季，分集 {} 个",
+            "TMDb 季详情获取完成：《{media_name}》，TMDb {id}，第 {number} 季，分集 {} 个",
             list(&details["episodes"]).len()
         );
         seasons.push(details);
     }
     tracing::info!(
-        "TMDb 按季聚合完成：TMDb {id}，季 {} 个，分集 {} 个",
+        "TMDb 按季聚合完成：《{media_name}》，TMDb {id}，季 {} 个，分集 {} 个",
         seasons.len(),
         episodes.as_object().map_or(0, |o| o.len())
     );
@@ -344,6 +350,7 @@ pub async fn aggregate_group(
     tracing::info!("TMDb 剧集组聚合开始：TMDb {id}，剧集组 {group}，目标季 {numbers:?}");
     let mut series = details_with_append(state,"Series",id,
         Some("credits,aggregate_credits,keywords,external_ids,content_ratings,alternative_titles,translations")).await?;
+    let media_name = string(&series, "name");
     let data = get(state, &format!("/tv/episode_group/{group}"), &[]).await?;
     let mut seasons = vec![];
     let mut episodes = serde_json::Map::new();
@@ -355,7 +362,9 @@ pub async fn aggregate_group(
             continue;
         };
         if !numbers.is_empty() && !numbers.contains(&number) {
-            tracing::debug!("TMDb 剧集组季跳过：TMDb {id}，第 {number} 季不在本次范围");
+            tracing::debug!(
+                "TMDb 剧集组季跳过：《{media_name}》，TMDb {id}，第 {number} 季不在本次范围"
+            );
             continue;
         }
         let mut normalized = vec![];
@@ -375,11 +384,13 @@ pub async fn aggregate_group(
             normalized.push(episode);
         }
         if normalized.is_empty() {
-            tracing::info!("TMDb 剧集组季跳过：TMDb {id}，第 {number} 季没有分集");
+            tracing::info!(
+                "TMDb 剧集组季跳过：《{media_name}》，TMDb {id}，第 {number} 季没有分集"
+            );
             continue;
         }
         tracing::info!(
-            "TMDb 剧集组季处理完成：TMDb {id}，第 {number} 季，分集 {} 个",
+            "TMDb 剧集组季处理完成：《{media_name}》，TMDb {id}，第 {number} 季，分集 {} 个",
             normalized.len()
         );
         seasons.push(json!({"id":format!("{id}-G{group}-S{number}"),
@@ -396,7 +407,7 @@ pub async fn aggregate_group(
             .unwrap_or(episodes.len() as u64)
     );
     tracing::info!(
-        "TMDb 剧集组聚合完成：TMDb {id}，剧集组 {group}，季 {} 个，分集 {} 个",
+        "TMDb 剧集组聚合完成：《{media_name}》，TMDb {id}，剧集组 {group}，季 {} 个，分集 {} 个",
         seasons.len(),
         episodes.len()
     );

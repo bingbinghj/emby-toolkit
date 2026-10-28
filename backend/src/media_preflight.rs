@@ -99,6 +99,8 @@ async fn restore(
     context: &JobContext,
     report: &mut Value,
 ) -> Result<()> {
+    let filename = path.replace('\\', "/");
+    let media_name = filename.rsplit('/').next().unwrap_or(path);
     if config["monitor_sha1_pc_search"] == false {
         return Ok(());
     }
@@ -119,7 +121,7 @@ async fn restore(
         .fetch_optional(&state.db)
         .await
         .unwrap_or_else(|error| {
-            tracing::warn!("入库媒体信息缓存查询失败：Emby {id}，{error}");
+            tracing::warn!("入库媒体信息缓存查询失败：《{media_name}》，Emby {id}，{error}");
             None
         });
         let expected = expected.unwrap_or(0).max(0) as u64;
@@ -130,7 +132,7 @@ async fn restore(
         .fetch_optional(&state.db)
         .await
         .unwrap_or_else(|error| {
-            tracing::warn!("入库媒体信息缓存查询失败：Emby {id}，{error}");
+            tracing::warn!("入库媒体信息缓存查询失败：《{media_name}》，Emby {id}，{error}");
             None
         });
         let mut data = cached
@@ -140,10 +142,10 @@ async fn restore(
         if from_cache {
             if let Err(error) = sqlx::query("UPDATE p115_mediainfo_cache SET hit_count=COALESCE(hit_count,0)+1 WHERE UPPER(sha1)=UPPER($1)")
                 .bind(sha).execute(&state.db).await {
-                tracing::warn!("入库媒体信息缓存命中计数失败：Emby {id}，{error}");
+                tracing::warn!("入库媒体信息缓存命中计数失败：《{media_name}》，Emby {id}，{error}");
             }
             report["cache_hit"] = json!(true);
-            tracing::info!("入库媒体信息缓存命中：Emby {id}，SHA1 {sha}");
+            tracing::info!("入库媒体信息缓存命中：《{media_name}》，Emby {id}，SHA1 {sha}");
         }
         for attempt in 0..15 {
             context.checkpoint().await?;
@@ -157,12 +159,18 @@ async fn restore(
             let response = match response {
                 Ok(response) => response,
                 Err(error) => {
-                    tracing::warn!("入库媒体信息同步失败：Emby {id}，{}", error.1);
+                    tracing::warn!(
+                        "入库媒体信息同步失败：《{media_name}》，Emby {id}，{}",
+                        error.1
+                    );
                     break;
                 }
             };
             if response.as_array().is_some_and(Vec::is_empty) {
-                tracing::debug!("入库媒体信息提取等待：Emby {id}，轮次 {}/15", attempt + 1);
+                tracing::debug!(
+                    "入库媒体信息提取等待：《{media_name}》，Emby {id}，轮次 {}/15",
+                    attempt + 1
+                );
                 context.sleep(Duration::from_secs(5)).await?;
                 continue;
             }
@@ -170,7 +178,9 @@ async fn restore(
                 break;
             }
             if !size_matches(&response, expected) {
-                tracing::warn!("入库媒体信息大小不符：Emby {id}，清除错误插件数据后重新提取");
+                tracing::warn!(
+                    "入库媒体信息大小不符：《{media_name}》，Emby {id}，清除错误插件数据后重新提取"
+                );
                 if let Err(error) = state
                     .emby(
                         reqwest::Method::POST,
@@ -180,7 +190,10 @@ async fn restore(
                     )
                     .await
                 {
-                    tracing::warn!("入库媒体信息清除失败：Emby {id}，{}", error.1);
+                    tracing::warn!(
+                        "入库媒体信息清除失败：《{media_name}》，Emby {id}，{}",
+                        error.1
+                    );
                 }
                 data = Value::Null;
                 from_cache = false;
@@ -192,10 +205,17 @@ async fn restore(
                 match sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2) ON CONFLICT(sha1) DO UPDATE SET mediainfo_json=EXCLUDED.mediainfo_json")
                     .bind(sha).bind(&response).execute(&state.db).await {
                     Ok(_) => report["cached"] = json!(true),
-                    Err(error) => tracing::warn!("入库媒体信息缓存写入失败：Emby {id}，{error}"),
+                    Err(error) => tracing::warn!("入库媒体信息缓存写入失败：《{media_name}》，Emby {id}，{error}"),
                 }
             }
-            tracing::info!("入库媒体信息同步完成：Emby {id}，本地缓存恢复 {from_cache}");
+            tracing::info!(
+                "入库媒体信息同步完成：《{media_name}》，Emby {id}，数据来源 {}",
+                if from_cache {
+                    "本地媒体信息缓存"
+                } else {
+                    "现场提取"
+                }
+            );
             break;
         }
     }
@@ -207,6 +227,7 @@ async fn preflight(state: &AppState, item: &Value, context: &JobContext) -> Resu
         return Ok(json!({"skipped":true}));
     }
     let id = string(item, "Id");
+    let media_name = string(item, "Name");
     let path = item["Path"]
         .as_str()
         .filter(|path| !path.is_empty())
@@ -222,12 +243,12 @@ async fn preflight(state: &AppState, item: &Value, context: &JobContext) -> Resu
     }
     let config = state.config.read().await.clone();
     let reuse = config["p115_generate_mediainfo"] != true;
-    tracing::info!("入库媒体信息预检开始：Emby {id}");
+    tracing::info!("入库媒体信息预检开始：《{media_name}》，Emby {id}");
     let mut report = json!({"skipped":false,"cache_hit":false,"cached":false,"sync_attempts":0,"invalid_sizes":0,"video_ready":false});
     if reuse && let Err(error) = restore(state, &config, &id, &path, context, &mut report).await {
         context.checkpoint().await?;
         tracing::warn!(
-            "入库媒体信息缓存联动失败：Emby {id}，{}，继续检查视频流",
+            "入库媒体信息缓存联动失败：《{media_name}》，Emby {id}，{}，继续检查视频流",
             error.1
         );
     }
@@ -249,16 +270,24 @@ async fn preflight(state: &AppState, item: &Value, context: &JobContext) -> Resu
                 report["video_ready"] = json!(true);
                 break;
             }
-            Err(error) => tracing::warn!("入库视频流检查失败：Emby {id}，{}", error.1),
+            Err(error) => tracing::warn!(
+                "入库视频流检查失败：《{media_name}》，Emby {id}，{}",
+                error.1
+            ),
             _ => (),
         }
-        tracing::debug!("入库视频流提取等待：Emby {id}，轮次 {}/6", attempt + 1);
+        tracing::debug!(
+            "入库视频流提取等待：《{media_name}》，Emby {id}，轮次 {}/6",
+            attempt + 1
+        );
         context.sleep(Duration::from_secs(10)).await?;
     }
     if report["video_ready"] == false {
-        tracing::warn!("入库媒体信息预检超时：Emby {id}，继续分发并由最终质检判定");
+        tracing::warn!(
+            "入库媒体信息预检超时：《{media_name}》，Emby {id}，继续分发并由最终质检判定"
+        );
     } else {
-        tracing::info!("入库媒体信息预检完成：Emby {id}，有效视频流已就绪");
+        tracing::info!("入库媒体信息预检完成：《{media_name}》，Emby {id}，有效视频流已就绪");
     }
     Ok(report)
 }

@@ -113,16 +113,17 @@ where
     }
     let changed = !restore.as_object().unwrap().is_empty();
     let mode = "自定义配置";
-    tracing::info!("[神医临时设置] {mode} 开始");
+    let mode_name = settings_mode_label(mode);
+    tracing::info!("[神医临时设置] {mode_name} 开始");
     let outcome = std::panic::AssertUnwindSafe(async {
         if changed {
             write(state, &id, &desired).await?;
             if !matches(&read(state, &id).await?, &desired) {
                 return Err(ApiError::bad("神医临时配置回读不一致"));
             }
-            tracing::info!("[神医临时设置] {mode} 已启用临时配置，结束后恢复原配置");
+            tracing::info!("[神医临时设置] {mode_name} 已启用临时配置，结束后恢复原配置");
         } else {
-            tracing::info!("[神医临时设置] {mode} 原配置已满足要求，无需修改");
+            tracing::info!("[神医临时设置] {mode_name} 原配置已满足要求，无需修改");
         }
         function().await
     })
@@ -238,6 +239,13 @@ fn matches(actual: &Value, expected: &Value) -> bool {
         })
     })
 }
+fn settings_mode_label(mode: &str) -> &str {
+    match mode {
+        "preserve" => "忽略文件变更",
+        "capture" => "图片捕获",
+        _ => mode,
+    }
+}
 async fn restore_settings(
     state: &AppState,
     id: &str,
@@ -245,7 +253,8 @@ async fn restore_settings(
     mode: &str,
     failure: Option<&ApiError>,
 ) -> bool {
-    tracing::info!("[神医临时设置] {mode} 开始恢复原配置");
+    let mode_name = settings_mode_label(mode);
+    tracing::info!("[神医临时设置] {mode_name} 开始恢复原配置");
     for attempt in 1..=3 {
         let result = async {
             let mut current = read(state, id).await?;
@@ -262,27 +271,28 @@ async fn restore_settings(
         .await;
         match result {
             Ok(()) => {
-                tracing::info!("[神医临时设置] {mode} 原配置已恢复");
+                tracing::info!("[神医临时设置] {mode_name} 原配置已恢复");
                 return true;
             }
             Err(error) => {
                 tracing::warn!(
-                    "[神医临时设置] {mode} 第 {attempt}/3 次恢复未确认：{}",
+                    "[神医临时设置] {mode_name} 第 {attempt}/3 次恢复未确认：{}",
                     error.1
                 );
             }
         }
     }
     if let Some(error) = failure {
-        tracing::error!("[神医临时设置] {mode} 执行失败：{}", error.1);
+        tracing::error!("[神医临时设置] {mode_name} 执行失败：{}", error.1);
     }
-    tracing::error!("[神医临时设置] {mode} 已结束，恢复原配置失败，请检查神医设置");
+    tracing::error!("[神医临时设置] {mode_name} 已结束，恢复原配置失败，请检查神医设置");
     false
 }
 fn settings_finished<T>(mode: &str, outcome: Result<T>) -> Result<T> {
+    let mode_name = settings_mode_label(mode);
     match &outcome {
-        Ok(_) => tracing::info!("[神医临时设置] {mode} 已结束"),
-        Err(error) => tracing::warn!("[神医临时设置] {mode} 已结束，执行失败：{}", error.1),
+        Ok(_) => tracing::info!("[神医临时设置] {mode_name} 已结束"),
+        Err(error) => tracing::warn!("[神医临时设置] {mode_name} 已结束，执行失败：{}", error.1),
     }
     outcome
 }
@@ -356,16 +366,17 @@ where
         }
     }
     let changed = !restore.as_object().unwrap().is_empty();
-    tracing::info!("[神医临时设置] {mode} 开始");
+    let mode_name = settings_mode_label(mode);
+    tracing::info!("[神医临时设置] {mode_name} 开始");
     let outcome = std::panic::AssertUnwindSafe(async {
         if changed {
             write(state, &id, &desired).await?;
             if !matches(&read(state, &id).await?, &desired) {
                 return Err(ApiError::bad("神医临时设置回读不一致"));
             }
-            tracing::info!("[神医临时设置] {mode} 已启用临时配置，结束后恢复原配置");
+            tracing::info!("[神医临时设置] {mode_name} 已启用临时配置，结束后恢复原配置");
         } else {
-            tracing::info!("[神医临时设置] {mode} 原配置已满足要求，无需修改");
+            tracing::info!("[神医临时设置] {mode_name} 原配置已满足要求，无需修改");
         }
         function().await
     })

@@ -95,10 +95,15 @@ async fn process_inner(
     persist: bool,
 ) -> Result<Vec<Value>> {
     tracing::info!(
-        "演员表处理开始：Emby {}，名称 {}，输入 {} 位，写入缓存 {persist}",
+        "演员表处理开始：Emby {}，名称 {}，输入 {} 位，缓存方式 {}",
         string(item, "Id"),
         string(item, "Name"),
-        source.len()
+        source.len(),
+        if persist {
+            "处理后写入缓存"
+        } else {
+            "仅生成预览"
+        }
     );
     let config = state.config.read().await.clone();
     let mut raw = source.to_vec();
@@ -283,7 +288,8 @@ pub async fn update_emby(
         }
     }
     tracing::info!(
-        "Emby 人物名字同步范围确认：Emby {}，待核对 {} 位",
+        "Emby 人物名字同步范围确认：《{}》，Emby {}，待核对 {} 位",
+        string(item, "Name"),
         string(item, "Id"),
         names.len()
     );
@@ -291,7 +297,11 @@ pub async fn update_emby(
     for (id, location) in locations {
         let mut person = crate::media_edit::details(state, &location, "Name").await?;
         if names.get(&id).is_some_and(|name| person["Name"] != *name) {
-            tracing::debug!("Emby 人物名字更新开始：人员 {location}，TMDb {id}");
+            tracing::debug!(
+                "Emby 人物名字更新开始：{} → {}，人员 {location}，TMDb {id}",
+                string(&person, "Name"),
+                names[&id]
+            );
             person["Name"] = json!(names[&id]);
             state
                 .emby(
@@ -302,13 +312,20 @@ pub async fn update_emby(
                 )
                 .await?;
             updated += 1;
-            tracing::debug!("Emby 人物名字更新完成：人员 {location}，TMDb {id}");
+            tracing::debug!(
+                "Emby 人物名字更新完成：{}，人员 {location}，TMDb {id}",
+                names[&id]
+            );
         } else {
-            tracing::debug!("Emby 人物名字更新跳过：人员 {location}，TMDb {id}，名字无需更新");
+            tracing::debug!(
+                "Emby 人物名字更新跳过：{}，人员 {location}，TMDb {id}，名字无需更新",
+                string(&person, "Name")
+            );
         }
     }
     tracing::info!(
-        "Emby 人物名字同步完成：Emby {}，更新 {updated} 位",
+        "Emby 人物名字同步完成：《{}》，Emby {}，更新 {updated} 位",
+        string(item, "Name"),
         string(item, "Id")
     );
     Ok(updated)

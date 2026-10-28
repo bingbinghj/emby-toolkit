@@ -6,12 +6,27 @@ use std::{collections::HashMap, future::Future, sync::Arc};
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
+type Activity = Arc<std::sync::Mutex<Option<String>>>;
+type ProgressLog = Option<(tokio::time::Instant, Option<u64>, String)>;
+tokio::task_local! {
+    static TASK_ACTIVITY: Activity;
+}
+
+pub(crate) fn record_activity(message: &str) {
+    let _ = TASK_ACTIVITY.try_with(|activity| {
+        *activity.lock().unwrap_or_else(|error| error.into_inner()) =
+            Some(crate::logs::redact(message).chars().take(500).collect());
+    });
+}
+
 #[derive(Clone)]
 pub struct JobContext {
     pub id: String,
     cancel: CancellationToken,
     wake: Arc<Notify>,
     progress: Arc<Mutex<Value>>,
+    activity: Activity,
+    last_progress_log: Arc<std::sync::Mutex<ProgressLog>>,
 }
 impl JobContext {
     pub async fn cancelled(&self) {
@@ -41,19 +56,78 @@ impl JobContext {
             }
             if state["state"] == "pausing" {
                 state["state"] = json!("paused");
-                tracing::info!(task_id=%self.id,"[任务暂停] 已到达安全暂停点");
+                let name = state["last_action"].as_str().unwrap_or("后台任务");
+                tracing::info!(task_id=%self.id,"[任务暂停] {name} · 已到达安全暂停点，保留当前进度");
             }
             drop(state);
             tokio::select! { _ = self.cancel.cancelled()=>{}, _ = wake=>{} }
         }
     }
     pub async fn update(&self, progress: u64, phase: &str, message: &str) {
+        self.update_status(Some(progress), None, phase, message)
+            .await;
+    }
+    pub async fn update_counted(&self, completed: u64, total: u64, phase: &str, message: &str) {
+        self.update_status(
+            Some(if total == 0 {
+                100
+            } else {
+                completed.saturating_mul(100) / total
+            }),
+            Some((completed, total)),
+            phase,
+            message,
+        )
+        .await;
+    }
+    pub async fn activity(&self, phase: &str, message: &str) {
+        self.update_status(None, None, phase, message).await;
+    }
+    async fn update_status(
+        &self,
+        progress: Option<u64>,
+        counts: Option<(u64, u64)>,
+        phase: &str,
+        message: &str,
+    ) {
         let mut state = self.progress.lock().await;
-        state["progress"] = json!(progress.min(100));
-        state["progress_known"] = json!(true);
+        if let Some(progress) = progress {
+            state["progress"] = json!(progress.min(100));
+            state["progress_known"] = json!(true);
+        }
+        if let Some((completed, total)) = counts {
+            state["completed"] = json!(completed);
+            state["total"] = json!(total);
+        }
         state["phase"] = json!(phase);
         state["message"] = json!(message);
-        tracing::info!(task_id=%self.id,progress,%phase,"[任务进度] {message}");
+        state["updated_at"] = json!(chrono::Utc::now().timestamp());
+        *self
+            .activity
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        let name = state["last_action"].as_str().unwrap_or("后台任务");
+        let count = counts
+            .map(|(done, total)| format!(" · {done}/{total}"))
+            .unwrap_or_default();
+        let percent = progress
+            .map(|p| format!(" · {}%", p.min(100)))
+            .unwrap_or_default();
+        let mut previous = self
+            .last_progress_log
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some((before, old_progress, old_phase)) = previous.as_ref() {
+            let boundary = matches!(progress, Some(0 | 100)) && old_progress != &progress;
+            if old_phase == phase
+                && !boundary
+                && before.elapsed() < std::time::Duration::from_secs(2)
+            {
+                return;
+            }
+        }
+        *previous = Some((tokio::time::Instant::now(), progress, phase.into()));
+        tracing::info!(task_id=%self.id,"[任务进度] {name} · {phase}{count}{percent} · {message}");
     }
 }
 #[derive(Default)]
@@ -110,15 +184,45 @@ impl JobManager {
             cancel: CancellationToken::new(),
             wake: Arc::new(Notify::new()),
             progress: Arc::new(Mutex::new(state)),
+            activity: Arc::new(std::sync::Mutex::new(None)),
+            last_progress_log: Arc::new(std::sync::Mutex::new(None)),
         };
         inner.active = Some(context.clone());
         drop(inner);
         tracing::info!(task_id=%id,"[任务开始] {name}");
         let manager = self.clone();
         tokio::spawn(async move {
-            let result = std::panic::AssertUnwindSafe(async { function(context.clone()).await })
-                .catch_unwind()
-                .await
+            let work = std::panic::AssertUnwindSafe(
+                TASK_ACTIVITY.scope(context.activity.clone(), function(context.clone())),
+            )
+            .catch_unwind();
+            tokio::pin!(work);
+            let mut waiting = tokio::time::interval(std::time::Duration::from_secs(30));
+            waiting.tick().await;
+            let result = loop {
+                tokio::select! {
+                    result = &mut work => break result,
+                    _ = waiting.tick() => {
+                        let state = context.progress.lock().await;
+                        let now = chrono::Utc::now().timestamp();
+                        if state["state"] == "paused" || context.is_cancelled() {
+                            continue;
+                        }
+                        let remaining = context.last_progress_log.lock().unwrap_or_else(|error| error.into_inner())
+                            .as_ref().and_then(|(before, _, _)| std::time::Duration::from_secs(30).checked_sub(before.elapsed()));
+                        if let Some(remaining) = remaining {
+                            waiting.reset_after(remaining);
+                            continue;
+                        }
+                        let name = state["last_action"].as_str().unwrap_or("后台任务");
+                        let phase = state["phase"].as_str().unwrap_or("执行");
+                        let activity = context.activity.lock().unwrap_or_else(|error| error.into_inner());
+                        let message = activity.as_deref().or_else(|| state["message"].as_str()).unwrap_or("等待当前操作结束");
+                        let elapsed = now - state["started_at"].as_i64().unwrap_or(now);
+                        tracing::info!(task_id=%context.id,"[任务进度] {name} · {phase} · 已运行 {elapsed} 秒 · {message}");
+                    }
+                }
+            }
                 .unwrap_or_else(|_| {
                     Err(ApiError(
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -170,7 +274,32 @@ impl JobManager {
             }
             state["finished_at"] = json!(chrono::Utc::now().timestamp());
             state["current_action"] = json!("空闲");
-            tracing::info!(task_id=%context.id,state=%state["state"],"[任务结束] {}",state["message"]);
+            if let Some(activity) = context
+                .activity
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+            {
+                state["last_activity"] = json!(activity);
+            }
+            let name = state["last_action"].as_str().unwrap_or("后台任务");
+            let message = state["message"].as_str().unwrap_or("任务结束");
+            let elapsed = state["finished_at"].as_i64().unwrap_or(0)
+                - state["started_at"].as_i64().unwrap_or(0);
+            match state["state"].as_str() {
+                Some("failed") => {
+                    tracing::error!(task_id=%context.id,"[任务结束] {name} · 失败 · 耗时 {elapsed} 秒 · {message}")
+                }
+                Some("completed_with_warnings") => {
+                    tracing::warn!(task_id=%context.id,"[任务结束] {name} · 完成，有提醒 · 耗时 {elapsed} 秒 · {message}")
+                }
+                Some("cancelled") => {
+                    tracing::info!(task_id=%context.id,"[任务结束] {name} · 已停止 · 耗时 {elapsed} 秒 · {message}")
+                }
+                _ => {
+                    tracing::info!(task_id=%context.id,"[任务结束] {name} · 完成 · 耗时 {elapsed} 秒 · {message}")
+                }
+            }
             let mut inner = manager.inner.lock().await;
             inner.latest = state.clone();
             inner.results.insert(context.id.clone(), state.clone());
@@ -220,7 +349,16 @@ impl JobManager {
         history.sort_by_key(|v| std::cmp::Reverse(v["finished_at"].as_i64().unwrap_or(0)));
         drop(inner);
         let mut status = if let Some(active) = active {
-            active.progress.lock().await.clone()
+            let mut state = active.progress.lock().await.clone();
+            if let Some(activity) = active
+                .activity
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+            {
+                state["last_activity"] = json!(activity);
+            }
+            state
         } else if latest.is_null() {
             json!({"is_running":false,"state":"idle","progress":0,"message":"空闲","current_action":"空闲","logs":[]})
         } else {
@@ -256,19 +394,23 @@ impl JobManager {
                 "任务正在停止，无法暂停或恢复".into(),
             ));
         }
+        let name = state["last_action"]
+            .as_str()
+            .unwrap_or("后台任务")
+            .to_string();
         match action {
             "pause" => {
                 state["pause_requested"] = json!(true);
                 if state["state"] != "paused" && state["state"] != "pausing" {
                     state["state"] = json!("pausing");
-                    tracing::info!(task_id=%active.id,"[任务控制] 已请求暂停，等待当前操作结束");
+                    tracing::info!(task_id=%active.id,"[任务控制] {name} · 已请求暂停，等待当前操作结束");
                 }
             }
             "resume" => {
                 state["pause_requested"] = json!(false);
                 if state["state"] == "paused" || state["state"] == "pausing" {
                     state["state"] = json!("running");
-                    tracing::info!(task_id=%active.id,"[任务恢复] 继续原任务");
+                    tracing::info!(task_id=%active.id,"[任务恢复] {name} · 继续原任务");
                 }
                 active.wake.notify_waiters();
             }
@@ -278,7 +420,7 @@ impl JobManager {
                 state["stop_requested"] = json!(true);
                 if state["state"] != "stopping" {
                     state["state"] = json!("stopping");
-                    tracing::info!(task_id=%active.id,"[任务控制] 已请求停止，等待当前操作安全结束");
+                    tracing::info!(task_id=%active.id,"[任务控制] {name} · 已请求停止，等待当前操作安全结束");
                 }
                 active.wake.notify_waiters();
             }
@@ -294,7 +436,16 @@ impl JobManager {
         let active = inner.active.clone().filter(|v| v.id == id);
         drop(inner);
         if let Some(active) = active {
-            Some(active.progress.lock().await.clone())
+            let mut state = active.progress.lock().await.clone();
+            if let Some(activity) = active
+                .activity
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+            {
+                state["last_activity"] = json!(activity);
+            }
+            Some(state)
         } else {
             None
         }

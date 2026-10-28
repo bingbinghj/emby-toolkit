@@ -399,7 +399,7 @@ pub async fn supplement(state: &AppState, raw: &[Value], douban: &[Value]) -> Re
             let details = match details {
                 Ok(details) => details,
                 Err(error) => {
-                    tracing::warn!(douban_id = %id, "豆瓣演员详情查询失败：{}", error.1);
+                    tracing::warn!(douban_id = %id, "豆瓣演员详情查询失败：{}，{}", string(candidate, "name"), error.1);
                     continue;
                 }
             };
@@ -483,14 +483,18 @@ pub async fn supplement(state: &AppState, raw: &[Value], douban: &[Value]) -> Re
     Ok(actors)
 }
 pub async fn premerge_online(state: &AppState, item: &Value, data: &mut Value) -> Result<()> {
+    let media_name = string(item, "Name");
     let raw = list(&data["credits"]["cast"]);
     if !should_fetch(&raw, &*state.config.read().await) {
         return Ok(());
     }
-    tracing::info!(item_id = %string(item, "Id"), "[演员资料] 开始匹配豆瓣演员与角色");
+    tracing::info!(item_id = %string(item, "Id"), "[演员资料] 开始匹配《{media_name}》豆瓣演员与角色");
     match cast(state, item, data).await {
         Ok(cast) => {
-            tracing::info!(matched = cast.len(), "[演员资料] 豆瓣演员匹配完成");
+            tracing::info!(
+                matched = cast.len(),
+                "[演员资料] 《{media_name}》豆瓣演员匹配完成"
+            );
             // Keep Douban's foreign names available for matching before the shared translation pass.
             let cast = cast
                 .into_iter()
@@ -501,7 +505,7 @@ pub async fn premerge_online(state: &AppState, item: &Value, data: &mut Value) -
                 .collect::<Vec<_>>();
             data["credits"]["cast"] = json!(supplement(state, &raw, &cast).await?);
         }
-        Err(error) => tracing::warn!("豆瓣演员补充失败：{}", error.1),
+        Err(error) => tracing::warn!("豆瓣演员补充失败：《{media_name}》，{}", error.1),
     }
     Ok(())
 }

@@ -201,7 +201,10 @@ async fn repair(state: &AppState, old_pc: &str, ua: &str, cookie: bool) -> Resul
         .bind(old_pc).bind(&new_pc).execute(&mut *transaction).await?;
     transaction.commit().await?;
     state.p115.downloads.save(old_pc, ua, &url).await;
-    tracing::info!("115 旧 PC 已通过文件 ID 修复，缓存和媒体引用已同步");
+    tracing::info!(
+        "115 旧 PC 已通过文件 ID 修复：文件 {}，ID {fid}，缓存和媒体引用已同步",
+        super::text(&info, &["name", "file_name", "fn", "n"])
+    );
     Ok(url)
 }
 pub async fn download_url(state: &AppState, pc: &str) -> Result<String> {

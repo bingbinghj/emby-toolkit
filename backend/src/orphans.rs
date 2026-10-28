@@ -509,6 +509,13 @@ impl Reader<'_> {
             .iter()
             .filter_map(|v| v.as_str().map(str::to_string))
             .collect::<Vec<_>>();
+        let path = string(candidate, "path");
+        self.context
+            .activity(
+                "定位原整理目录",
+                &format!("正在定位 {path} 的原整理目录：{}", parts.join("/")),
+            )
+            .await;
         let mut target = self.directory(root, &parts, false).await?;
         let mut children = if target.is_empty() {
             vec![]
@@ -519,6 +526,12 @@ impl Reader<'_> {
         if children.iter().any(|item| id(item) == fid) {
             return Ok(("already_correct", 0));
         }
+        self.context
+            .activity(
+                "搜索115文件",
+                &format!("正在搜索 {path} 的当前云端位置（FID {fid}）"),
+            )
+            .await;
         self.before().await?;
         let response = p115::search(self.state, &string(candidate, "stem")).await;
         self.after();
@@ -555,6 +568,12 @@ impl Reader<'_> {
         let exists = if let Some(exists) = self.parents.get(&current) {
             *exists
         } else {
+            self.context
+                .activity(
+                    "核对父目录",
+                    &format!("正在确认 {path} 的原父目录 {current} 是否已失效"),
+                )
+                .await;
             let parent_id = current
                 .parse()
                 .map_err(|_| ApiError::bad("115父目录ID无效"))?;
@@ -573,6 +592,12 @@ impl Reader<'_> {
             return Ok(("skipped_mismatch", 0));
         }
         if target.is_empty() {
+            self.context
+                .activity(
+                    "重建原整理目录",
+                    &format!("正在为 {path} 恢复原整理目录：{}", parts.join("/")),
+                )
+                .await;
             target = self.directory(root, &parts, true).await?;
             children = self.children(&target, false).await?;
         }
@@ -603,6 +628,15 @@ impl Reader<'_> {
         if related.iter().any(|item| names.contains(&name(item))) {
             return Err(ApiError::bad("目标目录存在同名文件"));
         }
+        self.context
+            .activity(
+                "恢复孤儿文件",
+                &format!(
+                    "正在恢复 {path}，关联文件 {} 个",
+                    ids.len().saturating_sub(1)
+                ),
+            )
+            .await;
         self.before().await?;
         let response = p115::move_files(self.state, &ids, &target).await;
         self.after();
@@ -610,6 +644,12 @@ impl Reader<'_> {
         if !p115::success(&response) {
             return Err(ApiError::bad("115移动失败"));
         }
+        self.context
+            .activity(
+                "验收孤儿文件",
+                &format!("正在确认 {path} 已恢复到原整理目录"),
+            )
+            .await;
         let verified = self.children(&target, true).await?;
         if !verified.iter().any(|item| id(item) == fid) {
             return Err(ApiError::bad("移动接口成功但目标目录未找到视频"));
@@ -649,7 +689,7 @@ pub async fn restore_search_hit(
         directories: BTreeMap::new(),
         parents: BTreeMap::new(),
     };
-    let (status, _) = reader.check(&candidate, &root).await?;
+    let (status, sidecars) = reader.check(&candidate, &root).await?;
     if !matches!(status, "repaired_videos" | "already_correct") {
         return Err(ApiError::bad(format!("孤儿文件恢复未完成：{status}")));
     }
@@ -673,6 +713,11 @@ pub async fn restore_search_hit(
     if current_parent != target {
         return Err(ApiError::bad("孤儿文件详情未确认恢复到目标目录"));
     }
+    if status == "repaired_videos" {
+        tracing::info!("[修复115孤儿文件] 已恢复：{relative}，关联文件 {sidecars} 个");
+    } else {
+        tracing::info!("[修复115孤儿文件] 文件已在原整理目录，无需移动：{relative}");
+    }
     Ok(raw)
 }
 pub async fn repair(state: &AppState, item_id: &str, context: &JobContext) -> Result<Value> {
@@ -686,6 +731,11 @@ pub async fn repair(state: &AppState, item_id: &str, context: &JobContext) -> Re
         return Err(ApiError::bad("未配置媒体路径根目录或115媒体库根CID"));
     }
     let candidates = candidates(&rows, selected.as_ref(), &[&local, &cd2, &cloud]);
+    tracing::info!(
+        "[修复115孤儿文件] 从 {} 条当前范围记录提取 {} 个视频，开始核对原整理目录",
+        rows.len(),
+        candidates.len()
+    );
     let mut reader = Reader {
         state,
         context,
@@ -698,38 +748,87 @@ pub async fn repair(state: &AppState, item_id: &str, context: &JobContext) -> Re
     let mut result = json!({"checked":candidates.len(),"repaired_videos":0,"repaired_sidecars":0,"already_correct":0,"search_missing":0,"skipped_mismatch":0,"failed":0,"failures":[]});
     for (index, candidate) in candidates.iter().enumerate() {
         context.checkpoint().await?;
-        match reader.check(candidate, &root).await {
+        let path = string(candidate, "path");
+        context
+            .update_counted(
+                index as u64,
+                candidates.len() as u64,
+                "115孤儿文件",
+                &format!("正在检查：{path}"),
+            )
+            .await;
+        let message = match reader.check(candidate, &root).await {
             Ok((key, count)) => {
                 result[key] = json!(result[key].as_u64().unwrap() + 1);
                 result["repaired_sidecars"] =
                     json!(result["repaired_sidecars"].as_u64().unwrap() + count as u64);
+                match key {
+                    "repaired_videos" => {
+                        tracing::info!("[修复115孤儿文件] 已恢复：{path}，关联文件 {count} 个");
+                        format!("已恢复：{path}，关联文件 {count} 个")
+                    }
+                    "already_correct" => {
+                        tracing::info!("[修复115孤儿文件] 文件已在原整理目录，无需移动：{path}");
+                        format!("原位正常：{path}")
+                    }
+                    "search_missing" => {
+                        tracing::warn!("[修复115孤儿文件] 搜索未命中，未移动：{path}");
+                        format!("搜索未命中：{path}")
+                    }
+                    _ => {
+                        tracing::warn!(
+                            "[修复115孤儿文件] 文件位于其他有效目录，跳过自动移动：{path}"
+                        );
+                        format!("其他有效目录，跳过：{path}")
+                    }
+                }
             }
             Err(error) => {
                 if context.is_cancelled() {
                     return Err(error);
                 }
+                tracing::error!("[修复115孤儿文件] 处理失败 {path}：{}", error.1);
                 result["failed"] = json!(result["failed"].as_u64().unwrap() + 1);
                 result["failures"]
                     .as_array_mut()
                     .unwrap()
-                    .push(json!(format!("{}：{}", candidate["path"], error.1)));
+                    .push(json!(format!("{path}：{}", error.1)));
+                format!("处理失败 {path}：{}", error.1)
             }
-        }
+        };
         context
-            .update(
-                ((index + 1) * 100 / candidates.len()) as u64,
+            .update_counted(
+                (index + 1) as u64,
+                candidates.len() as u64,
                 "115孤儿文件",
                 &format!(
-                    "已检查{}/{}，恢复{}，失败{}",
-                    index + 1,
-                    candidates.len(),
-                    result["repaired_videos"],
-                    result["failed"]
+                    "{message}；恢复{}，失败{}，115请求{}次",
+                    result["repaired_videos"], result["failed"], reader.requests
                 ),
             )
             .await;
     }
+    context.checkpoint().await?;
     result["requests"] = json!(reader.requests);
-    result["message"] = json!("当前媒体115孤儿文件检查完成");
+    let message = format!(
+        "115孤儿文件检查完成：检查 {} 个视频，恢复 {} 个，关联文件 {} 个，原位 {} 个，搜索未命中 {} 个，其他有效目录跳过 {} 个，失败 {} 个，115请求 {} 次",
+        candidates.len(),
+        result["repaired_videos"],
+        result["repaired_sidecars"],
+        result["already_correct"],
+        result["search_missing"],
+        result["skipped_mismatch"],
+        result["failed"],
+        reader.requests
+    );
+    context
+        .update_counted(
+            candidates.len() as u64,
+            candidates.len() as u64,
+            "115孤儿文件",
+            &message,
+        )
+        .await;
+    result["message"] = json!(message);
     Ok(result)
 }

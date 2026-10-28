@@ -20,6 +20,7 @@ pub async fn feedback(
     context.checkpoint().await?;
     let fields = "Id,Type,Name,Path,Size,MediaSources,MediaStreams,ProviderIds,DateCreated,Container,RunTimeTicks,SeriesId,ParentIndexNumber,IndexNumber,ParentId";
     let mut item = details(state, id, fields).await?;
+    let media_name = string(&item, "Name");
     let library = emby::library_for_path(state, &string(&item, "Path")).await?;
     if let Some(library) = &library {
         item["_SourceLibraryId"] = library["ItemId"].clone();
@@ -28,8 +29,13 @@ pub async fn feedback(
         return Ok(json!({"updated":0,"status":"ignored_library"}));
     }
     tracing::info!(
-        "缓存回流开始：Emby {id}，目标分集 {} 个，仅媒体信息 {media_info_only}",
-        episode_ids.len()
+        "缓存回流开始：《{media_name}》，Emby {id}，目标分集 {} 个，处理范围 {}",
+        episode_ids.len(),
+        if media_info_only {
+            "仅媒体信息"
+        } else {
+            "元数据和媒体信息"
+        }
     );
     let kind = string(&item, "Type");
     let tmdb = string(&item["ProviderIds"], "Tmdb");
@@ -48,7 +54,7 @@ pub async fn feedback(
     let Some((payload, cast)) =
         metadata::reconstruct_full(state, &tmdb, &kind, media_info_only).await?
     else {
-        tracing::info!("缓存回流未命中：Emby {id}，类型 {kind}，TMDb {tmdb}");
+        tracing::info!("缓存回流未命中：《{media_name}》，Emby {id}，类型 {kind}，TMDb {tmdb}");
         return Err(ApiError::bad(
             "未命中可复用元数据/演员缓存，无法执行缓存回流",
         ));
@@ -69,7 +75,7 @@ pub async fn feedback(
         .cloned()
         .collect::<Vec<_>>();
     tracing::info!(
-        "缓存回流命中：Emby {id}，TMDb {tmdb}，演员 {} 位，Emby 季 {} 个，分集 {} 个",
+        "缓存回流命中：《{media_name}》，Emby {id}，TMDb {tmdb}，演员 {} 位，Emby 季 {} 个，分集 {} 个",
         cast.len(),
         seasons.len(),
         episodes.len()
@@ -111,7 +117,7 @@ pub async fn feedback(
                     .is_none()
             {
                 tracing::warn!(
-                    "缓存回流范围检查失败：Emby {id}，TMDb {tmdb}，S{season}E{number} 缓存不完整"
+                    "缓存回流范围检查失败：《{media_name}》，Emby {id}，TMDb {tmdb}，S{season}E{number} 缓存不完整"
                 );
                 return Err(ApiError::bad("目标季集缓存不完整，请先完成后置增强"));
             }
@@ -159,7 +165,7 @@ pub async fn feedback(
         })
         .collect::<HashSet<_>>();
     tracing::info!(
-        "缓存回流完成：Emby {id}，TMDb {tmdb}，数据库记录 {} 条，评分 {score:.2}",
+        "缓存回流完成：《{media_name}》，Emby {id}，TMDb {tmdb}，数据库记录 {} 条，评分 {score:.2}",
         records.len()
     );
     Ok(
@@ -211,15 +217,21 @@ async fn process(
     context: &JobContext,
     pending: bool,
 ) -> Result<Value> {
+    let media_name = string(item, "Name");
     context.checkpoint().await?;
     if emby::path_ignored(state, &string(item, "Path")).await? {
         return Ok(json!({"updated":0,"status":"ignored_library"}));
     }
     tracing::info!(
-        "完整刮削开始：Emby {}，名称 {}，目标分集 {} 个，待回流 {pending}",
+        "完整刮削开始：Emby {}，名称 {}，目标分集 {} 个，处理方式 {}",
         string(item, "Id"),
         string(item, "Name"),
-        episode_ids.len()
+        episode_ids.len(),
+        if pending {
+            "预处理后等待回流"
+        } else {
+            "刮削并写回在线媒体"
+        }
     );
     let kind = string(item, "Type");
     let tmdb = string(&item["ProviderIds"], "Tmdb");
@@ -253,7 +265,9 @@ async fn process(
         .into_iter()
         .collect::<Vec<_>>();
     let auto_group = if kind == "Series" && group.is_none() {
-        tracing::info!("剧集组自动匹配开始：TMDb {tmdb}，目标季 {target_numbers:?}");
+        tracing::info!(
+            "剧集组自动匹配开始：《{media_name}》，TMDb {tmdb}，目标季 {target_numbers:?}"
+        );
         let selected = episodes
             .iter()
             .filter(|e| episode_ids.is_empty() || episode_ids.contains(&string(e, "Id")))
@@ -273,7 +287,10 @@ async fn process(
         {
             Ok(group) => group,
             Err(error) => {
-                tracing::warn!("剧集组自动匹配失败，沿用官方季：{}", error.1);
+                tracing::warn!(
+                    "剧集组自动匹配失败：《{media_name}》，沿用官方季，{}",
+                    error.1
+                );
                 None
             }
         }
@@ -282,7 +299,7 @@ async fn process(
     };
     let group = group.or(auto_group.as_deref());
     tracing::info!(
-        "刮削范围确认：TMDb {tmdb}，类型 {kind}，目标季 {target_numbers:?}，剧集组 {}",
+        "刮削范围确认：《{media_name}》，TMDb {tmdb}，类型 {kind}，目标季 {target_numbers:?}，剧集组 {}",
         group.filter(|g| !g.is_empty()).unwrap_or("官方季")
     );
     let mut data = if kind == "Movie" {
@@ -292,7 +309,7 @@ async fn process(
     } else {
         crate::tmdb::aggregate(state, &tmdb, &target_numbers).await?
     };
-    tracing::info!("TMDb 元数据已获取：TMDb {tmdb}，类型 {kind}");
+    tracing::info!("TMDb 元数据已获取：《{media_name}》，TMDb {tmdb}，类型 {kind}");
     if kind == "Series" {
         crate::douban::premerge_in_job(state, item, &mut data["series_details"], context).await?;
     } else {
@@ -331,7 +348,7 @@ async fn process(
         &priority,
     );
     tracing::info!(
-        "元数据骨架格式化完成：TMDb {tmdb}，类型 {kind}，演员 {} 位",
+        "元数据骨架格式化完成：《{media_name}》，TMDb {tmdb}，类型 {kind}，演员 {} 位",
         cast.len()
     );
     if kind == "Series" {
@@ -358,7 +375,7 @@ async fn process(
     let images = crate::images::download(state, &kind, &tmdb, item, &payload, context).await?;
     if state.configured().await && !pending {
         tracing::info!(
-            "Emby 元数据刷新开始：Emby {}，TMDb {tmdb}",
+            "Emby 元数据刷新开始：《{media_name}》，Emby {}，TMDb {tmdb}",
             string(item, "Id")
         );
         crate::persons::update_emby(state, &cast, &payload, item).await?;
@@ -367,7 +384,7 @@ async fn process(
         })
         .await?;
         tracing::info!(
-            "Emby 元数据刷新完成：Emby {}，TMDb {tmdb}",
+            "Emby 元数据刷新完成：《{media_name}》，Emby {}，TMDb {tmdb}",
             string(item, "Id")
         );
     }
@@ -388,7 +405,7 @@ async fn process(
     metadata::ingest(state, &mut records, !pending && group.is_some()).await?;
     if pending {
         tracing::info!(
-            "入库预处理完成：TMDb {tmdb}，数据库记录 {} 条，NFO 写入 {written} 个，图片下载 {images} 个，等待回流",
+            "入库预处理完成：《{media_name}》，TMDb {tmdb}，数据库记录 {} 条，NFO 写入 {written} 个，图片下载 {images} 个，等待回流",
             records.len()
         );
         return Ok(
@@ -397,7 +414,7 @@ async fn process(
     }
     let score = review(state, item, &cast, pending).await?;
     tracing::info!(
-        "完整刮削完成：Emby {}，TMDb {tmdb}，数据库记录 {} 条，NFO 写入 {written} 个，图片下载 {images} 个，评分 {score:.2}",
+        "完整刮削完成：《{media_name}》，Emby {}，TMDb {tmdb}，数据库记录 {} 条，NFO 写入 {written} 个，图片下载 {images} 个，评分 {score:.2}",
         string(item, "Id"),
         records.len()
     );
@@ -412,7 +429,8 @@ pub async fn patch_cached_series(
     payload: &mut Value,
     scope: &[(i64, i64)],
 ) -> Result<bool> {
-    tracing::info!("追更缓存补齐开始：TMDb {id}，目标季集 {scope:?}");
+    let media_name = string(payload, "name");
+    tracing::info!("追更缓存补齐开始：《{media_name}》，TMDb {id}，目标季集 {scope:?}");
     let config = state.config.read().await.clone();
     let mut seasons = list(&payload["seasons_details"])
         .into_iter()
@@ -436,14 +454,16 @@ pub async fn patch_cached_series(
                     && list(&e["credits"]["guest_stars"]).is_empty()
             });
         if seasons.contains_key(&season) && existing.is_some() && !needs_credits {
-            tracing::debug!("追更缓存补齐跳过：TMDb {id}，{key} 缓存完整");
+            tracing::debug!("追更缓存补齐跳过：《{media_name}》，TMDb {id}，{key} 缓存完整");
             continue;
         }
         if let std::collections::btree_map::Entry::Vacant(entry) = fetched.entry(season) {
-            tracing::info!("追更季元数据补抓开始：TMDb {id}，第 {season} 季");
+            tracing::info!("追更季元数据补抓开始：《{media_name}》，TMDb {id}，第 {season} 季");
             let data = crate::tmdb::get(state, &format!("/tv/{id}/season/{season}"), &[]).await?;
             if data["id"].as_u64().is_none_or(|id| id == 0) {
-                tracing::warn!("追更季元数据补抓失败：TMDb {id}，第 {season} 季没有有效元数据");
+                tracing::warn!(
+                    "追更季元数据补抓失败：《{media_name}》，TMDb {id}，第 {season} 季没有有效元数据"
+                );
                 return Err(ApiError::bad(format!("未能获取第 {season} 季元数据")));
             }
             entry.insert(data);
@@ -488,7 +508,14 @@ pub async fn patch_cached_series(
             episode = json!({"id":existing["id"],"season_number":season,"episode_number":number,"credits":credits});
         }
         patch["episodes_details"][&key] = episode;
-        tracing::debug!("追更分集缓存已补齐：TMDb {id}，{key}，补抓演员表 {needs_credits}");
+        tracing::debug!(
+            "追更分集缓存已补齐：《{media_name}》，TMDb {id}，{key}，{}",
+            if needs_credits {
+                "已补抓分集演员表"
+            } else {
+                "演员表无需补抓"
+            }
+        );
     }
     let patched = !list(&patch["seasons_details"]).is_empty()
         || patch["episodes_details"]
@@ -496,7 +523,7 @@ pub async fn patch_cached_series(
             .is_some_and(|o| !o.is_empty());
     if patched {
         tracing::info!(
-            "追更缓存补齐数据已就绪：TMDb {id}，新增季 {} 个，补齐分集 {} 个",
+            "追更缓存补齐数据已就绪：《{media_name}》，TMDb {id}，新增季 {} 个，补齐分集 {} 个",
             list(&patch["seasons_details"]).len(),
             patch["episodes_details"].as_object().map_or(0, |o| o.len())
         );
@@ -514,7 +541,14 @@ pub async fn patch_cached_series(
     }
     payload["seasons_details"] = json!(seasons.into_values().collect::<Vec<_>>());
     payload["episodes_details"] = json!(episodes);
-    tracing::info!("追更缓存补齐完成：TMDb {id}，缓存发生变化 {patched}");
+    tracing::info!(
+        "追更缓存补齐完成：《{media_name}》，TMDb {id}，{}",
+        if patched {
+            "已更新缺失的季集缓存"
+        } else {
+            "目标季集缓存完整，无需更新"
+        }
+    );
     Ok(patched)
 }
 pub async fn prepare_cached(
@@ -524,6 +558,7 @@ pub async fn prepare_cached(
     requested_group: Option<&str>,
     context: &JobContext,
 ) -> Result<bool> {
+    let media_name = string(item, "Name");
     context.checkpoint().await?;
     if emby::path_ignored(state, &string(item, "Path")).await? {
         return Ok(true);
@@ -538,13 +573,13 @@ pub async fn prepare_cached(
     let kind = string(item, "Type");
     let Some((mut payload, cast)) = metadata::reconstruct_full(state, &id, &kind, false).await?
     else {
-        tracing::info!("缓存预处理未命中：类型 {kind}，TMDb {id}");
+        tracing::info!("缓存预处理未命中：《{media_name}》，类型 {kind}，TMDb {id}");
         return Ok(false);
     };
     if kind == "Series"
         && requested_group.is_some_and(|group| group != string(&payload, "episode_group_id"))
     {
-        tracing::info!("缓存预处理未命中：TMDb {id}，请求剧集组与缓存不一致");
+        tracing::info!("缓存预处理未命中：《{media_name}》，TMDb {id}，请求剧集组与缓存不一致");
         return Ok(false);
     }
     let children = if kind == "Series" {
@@ -576,7 +611,7 @@ pub async fn prepare_cached(
         .collect::<Vec<_>>();
     let cached_group = string(&payload, "episode_group_id");
     tracing::info!(
-        "缓存预处理范围确认：TMDb {id}，目标季集 {scope:?}，缓存剧集组 {}",
+        "缓存预处理范围确认：《{media_name}》，TMDb {id}，目标季集 {scope:?}，缓存剧集组 {}",
         if cached_group.is_empty() {
             "官方季"
         } else {
@@ -601,7 +636,9 @@ pub async fn prepare_cached(
         .await
             && group.as_deref() != Some(&cached_group)
         {
-            tracing::info!("缓存预处理未命中：TMDb {id}，当前分集与缓存剧集组不匹配");
+            tracing::info!(
+                "缓存预处理未命中：《{media_name}》，TMDb {id}，当前分集与缓存剧集组不匹配"
+            );
             return Ok(false);
         }
     }
@@ -616,7 +653,7 @@ pub async fn prepare_cached(
                 .is_none()
         })
     {
-        tracing::info!("缓存预处理未命中：TMDb {id}，目标季集的剧集组缓存不完整");
+        tracing::info!("缓存预处理未命中：《{media_name}》，TMDb {id}，目标季集的剧集组缓存不完整");
         return Ok(false);
     }
     let old_seasons = list(&payload["seasons_details"])
@@ -688,10 +725,10 @@ pub async fn prepare_cached(
         path.parent().unwrap_or(path)
     };
     if !root.join("poster.jpg").is_file() {
-        tracing::info!("缓存恢复图片补抓开始：TMDb {id}，本地海报缺失");
+        tracing::info!("缓存恢复图片补抓开始：《{media_name}》，TMDb {id}，本地海报缺失");
         crate::images::download(state, &kind, &id, item, &payload, context).await?;
     } else {
-        tracing::info!("缓存恢复图片补抓跳过：TMDb {id}，本地海报已存在");
+        tracing::info!("缓存恢复图片补抓跳过：《{media_name}》，TMDb {id}，本地海报已存在");
     }
     tracing::info!(
         "缓存预处理完成：TMDb {id}，复用演员 {} 位，目标分集 {} 个，缓存已补齐 {patched}",
@@ -787,8 +824,8 @@ async fn review(
     };
     let mut transaction = state.db.begin().await?;
     tracing::info!(
-        "处理评分写入开始：Emby {id}，名称 {name}，评分 {score:.2}，待复核 {}",
-        reason.is_some()
+        "处理评分写入开始：Emby {id}，名称 {name}，评分 {score:.2}，复核结果 {}",
+        reason.as_deref().unwrap_or("评分和媒体信息检查通过")
     );
     sqlx::query("INSERT INTO processed_log(item_id,item_name,score) VALUES($1,$2,$3) ON CONFLICT(item_id) DO UPDATE SET item_name=EXCLUDED.item_name,score=EXCLUDED.score,processed_at=NOW()")
         .bind(&id).bind(&name).bind(score as f32).execute(&mut *transaction).await?;
@@ -803,7 +840,7 @@ async fn review(
     }
     transaction.commit().await?;
     tracing::info!(
-        "处理评分写入完成：Emby {}，评分 {score:.2}",
+        "处理评分写入完成：《{name}》，Emby {}，评分 {score:.2}",
         string(item, "Id")
     );
     Ok(score)
