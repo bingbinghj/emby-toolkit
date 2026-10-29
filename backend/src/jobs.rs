@@ -53,6 +53,20 @@ impl JobContext {
     pub(crate) fn pause_generation(&self) -> u64 {
         self.pause_generation.load(Ordering::Acquire)
     }
+    pub(crate) async fn is_pause_requested(&self) -> bool {
+        self.progress.lock().await["pause_requested"] == true
+    }
+    pub(crate) async fn wait_for_pause(&self) {
+        loop {
+            let wake = self.wake.notified();
+            tokio::pin!(wake);
+            wake.as_mut().enable();
+            if self.is_pause_requested().await {
+                return;
+            }
+            wake.await;
+        }
+    }
     pub async fn checkpoint(&self) -> Result<()> {
         loop {
             let wake = self.wake.notified();
@@ -427,6 +441,7 @@ impl JobManager {
                     state["state"] = json!("pausing");
                     tracing::info!(task_id=%active.id,"[任务控制] {name} · 已请求暂停，等待当前操作结束");
                 }
+                active.wake.notify_waiters();
             }
             "resume" => {
                 state["pause_requested"] = json!(false);

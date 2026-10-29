@@ -290,7 +290,16 @@ pub async fn cache_with_batch(
             "分批大小不能为 0".into(),
         ));
     }
-    let dirty = dirty.into_iter().collect::<Vec<_>>();
+    let mut dirty = dirty.into_iter().collect::<Vec<_>>();
+    dirty.sort_by_cached_key(|work| {
+        (
+            work_titles
+                .get(work)
+                .map(|name| name.to_lowercase())
+                .unwrap_or_default(),
+            work.clone(),
+        )
+    });
     let chunks = if batch_size < 0 {
         vec![]
     } else {
@@ -371,7 +380,7 @@ pub async fn cache_with_batch(
         }
         use futures_util::{FutureExt, StreamExt, stream};
         let limit = crate::strm::thread_limit(state, "secondary").await;
-        let pending = stream::iter(groups.clone()).map(|(work, _, _, numbers, title)| async move {
+        let pending = stream::iter(groups.clone()).map(|(work, _, _, numbers, _)| async move {
             context.checkpoint().await?;
         let data = if work.1 == "Movie" {
             tmdb::details(state, "Movie", &work.0).await
@@ -380,23 +389,26 @@ pub async fn cache_with_batch(
         } else {
             tmdb::aggregate(state, &work.0, &numbers).await
         };
-        let data = data.unwrap_or_else(|error| {
-            tracing::warn!(
-                "[同步媒体] 《{title}》读取 TMDb 元数据失败，使用现有媒体信息：{}",
-                error.1
-            );
-            json!({})
-        });
             Ok::<_, crate::error::ApiError>((work.clone(), data))
         }.boxed()).buffer_unordered(limit);
         tokio::pin!(pending);
         let mut metadata = BTreeMap::new();
+        let mut metadata_errors = BTreeMap::new();
         while let Some(result) = pending.next().await {
             let (work, data) = result?;
+            let data = data.unwrap_or_else(|error| {
+                metadata_errors.insert(work.clone(), error.1);
+                json!({})
+            });
             metadata.insert(work, data);
         }
-        for (work, _, _, _, _) in &groups {
+        for (work, _, _, _, title) in &groups {
             context.checkpoint().await?;
+            if let Some(error) = metadata_errors.remove(work) {
+                tracing::warn!(
+                    "[同步媒体] 《{title}》读取 TMDb 元数据失败，使用现有媒体信息：{error}"
+                );
+            }
             let data = metadata.get_mut(work).unwrap();
             if config["ai_translate_on_sync"] == true {
                 let mut pruned = data.clone();

@@ -121,10 +121,17 @@ async fn prepare(state: &AppState, target: Target, mut info: Value) -> Result<Pr
         multipart: item["PartCount"].as_u64().unwrap_or(0) > 1,
     })
 }
-async fn stage_all(state: &AppState, prepared: &mut BTreeMap<String, Prepared>) -> Result<()> {
+async fn stage_all(
+    state: &AppState,
+    prepared: &mut BTreeMap<String, Prepared>,
+    order: &std::collections::HashMap<String, crate::media_order::Key>,
+) -> Result<()> {
     // All identity and chapter reads finish before any persistent write or cache clear.
     let mut transaction = state.db.begin().await?;
-    for item in prepared.values_mut() {
+    let mut ids = prepared.keys().cloned().collect::<Vec<_>>();
+    ids.sort_by_cached_key(|id| order.get(id).cloned());
+    for id in ids {
+        let item = prepared.get_mut(&id).unwrap();
         if !item.target.kind.is_empty() {
             let current = media_edit::target(state, &item.target.id).await?;
             if current.path != item.target.path
@@ -315,6 +322,9 @@ pub async fn save_with_rebuilt(
             ids.push(value.trim().into());
         }
     }
+    let order = crate::media_order::id_keys(state, &ids).await?;
+    // The edited item remains the first identity/track validation gate.
+    ids[1..].sort_by_cached_key(|id| order.get(id).cloned());
     tracing::info!(
         item_id = id,
         targets = ids.len(),
@@ -412,6 +422,8 @@ pub async fn save_with_rebuilt(
         }
     }
     let mut restore = BTreeMap::new();
+    let mut prepared = prepared.into_iter().collect::<Vec<_>>();
+    prepared.sort_by_cached_key(|(id, _)| order.get(id).cloned());
     for (id, (target, info)) in prepared {
         context.checkpoint().await?;
         let prepared = prepare(state, target, info).await?;
@@ -445,7 +457,7 @@ pub async fn save_with_rebuilt(
         restore.insert(id, prepared);
     }
     context.update(35, "暂存", "暂存媒体信息和当前章节").await;
-    let result = stage_all(state, &mut restore).await;
+    let result = stage_all(state, &mut restore, &order).await;
     if let Err(error) = result {
         cleanup_stages(&restore).await;
         return Err(error);
@@ -494,7 +506,9 @@ pub async fn save_with_rebuilt(
     context
         .update(65, "恢复媒体信息", "恢复全部受影响版本和分段 JSON")
         .await;
-    for (id, item) in &restore {
+    let mut ordered_restore = restore.iter().collect::<Vec<_>>();
+    ordered_restore.sort_by_cached_key(|(id, _)| order.get(*id).cloned());
+    for (id, item) in &ordered_restore {
         if let Some(stage) = &item.stage {
             if let Err(error) = tokio::fs::rename(stage, &item.final_path).await {
                 operation_failures.push(format!("{id}: 无法恢复 JSON: {error}"));
@@ -516,7 +530,7 @@ pub async fn save_with_rebuilt(
             operation_failures.push(format!("恢复版本组 {} 失败: {}", group.join(","), error.1));
         }
     }
-    for item in restore.values() {
+    for (_, item) in &ordered_restore {
         let fields = media_display::fields(&item.target.path);
         if let Err(error)=sqlx::query("UPDATE media_metadata SET asset_details_json=(SELECT jsonb_agg(CASE WHEN a->>'path'=$1 THEN a||$2::jsonb ELSE a END ORDER BY idx) FROM jsonb_array_elements(asset_details_json) WITH ORDINALITY entries(a,idx)),last_updated_at=NOW() WHERE jsonb_typeof(asset_details_json)='array' AND asset_details_json @> $3::jsonb")
             .bind(&item.target.path).bind(&fields).bind(json!([{"path":item.target.path}])).execute(&state.db).await {
@@ -531,7 +545,7 @@ pub async fn save_with_rebuilt(
     let mut verification_failures = vec![];
     for attempt in 0..3 {
         verification_failures.clear();
-        for (id, item) in &restore {
+        for (id, item) in &ordered_restore {
             match media_edit::details(state, id, "Type,Chapters,MediaSources,MediaStreams").await {
                 Ok(details) => {
                     let has_streams = details["MediaStreams"]

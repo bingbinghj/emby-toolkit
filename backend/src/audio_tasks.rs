@@ -319,7 +319,7 @@ pub async fn repair_all(state: &AppState, context: &JobContext) -> Result<Value>
     let libraries = libraries["Items"]
         .as_array()
         .ok_or_else(|| ApiError::bad("Emby 媒体库列表无效"))?;
-    let mut ids = std::collections::BTreeSet::new();
+    let mut ids = BTreeMap::new();
     let mut scanned = 0;
     for library in libraries {
         context.checkpoint().await?;
@@ -347,7 +347,7 @@ pub async fn repair_all(state: &AppState, context: &JobContext) -> Result<Value>
                 ("IncludeItemTypes", "Movie,Episode,Video".into()),
                 (
                     "Fields",
-                    "Name,Path,PartCount,ExtraType,MediaSources,MediaStreams,Container,Type".into(),
+                    "Name,Path,PartCount,ExtraType,MediaSources,MediaStreams,Container,Type,SeriesName,SeriesId,ParentIndexNumber,IndexNumber".into(),
                 ),
             ],
             context,
@@ -361,23 +361,41 @@ pub async fn repair_all(state: &AppState, context: &JobContext) -> Result<Value>
             }
             let sources = list(&item["MediaSources"]);
             if sources.is_empty() {
-                ids.insert(string(&item, "Id"));
+                ids.entry(string(&item, "Id"))
+                    .or_insert_with(|| crate::media_order::key(&item));
             } else {
-                for source in sources {
+                for (index, source) in sources.into_iter().enumerate() {
                     let id = string(&source, "ItemId");
                     let source_id = string(&source, "Id");
-                    ids.insert(if !id.is_empty() {
+                    let id = if !id.is_empty() {
                         id
                     } else if !source_id.is_empty() && !source_id.starts_with("mediasource_") {
                         source_id
                     } else {
                         string(&item, "Id")
-                    });
+                    };
+                    let mut key = crate::media_order::key(&item);
+                    key.4 = index as u64;
+                    ids.entry(id).or_insert(key);
                 }
             }
         }
     }
-    let mut result = repair(state, &ids.into_iter().collect::<Vec<_>>(), context).await?;
+    let local_keys =
+        crate::media_order::id_keys(state, &ids.keys().cloned().collect::<Vec<_>>()).await?;
+    for (id, key) in &mut ids {
+        if let Some(local) = local_keys.get(id) {
+            *key = local.clone();
+        }
+    }
+    let mut ids = ids.into_iter().collect::<Vec<_>>();
+    ids.sort_by(|a, b| a.1.cmp(&b.1));
+    let mut result = repair(
+        state,
+        &ids.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
+        context,
+    )
+    .await?;
     result["scanned"] = json!(scanned);
     Ok(result)
 }
@@ -695,10 +713,13 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
     if !root.is_dir() || protected(&root) {
         return Err(ApiError::bad("媒体根目录不存在或位于115源目录"));
     }
-    let seed_ids = selected
+    let mut seed_ids = selected
         .keys()
         .map(|(id, _)| id.clone())
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    crate::media_order::sort_ids(state, &mut seed_ids).await?;
     let mut processed = HashSet::new();
     let mut updated = 0;
     let mut unchanged = 0;

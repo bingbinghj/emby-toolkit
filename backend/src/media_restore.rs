@@ -212,9 +212,11 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
     if string(&config, "local_strm_root").is_empty() || !root.is_dir() {
         return Err(ApiError::bad("未配置本地媒体库目录或目录不存在"));
     }
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE in_library=true AND item_type IN ('Movie','Episode')").fetch_all(&state.db).await?;
+    let mut rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE in_library=true AND item_type IN ('Movie','Episode')").fetch_all(&state.db).await?;
+    crate::media_order::sort_rows(state, &mut rows).await?;
     let mut assets = BTreeMap::<PathBuf, Vec<(String, Value)>>::new();
     let mut labels = BTreeMap::new();
+    let mut order = BTreeMap::new();
     for row in rows {
         let ids = list(&row["emby_item_ids_json"]);
         for (index, asset) in list(&row["asset_details_json"]).into_iter().enumerate() {
@@ -250,6 +252,11 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
                 labels
                     .entry(path.clone())
                     .or_insert_with(|| crate::revalidation::media_label(&row, &asset, index));
+                order.entry(path.clone()).or_insert_with(|| {
+                    let mut key = crate::media_order::key(&row);
+                    key.4 = index as u64;
+                    key
+                });
                 assets.entry(path).or_default().push((id, asset));
             }
         }
@@ -278,6 +285,13 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
     let mut failures = vec![];
     let mut affected = std::collections::BTreeSet::new();
     let total = assets.len();
+    let mut assets = assets.into_iter().collect::<Vec<_>>();
+    assets.sort_by_cached_key(|(path, _)| {
+        order
+            .get(path)
+            .cloned()
+            .unwrap_or_else(|| crate::media_order::key(&json!({"Name":path.to_string_lossy()})))
+    });
     for (index, (path, bindings)) in assets.into_iter().enumerate() {
         context.checkpoint().await?;
         let label = labels.get(&path).cloned().unwrap_or_else(|| {

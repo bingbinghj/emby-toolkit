@@ -120,35 +120,59 @@ pub async fn missing_with_overwrite(
         if !overwrite && target.is_file() {
             continue;
         }
-        tasks.push((file.clone(), target, data, overwrite));
+        tasks.push((season, episode, file.clone(), target, data, overwrite));
     }
     if tasks.is_empty() {
         return Ok(0);
     }
+    tasks.sort_by_key(|(season, episode, _, _, _, _)| (*season, *episode));
     use futures_util::{FutureExt, StreamExt, stream};
     let limit = crate::strm::thread_limit(state, "main").await;
-    let pending = stream::iter(tasks).map(|(file, target, data, overwrite)| async move {
-        if let Some(context) = context { context.checkpoint().await?; }
-        let name = file.file_name().unwrap_or_default().to_string_lossy();
-        match capture(state, &file, &target, &data, context, overwrite).await {
-            Ok(true) => {
-                tracing::info!(file = %name, "[视频截图] 分集图已生成");
-                Ok(1)
+    let pending = stream::iter(tasks.into_iter().enumerate())
+        .map(|(index, (_, _, file, target, data, overwrite))| {
+            let name = file
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            tracing::info!(file = %name, "[视频截图] 开始处理缺失图片");
+            async move {
+                let result = async {
+                    if let Some(context) = context {
+                        context.checkpoint().await?;
+                    }
+                    match capture(state, &file, &target, &data, context, overwrite).await {
+                        Ok(done) => Ok((usize::from(done), None)),
+                        Err(error) if context.is_some_and(JobContext::is_cancelled) => Err(error),
+                        Err(error) => Ok((0, Some(error.1))),
+                    }
+                }
+                .await;
+                (index, name, result)
             }
-            Ok(false) => Ok(0),
-            Err(error) if context.is_some_and(JobContext::is_cancelled) => Err(error),
-            Err(error) => {
-                tracing::warn!(file = %name, error = %error.1, "[视频截图] 截取失败，保留现有图片"); Ok(0)
-            }
-        }
-    }.boxed()).buffer_unordered(limit);
+            .boxed()
+        })
+        .buffer_unordered(limit);
     tokio::pin!(pending);
     let mut captured = 0;
     let mut cancelled = None;
-    while let Some(result) = pending.next().await {
-        match result {
-            Ok(done) => captured += done,
-            Err(error) => cancelled = Some(error),
+    let mut finished = std::collections::BTreeMap::new();
+    let mut next = 0;
+    while let Some((index, name, result)) = pending.next().await {
+        finished.insert(index, (name, result));
+        while let Some((name, result)) = finished.remove(&next) {
+            match result {
+                Ok((done, error)) => {
+                    captured += done;
+                    if let Some(error) = error {
+                        tracing::warn!(file = %name, error = %error, "[视频截图] 截取失败，保留现有图片");
+                    } else if done > 0 {
+                        tracing::info!(file = %name, "[视频截图] 分集图已生成");
+                    }
+                }
+                Err(error) => cancelled = Some(error),
+            }
+            next += 1;
         }
     }
     if let Some(error) = cancelled {
@@ -236,7 +260,7 @@ async fn capture(
             let name = file.file_name().unwrap_or_default().to_string_lossy();
             let (timestamp, filter) = capture_options(&info.unwrap_or(json!({})), &name, data);
             let url = crate::p115::download_url(state, &pc).await?;
-            tracing::info!(file = %name, timestamp, "[视频截图] 开始截取缺失图片");
+            tracing::debug!(file = %name, timestamp, "[视频截图] 开始截取缺失图片");
             let mut command = tokio::process::Command::new("ffmpeg");
             command
                 .kill_on_drop(true)

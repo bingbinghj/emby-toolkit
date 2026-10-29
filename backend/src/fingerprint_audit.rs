@@ -43,7 +43,7 @@ pub fn summary(progress: &Value) -> Value {
     ] {
         result[key] = progress[key].clone();
     }
-    let remaining = list(&progress["pending"]).len();
+    let remaining = progress["pending"].as_array().map_or(0, Vec::len);
     result["remaining"] = json!(remaining);
     result["completed"] = json!(
         progress["total"]
@@ -51,7 +51,7 @@ pub fn summary(progress: &Value) -> Value {
             .unwrap_or(0)
             .saturating_sub(remaining as u64)
     );
-    result["failed"] = json!(list(&progress["failed"]).len());
+    result["failed"] = json!(progress["failed"].as_array().map_or(0, Vec::len));
     result
 }
 fn advice(reason: &str) -> &'static str {
@@ -121,7 +121,7 @@ pub fn build_report(progress: &Value) -> Value {
     ] {
         result[key] = progress[key].clone();
     }
-    let remaining = list(&progress["pending"]).len() as u64;
+    let remaining = progress["pending"].as_array().map_or(0, Vec::len) as u64;
     result["remaining"] = json!(remaining);
     result["completed"] = json!(
         progress["total"]
@@ -266,7 +266,7 @@ pub async fn save(state: &AppState, progress: &mut Value) -> Result<()> {
     Ok(())
 }
 async fn snapshot(state: &AppState, item: &Value) -> Result<(Value, usize)> {
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE in_library=true AND tmdb_id=$1 AND item_type=$2 AND emby_item_ids_json @> $3").bind(string(item,"tmdb_id")).bind(string(item,"item_type")).bind(json!([item["item_id"]])).fetch_all(&state.db).await?;
+    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(f) FROM (SELECT tmdb_id,item_type,parent_series_tmdb_id,emby_item_ids_json,asset_details_json,file_sha1_json,file_pickcode_json FROM media_metadata WHERE in_library=true AND tmdb_id=$1 AND item_type=$2 AND emby_item_ids_json @> $3) f").bind(string(item,"tmdb_id")).bind(string(item,"item_type")).bind(json!([item["item_id"]])).fetch_all(&state.db).await?;
     let mut matches = vec![];
     for row in rows {
         for (index, asset) in list(&row["asset_details_json"]).iter().enumerate() {
@@ -384,8 +384,8 @@ pub async fn scan(
     context: &JobContext,
 ) -> Result<Value> {
     let identity = config_identity(state).await;
-    let (inventory, mut progress) = if mode == "start" {
-        let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE in_library=true AND item_type IN ('Movie','Episode')").fetch_all(&state.db).await?;
+    let (mut inventory, mut progress) = if mode == "start" {
+        let rows = crate::revalidation::fingerprint_rows(state, None).await?;
         let mut items = vec![];
         for row in rows {
             let assets = list(&row["asset_details_json"]);
@@ -394,8 +394,8 @@ pub async fn scan(
             } else {
                 assets
             };
-            for asset in assets {
-                items.push(json!({"tmdb_id":row["tmdb_id"],"item_type":row["item_type"],"item_id":asset["emby_item_id"].as_str().unwrap_or(""),"path":asset["path"].as_str().unwrap_or("")}));
+            for (index, asset) in assets.into_iter().enumerate() {
+                items.push(json!({"tmdb_id":row["tmdb_id"],"item_type":row["item_type"],"item_id":asset["emby_item_id"].as_str().unwrap_or(""),"path":asset["path"].as_str().unwrap_or(""),"label":crate::revalidation::media_label(&row,&asset,index)}));
             }
         }
         let id = uuid::Uuid::new_v4().simple().to_string();
@@ -439,13 +439,79 @@ pub async fn scan(
             }
         }
     }
+    if inventory["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|item| item["label"].as_str().is_none())
+    {
+        let rows = crate::revalidation::fingerprint_rows(state, None).await?;
+        let mut labels = std::collections::HashMap::new();
+        let mut rank = 0;
+        for row in rows {
+            for (index, asset) in list(&row["asset_details_json"]).iter().enumerate() {
+                labels
+                    .entry((
+                        string(&row, "tmdb_id"),
+                        string(&row, "item_type"),
+                        string(asset, "emby_item_id"),
+                        string(asset, "path"),
+                    ))
+                    .or_insert((rank, crate::revalidation::media_label(&row, asset, index)));
+                rank += 1;
+            }
+        }
+        let mut order = vec![];
+        for item in inventory["items"].as_array_mut().unwrap() {
+            let key = (
+                string(item, "tmdb_id"),
+                string(item, "item_type"),
+                string(item, "item_id"),
+                string(item, "path"),
+            );
+            let (rank, label) = labels.get(&key).cloned().unwrap_or_else(|| {
+                (
+                    usize::MAX,
+                    format!("Item {}：{}", string(item, "item_id"), string(item, "path")),
+                )
+            });
+            order.push(rank);
+            item["label"] = json!(label);
+            item["sort_rank"] = json!(rank);
+        }
+        progress["pending"]
+            .as_array_mut()
+            .unwrap()
+            .sort_by_cached_key(|ordinal| order[ordinal.as_u64().unwrap() as usize]);
+        let mut transaction = state.db.begin().await?;
+        for (key, value) in [(INVENTORY, &inventory), (PROGRESS, &progress)] {
+            sqlx::query("INSERT INTO app_settings(setting_key,value_json) VALUES($1,$2) ON CONFLICT(setting_key) DO UPDATE SET value_json=EXCLUDED.value_json").bind(key).bind(value).execute(&mut *transaction).await?;
+        }
+        transaction.commit().await?;
+    }
+    if mode == "retry" {
+        progress["pending"]
+            .as_array_mut()
+            .unwrap()
+            .sort_by_cached_key(|ordinal| {
+                let index = ordinal.as_u64().unwrap();
+                inventory["items"][index as usize]["sort_rank"]
+                    .as_u64()
+                    .unwrap_or(index)
+            });
+    }
     progress["state"] = json!("running");
     progress.as_object_mut().unwrap().remove("error");
     save(state, &mut progress).await?;
+    let mut last_saved = tokio::time::Instant::now();
     let reader = crate::revalidation::AuditReader::new(context, true);
     let verifier = reader.verifier();
     let outcome = async {
-        for ordinal in list(&progress["pending"]) {
+        for (number, ordinal) in list(&progress["pending"]).into_iter().enumerate() {
+            if context.is_pause_requested().await {
+                save(state, &mut progress).await?;
+                last_saved = tokio::time::Instant::now();
+            }
             context.checkpoint().await?;
             if config_identity(state).await != identity {
                 return Err(ApiError::bad("扫描期间配置变化，请重新扫描"));
@@ -454,8 +520,18 @@ pub async fn scan(
             let total = progress["total"].as_u64().unwrap();
             let item_id = string(item, "item_id");
             let path = string(item, "path");
-            context.update_counted(total.saturating_sub(list(&progress["pending"]).len() as u64), total, "全库指纹", &format!("正在检查 Item {item_id}：{path}")).await;
-            let result = check(state, item, &reader, &verifier).await;
+            let label = item["label"].as_str().map(str::to_string).unwrap_or_else(|| format!("Item {item_id}：{path}"));
+            context.update_counted(total.saturating_sub(progress["pending"].as_array().map_or(0, Vec::len) as u64), total, "全库指纹", &format!("正在检查 {label}")).await;
+            let checking = check(state, item, &reader, &verifier);
+            tokio::pin!(checking);
+            let result = tokio::select! {
+                result = &mut checking => result,
+                _ = context.wait_for_pause() => {
+                    save(state, &mut progress).await?;
+                    last_saved = tokio::time::Instant::now();
+                    checking.await
+                }
+            };
             let (kind, details) = match result {
                 Ok(v) => v,
                 Err(error) if context.is_cancelled() || error.0 == StatusCode::CONFLICT => return Err(error),
@@ -463,19 +539,19 @@ pub async fn scan(
             };
             let message = match kind.as_str() {
                 "consistent" => {
-                    tracing::info!("[全库指纹] 一致，跳过 Item {item_id}：{path}");
-                    format!("一致，跳过 Item {item_id}：{path}")
+                    tracing::info!("[全库指纹] 一致，跳过 {label}");
+                    format!("一致，跳过 {label}")
                 }
                 "repaired" => {
-                    tracing::info!("[全库指纹] 已更新 Item {item_id}：{path}，PC={}→{}，SHA1={}→{}，FID={}", string(&details["old"], "pc"), string(&details["new"], "pick_code"), string(&details["old"], "sha1"), string(&details["new"], "sha1"), string(&details["new"], "id"));
-                    format!("已更新 Item {item_id} 的 PC/SHA1 和 115 文件缓存：{path}")
+                    tracing::info!("[全库指纹] 已更新 {label}，PC={}→{}，SHA1={}→{}，FID={}", string(&details["old"], "pc"), string(&details["new"], "pick_code"), string(&details["old"], "sha1"), string(&details["new"], "sha1"), string(&details["new"], "id"));
+                    format!("已更新 {label} 的 PC/SHA1 和 115 文件缓存")
                 }
                 _ => {
                     let reason = string(&details, "error");
                     let emby_size = crate::identity::size(&details["emby_size"]).map(|n| n.to_string()).unwrap_or_else(|| "未知".into());
                     let cloud_size = crate::identity::size(&details["new"]["size"]).map(|n| n.to_string()).unwrap_or_else(|| "未知".into());
-                    tracing::warn!("[全库指纹] 未更新 Item {item_id}：{path}，{reason}（Emby={emby_size}，云端={cloud_size} 字节）");
-                    format!("未更新 Item {item_id}：{path}，{reason}")
+                    tracing::warn!("[全库指纹] 未更新 {label}，{reason}（Emby={emby_size}，云端={cloud_size} 字节）");
+                    format!("未更新 {label}，{reason}")
                 }
             };
             if kind != "consistent" {
@@ -509,10 +585,13 @@ pub async fn scan(
                 progress["failed"].as_array_mut().unwrap().push(ordinal);
             }
             progress["pending"].as_array_mut().unwrap().remove(0);
-            save(state, &mut progress).await?;
+            if (number + 1) % 50 == 0 || last_saved.elapsed() >= std::time::Duration::from_secs(5) {
+                save(state, &mut progress).await?;
+                last_saved = tokio::time::Instant::now();
+            }
             context
                 .update_counted(
-                    total.saturating_sub(list(&progress["pending"]).len() as u64),
+                    total.saturating_sub(progress["pending"].as_array().map_or(0, Vec::len) as u64),
                     total,
                     "全库指纹",
                     &format!(
@@ -523,6 +602,9 @@ pub async fn scan(
                     ),
                 )
                 .await;
+        }
+        if context.is_pause_requested().await {
+            save(state, &mut progress).await?;
         }
         context.checkpoint().await?;
         Ok::<_, ApiError>(())

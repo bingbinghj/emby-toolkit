@@ -767,22 +767,23 @@ pub(crate) async fn fingerprint_rows(
     state: &AppState,
     ids: Option<&[String]>,
 ) -> Result<Vec<Value>> {
-    Ok(sqlx::query_scalar(
+    let mut rows = sqlx::query_scalar(
         "SELECT to_jsonb(f) FROM (
             SELECT m.tmdb_id,m.item_type,m.title,m.original_title,m.release_year,
                    m.parent_series_tmdb_id,m.season_number,m.episode_number,
                    m.emby_item_ids_json,m.asset_details_json,m.file_sha1_json,m.file_pickcode_json,
-                   p.title AS series_title
+                   COALESCE(NULLIF(p.title,''),NULLIF(p.original_title,''),p.tmdb_id) AS series_title
             FROM media_metadata m
             LEFT JOIN media_metadata p ON m.parent_series_tmdb_id=p.tmdb_id AND p.item_type='Series'
             WHERE m.in_library=true AND m.item_type IN ('Movie','Episode')
               AND ($1::text[] IS NULL OR m.emby_item_ids_json ?| $1)
-            ORDER BY m.item_type,m.title NULLS LAST,m.tmdb_id
         ) f",
     )
     .bind(ids)
     .fetch_all(&state.db)
-    .await?)
+    .await?;
+    crate::media_order::sort(&mut rows);
+    Ok(rows)
 }
 
 fn repair_size(asset: &Value) -> Option<u64> {
@@ -1246,8 +1247,15 @@ pub async fn scope(state: &AppState, id: &str, context: &JobContext) -> Result<V
     if !matches!(item["Type"].as_str(), Some("Series" | "Season")) {
         return Err(ApiError::bad("仅支持电影、电视剧、季和分集"));
     }
-    Ok(crate::emby::items(state, id, "Id,Type", context)
-        .await?
+    let mut items = crate::emby::items(
+        state,
+        id,
+        "Id,Type,Name,SeriesName,SeriesId,ParentIndexNumber,IndexNumber",
+        context,
+    )
+    .await?;
+    crate::media_order::sort(&mut items);
+    Ok(items
         .iter()
         .filter(|i| i["Type"] == "Episode")
         .map(|i| string(i, "Id"))

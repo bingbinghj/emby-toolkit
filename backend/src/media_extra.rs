@@ -359,7 +359,7 @@ pub async fn replace_images(
     if !matches!(kind.as_str(), "Series" | "Season" | "Episode") {
         return Err(ApiError::bad("只有电视剧、季度或单集可以替换剧集图"));
     }
-    let episodes = if kind == "Episode" {
+    let mut episodes = if kind == "Episode" {
         vec![item.clone()]
     } else {
         crate::emby::query_items(
@@ -370,13 +370,14 @@ pub async fn replace_images(
                 ("Recursive", "true".into()),
                 (
                     "Fields",
-                    "Id,Name,Type,ParentId,SeriesId,Path,ImageTags".into(),
+                    "Id,Name,Type,ParentId,SeriesId,SeriesName,ParentIndexNumber,IndexNumber,Path,ImageTags".into(),
                 ),
             ],
             context,
         )
         .await?
     };
+    crate::media_order::sort_items(state, &mut episodes).await?;
     if episodes.is_empty() {
         return Err(ApiError(
             StatusCode::NOT_FOUND,

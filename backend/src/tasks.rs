@@ -165,7 +165,8 @@ async fn translate_persons(state: &AppState, context: &crate::jobs::JobContext) 
     context
         .activity("阶段1/3：扫描人物", "正在扫描 Emby，收集待翻译人物")
         .await;
-    let people = crate::emby::persons(state, context).await?;
+    let mut people = crate::emby::persons(state, context).await?;
+    crate::media_order::sort(&mut people);
     tracing::info!("[人物中文化] 已读取 {} 名媒体库关联人物", people.len());
     let mut inputs = std::collections::BTreeMap::new();
     let mut source_map = std::collections::HashMap::new();
@@ -358,6 +359,7 @@ async fn translate_roles(
     let mut updated = 0;
     let mut failures = vec![];
     let mut processed = false;
+    crate::media_order::sort(&mut media);
     let total = media.len();
     for (index, item) in media.into_iter().enumerate() {
         context.checkpoint().await?;
@@ -531,7 +533,8 @@ async fn enrich_persons(
 }
 
 async fn restore_metadata(state: &AppState, context: &crate::jobs::JobContext) -> Result<Value> {
-    let rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE in_library=true AND item_type IN ('Movie','Series') AND tmdb_id NOT IN ('0','None','null','')").fetch_all(&state.db).await?;
+    let mut rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE in_library=true AND item_type IN ('Movie','Series') AND tmdb_id NOT IN ('0','None','null','')").fetch_all(&state.db).await?;
+    crate::media_order::sort(&mut rows);
     let config = state.config.read().await.clone();
     let defaults: Value = serde_json::from_str(include_str!("../assets/defaults.json")).unwrap();
     let studio = crate::db::setting(&state.db, "studio_mapping")
@@ -753,7 +756,8 @@ async fn backup_info(state: &AppState, context: &crate::jobs::JobContext) -> Res
     context
         .activity("扫描媒体信息", "正在扫描需要备份的在库电影和分集")
         .await;
-    let rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE in_library=true AND item_type IN ('Movie','Episode')").fetch_all(&state.db).await?;
+    let mut rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE in_library=true AND item_type IN ('Movie','Episode')").fetch_all(&state.db).await?;
+    crate::media_order::sort_rows(state, &mut rows).await?;
     let mut updated = 0;
     let mut failures = vec![];
     let total = rows.len();

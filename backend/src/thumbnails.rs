@@ -421,7 +421,7 @@ async fn item(state: &AppState, id: &str) -> Result<Value> {
             ("Ids", id.into()),
             (
                 "Fields",
-                "Name,Path,Chapters,MediaSources,Tags,ParentId".into(),
+                "Name,Path,Chapters,MediaSources,Tags,ParentId,Type,SeriesName,SeriesId,ParentIndexNumber,IndexNumber".into(),
             ),
         ],
     )
@@ -446,6 +446,19 @@ async fn missing(state: &AppState, item: &Value, options: &Value) -> Result<bool
     Ok(chapters.is_empty() || chapters.iter().any(|c| string(c, "ImageTag").is_empty()))
 }
 type Targets = BTreeMap<String, (Value, Value)>;
+fn ordered_targets<'a>(
+    targets: &'a Targets,
+    order: &std::collections::HashMap<String, crate::media_order::Key>,
+) -> Vec<(&'a String, &'a (Value, Value))> {
+    let mut items = targets.iter().collect::<Vec<_>>();
+    items.sort_by_cached_key(|(id, (item, _))| {
+        order
+            .get(*id)
+            .cloned()
+            .unwrap_or_else(|| crate::media_order::key(item))
+    });
+    items
+}
 async fn targets(
     state: &AppState,
     paths: &BTreeSet<String>,
@@ -467,7 +480,7 @@ async fn targets(
                 ("Recursive", "true".into()),
                 (
                     "Fields",
-                    "Name,Path,Chapters,MediaSources,Tags,ParentId".into(),
+                    "Name,Path,Chapters,MediaSources,Tags,ParentId,Type,SeriesName,SeriesId,ParentIndexNumber,IndexNumber".into(),
                 ),
             ],
         )
@@ -503,9 +516,14 @@ async fn targets(
     }
     Ok(targets)
 }
-async fn remaining(state: &AppState, targets: &Targets, context: &JobContext) -> Result<Targets> {
+async fn remaining(
+    state: &AppState,
+    targets: &Targets,
+    order: &std::collections::HashMap<String, crate::media_order::Key>,
+    context: &JobContext,
+) -> Result<Targets> {
     let mut result = BTreeMap::new();
-    for (id, (before, options)) in targets {
+    for (id, (before, options)) in ordered_targets(targets, order) {
         context.checkpoint().await?;
         context
             .activity(
@@ -618,6 +636,7 @@ async fn fallback(
     targets: &Targets,
     timeout: Duration,
     context: &JobContext,
+    order: &std::collections::HashMap<String, crate::media_order::Key>,
 ) -> Result<()> {
     let config = crate::strm::config(state)
         .await
@@ -649,7 +668,7 @@ async fn fallback(
     let docker = crate::docker_host::client(state)?;
     let id = find_container(&docker, &system).await?;
     let mut rules = vec![];
-    for (index, (item, _)) in targets.values().enumerate() {
+    for (index, (_, (item, _))) in ordered_targets(targets, order).into_iter().enumerate() {
         context.checkpoint().await?;
         context
             .update(
@@ -853,14 +872,16 @@ pub async fn repair(state: &AppState, context: &JobContext) -> Result<Value> {
             .filter(|n| n.is_finite() && *n > 0.0)
             .unwrap_or(2.0);
     let timeout = Duration::from_secs_f64(estimate.clamp(1800.0, 86400.0));
-    if let Err(error) = fallback(state, &targets, timeout, context).await {
+    let order =
+        crate::media_order::id_keys(state, &targets.keys().cloned().collect::<Vec<_>>()).await?;
+    if let Err(error) = fallback(state, &targets, timeout, context, &order).await {
         if context.is_cancelled() || error.0 == axum::http::StatusCode::CONFLICT {
             return Err(error);
         }
         tracing::warn!("自定义编码器补图未完成：{}", error.1);
     }
-    let remaining = remaining(state, &targets, context).await?;
-    for (id, (item, options)) in &remaining {
+    let remaining = remaining(state, &targets, &order, context).await?;
+    for (id, (item, options)) in ordered_targets(&remaining, &order) {
         let missing = if number(&options["ThumbnailImagesIntervalSeconds"]) > 0.0 {
             "BIF"
         } else {

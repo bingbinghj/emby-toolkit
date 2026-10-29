@@ -198,7 +198,9 @@ pub async fn generate(
     ];
     let mut updated = 0;
     let mut failures = vec![];
-    for library in list(&views["Items"]) {
+    let mut libraries = list(&views["Items"]);
+    crate::media_order::sort(&mut libraries);
+    for library in libraries {
         let id = string(&library, "Id");
         let name = string(&library, "Name");
         if id.is_empty()

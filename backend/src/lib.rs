@@ -35,6 +35,7 @@ pub mod media_extra;
 pub mod media_images;
 pub mod media_info;
 pub mod media_manual;
+mod media_order;
 pub mod media_paths;
 pub mod media_preflight;
 pub mod media_rename;
