@@ -208,13 +208,18 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
     }
     let mut rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE in_library=true AND item_type IN ('Movie','Episode')").fetch_all(&state.db).await?;
     crate::media_order::sort_rows(state, &mut rows).await?;
+    let folders = list(
+        &state
+            .emby(reqwest::Method::GET, "Library/VirtualFolders", &[], None)
+            .await?,
+    );
     let mut assets = BTreeMap::<PathBuf, Vec<(String, Value)>>::new();
     let mut labels = BTreeMap::new();
     let mut order = BTreeMap::new();
     for row in rows {
         let ids = list(&row["emby_item_ids_json"]);
         for (index, asset) in list(&row["asset_details_json"]).into_iter().enumerate() {
-            if crate::emby::path_ignored(state, &string(&asset, "path")).await? {
+            if crate::emby::path_ignored_in(state, &string(&asset, "path"), &folders).await {
                 continue;
             }
             let raw = string(&asset, "path");
@@ -302,7 +307,7 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
                 &format!("正在检查 {label}"),
             )
             .await;
-        if crate::emby::path_ignored(state, path.to_str().unwrap_or("")).await? {
+        if crate::emby::path_ignored_in(state, path.to_str().unwrap_or(""), &folders).await {
             continue;
         }
         let final_path = path.with_file_name(format!(
@@ -393,7 +398,7 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
             }.await;
             let _=tokio::fs::remove_file(&stage).await;
             write?;
-            if let Some(library)=crate::emby::library_for_path(state,path.to_str().unwrap_or("")).await?{affected.insert(string(&library,"ItemId"));}
+            if let Some(library)=crate::emby::library_for_path_in(&folders,path.to_str().unwrap_or("")){affected.insert(string(library,"ItemId"));}
             Ok::<_,ApiError>(())
         }.await;
         match result {

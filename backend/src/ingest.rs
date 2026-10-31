@@ -530,13 +530,16 @@ pub async fn patch_cached_series(
         if existing.is_some() && !needs_credits {
             continue;
         }
-        let mut episode = list(&data["episodes"])
-            .into_iter()
-            .find(|e| {
-                e["episode_number"].as_i64() == Some(number)
-                    && e["id"].as_u64().is_some_and(|id| id > 0)
-            })
-            .ok_or_else(|| ApiError::bad(format!("TMDb 尚未提供 {key} 元数据")))?;
+        let matches_episode = |e: &Value| {
+            e["episode_number"].as_i64() == Some(number)
+                && e["id"].as_u64().is_some_and(|id| id > 0)
+        };
+        let mut episode = if let Some(episodes) = data["episodes"].as_array() {
+            episodes.iter().find(|e| matches_episode(e)).cloned()
+        } else {
+            list(&data["episodes"]).into_iter().find(matches_episode)
+        }
+        .ok_or_else(|| ApiError::bad(format!("TMDb 尚未提供 {key} 元数据")))?;
         episode["season_number"] = json!(season);
         let guest = list(&episode["credits"]["guest_stars"]);
         let guest = if guest.is_empty() {

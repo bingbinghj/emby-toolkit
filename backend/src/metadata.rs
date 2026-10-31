@@ -436,11 +436,17 @@ pub async fn reconstruct_full(
         .into_iter()
         .collect::<Vec<_>>();
     let people:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(p)||jsonb_build_object('name',primary_name,'tmdb_id',tmdb_person_id,'id',tmdb_person_id) FROM person_metadata p WHERE tmdb_person_id=ANY($1)").bind(ids).fetch_all(&state.db).await?;
+    let mut people_by_id = HashMap::new();
+    for person in &people {
+        if let Some(id) = person["id"].as_i64() {
+            people_by_id.entry(id).or_insert(person);
+        }
+    }
     let expand = |row: &Value| {
         let mut cast = list(&row["actors_json"])
             .iter()
             .filter_map(|link| {
-                let mut person = people.iter().find(|p| p["id"] == link["tmdb_id"])?.clone();
+                let mut person = (**people_by_id.get(&link["tmdb_id"].as_i64()?)?).clone();
                 person["character"] = link["character"].clone();
                 person["order"] = link.get("order").cloned().unwrap_or(json!(999));
                 Some(person)

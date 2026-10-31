@@ -14,7 +14,7 @@ use axum::{
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use tokio::io::AsyncWriteExt;
 
 const PROGRESS: &str = "fingerprint_scan_progress";
@@ -82,12 +82,15 @@ pub fn build_report(progress: &Value) -> Value {
         .map(|o| o.keys().cloned().collect::<Vec<_>>())
         .unwrap_or_default();
     let order = list(&progress["entry_order"]);
-    keys.sort_by_key(|key| {
+    let mut ranks = HashMap::new();
+    for (index, value) in order.iter().enumerate() {
+        if let Some(key) = value.as_str() {
+            ranks.entry(key).or_insert(index);
+        }
+    }
+    keys.sort_by_cached_key(|key| {
         (
-            order
-                .iter()
-                .position(|v| v.as_str() == Some(key))
-                .unwrap_or(usize::MAX),
+            ranks.get(key.as_str()).copied().unwrap_or(usize::MAX),
             key.parse::<u64>().unwrap_or(u64::MAX),
             key.clone(),
         )
@@ -97,16 +100,17 @@ pub fn build_report(progress: &Value) -> Value {
         .map(|key| progress["entries"][key].clone())
         .collect::<Vec<_>>();
     let mut reasons = Vec::<(String, usize)>::new();
+    let mut reason_indices = HashMap::new();
     for entry in entries.iter().filter(|e| e["state"] == "unknown") {
         let reason = entry["error"]
             .as_str()
             .filter(|s| !s.is_empty())
             .unwrap_or("原因未记录");
-        if let Some((_, count)) = reasons.iter_mut().find(|(r, _)| r == reason) {
-            *count += 1;
-        } else {
-            reasons.push((reason.into(), 1));
-        }
+        let index = *reason_indices.entry(reason).or_insert_with(|| {
+            reasons.push((reason.into(), 0));
+            reasons.len() - 1
+        });
+        reasons[index].1 += 1;
     }
     reasons.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     let mut result = json!({"version":1});

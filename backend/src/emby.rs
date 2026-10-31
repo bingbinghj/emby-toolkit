@@ -377,18 +377,38 @@ pub async fn refresh_item(
     Ok(())
 }
 pub async fn idle(state: &AppState, context: &JobContext) -> Result<()> {
-    for _ in 0..300 {
+    let ignored = [
+        "rotate log file",
+        "check for application updates",
+        "refresh guide",
+        "clean up collections",
+        "build douban cache",
+        "extract mediainfo",
+        "extract intro fingerprint",
+        "extract video thumbnail",
+        "update emby.apiclient",
+        "merge multi versions",
+    ];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+    loop {
         context.checkpoint().await?;
         let tasks = state.emby(Method::GET, "ScheduledTasks", &[], None).await?;
-        if tasks
-            .as_array()
-            .is_some_and(|tasks| !tasks.iter().any(|t| t["State"] == "Running"))
-        {
+        if tasks.as_array().is_some_and(|tasks| {
+            !tasks.iter().any(|task| {
+                task["State"] == "Running"
+                    && !ignored
+                        .iter()
+                        .any(|keyword| string(task, "Name").to_lowercase().contains(keyword))
+            })
+        }) {
             return Ok(());
         }
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        if tokio::time::Instant::now() >= deadline {
+            tracing::warn!("等待 Emby 空闲超时 (300s)，继续提交并验收实际刷新");
+            return Ok(());
+        }
+        context.sleep(Duration::from_secs(2)).await?;
     }
-    Err(ApiError::bad("等待 Emby 后台任务完成超时"))
 }
 pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Result<()> {
     context.checkpoint().await?;
@@ -438,8 +458,12 @@ pub async fn library_for_path(state: &AppState, path: &str) -> Result<Option<Val
     let folders = state
         .emby(Method::GET, "Library/VirtualFolders", &[], None)
         .await?;
-    Ok(crate::media_edit::list(&folders)
-        .into_iter()
+    Ok(library_for_path_in(&crate::media_edit::list(&folders), path).cloned())
+}
+
+pub(crate) fn library_for_path_in<'a>(folders: &'a [Value], path: &str) -> Option<&'a Value> {
+    folders
+        .iter()
         .filter_map(|library| {
             let length = crate::media_edit::list(&library["Locations"])
                 .iter()
@@ -452,7 +476,13 @@ pub async fn library_for_path(state: &AppState, path: &str) -> Result<Option<Val
             Some((length, library))
         })
         .max_by_key(|(length, _)| *length)
-        .map(|(_, library)| library))
+        .map(|(_, library)| library)
+}
+
+pub(crate) async fn path_ignored_in(state: &AppState, path: &str, folders: &[Value]) -> bool {
+    let config = state.config.read().await;
+    library_for_path_in(folders, path)
+        .is_some_and(|library| library_ignored(&config, &string(library, "ItemId")))
 }
 
 async fn wait_item_refresh(

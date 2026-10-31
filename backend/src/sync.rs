@@ -75,13 +75,26 @@ pub async fn cache_with_batch(
     let mut top_online = HashSet::new();
     let mut top_ids: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
     let mut work_titles = HashMap::new();
-    for row in &rows {
+    let mut asset_paths: HashMap<String, HashSet<String>> = HashMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        if index % 128 == 0 {
+            context.checkpoint().await?;
+            tokio::task::yield_now().await;
+        }
         let ids = list(&row["emby_item_ids_json"])
             .iter()
             .filter_map(Value::as_str)
             .map(str::to_string)
             .collect::<Vec<_>>();
         let work = (string(row, "tmdb_id"), string(row, "item_type"));
+        for asset in list(&row["asset_details_json"]) {
+            if let Some(id) = asset["emby_item_id"].as_str() {
+                asset_paths
+                    .entry(id.to_string())
+                    .or_default()
+                    .insert(string(&asset, "path"));
+            }
+        }
         if row["in_library"] == true {
             online.extend(ids.clone());
             if matches!(work.1.as_str(), "Movie" | "Series") {
@@ -131,6 +144,23 @@ pub async fn cache_with_batch(
         }
         scanned.extend(items);
     }
+    context
+        .update(
+            20,
+            "阶段2/3：计算媒体差异",
+            "Emby 扫描完成，核对版本和路径变更",
+        )
+        .await;
+    let mut scanned_by_id = HashMap::new();
+    for (index, item) in scanned.iter().enumerate() {
+        if index % 128 == 0 {
+            context.checkpoint().await?;
+            tokio::task::yield_now().await;
+        }
+        if let Some(id) = item["Id"].as_str() {
+            scanned_by_id.entry(id).or_insert(item);
+        }
+    }
     let observed = scanned
         .iter()
         .filter(|i| {
@@ -153,12 +183,17 @@ pub async fn cache_with_batch(
             })
             .cloned()
         {
+            context.checkpoint().await?;
             for (index, asset) in list(&snapshot["asset_details_json"]).iter().enumerate() {
+                if index % 128 == 0 {
+                    context.checkpoint().await?;
+                    tokio::task::yield_now().await;
+                }
                 if emby::library_ignored(&config, &string(asset, "source_library_id")) {
                     continue;
                 }
                 let id = string(asset, "emby_item_id");
-                let Some(item) = scanned.iter().find(|i| i["Id"] == id) else {
+                let Some(&item) = scanned_by_id.get(id.as_str()) else {
                     continue;
                 };
                 let (path, target, size) = crate::revalidation::observation(state, item).await;
@@ -227,7 +262,11 @@ pub async fn cache_with_batch(
             Err(_) => tracing::warn!("Emby 离线核对失败，保留未扫描到的绑定和指纹"),
         }
     }
-    for item in &scanned {
+    for (index, item) in scanned.iter().enumerate() {
+        if index % 128 == 0 {
+            context.checkpoint().await?;
+            tokio::task::yield_now().await;
+        }
         let id = string(item, "Id");
         if !full
             && item["Type"] == "Series"
@@ -239,14 +278,11 @@ pub async fn cache_with_batch(
                 .bind(json!([id])).bind(work.0).execute(&state.db).await?;
             continue;
         }
-        let changed = rows
-            .iter()
-            .flat_map(|r| list(&r["asset_details_json"]))
-            .any(|a| {
-                a["emby_item_id"] == id
-                    && !string(item, "Path").is_empty()
-                    && a["path"] != item["Path"]
-            });
+        let path = item["Path"].as_str().unwrap_or("");
+        let changed = !path.is_empty()
+            && asset_paths
+                .get(&id)
+                .is_some_and(|paths| paths.len() > 1 || !paths.contains(path));
         if !full && online.contains(&id) && !changed {
             continue;
         }
@@ -462,6 +498,7 @@ pub async fn cache_with_batch(
             )
             .await;
     }
+    context.checkpoint().await?;
     sqlx::query("DELETE FROM media_metadata WHERE in_library=false AND tmdb_id LIKE '%-%'")
         .execute(&state.db)
         .await?;

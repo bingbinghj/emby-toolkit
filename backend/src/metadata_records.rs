@@ -476,6 +476,7 @@ pub async fn online(
             online_assets(state, record, versions, item, context, false).await?;
         }
     }
+    let mut fallback_package = None;
     for (key, versions) in &groups {
         if processed.contains(key)
             || (!context.episode_ids.is_empty()
@@ -486,11 +487,11 @@ pub async fn online(
             continue;
         }
         let first = &versions[0];
-        let mut fallback = package.clone();
+        let fallback = fallback_package.get_or_insert_with(|| package.clone());
         fallback["episodes_details"] = json!([{"season_number":key.0,"episode_number":key.1,
             "name":first["Name"].as_str().filter(|s|!s.is_empty()).map(str::to_string).unwrap_or(format!("Episode {}",key.1)),
             "overview":first["Overview"],"air_date":first["PremiereDate"]}]);
-        let mut child = pending("Series", &fallback, cast, item)?.pop().unwrap();
+        let mut child = pending("Series", fallback, cast, item)?.pop().unwrap();
         tracing::debug!(
             "分集资产使用内部元数据 ID：《{media_name}》，Emby {id}，S{}E{}，版本 {} 个",
             key.0,
