@@ -451,7 +451,7 @@ pub async fn repair(state: &AppState, ids: &[String], context: &JobContext) -> R
             let (repaired,_)=audio::apply(&original,report.clone());
             let body=json!({"mediainfo":repaired,"sha1":target.sha,"media_path":target.path});
             let rebuilt=BTreeMap::from([(id.clone(),body["mediainfo"].clone())]);
-            let outcome=crate::strm::with_settings(state,"preserve",||crate::media_save::save_with_rebuilt(state,id,&body,&rebuilt,context)).await;
+            let outcome=crate::media_save::save_with_rebuilt(state,id,&body,&rebuilt,context).await;
             match outcome{
                 Ok((status,value)) if status<400=>Ok(("repaired",json!({"item_id":id,"pair_count":report["pair_count"],"evidence":evidence,"result":value}))),
                 other=>{
@@ -823,10 +823,7 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
                 for (member, _, path, _, _) in &members {
                     tokio::fs::rename(stages.remove(member).unwrap(), path).await?;
                 }
-                crate::strm::with_optional_preserve(state, || {
-                    crate::media_save::refresh(state, &paths)
-                })
-                .await?;
+                crate::media_save::refresh(state, &paths).await?;
                 Ok::<_, ApiError>(())
             }
             .await;
@@ -835,10 +832,7 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
                     for (member, _, path, _, _) in &members {
                         tokio::fs::rename(rollbacks.remove(member).unwrap(), path).await?;
                     }
-                    crate::strm::with_optional_preserve(state, || {
-                        crate::media_save::refresh(state, &paths)
-                    })
-                    .await
+                    crate::media_save::refresh(state, &paths).await
                 }
                 .await;
                 if let Err(error) = rollback {

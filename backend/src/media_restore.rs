@@ -195,12 +195,6 @@ async fn cached_info(
 }
 
 pub async fn restore(state: &AppState, full: bool, context: &JobContext) -> Result<Value> {
-    if full {
-        return crate::strm::with_settings(state, "preserve", || {
-            restore_files(state, full, context)
-        })
-        .await;
-    }
     restore_files(state, full, context).await
 }
 async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Result<Value> {

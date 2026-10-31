@@ -976,42 +976,78 @@ pub async fn refresh_files(
         ensure(&directory, &current.roots).await?;
         directories.insert(ensure(&directory, roots).await?);
     }
-    crate::strm::with_optional_preserve(state, || async {
+    {
         let mut failure = None;
         for mut directory in directories {
             let mut directory_failure = None;
             for _ in 0..if metadata { 1 } else { 4 } {
-                if !roots.iter().any(|root| directory.starts_with(root)) { break; }
+                if !roots.iter().any(|root| directory.starts_with(root)) {
+                    break;
+                }
                 let current = check_active(state, &[], context, cancel, false).await?;
                 ensure(&directory, &current.roots).await?;
                 let path = map_emby(&directory, &config);
-                let response = state.emby(reqwest::Method::GET, "Items", &[
-                    ("Recursive", "true".into()),
-                    ("Path", path.clone()),
-                    ("Fields", if metadata { "Id,Path,Name,Type" } else { "Id,Path,Name" }.into()),
-                ], None).await;
+                let response = state
+                    .emby(
+                        reqwest::Method::GET,
+                        "Items",
+                        &[
+                            ("Recursive", "true".into()),
+                            ("Path", path.clone()),
+                            (
+                                "Fields",
+                                if metadata {
+                                    "Id,Path,Name,Type"
+                                } else {
+                                    "Id,Path,Name"
+                                }
+                                .into(),
+                            ),
+                        ],
+                        None,
+                    )
+                    .await;
                 match response {
                     Ok(response) => {
                         let items = list(&response["Items"]);
                         let item = if metadata {
-                            items.iter().find(|v| crate::monitor::normalized_path(Path::new(&string(v, "Path"))) == crate::monitor::normalized_path(Path::new(&path)))
+                            items.iter().find(|v| {
+                                crate::monitor::normalized_path(Path::new(&string(v, "Path")))
+                                    == crate::monitor::normalized_path(Path::new(&path))
+                            })
                         } else {
                             items.first()
                         };
                         if let Some(item) = item {
                             let current = check_active(state, &[], context, cancel, false).await?;
                             ensure(&directory, &current.roots).await?;
-                            let response = crate::emby::send(state.http.post(format!("{}/Items/{}/Refresh", string(&config, "emby_server_url").trim_end_matches('/'), string(item, "Id")))
-                                .header("X-Emby-Token", string(&config, "emby_api_key"))
-                                .query(&[
-                                    ("Recursive", "true"),
-                                    ("MetadataRefreshMode", if metadata { "FullRefresh" } else { "Default" }),
-                                    ("ImageRefreshMode", "Default"),
-                                    ("ReplaceAllImages", "false"),
-                                    ("ReplaceAllMetadata", "false"),
-                                ])).await.and_then(crate::emby::Response::error_for_status);
+                            let response = crate::emby::send(
+                                state
+                                    .http
+                                    .post(format!(
+                                        "{}/Items/{}/Refresh",
+                                        string(&config, "emby_server_url").trim_end_matches('/'),
+                                        string(item, "Id")
+                                    ))
+                                    .header("X-Emby-Token", string(&config, "emby_api_key"))
+                                    .query(&[
+                                        ("Recursive", "true"),
+                                        (
+                                            "MetadataRefreshMode",
+                                            if metadata { "FullRefresh" } else { "Default" },
+                                        ),
+                                        ("ImageRefreshMode", "Default"),
+                                        ("ReplaceAllImages", "false"),
+                                        ("ReplaceAllMetadata", "false"),
+                                    ]),
+                            )
+                            .await
+                            .and_then(crate::emby::Response::error_for_status);
                             match response {
-                                Ok(_) => { directory_failure = None; break; },
+                                Ok(_) => {
+                                    directory_failure = None;
+                                    break;
+                                }
                                 Err(error) => {
                                     tracing::warn!(path=%path, error=%error.without_url(), "Emby 目录刷新失败");
                                     directory_failure = Some(ApiError::bad("Emby 目录刷新失败"));
@@ -1024,12 +1060,20 @@ pub async fn refresh_files(
                         directory_failure = Some(error);
                     }
                 }
-                if metadata || !directory.pop() { break; }
+                if metadata || !directory.pop() {
+                    break;
+                }
             }
-            if directory_failure.is_some() { failure = directory_failure; }
+            if directory_failure.is_some() {
+                failure = directory_failure;
+            }
         }
-        if let Some(error) = failure { Err(error) } else { Ok(()) }
-    }).await
+        if let Some(error) = failure {
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
 }
 pub fn map_emby(path: &Path, config: &Value) -> String {
     let value = path.to_string_lossy().trim().replace('\\', "/");

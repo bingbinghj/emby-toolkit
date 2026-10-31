@@ -328,8 +328,7 @@ async fn submit(
     let id = state
         .jobs
         .submit("重命名媒体", move |context| async move {
-            crate::strm::with_settings(&work, "preserve", || execute(&work, &id, &body, &context))
-                .await
+            execute(&work, &id, &body, &context).await
         })
         .await?;
     Ok((
@@ -478,6 +477,7 @@ async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext)
         &string(&source.item["ProviderIds"], "Tmdb"),
     )
     .await?;
+    crate::strm::with_settings(state, "preserve", || async {
     let mut changes = Changes {
         moves: vec![],
         contents: vec![],
@@ -582,6 +582,8 @@ async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext)
     Ok(
         json!({"message":"媒体已重命名，115、STRM和媒体信息路径已同步","source_name":source.source,"target_name":filename,"target_cloud_path":plan["cloud_path"],"target_local_path":target,"item_id":found}),
     )
+    })
+    .await
 }
 async fn sample(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Json<Value>> {
     let _ = state;

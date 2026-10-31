@@ -421,10 +421,7 @@ async fn process(
             string(item, "Id")
         );
         crate::persons::update_emby(state, &cast, &payload, item).await?;
-        crate::strm::with_settings(state, "preserve", || async {
-            crate::emby::refresh_item(state, &string(item, "Id"), kind == "Series", context).await
-        })
-        .await?;
+        crate::emby::refresh_item(state, &string(item, "Id"), kind == "Series", context).await?;
         tracing::info!(
             "Emby 元数据刷新完成：《{media_name}》，Emby {}，TMDb {tmdb}",
             string(item, "Id")
@@ -814,15 +811,10 @@ async fn review(
             .to_string_lossy()
             .to_string()
             + "-mediainfo.json";
-        let video = list(&item["MediaSources"])
-            .iter()
-            .flat_map(|s| list(&s["MediaStreams"]))
-            .any(|s| {
-                s["Type"] == "Video"
-                    && s["Width"].as_u64().is_some_and(|n| n > 0)
-                    && s["Height"].as_u64().is_some_and(|n| n > 0)
-            });
-        if !std::path::Path::new(&sidecar).is_file() && !video {
+        let video = crate::media_preflight::valid_video(item);
+        if !crate::media_preflight::valid_video_sidecar(std::path::Path::new(&sidecar)).await
+            && !video
+        {
             missing = Some("缺失媒体信息: ".to_string());
         }
     } else if item["Type"] == "Series" {
@@ -846,7 +838,11 @@ async fn review(
                     s["width"].as_u64().is_some_and(|n| n > 0)
                         && s["height"].as_u64().is_some_and(|n| n > 0)
                 });
-            if path.is_empty() || (!std::path::Path::new(&sidecar).is_file() && !video) {
+            if path.is_empty()
+                || (!crate::media_preflight::valid_video_sidecar(std::path::Path::new(&sidecar))
+                    .await
+                    && !video)
+            {
                 missing = Some(format!(
                     "缺失媒体信息: [S{}E{}]",
                     episode["season_number"], episode["episode_number"]

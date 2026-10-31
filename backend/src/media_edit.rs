@@ -534,6 +534,7 @@ async fn edit_data(state: &AppState, id: &str) -> Result<Json<Value>> {
     }
     let total = target.versions.len();
     for (index, version) in target.versions.iter_mut().enumerate() {
+        version["version_number"] = json!(index + 1);
         let base = string(version, "base_label");
         version["label"] = json!(if total > 1 {
             format!("版本 {} · {base}", index + 1)

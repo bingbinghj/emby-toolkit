@@ -36,6 +36,21 @@ pub fn valid_video(item: &Value) -> bool {
         })
 }
 
+pub(crate) async fn valid_video_sidecar(path: &std::path::Path) -> bool {
+    let Ok(bytes) = tokio::fs::read(path).await else {
+        return false;
+    };
+    let Ok(info) = serde_json::from_slice::<Value>(&bytes) else {
+        return false;
+    };
+    media_info::recoverable(&info)
+        && media_info::container(&info).is_some_and(|source| {
+            source["MediaStreams"]
+                .as_array()
+                .is_some_and(|streams| streams.iter().any(|stream| stream["Type"] == "Video"))
+        })
+}
+
 async fn sync(state: &AppState, id: &str, data: &Value) -> Result<Value> {
     let config = state.config.read().await.clone();
     let base = string(&config, "emby_server_url");
@@ -262,7 +277,7 @@ async fn preflight(state: &AppState, item: &Value, context: &JobContext) -> Resu
     ));
     for attempt in 0..6 {
         context.checkpoint().await?;
-        if !path.is_empty() && tokio::fs::try_exists(&sidecar).await.unwrap_or(false) {
+        if !path.is_empty() && valid_video_sidecar(&sidecar).await {
             report["video_ready"] = json!(true);
             break;
         }

@@ -11,6 +11,7 @@ use axum::{
     http::StatusCode,
     routing::post,
 };
+use futures_util::FutureExt;
 use reqwest::Method;
 use serde_json::{Value, json};
 use std::{
@@ -281,7 +282,7 @@ impl RefreshTrace {
         Ok(self.completed && self.pending == 0)
     }
 }
-async fn log_position(state: &AppState) -> Result<u64> {
+pub(crate) async fn log_position(state: &AppState) -> Result<u64> {
     state
         .emby(
             Method::GET,
@@ -428,9 +429,10 @@ pub async fn replace_images(
     let mut started = false;
     let mut complete = false;
     let mut generated = 0;
+    context.checkpoint().await?;
+    log_position(state).await?;
     let outcome = crate::strm::with_settings(state, "capture", || async {
         context.checkpoint().await?;
-        log_position(state).await?;
         for (i, episode) in episodes.iter().enumerate() {
             // Once an image is removed, finish the accepted refresh and restoration even on stop.
             match delete_image(state, &string(episode, "Id")).await {
@@ -554,7 +556,7 @@ pub async fn replace_images(
         ));
     }
     if complete {
-        crate::strm::with_settings(state, "preserve", || async {
+        async {
             let changed = snapshots
                 .iter()
                 .filter(|(path, bytes)| std::fs::read(path).ok().as_ref() != Some(bytes))
@@ -644,8 +646,8 @@ pub async fn replace_images(
                     ));
                 }
             }
-            Ok(())
-        })
+            Ok::<_, ApiError>(())
+        }
         .await?;
     }
     outcome?;
@@ -1111,7 +1113,9 @@ pub async fn delete_version(
     let mut split = false;
     let mut deleted = false;
     let mut committed = false;
+    let mut recovery_failed = false;
     let outcome=crate::strm::with_settings(state,"preserve",|| async {
+        let result = std::panic::AssertUnwindSafe(async {
         context.checkpoint().await?;
         verify_delete_resources(state, &resources).await?;
         state.emby(Method::POST,&format!("Videos/{}/AlternateSources/Delete",versions[0]),&[],None).await?;split=true;
@@ -1131,12 +1135,13 @@ pub async fn delete_version(
         crate::media_save::refresh(state,&snapshot.targets.iter().map(|p|p.to_string_lossy().into_owned()).collect::<Vec<_>>()).await?;
         for (i,delay)in protection_delays.iter().enumerate(){context.update(85+(14*(i+1)/protection_delays.len())as u64,"保护剩余版本","正在安全收尾，恢复外部增量任务可能误删的剩余版本文件").await;tokio::time::sleep(*delay).await;snapshot.restore(false).await?;}
         Ok(json!({"message":format!("指定媒体版本已删除，115、STRM、媒体信息和Emby已刷新{merge_warning}"),"deleted_item_id":id,"remaining_item_id":remaining.first()}))
-    }).await;
+        }).catch_unwind().await.unwrap_or_else(|_| Err(ApiError::bad("版本删除执行异常")));
     if !deleted {
         state.webhooks.clear_manual_delete(&versions).await;
     }
-    if outcome.is_err() {
+    if result.is_err() && (split || deleted) {
         if let Err(e) = snapshot.restore(!committed).await {
+            recovery_failed = true;
             tracing::error!(
                 "版本删除恢复失败，保留备份 {}: {}",
                 snapshot.stage.display(),
@@ -1150,6 +1155,11 @@ pub async fn delete_version(
         if split && !deleted {
             let _ = regroup(state, &versions).await;
         }
+    }
+        result
+    }).await;
+    if recovery_failed {
+        return outcome;
     }
     let _ = tokio::fs::remove_dir_all(snapshot.stage).await;
     outcome

@@ -28,9 +28,13 @@ pub fn merge(old: &Value, new: &mut Value) {
         }
     }
     let mut slots = HashMap::new();
-    for (index, id) in old_ids.iter().enumerate() {
+    for (index, id) in list(&old["emby_item_ids_json"])
+        .iter()
+        .enumerate()
+        .filter_map(|(index, id)| id.as_str().map(|id| (index, id)))
+    {
         slots.insert(
-            id.clone(),
+            id.to_string(),
             (
                 list(&old["asset_details_json"])
                     .get(index)
@@ -50,7 +54,11 @@ pub fn merge(old: &Value, new: &mut Value) {
     let assets = list(&new["asset_details_json"]);
     let pc = list(&new["file_pickcode_json"]);
     let sha = list(&new["file_sha1_json"]);
-    for (index, id) in new_ids.iter().enumerate() {
+    for (index, id) in list(&new["emby_item_ids_json"])
+        .iter()
+        .enumerate()
+        .filter_map(|(index, id)| id.as_str().map(|id| (index, id)))
+    {
         let asset = assets.get(index).cloned().unwrap_or(Value::Null);
         let pc = pc.get(index).cloned().unwrap_or(Value::Null);
         let sha = sha.get(index).cloned().unwrap_or(Value::Null);
@@ -59,7 +67,7 @@ pub fn merge(old: &Value, new: &mut Value) {
         } else {
             (asset, pc, sha)
         };
-        slots.insert(id.clone(), (asset, pc, sha));
+        slots.insert(id.to_string(), (asset, pc, sha));
     }
     new["emby_item_ids_json"] = json!(output);
     new["asset_details_json"] = json!(
@@ -123,9 +131,10 @@ pub async fn unbind(state: &AppState, removed: &[String]) -> Result<u64> {
     let mut count = 0;
     for row in rows {
         let old_ids = ids(&row["emby_item_ids_json"]);
-        let retained = old_ids
-            .iter()
+        let retained = list(&row["emby_item_ids_json"])
+            .into_iter()
             .enumerate()
+            .filter_map(|(index, id)| id.as_str().map(|id| (index, id.to_string())))
             .filter(|(_, id)| !removed.contains(id))
             .collect::<Vec<_>>();
         count += old_ids.len() - retained.len();
@@ -133,7 +142,7 @@ pub async fn unbind(state: &AppState, removed: &[String]) -> Result<u64> {
             let values = list(&row[key]);
             retained
                 .iter()
-                .filter_map(|(index, _)| values.get(*index).cloned())
+                .map(|(index, _)| values.get(*index).cloned().unwrap_or(Value::Null))
                 .collect::<Vec<_>>()
         };
         let assets = keep("asset_details_json");

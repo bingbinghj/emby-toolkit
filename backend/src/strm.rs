@@ -208,10 +208,7 @@ async fn read(state: &AppState, id: &str) -> Result<Value> {
     )
     .await?;
     let object = &view["EditObjectContainer"]["Object"];
-    if !object.is_object()
-        || object.get("ExclusiveControlFeatures").is_none()
-        || object.get("EnableImageCapture").is_none()
-    {
+    if !object.is_object() || object.get("ExclusiveControlFeatures").is_none() {
         return Err(ApiError::bad("神医媒体信息提取配置格式不兼容"));
     }
     Ok(object.clone())
@@ -306,21 +303,6 @@ where
     let _gate = state.strm.gate.lock().await;
     apply_settings(state, mode, discover(state).await?, function).await
 }
-pub async fn with_optional_preserve<F, Fut, T>(state: &AppState, function: F) -> Result<T>
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = Result<T>>,
-{
-    let _gate = state.strm.gate.lock().await;
-    let id = match discover(state).await {
-        Ok(id) => id,
-        Err(error) => {
-            tracing::warn!(reason=%error.1, "神医忽略文件变更不可用，沿用当前设置刷新");
-            return function().await;
-        }
-    };
-    apply_settings(state, "preserve", id, function).await
-}
 async fn apply_settings<F, Fut, T>(
     state: &AppState,
     mode: &str,
@@ -358,14 +340,11 @@ where
         .into(),
     );
     desired["ExclusiveControlFeatures"] = json!(values.join(","));
-    if mode == "capture" {
-        desired["EnableImageCapture"] = json!(true);
-    }
     let mut restore = json!({});
-    for key in ["ExclusiveControlFeatures", "EnableImageCapture"] {
-        if desired[key] != original[key] {
-            restore[key] = original[key].clone();
-        }
+    if features(&desired["ExclusiveControlFeatures"])
+        != features(&original["ExclusiveControlFeatures"])
+    {
+        restore["ExclusiveControlFeatures"] = original["ExclusiveControlFeatures"].clone();
     }
     let changed = !restore.as_object().unwrap().is_empty();
     let mode_name = settings_mode_label(mode);

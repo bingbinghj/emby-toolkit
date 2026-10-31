@@ -212,7 +212,7 @@ async fn fill_inner(
             if expected.is_empty() { return Ok((false, 0)); }
             if changed == 0 && mismatches(&expected, &item, &source_paths).is_empty() { return Ok((false, expected.len())); }
             checkpoint(context).await?;
-            let readback = crate::strm::with_settings(state, "preserve", || async {
+            let readback = async {
                 crate::media_save::refresh(state, &[string(&item, "Path")]).await?;
                 let mut missing = expected.clone();
                 for attempt in 0..3 {
@@ -221,8 +221,8 @@ async fn fill_inner(
                     if missing.is_empty() { break; }
                     if attempt < 2 { tokio::time::sleep(Duration::from_secs(1)).await; }
                 }
-                Ok(missing)
-            }).await;
+                Ok::<_, ApiError>(missing)
+            }.await;
             match readback {
                 Ok(missing) if missing.is_empty() => Ok((false, expected.len())),
                 Ok(missing) => {

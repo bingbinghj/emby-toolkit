@@ -870,7 +870,7 @@ async fn missing_moviepilot_media_info(
             "{}-mediainfo.json",
             media_path.file_stem().unwrap_or_default().to_string_lossy()
         ));
-        if tokio::fs::try_exists(info_path).await.unwrap_or(false) {
+        if crate::media_preflight::valid_video_sidecar(&info_path).await {
             continue;
         }
         let item = moviepilot_item(state, path).await.ok().flatten();

@@ -281,10 +281,7 @@ pub async fn save(state: &AppState, id: &str, body: &Value, context: &JobContext
     if refresh.is_empty() {
         return Err(ApiError::bad("无法定位目标Season刷新"));
     }
-    crate::strm::with_settings(state, "preserve", || {
-        crate::emby::refresh_item(state, &refresh, true, context)
-    })
-    .await?;
+    crate::emby::refresh_item(state, &refresh, true, context).await?;
     tracing::info!(item_id = id, refresh_id = %refresh, "[手动处理] 已提交《{media_name}》刷新，开始保存数据库结果");
     let mut transaction = state.db.begin().await?;
     sqlx::query("UPDATE media_metadata SET actors_json=$1,last_updated_at=NOW() WHERE tmdb_id=$2 AND item_type=$3").bind(crate::cast::relations(&actors)).bind(&tmdb).bind(&kind).execute(&mut *transaction).await?;

@@ -7,7 +7,6 @@ use crate::{
     media_edit::{self, Target},
     media_info,
     state::string,
-    strm,
 };
 use axum::{
     Json,
@@ -47,7 +46,7 @@ pub async fn submit(
     let manager = state.jobs.clone();
     let task = manager
         .submit_response("保存媒体信息", move |context| async move {
-            strm::with_settings(&state, "preserve", || save(&state, &id, &body, &context)).await
+            save(&state, &id, &body, &context).await
         })
         .await?;
     Ok((

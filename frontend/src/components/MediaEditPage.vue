@@ -1111,6 +1111,7 @@ const mediaInfoSaveFeedback = ref(null);
 const currentEditMediaId = ref(null); // ★ 新增：记录当前正在编辑的具体媒体ID (电影ID或具体的集ID)
 const mediaInfoVersions = ref([]);
 let mediaInfoStreamSnapshotMap = new WeakMap();
+let mediaInfoLoadSequence = 0;
 const deletedMediaStreamSnapshots = ref([]);
 const mediaInfoLanguageSelections = ref({});
 const mediaInfoIsoLanguageOptions = ref([]);
@@ -1501,7 +1502,7 @@ const formatEpisodeLabel = (ep) => {
   const n = Number(ep?.episode_number);
   if (!Number.isFinite(n)) return ep?.episode_number || '?';
   const episodeLabel = String(n).padStart(2, '0');
-  return Number(ep?.season_version_count || 0) > 1
+  return Number(ep?.version_count || 0) > 1
     ? `${episodeLabel}.${ep?.version_index || 1}`
     : episodeLabel;
 };
@@ -1809,17 +1810,20 @@ const fillLanguagesToTitles = () => {
 
 // 2. 打开编辑器并获取数据 (修改为接收 targetId 参数)
 const openMediaInfoEditor = async (targetId) => {
+  const sequence = ++mediaInfoLoadSequence;
   mediaInfoSaveFeedback.value = null;
-  currentEditMediaId.value = String(targetId); // 记录当前正在编辑的 ID
 
   // 检查其中一个数组是否为空即可
   if (audioLanguageOptions.value.length === 0) {
     await fetchLanguageMapping();
   }
+  if (sequence !== mediaInfoLoadSequence) return;
 
   const loadingMsg = message.loading("正在读取底层媒体指纹...", { duration: 0 });
   try {
     const res = await axios.get(`/api/media_info/edit/${targetId}`);
+    if (sequence !== mediaInfoLoadSequence) return;
+    currentEditMediaId.value = String(targetId);
     mediaInfoContext.value = {
       sha1: res.data.sha1,
       fingerprint_pending: Boolean(res.data.fingerprint_pending),
@@ -1866,7 +1870,9 @@ const openMediaInfoEditor = async (targetId) => {
 
     showMediaInfoEditor.value = true;
   } catch (e) {
-    message.error(e.response?.data?.error || "获取媒体信息失败");
+    if (sequence === mediaInfoLoadSequence) {
+      message.error(e.response?.data?.error || "获取媒体信息失败");
+    }
   } finally {
     loadingMsg.destroy();
   }

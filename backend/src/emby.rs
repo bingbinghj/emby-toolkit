@@ -458,17 +458,49 @@ pub async fn library_for_path(state: &AppState, path: &str) -> Result<Option<Val
 async fn wait_item_refresh(
     state: &AppState,
     id: &str,
-    previous: &str,
+    previous: Option<&str>,
+    mut trace: Option<crate::media_extra::RefreshTrace>,
     context: &JobContext,
-) -> Result<String> {
+) -> Result<()> {
     for _ in 0..120 {
         context.checkpoint().await?;
-        let details = crate::media_edit::details(state, id, "DateLastRefreshed").await?;
-        let current = string(&details, "DateLastRefreshed").trim().to_string();
-        if !current.is_empty() && current != previous {
-            return Ok(current);
+        if let Some(previous) = previous {
+            let details = crate::media_edit::details(state, id, "DateLastRefreshed").await?;
+            let current = string(&details, "DateLastRefreshed").trim().to_string();
+            if !current.is_empty() && current != previous {
+                return Ok(());
+            }
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        if let Some(log_trace) = trace.as_mut() {
+            let completed = async {
+                let logs = state
+                    .emby(
+                        Method::GET,
+                        "System/Logs/embyserver.txt/Lines",
+                        &[("Limit", "500".into())],
+                        None,
+                    )
+                    .await?;
+                log_trace.feed(id, &logs)
+            }
+            .await;
+            match completed {
+                Ok(true) => {
+                    tracing::info!("[入库刷新] 已确认 Item {id} 本次 RefreshItem Complete");
+                    return Ok(());
+                }
+                Ok(false) => {}
+                Err(error) if previous.is_some_and(|value| !value.is_empty()) => {
+                    tracing::warn!(
+                        "[入库刷新] Item {id} 完成日志不可用，继续验收刷新时间：{}",
+                        error.1
+                    );
+                    trace = None;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        context.sleep(Duration::from_secs(1)).await?;
     }
     Err(ApiError::bad(format!(
         "等待 Emby 项目实际刷新完成超时：{id}"
@@ -481,46 +513,45 @@ pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobConte
     idle(state, context).await?;
     let details = crate::media_edit::details(state, &id, "Path,DateLastRefreshed").await?;
     let previous = string(&details, "DateLastRefreshed").trim().to_string();
-    crate::strm::with_settings(state, "preserve", || async {
-        context.checkpoint().await?;
-        state
-            .emby(
-                Method::POST,
-                &format!("Items/{id}/Refresh"),
-                &[
-                    ("Recursive", series.to_string()),
-                    ("MetadataRefreshMode", "FullRefresh".into()),
-                    ("ImageRefreshMode", "FullRefresh".into()),
-                    ("ReplaceAllMetadata", "false".into()),
-                    ("ReplaceAllImages", "false".into()),
-                ],
-                None,
-            )
-            .await?;
-        wait_item_refresh(state, &id, &previous, context).await
-    })
-    .await?;
+    let trace = match crate::media_extra::log_position(state).await {
+        Ok(position) => Some(crate::media_extra::RefreshTrace::new(position)),
+        Err(error) if previous.is_empty() => return Err(error),
+        Err(_) => None,
+    };
+    context.checkpoint().await?;
+    state
+        .emby(
+            Method::POST,
+            &format!("Items/{id}/Refresh"),
+            &[
+                ("Recursive", series.to_string()),
+                ("MetadataRefreshMode", "FullRefresh".into()),
+                ("ImageRefreshMode", "FullRefresh".into()),
+                ("ReplaceAllMetadata", "false".into()),
+                ("ReplaceAllImages", "false".into()),
+            ],
+            None,
+        )
+        .await?;
+    wait_item_refresh(state, &id, Some(&previous), trace, context).await?;
     if !series {
         return Ok(());
     }
     idle(state, context).await?;
     let path = std::path::Path::new(item["Path"].as_str().unwrap_or("")).join("tvshow.nfo");
     let xml = tokio::fs::read_to_string(&path).await?;
-    let details = crate::media_edit::details(state, &id, "DateLastRefreshed").await?;
-    let previous = string(&details, "DateLastRefreshed").trim().to_string();
-    crate::strm::with_settings(state, "preserve", || async {
-        context.checkpoint().await?;
-        state
-            .emby(
-                Method::POST,
-                "Library/Media/Updated",
-                &[],
-                Some(serde_json::json!({"Updates":[{"Path":path,"UpdateType":"Modified"}]})),
-            )
-            .await?;
-        wait_item_refresh(state, &id, &previous, context).await
-    })
-    .await?;
+    let trace =
+        crate::media_extra::RefreshTrace::new(crate::media_extra::log_position(state).await?);
+    context.checkpoint().await?;
+    state
+        .emby(
+            Method::POST,
+            "Library/Media/Updated",
+            &[],
+            Some(serde_json::json!({"Updates":[{"Path":path,"UpdateType":"Modified"}]})),
+        )
+        .await?;
+    wait_item_refresh(state, &id, None, Some(trace), context).await?;
     let tag = |name| {
         regex::Regex::new(&format!(r"(?is)<{name}[^>]*>(.*?)</{name}>"))
             .unwrap()

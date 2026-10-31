@@ -153,10 +153,8 @@ pub async fn reprocess(
     }
     if let Some(first) = rebuilt.keys().next() {
         let body = json!({"mediainfo":rebuilt[first],"target_item_ids":ids,"stream_patches":[]});
-        let (status, result) = crate::strm::with_settings(state, "preserve", || {
-            crate::media_save::save_with_rebuilt(state, first, &body, &rebuilt, context)
-        })
-        .await?;
+        let (status, result) =
+            crate::media_save::save_with_rebuilt(state, first, &body, &rebuilt, context).await?;
         if status >= 400 {
             return Err(ApiError::bad(
                 result["error"].as_str().unwrap_or("重建媒体信息失败"),
