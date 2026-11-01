@@ -425,6 +425,14 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
         || native_name.is_empty() && key == "MediaInfoExtractTask"
     {
         "提取媒体信息".to_string()
+    } else if native_name == "Extract Intro Fingerprint"
+        || native_name.is_empty() && key == "IntroFingerprintExtractTask"
+    {
+        "提取片头声纹".to_string()
+    } else if native_name == "Extract Video Thumbnail"
+        || native_name.is_empty() && key == "VideoThumbnailExtractTask"
+    {
+        "提取视频预览缩略图".to_string()
     } else if native_name.is_empty() {
         key.to_string()
     } else {
@@ -656,12 +664,8 @@ pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobConte
         .activity(
             "首次元数据刷新",
             &format!(
-                "{label}：提交{}元数据和图片完整刷新",
-                if series {
-                    "整剧递归"
-                } else {
-                    "电影定点"
-                }
+                "{label}：提交{}元数据和图片刷新",
+                if series { "电视剧" } else { "电影" }
             ),
         )
         .await;
@@ -686,7 +690,8 @@ pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobConte
                 format!("{label}：首次元数据刷新请求失败：{}", error.1),
             )
         })?;
-    tracing::info!("[入库刷新] {label}：首次刷新请求已接收，替换全部元数据/图片均为否");
+    tracing::info!("[入库刷新] {label}：首次刷新请求已接收，等待实际完成");
+    tracing::debug!("[入库刷新参数] 媒体ID {id}：递归 {series}，元数据/图片完整刷新，全部替换否");
     wait_item_refresh(
         state,
         &id,
@@ -716,7 +721,7 @@ pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobConte
     context
         .activity(
             "顶层NFO扫描",
-            &format!("{label}：读取 {}，准备立即刷新剧集根目录", path.display()),
+            &format!("{label}：重读顶层NFO，准备刷新剧集元数据"),
         )
         .await;
     let xml = tokio::fs::read_to_string(&path).await.map_err(|error| {
@@ -735,7 +740,7 @@ pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobConte
         })?;
     let trace = crate::media_extra::RefreshTrace::new(position);
     context.checkpoint().await?;
-    tracing::info!(
+    tracing::debug!(
         "[顶层NFO扫描] {label}：立即刷新根目录 {series_path}，递归是，元数据/图片使用默认刷新，全部替换否；刷新日志起始行 {position}"
     );
     refresh_item(state, &id, true, context)

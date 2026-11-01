@@ -273,7 +273,7 @@ pub async fn request(
         0
     };
     for attempt in 0..=retries {
-        tracing::info!(
+        tracing::debug!(
             "AI 请求开始：服务 {provider}，模型 {model}，尝试 {}/{}",
             attempt + 1,
             retries + 1
@@ -340,7 +340,7 @@ pub async fn request(
             .and_then(parse_json)
             .ok_or_else(|| ApiError::bad("AI 未返回有效 JSON"))
             .inspect(|value| {
-                tracing::info!(
+                tracing::debug!(
                     "AI 请求完成：服务 {provider}，模型 {model}，返回条目 {} 个",
                     value.as_object().map_or(0, |o| o.len())
                 )

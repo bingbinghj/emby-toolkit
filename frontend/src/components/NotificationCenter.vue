@@ -62,7 +62,7 @@ defineEmits(['close']);
 const message = useMessage();
 const activeTab = ref('logs'), logRef = ref(null), controlAction = ref('');
 const keyword = ref(''), logFilter = ref('all'), following = ref(true), displayedLogs = ref([]);
-const filterOptions = [{ label: '全部日志', value: 'all' }, { label: '任务进度', value: 'progress' }, { label: '警告与错误', value: 'warning' }];
+const filterOptions = [{ label: '全部日志', value: 'all' }, { label: '任务进度', value: 'progress' }, { label: '警告', value: 'warning' }, { label: '错误', value: 'error' }];
 const labels = { idle: '空闲', queued: '等待执行', completed: '已完成', completed_with_warnings: '已完成，有提醒', failed: '失败', cancelled: '已停止', paused: '已暂停', pausing: '正在暂停', stopping: '正在停止', running: '执行中' };
 const stateLabel = computed(() => props.task.stop_requested ? '正在停止' : (labels[props.task.state] || (props.task.is_running ? '执行中' : '空闲')));
 const statusType = computed(() => props.task.state === 'failed' ? 'error' : ['pausing', 'paused', 'stopping', 'completed_with_warnings'].includes(props.task.state) ? 'warning' : props.task.is_running ? 'info' : props.task.state === 'completed' ? 'success' : 'default');
@@ -98,11 +98,12 @@ function downloadLogs() {
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
+const logLevel = line => line.match(/^\[\d{2}:\d{2}:\d{2}\] \[([A-Z]+)\]/)?.[1];
 const filteredLogs = computed(() => displayedLogs.value.filter(line =>
   (!keyword.value.trim() || line.toLowerCase().includes(keyword.value.trim().toLowerCase())) &&
-  (logFilter.value === 'all' || (logFilter.value === 'progress' ? /\[任务(?:进度|开始|结束|暂停|继续)\]/.test(line) : /\b(WARNING|ERROR|CRITICAL)\b/.test(line)))
+  (logFilter.value === 'all' || (logFilter.value === 'progress' ? /\[任务(?:进度|开始|结束|暂停|继续)\]/.test(line) : logFilter.value === 'warning' ? logLevel(line) === 'WARNING' : logFilter.value === 'error' && ['ERROR', 'CRITICAL'].includes(logLevel(line))))
 ));
-const lineClass = line => /\b(ERROR|CRITICAL)\b/.test(line) ? 'log-error' : /\bWARNING\b/.test(line) ? 'log-warning' : /\[任务(?:进度|开始|结束|暂停|继续)\]/.test(line) ? 'log-progress' : '';
+const lineClass = line => ['ERROR', 'CRITICAL'].includes(logLevel(line)) ? 'log-error' : logLevel(line) === 'WARNING' ? 'log-warning' : /\[任务(?:进度|开始|结束|暂停|继续)\]/.test(line) ? 'log-progress' : '';
 watch([latestLogs, following], () => { if (following.value) displayedLogs.value = [...latestLogs.value]; }, { immediate: true });
 watch([filteredLogs, activeTab, following], async () => {
   if (activeTab.value === 'logs' && following.value) {

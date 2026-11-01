@@ -161,7 +161,7 @@ async fn restore(
                 tracing::warn!("入库媒体信息缓存命中计数失败：《{media_name}》，Emby {id}，{error}");
             }
             report["cache_hit"] = json!(true);
-            tracing::info!("入库媒体信息缓存命中：《{media_name}》，Emby {id}，SHA1 {sha}");
+            tracing::debug!("入库媒体信息缓存命中：《{media_name}》，Emby {id}，SHA1 {sha}");
         }
         for attempt in 0..15 {
             context.checkpoint().await?;

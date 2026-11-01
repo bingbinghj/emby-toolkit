@@ -425,9 +425,7 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
             )
             .await;
         crate::emby::refresh_item(state, &id, true, context).await?;
-        tracing::info!(
-            "[媒体信息还原] Emby 已接收媒体库扫描请求：Item {id}，Recursive=true，尚未进行回读验收"
-        );
+        tracing::info!("[媒体信息还原] Emby 已接收媒体库扫描请求（媒体ID：{id}），等待扫描完成");
     }
     let message = format!(
         "媒体信息本地还原完成：恢复 {updated} 个文件，失败 {} 个；已向 {submitted_libraries} 个媒体库提交 Emby 扫描，尚未进行回读验收",

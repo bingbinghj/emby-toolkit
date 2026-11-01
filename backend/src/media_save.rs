@@ -280,10 +280,11 @@ pub async fn refresh(state: &AppState, paths: &[String]) -> Result<()> {
                             ]),
                     )
                     .await?.error_for_status()?;
-                    tracing::info!(
+                    tracing::debug!(
                         "[精准扫描] Emby已接收 {} 的目录扫描请求（媒体ID：{target_id}，路径：{path}，递归是，默认刷新，全部替换否）",
                         item["Name"].as_str().unwrap_or(&path)
                     );
+                    tracing::info!("[精准扫描] Emby已接收《{}》的扫描请求", item["Name"].as_str().unwrap_or(&path));
                     return Ok(true);
                 }
                 Ok(false)

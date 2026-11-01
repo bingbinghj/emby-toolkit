@@ -765,7 +765,143 @@ pub async fn process_emby(
         "Emby 入库处理完成：《{media_name}》，Emby {id}，更新 {} 条记录",
         result["updated"].as_u64().unwrap_or(0)
     );
+    let automatic = automatic_extraction(
+        state,
+        item["Type"] == "Series" && !episodes.is_empty(),
+        item["Type"] == "Movie" || item["Type"] == "Series" && !episodes.is_empty(),
+        &format!("《{media_name}》"),
+        context,
+    )
+    .await?;
+    add_automatic_result(&mut result, automatic);
     Ok(result)
+}
+
+fn add_automatic_result(result: &mut Value, automatic: Value) {
+    if automatic.is_null() {
+        return;
+    }
+    let warnings = automatic["warnings"].as_u64().unwrap_or(0);
+    if warnings > 0 {
+        result["warnings"] = json!(result["warnings"].as_u64().unwrap_or(0) + warnings);
+    }
+    result["automatic_extraction"] = automatic;
+}
+
+async fn automatic_extraction(
+    state: &AppState,
+    series: bool,
+    videos: bool,
+    label: &str,
+    context: &crate::jobs::JobContext,
+) -> Result<Value> {
+    let config = state.config.read().await.clone();
+    let stages = [
+        (
+            "片头声纹提取",
+            "IntroFingerprintExtractTask",
+            "intro",
+            series && config["auto_extract_intro_fingerprint_on_ingest"] == true,
+        ),
+        (
+            "视频预览缩略图提取",
+            "VideoThumbnailExtractTask",
+            "video_thumbnails",
+            videos && config["auto_extract_video_thumbnails_on_ingest"] == true,
+        ),
+    ];
+    let mut report = json!({});
+    let mut warnings = 0_u64;
+    for (phase, key, field, enabled) in stages {
+        if !enabled {
+            continue;
+        }
+        context.checkpoint().await?;
+        context
+            .activity(
+                phase,
+                &format!("{label}入库已完成，开始神医助手{phase}，等待原生任务结束"),
+            )
+            .await;
+        match crate::emby::scheduled(state, key, context).await {
+            Ok(()) => {
+                report[field] = json!({"state":"completed"});
+                tracing::info!("[入库自动处理] {label}{phase}已确认完成");
+            }
+            Err(error) if context.is_cancelled() => return Err(error),
+            Err(error) => {
+                warnings += 1;
+                report[field] = json!({"state":"failed","reason":error.1});
+                tracing::warn!(
+                    "[入库自动处理] {label}{phase}失败：{}；保留已完成的入库结果",
+                    error.1
+                );
+                if field == "intro" && stages[1].3 {
+                    context.checkpoint().await?;
+                    let tasks = state
+                        .emby(reqwest::Method::GET, "ScheduledTasks", &[], None)
+                        .await;
+                    context.checkpoint().await?;
+                    // 查询失败或等待超时不代表原生片头任务已经结束。
+                    let ended =
+                        tasks
+                            .as_ref()
+                            .ok()
+                            .and_then(Value::as_array)
+                            .is_some_and(|tasks| {
+                                tasks
+                                    .iter()
+                                    .filter(|task| task["Key"] == key)
+                                    .all(|task| task["State"] == "Idle")
+                            });
+                    if !ended {
+                        let reason = "片头声纹任务尚未确认结束，跳过视频预览缩略图提取";
+                        report["video_thumbnails"] = json!({"state":"skipped","reason":reason});
+                        tracing::warn!("[入库自动处理] {label}{reason}");
+                        break;
+                    }
+                }
+                if field == "video_thumbnails" {
+                    context.checkpoint().await?;
+                    context
+                        .activity(
+                            "修复视频预览缩略图",
+                            &format!("{label}原生提取失败，自动运行一次现有视频预览缩略图修复任务"),
+                        )
+                        .await;
+                    match crate::thumbnails::repair(state, context).await {
+                        Ok(repair) => {
+                            if repair["failed"].as_u64().unwrap_or(0) > 0 {
+                                warnings += 1;
+                                tracing::error!(
+                                    "[入库自动处理] {label}视频预览缩略图修复结束，仍有 {} 项失败",
+                                    repair["failed"]
+                                );
+                            } else {
+                                tracing::info!("[入库自动处理] {label}视频预览缩略图修复已完成");
+                            }
+                            report["video_thumbnails_repair"] = repair;
+                        }
+                        Err(error) if context.is_cancelled() => return Err(error),
+                        Err(error) => {
+                            warnings += 1;
+                            tracing::error!(
+                                "[入库自动处理] {label}视频预览缩略图修复失败：{}；不再自动重复重试",
+                                error.1
+                            );
+                            report["video_thumbnails_repair"] =
+                                json!({"state":"failed","reason":error.1});
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if report.as_object().unwrap().is_empty() {
+        return Ok(Value::Null);
+    }
+    report["warnings"] = json!(warnings);
+    Ok(report)
 }
 
 async fn mirror(state: &AppState, id: &str) -> Result<Value> {
@@ -987,6 +1123,8 @@ pub async fn process_moviepilot(
     );
     let mut updated = 0;
     let mut failures = vec![];
+    let mut automatic_series = false;
+    let mut automatic_videos = false;
     let tmdb = string(event, "tmdb_id");
     let rows: Vec<Value> = if tmdb.is_empty() {
         vec![]
@@ -1190,15 +1328,22 @@ pub async fn process_moviepilot(
                         );
                         failures.push(error.1);
                     }
-                    if state.config.read().await["emby_webhook_ingest_enabled"] != true
-                        && let Err(error) =
-                            finalize(state, &id, &episodes, !known.is_empty(), context).await
-                    {
-                        tracing::warn!(
-                            "MoviePilot 入库收尾失败：《{media_name}》，Emby {id}，{}",
-                            error.1
-                        );
-                        failures.push(error.1);
+                    if state.config.read().await["emby_webhook_ingest_enabled"] != true {
+                        match finalize(state, &id, &episodes, !known.is_empty(), context).await {
+                            Ok(_) => {
+                                automatic_series |=
+                                    item["Type"] == "Series" && !episodes.is_empty();
+                                automatic_videos |= item["Type"] == "Movie"
+                                    || item["Type"] == "Series" && !episodes.is_empty();
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    "MoviePilot 入库收尾失败：《{media_name}》，Emby {id}，{}",
+                                    error.1
+                                );
+                                failures.push(error.1);
+                            }
+                        }
                     }
                 }
                 Err(error) => {
@@ -1231,7 +1376,21 @@ pub async fn process_moviepilot(
             failures[0]
         )
     };
-    Ok(json!({"updated":updated,"failures":failures,"message":message}))
+    let automatic = if failures.is_empty() {
+        automatic_extraction(
+            state,
+            automatic_series,
+            automatic_videos,
+            "本批媒体",
+            context,
+        )
+        .await?
+    } else {
+        Value::Null
+    };
+    let mut result = json!({"updated":updated,"failures":failures,"message":message});
+    add_automatic_result(&mut result, automatic);
+    Ok(result)
 }
 
 pub async fn finalize(

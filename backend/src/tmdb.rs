@@ -99,7 +99,7 @@ async fn details_with_append(
         return Err(ApiError::bad("TMDb ID 无效"));
     }
     let movie = kind == "Movie";
-    tracing::info!("TMDb 详情获取开始：类型 {kind}，TMDb {id}");
+    tracing::debug!("TMDb 详情获取开始：类型 {kind}，TMDb {id}");
     let path = format!("/{}/{id}", if movie { "movie" } else { "tv" });
     let append = append.unwrap_or(if movie {
         "credits,videos,images,keywords,external_ids,translations,release_dates,alternative_titles"
@@ -132,7 +132,7 @@ async fn details_with_append(
             "original_name"
         }]
         .clone();
-        tracing::info!(
+        tracing::debug!(
             "TMDb 详情获取完成：类型 {kind}，TMDb {id}，名称 {}",
             string(&data, title_field)
         );
@@ -157,7 +157,7 @@ async fn details_with_append(
             .as_str()
             .is_none_or(|s| s.chars().count() < 2);
     if need_title || need_overview {
-        tracing::info!(
+        tracing::debug!(
             "TMDb 英文补抓开始：《{media_name}》，类型 {kind}，TMDb {id}，缺少标题源 {}，缺少简介源 {}",
             if need_title { "是" } else { "否" },
             if need_overview { "是" } else { "否" }
@@ -178,7 +178,7 @@ async fn details_with_append(
             data["overview"] = fallback["overview"].clone();
         }
     }
-    tracing::info!(
+    tracing::debug!(
         "TMDb 详情获取完成：类型 {kind}，TMDb {id}，名称 {}",
         string(&data, title_field)
     );
@@ -249,7 +249,7 @@ pub async fn aggregate(state: &AppState, id: &str, numbers: &[i64]) -> Result<Va
         let media_name = media_name.clone();
         async move {
         let mut episodes = json!({});
-        tracing::info!("TMDb 季详情获取开始：《{media_name}》，TMDb {id}，第 {number} 季");
+            tracing::debug!("TMDb 季详情获取开始：《{media_name}》，TMDb {id}，第 {number} 季");
         let mut details = match get(
             state,
             &format!("/tv/{id}/season/{number}"),
@@ -323,7 +323,7 @@ pub async fn aggregate(state: &AppState, id: &str, numbers: &[i64]) -> Result<Va
             }
         }
         details["episodes"] = json!(season_episodes);
-        tracing::info!(
+        tracing::debug!(
             "TMDb 季详情获取完成：《{media_name}》，TMDb {id}，第 {number} 季，分集 {} 个",
             list(&details["episodes"]).len()
         );

@@ -118,7 +118,7 @@ async fn edit(State(state): State<AppState>, Path(id): Path<String>) -> Result<J
     let result = edit_data(&state, &id).await;
     match &result {
         Ok(Json(data)) => {
-            tracing::info!(item_id = %id, actors = data["current_emby_cast"].as_array().map_or(0, Vec::len), "打开《{}》演员编辑页完成", string(data, "item_name"))
+            tracing::debug!(item_id = %id, actors = data["current_emby_cast"].as_array().map_or(0, Vec::len), "打开《{}》演员编辑页完成", string(data, "item_name"))
         }
         Err(error) => tracing::warn!(item_id = %id, error = %error.1, "打开演员编辑页失败"),
     }

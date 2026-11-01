@@ -543,11 +543,12 @@ pub async fn scan(
             };
             let message = match kind.as_str() {
                 "consistent" => {
-                    tracing::info!("[全库指纹] 一致，跳过 {label}");
+                    tracing::debug!("[全库指纹] 一致，跳过 {label}");
                     format!("一致，跳过 {label}")
                 }
                 "repaired" => {
-                    tracing::info!("[全库指纹] 已更新 {label}，PC={}→{}，SHA1={}→{}，FID={}", string(&details["old"], "pc"), string(&details["new"], "pick_code"), string(&details["old"], "sha1"), string(&details["new"], "sha1"), string(&details["new"], "id"));
+                    tracing::info!("[全库指纹] 已更新 {label} 的资产指纹和 115 文件缓存");
+                    tracing::debug!("[全库指纹] 已更新 {label}，PC={}→{}，SHA1={}→{}，FID={}", string(&details["old"], "pc"), string(&details["new"], "pick_code"), string(&details["old"], "sha1"), string(&details["new"], "sha1"), string(&details["new"], "id"));
                     format!("已更新 {label} 的 PC/SHA1 和 115 文件缓存")
                 }
                 _ => {
