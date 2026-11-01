@@ -1222,7 +1222,16 @@ pub async fn process_moviepilot(
         "MoviePilot 后置增强处理结束：TMDb {tmdb}，更新 {updated} 条，失败 {} 项",
         failures.len()
     );
-    Ok(json!({"updated":updated,"failures":failures,"message":"MoviePilot 后置增强处理结束"}))
+    let message = if failures.is_empty() {
+        format!("MoviePilot 后置增强处理完成：已更新 {updated} 条记录")
+    } else {
+        format!(
+            "MoviePilot 后置增强未完全成功：已更新 {updated} 条记录，失败 {} 项；{}",
+            failures.len(),
+            failures[0]
+        )
+    };
+    Ok(json!({"updated":updated,"failures":failures,"message":message}))
 }
 
 pub async fn finalize(
@@ -1309,6 +1318,12 @@ pub async fn finalize(
     } else {
         json!({})
     };
+    context
+        .activity(
+            "首次元数据刷新",
+            &format!("《{media_name}》（媒体ID：{id}）：指纹及后处理结束，开始入库刷新验收"),
+        )
+        .await;
     tracing::info!(
         "入库最终元数据刷新开始：Emby {id}，名称 {}",
         string(&item, "Name")

@@ -210,6 +210,9 @@ pub async fn download_with_overwrite(
         }
     }
     let Some(data) = data else {
+        tracing::info!(
+            "图片资产下载跳过：《{media_name}》，TMDb {id}，未取得可用海报，未生成下载计划"
+        );
         return Ok(0);
     };
     let mut pending = vec![root.to_path_buf()];
@@ -229,6 +232,7 @@ pub async fn download_with_overwrite(
     }
     let mut count = 0;
     let plan = plan(kind, root, &data, aggregate, &files);
+    let planned = plan.len();
     tracing::info!(
         "图片资产下载计划：《{media_name}》，TMDb {id}，目标 {} 个",
         plan.len()
@@ -262,7 +266,7 @@ pub async fn download_with_overwrite(
                 "图片下载跳过：《{media_name}》，TMDb {id}，文件 {} 已存在",
                 path.display()
             );
-            return Ok(0);
+            return Ok((0, 1, 0));
         }
         tracing::debug!(
             "图片下载开始：《{media_name}》，TMDb {id}，文件 {}",
@@ -281,29 +285,36 @@ pub async fn download_with_overwrite(
                     "图片下载完成：《{media_name}》，TMDb {id}，文件 {}，{size} 字节",
                     path.display()
                 );
-                Ok(1)
+                Ok((1, 0, 0))
             }
             Err(error) if context.is_cancelled() => Err(error),
             Err(error) => { tracing::warn!(
                 "图片下载失败：《{media_name}》，TMDb {id}，文件 {}，{}，继续处理其它图片",
                 path.display(),
                 error.1
-            ); Ok(0) },
+            ); Ok((0, 0, 1)) },
         }
         }.boxed()
         })
         .buffer_unordered(limit);
     tokio::pin!(pending);
     let mut cancelled = None;
+    let mut skipped = 0_usize;
+    let mut failed = 0_usize;
     while let Some(result) = pending.next().await {
         match result {
-            Ok(done) => count += done,
+            Ok((done, existing, errors)) => {
+                count += done;
+                skipped += existing;
+                failed += errors;
+            }
             Err(error) => cancelled = Some(error),
         }
     }
     if let Some(error) = cancelled {
         return Err(error);
     }
+    let downloaded = count;
     if kind == "Series" {
         count += crate::video_images::missing_with_overwrite(
             state,
@@ -321,6 +332,9 @@ pub async fn download_with_overwrite(
         count += crate::video_images::movie_missing(state, path, root, &movie_data, Some(context))
             .await?;
     }
-    tracing::info!("图片资产下载完成：《{media_name}》，TMDb {id}，新增 {count} 个");
+    tracing::info!(
+        "图片资产处理结束：《{media_name}》，TMDb {id}，下载计划 {planned} 个，下载成功 {downloaded} 个，已存在跳过 {skipped} 个，下载失败 {failed} 个，视频补图 {} 个，共新增 {count} 个",
+        count - downloaded
+    );
     Ok(count)
 }

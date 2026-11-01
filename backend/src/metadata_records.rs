@@ -31,13 +31,23 @@ fn runtime(value: &Value) -> Value {
     )
 }
 pub fn pending(kind: &str, package: &Value, cast: &[Value], item: &Value) -> Result<Vec<Value>> {
+    let type_label = match kind {
+        "Series" => "电视剧",
+        "Movie" => "电影",
+        "Season" => "季",
+        "Episode" => "分集",
+        _ => kind,
+    };
     let media_name = string(
         package.get("series_details").unwrap_or(package),
         if kind == "Movie" { "title" } else { "name" },
     );
+    let emby_label = match item["Id"].as_str().unwrap_or("") {
+        "" | "pending" => "待回流绑定",
+        id => id,
+    };
     tracing::debug!(
-        "元数据记录构建开始：《{media_name}》，类型 {kind}，Emby {}，演员 {} 位",
-        string(item, "Id"),
+        "元数据记录构建开始：《{media_name}》，类型 {type_label}，Emby {emby_label}，演员 {} 位",
         cast.len()
     );
     if !matches!(kind, "Movie" | "Series") {
@@ -336,7 +346,7 @@ pub fn pending(kind: &str, package: &Value, cast: &[Value], item: &Value) -> Res
         }
     }
     tracing::debug!(
-        "元数据记录构建完成：《{media_name}》，类型 {kind}，TMDb {provider}，记录 {} 条",
+        "元数据记录构建完成：《{media_name}》，类型 {type_label}，TMDb {provider}，记录 {} 条",
         records.len()
     );
     Ok(records)
@@ -361,8 +371,15 @@ pub async fn online(
 ) -> Result<Vec<Value>> {
     let media_name = string(item, "Name");
     let id = string(item, "Id");
+    let type_label = match kind {
+        "Series" => "电视剧",
+        "Movie" => "电影",
+        "Season" => "季",
+        "Episode" => "分集",
+        _ => kind,
+    };
     tracing::info!(
-        "在线媒体资产绑定开始：《{media_name}》，类型 {kind}，Emby {id}，目标分集 {} 个",
+        "在线媒体资产绑定开始：《{media_name}》，类型 {type_label}，Emby {id}，目标分集 {} 个",
         context.episode_ids.len()
     );
     if id.is_empty() || id == "pending" {
@@ -493,7 +510,7 @@ pub async fn online(
             "overview":first["Overview"],"air_date":first["PremiereDate"]}]);
         let mut child = pending("Series", fallback, cast, item)?.pop().unwrap();
         tracing::debug!(
-            "分集资产使用内部元数据 ID：《{media_name}》，Emby {id}，S{}E{}，版本 {} 个",
+            "分集资产使用备用元数据编号：《{media_name}》，Emby {id}，第 {} 季第 {} 集，版本 {} 个，未找到对应分集元数据，沿用 Emby 季集信息",
             key.0,
             key.1,
             versions.len()
@@ -522,7 +539,7 @@ pub async fn online(
         records.retain(|r| r["item_type"] != "Series");
     }
     tracing::info!(
-        "在线媒体资产绑定完成：《{media_name}》，类型 {kind}，Emby {id}，记录 {} 条",
+        "在线媒体资产绑定完成：《{media_name}》，类型 {type_label}，Emby {id}，记录 {} 条",
         records.len()
     );
     Ok(records)

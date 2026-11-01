@@ -404,7 +404,10 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
         match result {
             Ok(()) => {
                 updated += 1;
-                tracing::info!("[媒体信息还原] {label} 已恢复：{}", final_path.display());
+                tracing::info!(
+                    "[媒体信息还原] {label} 本地 JSON 已恢复：{}",
+                    final_path.display()
+                );
             }
             Err(error) if context.is_cancelled() => return Err(error),
             Err(error) => {
@@ -413,27 +416,26 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
             }
         }
     }
+    let submitted_libraries = affected.len();
     for id in affected {
         context
             .activity(
-                "刷新Emby",
-                &format!("媒体信息文件已恢复，正在刷新所属媒体库（Item {id}）"),
+                "提交媒体库扫描",
+                &format!("本地媒体信息已恢复，正在提交所属媒体库扫描（Item {id}）"),
             )
             .await;
         crate::emby::refresh_item(state, &id, true, context).await?;
+        tracing::info!(
+            "[媒体信息还原] Emby 已接收媒体库扫描请求：Item {id}，Recursive=true，尚未进行回读验收"
+        );
     }
+    let message = format!(
+        "媒体信息本地还原完成：恢复 {updated} 个文件，失败 {} 个；已向 {submitted_libraries} 个媒体库提交 Emby 扫描，尚未进行回读验收",
+        failures.len()
+    );
+    tracing::info!("[媒体信息还原] {message}");
     context
-        .update_counted(
-            total as u64,
-            total as u64,
-            "媒体信息还原",
-            &format!(
-                "媒体信息还原完成：恢复 {updated} 个文件，失败 {} 个",
-                failures.len()
-            ),
-        )
+        .update_counted(total as u64, total as u64, "媒体信息还原", &message)
         .await;
-    Ok(
-        json!({"updated":updated,"failures":failures,"message":format!("媒体信息还原完成：恢复 {updated} 个文件，失败 {} 个", failures.len())}),
-    )
+    Ok(json!({"updated":updated,"failures":failures,"message":message}))
 }

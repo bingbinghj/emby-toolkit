@@ -234,6 +234,9 @@ pub struct RefreshTrace {
     completed: bool,
 }
 impl RefreshTrace {
+    pub(crate) fn pending_count(&self) -> usize {
+        self.pending
+    }
     pub fn new(position: u64) -> Self {
         Self {
             position,

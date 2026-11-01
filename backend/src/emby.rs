@@ -420,6 +420,30 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
     let id = string(task, "Id");
     let running = matches!(task["State"].as_str(), Some("Running" | "Cancelling"));
     let previous = task["LastExecutionResult"]["StartTimeUtc"].clone();
+    let native_name = string(task, "Name");
+    let task_name = if native_name == "Extract MediaInfo"
+        || native_name.is_empty() && key == "MediaInfoExtractTask"
+    {
+        "提取媒体信息".to_string()
+    } else if native_name.is_empty() {
+        key.to_string()
+    } else {
+        native_name
+    };
+    let started = tokio::time::Instant::now();
+    context
+        .activity(
+            "等待Emby计划任务",
+            &format!(
+                "{task_name}（任务ID：{id}）：{}",
+                if running {
+                    "已有任务运行，等待其实际结束"
+                } else {
+                    "准备提交原生计划任务"
+                }
+            ),
+        )
+        .await;
     if !running {
         context.checkpoint().await?;
         state
@@ -430,8 +454,11 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
                 None,
             )
             .await?;
+        tracing::info!(
+            "[Emby计划任务] {task_name}（任务ID：{id}）启动请求已接收，等待本次执行结果"
+        );
     }
-    for _ in 0..900 {
+    for attempt in 0..900 {
         context.sleep(Duration::from_secs(2)).await?;
         let tasks = state.emby(Method::GET, "ScheduledTasks", &[], None).await?;
         let task = tasks
@@ -449,10 +476,34 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
                     "Emby 任务未成功完成：{key}（{status}）"
                 )));
             }
+            tracing::info!(
+                "[Emby计划任务] {task_name}（任务ID：{id}）本次执行已确认完成，耗时 {} 秒",
+                started.elapsed().as_secs()
+            );
             return Ok(());
         }
+        if attempt % 15 == 0 {
+            let state_name = match task["State"].as_str() {
+                Some("Running") => "运行中",
+                Some("Cancelling") => "正在停止",
+                Some("Idle") => "空闲，等待新执行结果",
+                _ => "未知状态",
+            };
+            context
+                .activity(
+                    "等待Emby计划任务",
+                    &format!(
+                        "{task_name}（任务ID：{id}）：{state_name}，已等待 {} 秒",
+                        started.elapsed().as_secs()
+                    ),
+                )
+                .await;
+        }
     }
-    Err(ApiError::bad(format!("等待 Emby 任务超时：{key}")))
+    Err(ApiError::bad(format!(
+        "等待 Emby 计划任务超时：{task_name}（任务ID：{id}，已等待 {} 秒）",
+        started.elapsed().as_secs()
+    )))
 }
 pub async fn library_for_path(state: &AppState, path: &str) -> Result<Option<Value>> {
     let folders = state
@@ -491,13 +542,30 @@ async fn wait_item_refresh(
     previous: Option<&str>,
     mut trace: Option<crate::media_extra::RefreshTrace>,
     context: &JobContext,
+    phase: &str,
+    label: &str,
 ) -> Result<()> {
-    for _ in 0..120 {
+    let started = tokio::time::Instant::now();
+    let status = |trace: Option<&crate::media_extra::RefreshTrace>| match trace {
+        Some(trace) if trace.pending_count() > 0 => {
+            format!("已开始，尚有 {} 次目标刷新未结束", trace.pending_count())
+        }
+        Some(_) => "未见本次目标刷新开始记录".into(),
+        None => "刷新时间尚未变化，完成日志不可用".into(),
+    };
+    context
+        .activity(phase, &format!("{label}：请求已接收，等待实际刷新完成"))
+        .await;
+    for attempt in 0..120 {
         context.checkpoint().await?;
         if let Some(previous) = previous {
             let details = crate::media_edit::details(state, id, "DateLastRefreshed").await?;
             let current = string(&details, "DateLastRefreshed").trim().to_string();
             if !current.is_empty() && current != previous {
+                tracing::info!(
+                    "[入库刷新] {label} · {phase} 已确认完成（依据：媒体刷新时间变化，等待 {} 秒）",
+                    started.elapsed().as_secs()
+                );
                 return Ok(());
             }
         }
@@ -516,38 +584,87 @@ async fn wait_item_refresh(
             .await;
             match completed {
                 Ok(true) => {
-                    tracing::info!("[入库刷新] 已确认 Item {id} 本次 RefreshItem Complete");
+                    tracing::info!(
+                        "[入库刷新] {label} · {phase} 已确认完成（依据：Emby 刷新完成日志，等待 {} 秒）",
+                        started.elapsed().as_secs()
+                    );
                     return Ok(());
                 }
                 Ok(false) => {}
                 Err(error) if previous.is_some_and(|value| !value.is_empty()) => {
                     tracing::warn!(
-                        "[入库刷新] Item {id} 完成日志不可用，继续验收刷新时间：{}",
+                        "[入库刷新] {label} · {phase} 完成日志不可用，继续验收刷新时间：{}",
                         error.1
                     );
                     trace = None;
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    return Err(ApiError(
+                        error.0,
+                        format!("{label} · {phase} 刷新日志读取或验收失败：{}", error.1),
+                    ));
+                }
             }
+        }
+        if attempt > 0 && attempt % 15 == 0 {
+            context
+                .activity(
+                    phase,
+                    &format!(
+                        "{label}：已等待 {} 秒；{}",
+                        started.elapsed().as_secs(),
+                        status(trace.as_ref())
+                    ),
+                )
+                .await;
         }
         context.sleep(Duration::from_secs(1)).await?;
     }
     Err(ApiError::bad(format!(
-        "等待 Emby 项目实际刷新完成超时：{id}"
+        "{label} · {phase} 等待超时（已等待 {} 秒；{}）",
+        started.elapsed().as_secs(),
+        status(trace.as_ref())
     )))
 }
 
 pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobContext) -> Result<()> {
     let id = string(item, "Id");
     let series = item["Type"] == "Series";
+    let name = string(item, "Name");
+    let label = format!("《{name}》（媒体ID：{id}）");
+    context
+        .activity(
+            "等待后台扫描",
+            &format!("{label}：等待 Emby 初次入库扫描结束"),
+        )
+        .await;
     idle(state, context).await?;
     let details = crate::media_edit::details(state, &id, "Path,DateLastRefreshed").await?;
+    let series_path = string(&details, "Path");
     let previous = string(&details, "DateLastRefreshed").trim().to_string();
     let trace = match crate::media_extra::log_position(state).await {
         Ok(position) => Some(crate::media_extra::RefreshTrace::new(position)),
-        Err(error) if previous.is_empty() => return Err(error),
+        Err(error) if previous.is_empty() => {
+            return Err(ApiError(
+                error.0,
+                format!("{label}：首次元数据刷新无法读取完成日志基线：{}", error.1),
+            ));
+        }
         Err(_) => None,
     };
+    context
+        .activity(
+            "首次元数据刷新",
+            &format!(
+                "{label}：提交{}元数据和图片完整刷新",
+                if series {
+                    "整剧递归"
+                } else {
+                    "电影定点"
+                }
+            ),
+        )
+        .await;
     context.checkpoint().await?;
     state
         .emby(
@@ -562,26 +679,92 @@ pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobConte
             ],
             None,
         )
-        .await?;
-    wait_item_refresh(state, &id, Some(&previous), trace, context).await?;
+        .await
+        .map_err(|error| {
+            ApiError(
+                error.0,
+                format!("{label}：首次元数据刷新请求失败：{}", error.1),
+            )
+        })?;
+    tracing::info!("[入库刷新] {label}：首次刷新请求已接收，替换全部元数据/图片均为否");
+    wait_item_refresh(
+        state,
+        &id,
+        Some(&previous),
+        trace,
+        context,
+        "首次元数据刷新",
+        &label,
+    )
+    .await?;
     if !series {
         return Ok(());
     }
-    idle(state, context).await?;
-    let path = std::path::Path::new(item["Path"].as_str().unwrap_or("")).join("tvshow.nfo");
-    let xml = tokio::fs::read_to_string(&path).await?;
-    let trace =
-        crate::media_extra::RefreshTrace::new(crate::media_extra::log_position(state).await?);
-    context.checkpoint().await?;
-    state
-        .emby(
-            Method::POST,
-            "Library/Media/Updated",
-            &[],
-            Some(serde_json::json!({"Updates":[{"Path":path,"UpdateType":"Modified"}]})),
+    context
+        .activity(
+            "等待后台扫描",
+            &format!("{label}：首次刷新已完成，等待后台扫描结束后重读顶层NFO"),
         )
-        .await?;
-    wait_item_refresh(state, &id, None, Some(trace), context).await?;
+        .await;
+    idle(state, context).await?;
+    if series_path.is_empty() {
+        return Err(ApiError::bad(format!(
+            "{label}：Emby 未返回剧集根目录，无法定位顶层NFO"
+        )));
+    }
+    let path = std::path::Path::new(&series_path).join("tvshow.nfo");
+    context
+        .activity(
+            "顶层NFO扫描",
+            &format!("{label}：读取 {}，准备立即刷新剧集根目录", path.display()),
+        )
+        .await;
+    let xml = tokio::fs::read_to_string(&path).await.map_err(|error| {
+        ApiError::bad(format!(
+            "{label}：无法读取顶层NFO {}：{error}",
+            path.display()
+        ))
+    })?;
+    let position = crate::media_extra::log_position(state)
+        .await
+        .map_err(|error| {
+            ApiError(
+                error.0,
+                format!("{label}：顶层NFO扫描无法读取完成日志基线：{}", error.1),
+            )
+        })?;
+    let trace = crate::media_extra::RefreshTrace::new(position);
+    context.checkpoint().await?;
+    tracing::info!(
+        "[顶层NFO扫描] {label}：立即刷新根目录 {series_path}，递归是，元数据/图片使用默认刷新，全部替换否；刷新日志起始行 {position}"
+    );
+    refresh_item(state, &id, true, context)
+        .await
+        .map_err(|error| {
+            ApiError(
+                error.0,
+                format!("{label}：顶层NFO扫描请求失败：{}", error.1),
+            )
+        })?;
+    tracing::info!(
+        "[顶层NFO扫描] {label}：目录刷新请求已接收，等待本次开始与完成日志；ETK仅重读NFO文件"
+    );
+    wait_item_refresh(
+        state,
+        &id,
+        None,
+        Some(trace),
+        context,
+        "顶层NFO扫描",
+        &label,
+    )
+    .await?;
+    context
+        .activity(
+            "首播年份验收",
+            &format!("{label}：顶层NFO扫描已确认完成，开始核对首播年和结束日期"),
+        )
+        .await;
     let tag = |name| {
         regex::Regex::new(&format!(r"(?is)<{name}[^>]*>(.*?)</{name}>"))
             .unwrap()
@@ -594,7 +777,13 @@ pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobConte
         .ok()
         .or_else(|| tag("premiered").get(..4)?.parse().ok())
         .filter(|n| (1000..=9999).contains(n))
-        .ok_or_else(|| ApiError::bad("NFO 首播年份无效"))?;
+        .ok_or_else(|| {
+            ApiError::bad(format!(
+                "{label}：顶层NFO {} 的首播年份无效",
+                path.display()
+            ))
+        })?;
+    tracing::info!("[年份验收] {label}：NFO首播年份 {year}，需要连续3次一致；保留原连载状态");
     let mut stable = 0;
     let mut corrections = 0;
     for _ in 0..30 {
@@ -605,6 +794,9 @@ pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobConte
             && details["EndDate"].as_str().is_none_or(str::is_empty)
         {
             stable += 1;
+            tracing::info!(
+                "[年份验收] {label}：首播年份 {year}、结束日期为空，连续一致 {stable}/3 次"
+            );
             if stable >= 3 {
                 return Ok(());
             }
@@ -612,6 +804,11 @@ pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobConte
             stable = 0;
             if corrections < 3 {
                 corrections += 1;
+                tracing::info!(
+                    "[年份验收] {label}：第 {corrections}/3 次纠正，Emby年份 {} → {year}，结束日期 {} → 空",
+                    details["ProductionYear"],
+                    details["EndDate"]
+                );
                 details["ProductionYear"] = serde_json::json!(year);
                 details["EndDate"] = Value::Null;
                 for key in [
@@ -632,9 +829,11 @@ pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobConte
                     .await?;
             }
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        context.sleep(Duration::from_secs(1)).await?;
     }
-    Err(ApiError::bad("Series 首播年份未稳定，无法确认入库收尾完成"))
+    Err(ApiError::bad(format!(
+        "{label}：电视剧首播年份未稳定，无法确认入库收尾完成"
+    )))
 }
 
 pub async fn query_items(

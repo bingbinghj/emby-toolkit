@@ -856,7 +856,7 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
                 updated += members.len() - same;
                 unchanged += same;
                 tracing::info!(
-                    "[音轨备份还原] 已还原 Item {id} 的 {} 个版本，备份继续保留",
+                    "[音轨备份还原] Item {id} 的本地 JSON 已还原 {} 个版本，Emby 扫描通知已执行，实际接收状态见扫描日志，尚未进行回读验收，备份继续保留",
                     members.len()
                 );
             }
@@ -871,13 +871,14 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
                 index as u64 + 1,
                 seed_ids.len() as u64,
                 "还原音轨备份",
-                &format!("已还原 {updated}，无需还原 {unchanged}，跳过 {skipped}，失败 {failed}"),
+                &format!("本地 JSON 已还原 {updated}，无需还原 {unchanged}，跳过 {skipped}，失败 {failed}"),
             )
             .await;
     }
     let message = format!(
-        "检查 {backup_files} 个备份，还原 {updated} 个，无需还原 {unchanged} 个，跳过 {skipped} 个，失败 {failed} 个。"
+        "音轨备份处理结束：检查 {backup_files} 个备份，本地 JSON 还原 {updated} 个，无需还原 {unchanged} 个，跳过 {skipped} 个，失败 {failed} 个；Emby 回读状态尚未验收。"
     );
+    tracing::info!("[音轨备份还原] {message}");
     context.update(100, "还原音轨备份", &message).await;
     Ok(
         json!({"backup_files":backup_files,"restored":updated,"already_restored":unchanged,"skipped":skipped,"failed":failed,"failures":failures,"message":message}),

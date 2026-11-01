@@ -224,8 +224,11 @@ pub async fn refresh(state: &AppState, paths: &[String]) -> Result<()> {
         })
         .filter_map(|p| std::path::Path::new(&p).parent().map(|p| p.to_path_buf()))
         .collect();
+    let mut failures = vec![];
     for mut directory in directories {
+        let original_directory = directory.clone();
         let mut refreshed = false;
+        let mut last_error = "Emby未返回匹配目录".to_string();
         for _ in 0..4 {
             if directory.as_os_str().is_empty() || directory == std::path::Path::new("/") {
                 break;
@@ -251,10 +254,14 @@ pub async fn refresh(state: &AppState, paths: &[String]) -> Result<()> {
                 )
                 .await?;
                 if response.status() != StatusCode::OK {
-                    return Ok(false);
+                    return Err(ApiError::bad(format!("目录查询返回HTTP {}", response.status().as_u16())));
                 }
                 let response: Value = response.json().await?;
                 if let Some(item) = response["Items"].as_array().and_then(|items| items.first()) {
+                    let target_id = string(item, "Id");
+                    if target_id.is_empty() {
+                        return Err(ApiError::bad("Emby返回的目录缺少媒体ID"));
+                    }
                     crate::emby::send(
                         state
                             .http
@@ -272,9 +279,9 @@ pub async fn refresh(state: &AppState, paths: &[String]) -> Result<()> {
                                 ("ReplaceAllMetadata", "false"),
                             ]),
                     )
-                    .await?;
+                    .await?.error_for_status()?;
                     tracing::info!(
-                        "[精准扫描] 已通知 Emby 对 {} 立即扫描！",
+                        "[精准扫描] Emby已接收 {} 的目录扫描请求（媒体ID：{target_id}，路径：{path}，递归是，默认刷新，全部替换否）",
                         item["Name"].as_str().unwrap_or(&path)
                     );
                     return Ok(true);
@@ -286,17 +293,30 @@ pub async fn refresh(state: &AppState, paths: &[String]) -> Result<()> {
                 refreshed = true;
                 break;
             }
+            if let Err(error) = attempt {
+                last_error = error.1;
+                tracing::warn!(
+                    "[精准扫描] 目录 {path} 查询或提交失败：{last_error}，继续核对父目录"
+                );
+            }
             if !directory.pop() {
                 break;
             }
         }
         if !refreshed {
-            tracing::warn!(
-                "[精准扫描] 未能在 Emby 中找到有效父目录，将等待自动扫描；媒体信息文件已保留。"
-            );
+            let reason = format!("{}：{last_error}", original_directory.display());
+            tracing::warn!("[精准扫描] {reason}；未提交有效扫描请求，媒体信息文件已保留");
+            failures.push(reason);
         }
     }
-    Ok(())
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(ApiError::bad(format!(
+            "Emby目录扫描请求未成功：{}",
+            failures.join("；")
+        )))
+    }
 }
 pub async fn save(
     state: &AppState,

@@ -114,6 +114,45 @@ async fn checkpoint(context: Option<&JobContext>) -> Result<()> {
     }
     Ok(())
 }
+fn media_label(
+    name: &str,
+    season: Option<i64>,
+    episode: Option<i64>,
+    file: &str,
+    id: &str,
+) -> String {
+    let mut parts = vec![];
+    if !name.is_empty() {
+        parts.push(format!("《{name}》"));
+    }
+    if let Some(season) = season {
+        parts.push(format!("第{season}季"));
+    }
+    if let Some(episode) = episode {
+        parts.push(format!("第{episode}集"));
+    }
+    let file = file.split(['?', '#']).next().unwrap_or("");
+    if !file.is_empty() {
+        parts.push(file.into());
+    }
+    parts.push(format!("媒体ID：{id}"));
+    parts.join(" · ")
+}
+fn track_label(entry: &Value) -> String {
+    let kind = match entry["type"].as_str() {
+        Some("Audio") => "音轨",
+        Some("Subtitle") => "字幕",
+        _ => return "媒体项目".into(),
+    };
+    format!(
+        "{kind}#{}，语言 {}",
+        entry["ordinal"].as_u64().unwrap_or(0),
+        entry["language"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .unwrap_or("未标注")
+    )
+}
 
 pub async fn fill(state: &AppState, ids: &[String], skip_chinese: bool) -> Value {
     fill_inner(state, ids, skip_chinese, None)
@@ -158,11 +197,23 @@ async fn fill_inner(
     let mut processed = HashSet::new();
     for id in ids.iter().collect::<BTreeSet<_>>() {
         checkpoint(context).await?;
+        if let Some(context) = context {
+            context
+                .activity("读取语言标题", &format!("正在读取媒体ID {id} 的媒体信息"))
+                .await;
+        }
         result["scanned"] = json!(result["scanned"].as_u64().unwrap() + 1);
         let mut pending = vec![];
         let mut changed = 0;
+        let mut label = format!("媒体ID：{id}");
         let outcome = async {
             let item = media_edit::details(state, id, "Id,Name,Path,MediaSources,MediaStreams,PartCount,ExtraType,IndexNumber,ParentIndexNumber").await?;
+            let clean_path = crate::media_paths::clean(&string(&item, "Path"));
+            let file = Path::new(&clean_path).file_name().unwrap_or_default().to_string_lossy();
+            label = media_label(&string(&item, "Name"), item["ParentIndexNumber"].as_i64(), item["IndexNumber"].as_i64(), &file, id);
+            if let Some(context) = context {
+                context.activity("填充语言标题", &format!("正在检查 {label} 的音轨和字幕标题")).await;
+            }
             let annotate = |mut entry: Value| {
                 entry["item_id"] = json!(id);
                 entry["name"] = json!(item["Name"].as_str().unwrap_or(id));
@@ -194,12 +245,15 @@ async fn fill_inner(
                 processed.insert(path.clone());
                 let count = report["changed"].as_u64().unwrap_or(0);
                 if count > 0 {
+                    if let Some(context) = context {
+                        context.activity("保存语言标题", &format!("正在保存 {label} 的 {count} 条本地标题")).await;
+                    }
                     atomic(&path, &updated).await?;
                     changed = count;
                     if let Some(sha) = &target.sha
                         && let Err(error) = sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2) ON CONFLICT(sha1) DO UPDATE SET mediainfo_json=EXCLUDED.mediainfo_json")
                             .bind(sha.to_uppercase()).bind(&updated).execute(&state.db).await {
-                            tracing::warn!("[语言标题] Item {id} 本地 JSON 已保存，缓存同步失败：{error}");
+                            tracing::warn!("[语言标题] {label} 本地 JSON 已保存，缓存同步失败：{error}");
                     }
                 }
                 expected = Some(expected_titles(&updated, &report));
@@ -210,12 +264,24 @@ async fn fill_inner(
                 return Ok((true, 0));
             };
             if expected.is_empty() { return Ok((false, 0)); }
-            if changed == 0 && mismatches(&expected, &item, &source_paths).is_empty() { return Ok((false, expected.len())); }
+            if changed == 0 && mismatches(&expected, &item, &source_paths).is_empty() {
+                if let Some(context) = context {
+                    context.activity("标题已一致", &format!("{label} 的 {} 条 Emby 标题已与本地一致，无需重新扫描", expected.len())).await;
+                }
+                return Ok((false, expected.len()));
+            }
             checkpoint(context).await?;
             let readback = async {
+                if let Some(context) = context {
+                    context.activity("提交标题刷新", &format!("正在通知 Emby 重新读取 {label} 的 {} 条标题", expected.len())).await;
+                }
                 crate::media_save::refresh(state, &[string(&item, "Path")]).await?;
                 let mut missing = expected.clone();
                 for attempt in 0..3 {
+                    if let Some(context) = context {
+                        let tracks = missing.iter().map(track_label).collect::<Vec<_>>().join("；");
+                        context.activity("等待标题回读", &format!("正在验收 {label}，第 {}/3 次回读：{tracks}", attempt + 1)).await;
+                    }
                     let live = media_edit::details(state, id, "MediaSources,MediaStreams").await?;
                     missing = mismatches(&expected, &live, &source_paths);
                     if missing.is_empty() { break; }
@@ -224,7 +290,12 @@ async fn fill_inner(
                 Ok::<_, ApiError>(missing)
             }.await;
             match readback {
-                Ok(missing) if missing.is_empty() => Ok((false, expected.len())),
+                Ok(missing) if missing.is_empty() => {
+                    if let Some(context) = context {
+                        context.activity("标题回读完成", &format!("{label} 的 {} 条音轨和字幕标题已通过 Emby 回读验收", expected.len())).await;
+                    }
+                    Ok((false, expected.len()))
+                }
                 Ok(missing) => {
                     pending.extend(missing.into_iter().map(|mut entry| {
                         entry["reason"] = json!(format!("本地标题已保存，但 Emby 回读标题未一致（期望：{}），请重新读取后检查", string(&entry, "title")));
@@ -247,6 +318,7 @@ async fn fill_inner(
                     json!(result["verified_streams"].as_u64().unwrap() + verified as u64);
             }
             Err(error) => {
+                tracing::warn!("[语言标题] {label} 标题填充或回读失败：{}", error.1);
                 result["failed"] = json!(result["failed"].as_u64().unwrap() + 1);
                 if !pending
                     .iter()
@@ -266,20 +338,20 @@ async fn fill_inner(
 fn log_report(report: &Value) {
     for entry in list(&report["pending"]) {
         tracing::warn!(
-            "[语言标题] Item {} {}#{}，语言 {}：{}",
-            string(&entry, "item_id"),
-            match entry["type"].as_str() {
-                Some("Audio") => "音轨",
-                Some("Subtitle") => "字幕",
-                _ => "媒体流",
-            },
-            entry["ordinal"].as_u64().unwrap_or(0),
-            string(&entry, "language"),
+            "[语言标题] {} · {}：{}",
+            media_label(
+                &string(&entry, "name"),
+                entry["season"].as_i64(),
+                entry["episode"].as_i64(),
+                &string(&entry, "file"),
+                &string(&entry, "item_id")
+            ),
+            track_label(&entry),
             string(&entry, "reason")
         );
     }
     tracing::info!(
-        "[语言标题] 检查 {} 个当前入库媒体，本地填充 {} 条标题，Emby 回读确认 {} 条，失败 {} 个，待手动处理 {} 项",
+        "[语言标题] 检查 {} 个目标媒体，本地填充 {} 条标题，Emby 回读确认 {} 条，失败 {} 个，待手动处理 {} 项",
         report["scanned"],
         report["changed_streams"],
         report["verified_streams"],

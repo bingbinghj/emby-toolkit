@@ -170,12 +170,45 @@ pub async fn sync(
     options: &Options<'_>,
 ) -> Result<usize> {
     let media_name = string(item, "Name");
+    let type_label = match kind {
+        "Series" => "电视剧",
+        "Movie" => "电影",
+        "Season" => "季",
+        "Episode" => "分集",
+        _ => kind,
+    };
+    let target_seasons = if options.seasons.is_empty() {
+        "全部季".into()
+    } else {
+        options
+            .seasons
+            .iter()
+            .map(|number| format!("第 {number} 季"))
+            .collect::<Vec<_>>()
+            .join("、")
+    };
+    let mut target_episodes = options
+        .episodes
+        .iter()
+        .take(8)
+        .map(|(season, episode)| format!("第 {season} 季第 {episode} 集"))
+        .collect::<Vec<_>>()
+        .join("、");
+    if options.episodes.len() > 8 {
+        target_episodes.push_str(&format!("等 {} 个目标分集", options.episodes.len()));
+    }
+    if target_episodes.is_empty() {
+        target_episodes = "全部分集".into();
+    }
+    let scope_text = if kind == "Series" {
+        format!("目标季 {target_seasons}，目标季集 {target_episodes}")
+    } else {
+        "当前媒体项目".into()
+    };
     tracing::info!(
-        "NFO 同步开始：类型 {kind}，Emby {}，名称 {}，目标季 {:?}，目标季集 {:?}",
+        "NFO 同步开始：类型 {type_label}，Emby {}，名称 {}，范围：{scope_text}",
         string(item, "Id"),
-        string(item, "Name"),
-        options.seasons,
-        options.episodes
+        string(item, "Name")
     );
     let raw = string(item, "Path");
     if raw.is_empty() || raw.starts_with("http") {
@@ -198,14 +231,16 @@ pub async fn sync(
     };
     if !root.is_dir() {
         tracing::info!(
-            "NFO 同步跳过：《{media_name}》，Emby {}，本地目录不存在",
-            string(item, "Id")
+            "NFO 同步跳过：《{media_name}》，Emby {}，本地目录不存在，路径 {}",
+            string(item, "Id"),
+            root.display()
         );
         return Ok(0);
     }
     let mut data = package.clone();
     prepare(kind, &mut data, options);
     let mut written = 0;
+    let mut out_of_scope = 0;
     match kind {
         "Movie" => {
             static SKIP: LazyLock<regex::Regex> = LazyLock::new(|| {
@@ -283,7 +318,7 @@ pub async fn sync(
             };
             if episodes.is_empty() {
                 tracing::info!(
-                    "NFO 同步完成：Emby {}，写入 {written} 个，没有分集元数据",
+                    "NFO 同步结束：《{media_name}》，Emby {}，写入 {written} 个，没有分集元数据，跳过季和分集 NFO",
                     string(item, "Id")
                 );
                 return Ok(written);
@@ -306,8 +341,9 @@ pub async fn sync(
                 if (!options.seasons.is_empty() && !options.seasons.contains(&key.0))
                     || (!options.episodes.is_empty() && !options.episodes.contains(&key))
                 {
+                    out_of_scope += 1;
                     tracing::debug!(
-                        "NFO 分集跳过：S{}E{} 不在本次范围，文件 {}",
+                        "NFO 分集跳过：第 {} 季第 {} 集不在本次范围，文件 {}",
                         key.0,
                         key.1,
                         file.display()
@@ -404,7 +440,7 @@ pub async fn sync(
         _ => (),
     }
     tracing::info!(
-        "NFO 同步完成：《{media_name}》，类型 {kind}，Emby {}，写入 {written} 个",
+        "NFO 同步完成：《{media_name}》，类型 {type_label}，Emby {}，写入 {written} 个，范围外分集跳过 {out_of_scope} 个",
         string(item, "Id")
     );
     Ok(written)

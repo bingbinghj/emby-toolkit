@@ -618,6 +618,7 @@ async fn restore_metadata(state: &AppState, context: &crate::jobs::JobContext) -
         "NFO和封面还原完成：处理 {updated} 项，写入 {written} 个 NFO、{images} 张图片，失败 {} 项",
         failures.len()
     );
+    tracing::info!("[NFO和封面还原] {message}");
     context
         .update_counted(
             rows.len() as u64,
@@ -734,9 +735,20 @@ async fn purge_persons(state: &AppState, context: &crate::jobs::JobContext) -> R
                 deleted += 1;
                 tracing::info!("[幽灵演员清理] 已删除 {name}（Item {id}）");
             }
-            _ => {
+            Ok(response) => {
                 context.checkpoint().await?;
-                tracing::warn!("[幽灵演员清理] 删除 {name}（Item {id}）失败");
+                tracing::warn!(
+                    "[幽灵演员清理] 删除 {name}（Item {id}）失败：HTTP {}",
+                    response.status()
+                );
+                failures.push(id);
+            }
+            Err(error) => {
+                context.checkpoint().await?;
+                tracing::warn!(
+                    "[幽灵演员清理] 删除 {name}（Item {id}）请求失败：{}",
+                    error.without_url()
+                );
                 failures.push(id);
             }
         }
