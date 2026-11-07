@@ -420,7 +420,7 @@ pub async fn save(
     body: &Value,
     context: &JobContext,
 ) -> Result<(u16, Value)> {
-    save_with_rebuilt(state, id, body, &BTreeMap::new(), context).await
+    save_inner(state, id, body, &BTreeMap::new(), Some(context), true).await
 }
 pub async fn save_with_rebuilt(
     state: &AppState,
@@ -429,7 +429,7 @@ pub async fn save_with_rebuilt(
     rebuilt: &BTreeMap<String, Value>,
     context: &JobContext,
 ) -> Result<(u16, Value)> {
-    save_inner(state, id, body, rebuilt, Some(context)).await
+    save_inner(state, id, body, rebuilt, Some(context), false).await
 }
 pub(crate) async fn save_titles(
     state: &AppState,
@@ -437,7 +437,7 @@ pub(crate) async fn save_titles(
     body: &Value,
     context: Option<&JobContext>,
 ) -> Result<(u16, Value)> {
-    save_inner(state, id, body, &BTreeMap::new(), context).await
+    save_inner(state, id, body, &BTreeMap::new(), context, false).await
 }
 async fn save_inner(
     state: &AppState,
@@ -445,6 +445,7 @@ async fn save_inner(
     body: &Value,
     rebuilt: &BTreeMap<String, Value>,
     context: Option<&JobContext>,
+    refresh_metadata: bool,
 ) -> Result<(u16, Value)> {
     let mut ids = vec![id.to_string()];
     for value in body["target_item_ids"].as_array().into_iter().flatten() {
@@ -843,20 +844,74 @@ async fn save_inner(
             500,
         );
     }
-    let warnings: usize = reports
+    let mut metadata_requested = vec![];
+    let mut metadata_failed = vec![];
+    let mut warning_details = vec![];
+    if refresh_metadata && let Some(context) = context {
+        for saved_id in &saved {
+            context.checkpoint().await?;
+            context
+                .activity(
+                    "提交元数据刷新",
+                    &format!("媒体ID {saved_id}：媒体信息已验收，提交当前条目的后台元数据刷新"),
+                )
+                .await;
+            match crate::emby::refresh_item(state, saved_id, false, context).await {
+                Ok(()) => {
+                    metadata_requested.push(saved_id.clone());
+                    tracing::info!(
+                        "[媒体信息保存] 媒体ID {saved_id}：元数据刷新请求已接收，由 Emby 在后台处理"
+                    );
+                }
+                Err(error) => {
+                    context.checkpoint().await?;
+                    let warning = format!(
+                        "媒体ID {saved_id}：媒体信息已保存，元数据刷新提交失败：{}",
+                        error.1
+                    );
+                    tracing::warn!("[媒体信息保存] {warning}");
+                    metadata_failed.push(saved_id.clone());
+                    warning_details.push(warning);
+                }
+            }
+        }
+    }
+    let metadata_state = match (metadata_requested.is_empty(), warning_details.is_empty()) {
+        (false, true) => "submitted",
+        (false, false) => "partial",
+        (true, false) => "failed",
+        (true, true) => "not_requested",
+    };
+    let metadata_message = if !metadata_requested.is_empty() {
+        format!(
+            "；已提交 {} 个媒体的元数据刷新，Emby 在后台处理{}",
+            metadata_requested.len(),
+            if metadata_failed.is_empty() {
+                String::new()
+            } else {
+                format!("，另有 {} 项提交失败，请查看警告", metadata_failed.len())
+            }
+        )
+    } else if !warning_details.is_empty() {
+        "；元数据刷新未能提交，请查看警告".into()
+    } else {
+        String::new()
+    };
+    let skipped_tracks: usize = reports
         .iter()
         .map(|v| v["skipped"].as_array().map_or(0, Vec::len))
         .sum();
+    let warnings = skipped_tracks + warning_details.len();
     tracing::info!(
         item_id = id,
         restored = restore.len(),
         failures = failures.len(),
-        skipped_tracks = warnings,
+        skipped_tracks,
         "[媒体信息保存] JSON、媒体流和章节回读验收结束"
     );
     Ok((
         if failures.is_empty() { 200 } else { 207 },
-        json!({"message":format!("媒体信息已更新，已恢复 {} 个版本 JSON，Emby 媒体流、标题和章节已通过回读验收",restore.len()),"failures":failures,"batch_reports":reports,"warnings":warnings}),
+        json!({"message":format!("媒体信息已更新，已恢复 {} 个版本 JSON，Emby 媒体流、标题和章节已通过回读验收{metadata_message}",restore.len()),"failures":failures,"batch_reports":reports,"warnings":warnings,"warning_details":warning_details,"metadata_refresh":{"state":metadata_state,"requested_ids":metadata_requested,"failed_ids":metadata_failed}}),
     ))
 }
 fn text(value: &Value) -> String {
