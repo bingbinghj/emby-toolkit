@@ -352,6 +352,68 @@ pub(crate) async fn refresh_restored(state: &AppState, paths: &[String]) -> Resu
         Err(ApiError::bad(failures.join("；")))
     }
 }
+async fn restoration_settings(
+    state: &AppState,
+    restore: &BTreeMap<String, Prepared>,
+) -> Result<Value> {
+    let settings = crate::strm::config(state).await?;
+    if !matches!(
+        settings["PersistMediaInfoMode"].as_str(),
+        Some("None" | "Default" | "Restore")
+    ) || !settings["LibraryScope"].is_string()
+    {
+        return Err(ApiError::bad(
+            "神医恢复模式或媒体库范围配置无效，未清理 Emby 数据",
+        ));
+    }
+    if !string(&settings, "MediaInfoJsonRootFolder").is_empty() {
+        return Err(ApiError::bad(
+            "神医 JSON 根目录与当前恢复文件位置不一致，已停止保存，未清理 Emby 数据",
+        ));
+    }
+    let tasks = state.emby(Method::GET, "ScheduledTasks", &[], None).await?;
+    tasks
+        .as_array()
+        .and_then(|tasks| {
+            tasks.iter().find(|task| {
+                task["Key"] == "MediaInfoExtractTask" && !string(task, "Id").is_empty()
+            })
+        })
+        .ok_or_else(|| ApiError::bad("未找到神医提取媒体信息任务，已停止保存，未清理 Emby 数据"))?;
+    if !crate::strm::media_tasks_idle(&tasks) {
+        return Err(ApiError::bad(
+            "神医媒体信息、声纹或缩略图提取任务尚未结束，请结束后重试保存，未清理 Emby 数据",
+        ));
+    }
+    let folders = state
+        .emby(Method::GET, "Library/VirtualFolders", &[], None)
+        .await?;
+    let folders = media_edit::list(&folders);
+    let mut libraries = BTreeSet::new();
+    for item in restore.values() {
+        let library = crate::emby::library_for_path_in(&folders, &item.path).ok_or_else(|| {
+            ApiError::bad(format!(
+                "{}：无法确定恢复媒体库，未清理 Emby 数据",
+                item.target.id
+            ))
+        })?;
+        let id = string(library, "ItemId");
+        if id.is_empty() {
+            return Err(ApiError::bad("恢复媒体库缺少 ID，未清理 Emby 数据"));
+        }
+        libraries.insert(id);
+    }
+    let mut changes = json!({"PersistMediaInfoMode":"Restore","LibraryScope":libraries.into_iter().collect::<Vec<_>>().join(",")});
+    if restore.values().any(|item| item.multipart) {
+        if !settings["IncludeExtra"].is_boolean() {
+            return Err(ApiError::bad(
+                "神医额外媒体配置无效，无法恢复分段电影，未清理 Emby 数据",
+            ));
+        }
+        changes["IncludeExtra"] = json!(true);
+    }
+    Ok(changes)
+}
 pub async fn save(
     state: &AppState,
     id: &str,
@@ -540,6 +602,7 @@ async fn save_inner(
     if let Some(context) = context {
         context.update(35, "暂存", "暂存媒体信息和当前章节").await;
     }
+    let settings = restoration_settings(state, &restore).await?;
     let result = stage_all(state, &mut restore, &order).await;
     if let Err(error) = result {
         cleanup_stages(&restore).await;
@@ -551,6 +614,9 @@ async fn save_inner(
         cleanup_stages(&restore).await;
         return Err(error);
     }
+    let mut ordered_restore = restore.iter().collect::<Vec<_>>();
+    ordered_restore.sort_by_cached_key(|(id, _)| order.get(*id).cloned());
+    let outcome = crate::strm::with_changes(state, &settings, || async {
     if let Some(context) = context {
         context.update(50, "清理缓存", "清理旧媒体信息缓存").await;
     }
@@ -602,8 +668,6 @@ async fn save_inner(
             .update(65, "恢复媒体信息", "恢复全部受影响版本和分段 JSON")
             .await;
     }
-    let mut ordered_restore = restore.iter().collect::<Vec<_>>();
-    ordered_restore.sort_by_cached_key(|(id, _)| order.get(*id).cloned());
     for (id, item) in &ordered_restore {
         if let Some(stage) = &item.stage {
             if let Err(error) = tokio::fs::rename(stage, &item.final_path).await {
@@ -642,15 +706,18 @@ async fn save_inner(
             operation_failures.push(format!("更新 {} 展示字段失败: {error}",item.target.id));
         }
     }
-    // JSON restoration runs through the library scan path. An ordinary item
-    // metadata refresh can skip restoration and instead run remote scrapers.
-    let paths = ordered_restore
-        .iter()
-        .map(|(_, item)| item.path.clone())
-        .collect::<Vec<_>>();
-    if let Err(error) = refresh_restored(state, &paths).await {
-        operation_failures.push(error.1);
+    // The plugin's restore task imports streams, titles and chapters from JSON.
+    // A recursive metadata refresh and SyncMediaInfo do not provide this contract.
+    tracing::info!("[媒体信息恢复] JSON 已就绪，使用神医恢复模式，媒体库范围 {}，目标媒体 {} 个", settings["LibraryScope"], ordered_restore.len());
+    if let Some(context) = context {
+        context.update(75, "恢复媒体信息", "等待神医原生任务从 JSON 恢复媒体流、标题和章节").await;
     }
+    let recovery_context = JobContext::for_recovery(context).await;
+    crate::emby::scheduled(state, "MediaInfoExtractTask", &recovery_context).await?;
+    Ok(operation_failures)
+    }).await;
+    cleanup_stages(&restore).await;
+    let operation_failures = outcome?;
     let mut deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     if let Some(context) = context {
         context

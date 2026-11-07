@@ -37,6 +37,27 @@ pub struct JobContext {
     pause_generation: Arc<AtomicU64>,
 }
 impl JobContext {
+    pub(crate) async fn for_recovery(context: Option<&Self>) -> Self {
+        let mut progress = if let Some(context) = context {
+            context.progress.lock().await.clone()
+        } else {
+            json!({"last_action":"恢复媒体信息"})
+        };
+        progress["pause_requested"] = json!(false);
+        Self {
+            id: context
+                .map(|context| context.id.clone())
+                .unwrap_or_default(),
+            cancel: CancellationToken::new(),
+            wake: Arc::new(Notify::new()),
+            progress: Arc::new(Mutex::new(progress)),
+            activity: context
+                .map(|context| context.activity.clone())
+                .unwrap_or_default(),
+            last_progress_log: Arc::new(std::sync::Mutex::new(None)),
+            pause_generation: Arc::new(AtomicU64::new(0)),
+        }
+    }
     pub async fn cancelled(&self) {
         self.cancel.cancelled().await;
     }

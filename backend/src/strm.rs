@@ -94,6 +94,23 @@ pub async fn admin_system(state: &AppState) -> Result<Value> {
 pub async fn config(state: &AppState) -> Result<Value> {
     read(state, &discover(state).await?).await
 }
+pub(crate) fn media_tasks_idle(tasks: &Value) -> bool {
+    tasks.as_array().is_some_and(|tasks| {
+        tasks
+            .iter()
+            .any(|task| task["Key"] == "MediaInfoExtractTask" && task["State"] == "Idle")
+            && !tasks.iter().any(|task| {
+                matches!(
+                    task["Key"].as_str(),
+                    Some(
+                        "MediaInfoExtractTask"
+                            | "IntroFingerprintExtractTask"
+                            | "VideoThumbnailExtractTask"
+                    )
+                ) && task["State"] != "Idle"
+            })
+    })
+}
 pub async fn with_changes<F, Fut, T>(state: &AppState, changes: &Value, function: F) -> Result<T>
 where
     F: FnOnce() -> Fut,
@@ -117,9 +134,11 @@ where
     let mode = "自定义配置";
     let mode_name = settings_mode_label(mode);
     tracing::info!("[神医临时设置] {mode_name} 开始");
+    let mut applied = false;
     let outcome = std::panic::AssertUnwindSafe(async {
         if changed {
             write(state, &id, &desired).await?;
+            applied = true;
             if !matches(&read(state, &id).await?, &desired) {
                 return Err(ApiError::bad("神医临时配置回读不一致"));
             }
@@ -132,10 +151,47 @@ where
     .catch_unwind()
     .await
     .unwrap_or_else(|_| Err(ApiError::bad("任务执行异常")));
+    if applied
+        && changes
+            .get("PersistMediaInfoMode")
+            .is_some_and(|mode| mode == "Restore")
+    {
+        let mut stopped = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
+        loop {
+            let tasks = tokio::time::timeout_at(
+                deadline,
+                state.emby(Method::GET, "ScheduledTasks", &[], None),
+            )
+            .await;
+            if let Ok(Ok(tasks)) = tasks
+                && media_tasks_idle(&tasks)
+            {
+                stopped = true;
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(
+                std::time::Duration::from_secs(2)
+                    .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+            )
+            .await;
+        }
+        if !stopped {
+            tracing::error!(
+                "[神医临时设置] 未确认媒体信息任务结束，保留恢复模式，避免任务中途恢复实际提取"
+            );
+            return Err(ApiError::bad(
+                "未确认神医媒体信息任务结束，临时恢复模式仍保留，请检查任务状态及神医设置",
+            ));
+        }
+    }
     if changed && !restore_settings(state, &id, &restore, mode, outcome.as_ref().err()).await {
         return Err(ApiError(
             axum::http::StatusCode::CONFLICT,
-            "神医临时配置恢复失败，请核对自定义ffmpeg路径".into(),
+            "神医临时配置恢复失败，请核对神医设置".into(),
         ));
     }
     settings_finished(mode, outcome)
