@@ -846,8 +846,10 @@ async fn automatic_extraction(
             .await;
         match crate::emby::scheduled(state, key, context).await {
             Ok(()) => {
-                report[field] = json!({"state":"completed"});
-                tracing::info!("[入库自动处理] {label}{phase}已确认完成");
+                report[field] = json!({"state":"completed","verification":"native_task_result"});
+                tracing::info!(
+                    "[入库自动处理] {label}{phase}原生任务已确认结束，单项处理结果以 Emby 日志为准"
+                );
             }
             Err(error) if context.is_cancelled() => return Err(error),
             Err(error) => {
@@ -857,13 +859,13 @@ async fn automatic_extraction(
                     "[入库自动处理] {label}{phase}失败：{}；保留已完成的入库结果",
                     error.1
                 );
-                if field == "intro" && stages[1].3 {
+                if field == "intro" && stages[1].3 || field == "video_thumbnails" {
                     context.checkpoint().await?;
                     let tasks = state
                         .emby(reqwest::Method::GET, "ScheduledTasks", &[], None)
                         .await;
                     context.checkpoint().await?;
-                    // 查询失败或等待超时不代表原生片头任务已经结束。
+                    // Missing tasks and timeouts do not confirm that native work ended.
                     let ended =
                         tasks
                             .as_ref()
@@ -872,12 +874,22 @@ async fn automatic_extraction(
                             .is_some_and(|tasks| {
                                 tasks
                                     .iter()
-                                    .filter(|task| task["Key"] == key)
-                                    .all(|task| task["State"] == "Idle")
+                                    .find(|task| task["Key"] == key)
+                                    .is_some_and(|task| task["State"] == "Idle")
                             });
                     if !ended {
-                        let reason = "片头声纹任务尚未确认结束，跳过视频预览缩略图提取";
-                        report["video_thumbnails"] = json!({"state":"skipped","reason":reason});
+                        let (next, reason) = if field == "intro" {
+                            (
+                                "video_thumbnails",
+                                "片头声纹任务尚未确认结束，跳过视频预览缩略图提取",
+                            )
+                        } else {
+                            (
+                                "video_thumbnails_repair",
+                                "原生视频预览缩略图提取任务尚未确认结束，跳过自动修复",
+                            )
+                        };
+                        report[next] = json!({"state":"skipped","reason":reason});
                         tracing::warn!("[入库自动处理] {label}{reason}");
                         break;
                     }
@@ -1101,13 +1113,17 @@ async fn ensure_moviepilot_media_info(
         }
         for (path, id) in &pending {
             context.checkpoint().await?;
-            if id.is_some()
-                && let Err(error) = sync_moviepilot_media_info(state, path).await
-            {
-                tracing::warn!("MoviePilot 单项媒体信息提取失败：{}", error.1);
+            if id.is_some() {
+                let result = tokio::select! {
+                    _ = context.cancelled() => return context.checkpoint().await,
+                    result = sync_moviepilot_media_info(state, path) => result,
+                };
+                if let Err(error) = result {
+                    tracing::warn!("MoviePilot 单项媒体信息提取失败：{}", error.1);
+                }
             }
         }
-        tokio::time::sleep(Duration::from_secs_f64(interval)).await;
+        context.sleep(Duration::from_secs_f64(interval)).await?;
         pending = missing_moviepilot_media_info(state, files, context).await?;
     }
     if pending.is_empty() {

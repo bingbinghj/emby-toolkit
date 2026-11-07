@@ -817,12 +817,17 @@ async fn backup_info(state: &AppState, context: &crate::jobs::JobContext) -> Res
                 }
                 let sha=target.sha.as_ref().ok_or_else(||ApiError::bad("缺失SHA1"))?;
                 if target.asset["fingerprint_pending"]==true{return Err(ApiError::bad("文件身份待校验"));}
-                if sqlx::query_scalar::<_,bool>("SELECT EXISTS(SELECT 1 FROM p115_mediainfo_cache WHERE sha1=$1 AND mediainfo_json IS NOT NULL)").bind(sha).fetch_one(&state.db).await? {return Ok(false);}
+                let cached=sqlx::query_scalar::<_,Option<Value>>("SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1=$1").bind(sha).fetch_optional(&state.db).await?.flatten();
+                if cached.as_ref().is_some_and(|info|crate::media_info::recoverable(info)
+                    && crate::media_info::restore_json(info).is_ok()
+                    && crate::identity::verify(&target.asset,info).is_ok()
+                    && crate::identity::verify(&json!({"size_bytes":observed.2}),info).is_ok()) {return Ok(false);}
                 if target.path.starts_with("http"){return Ok(false);}
                 for path in &target.candidates {
                     if !path.is_file(){continue;}
                     let info:Value=serde_json::from_slice(&tokio::fs::read(path).await?).map_err(|_|ApiError::bad("媒体信息JSON无效"))?;
-                    if !info.is_array() || !crate::media_info::recoverable(&info){continue;}
+                    if !crate::media_info::recoverable(&info){continue;}
+                    let info=crate::media_info::restore_json(&info)?;
                     crate::identity::verify(&target.asset,&info)?;
                     crate::identity::verify(&json!({"size_bytes":observed.2}),&info)?;
                     if !crate::media_paths::matches_container(&info,&observed.1){return Err(ApiError::bad("媒体信息容器与当前文件不一致"));}

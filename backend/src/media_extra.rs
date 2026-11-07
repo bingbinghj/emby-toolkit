@@ -621,7 +621,7 @@ pub async fn replace_images(
         ));
     }
     if complete {
-        async {
+        let recovery_result = async {
             let changed = snapshots
                 .iter()
                 .filter(|(path, bytes)| std::fs::read(path).ok().as_ref() != Some(bytes))
@@ -657,6 +657,11 @@ pub async fn replace_images(
                     protected.insert(episode_id, (episode, info, source));
                 }
             }
+            let targets = protected.iter().map(|(id, (episode, _, _))| (id.clone(), string(episode, "Path"))).collect::<Vec<_>>();
+            let settings = if targets.is_empty() { None } else {
+                Some(crate::media_save::restoration_settings(state, &targets, false).await?)
+            };
+            let restore_files = || async {
             for id in protected.keys() {
                 if let Err(e) = state
                     .emby(
@@ -687,11 +692,17 @@ pub async fn replace_images(
                 }
             }
             if !protected.is_empty() {
-                // Trigger JSON restoration through the same bounded directory scan as media editing.
-                let paths = protected.values().map(|(episode, _, _)| string(episode, "Path")).collect::<Vec<_>>();
-                if let Err(error) = crate::media_save::refresh_restored(state, &paths).await {
-                    failures.push(format!("恢复目录扫描失败：{}", error.1));
-                }
+                let recovery_context = JobContext::for_recovery(Some(context)).await;
+                crate::emby::scheduled(state, "MediaInfoExtractTask", &recovery_context).await?;
+            }
+            Ok::<_, ApiError>(())
+            };
+            if let Some(settings) = settings {
+                crate::strm::with_changes(state, &settings, restore_files).await?;
+            } else {
+                restore_files().await?;
+            }
+            if !protected.is_empty() {
                 let mut pending = protected.keys().cloned().collect::<BTreeSet<_>>();
                 let mut reasons = BTreeMap::new();
                 let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
@@ -749,7 +760,18 @@ pub async fn replace_images(
             }
             Ok::<_, ApiError>(())
         }
-        .await?;
+        .await;
+        if let Err(error) = recovery_result {
+            let backup = save_recovery(state, id, &snapshots).await?;
+            return Err(ApiError(
+                error.0,
+                format!(
+                    "截图后的媒体信息恢复未完成：{}；原快照已保留：{}",
+                    error.1,
+                    backup.display()
+                ),
+            ));
+        }
     }
     outcome?;
     Ok((
@@ -1045,7 +1067,10 @@ async fn copy_tree(source: &FsPath, destination: &FsPath) -> Result<()> {
             if kind.is_dir() {
                 pending.push((path, out));
             } else if kind.is_file() {
-                tokio::fs::copy(path, out).await?;
+                let modified = tokio::fs::metadata(&path).await?.modified()?;
+                tokio::fs::copy(path, &out).await?;
+                std::fs::File::open(&out)?
+                    .set_times(std::fs::FileTimes::new().set_modified(modified))?;
             } else {
                 return Err(ApiError::bad("媒体目录含符号链接或特殊文件，已停止删除"));
             }
@@ -1098,8 +1123,35 @@ impl LocalSnapshot {
                     } else if kind.is_file() {
                         let destination = root.join(path.strip_prefix(backup).unwrap());
                         if include_target || !self.targets.contains(&destination) {
-                            tokio::fs::create_dir_all(destination.parent().unwrap()).await?;
-                            atomic_write(&destination, &tokio::fs::read(path).await?).await?;
+                            let modified = tokio::fs::metadata(&path).await?.modified()?;
+                            let bytes = tokio::fs::read(&path).await?;
+                            let unchanged = tokio::fs::symlink_metadata(&destination)
+                                .await
+                                .is_ok_and(|metadata| metadata.file_type().is_file())
+                                && tokio::fs::read(&destination).await.ok().as_deref()
+                                    == Some(bytes.as_slice());
+                            if !unchanged {
+                                tokio::fs::create_dir_all(destination.parent().unwrap()).await?;
+                                atomic_write(&destination, &bytes).await?;
+                            }
+                            let expected = tokio::fs::symlink_metadata(&destination).await?;
+                            if !expected.file_type().is_file() {
+                                return Err(ApiError::bad("恢复目标在设置文件时间前变化"));
+                            }
+                            let file = std::fs::File::open(&destination)?;
+                            let current = file.metadata()?;
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::MetadataExt;
+                                if current.dev() != expected.dev()
+                                    || current.ino() != expected.ino()
+                                {
+                                    return Err(ApiError::bad("恢复目标在设置文件时间前变化"));
+                                }
+                            }
+                            if current.modified()? != modified {
+                                file.set_times(std::fs::FileTimes::new().set_modified(modified))?;
+                            }
                         }
                     }
                 }

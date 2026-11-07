@@ -328,34 +328,14 @@ pub async fn refresh(state: &AppState, paths: &[String]) -> Result<()> {
         )))
     }
 }
-pub(crate) async fn refresh_restored(state: &AppState, paths: &[String]) -> Result<()> {
-    let mut directories = BTreeMap::<PathBuf, Vec<String>>::new();
-    for path in paths {
-        if let Some(parent) = std::path::Path::new(&path.replace('\\', "/")).parent() {
-            directories
-                .entry(parent.to_path_buf())
-                .or_default()
-                .push(path.clone());
-        }
-    }
-    let mut failures = vec![];
-    for paths in directories.values() {
-        match tokio::time::timeout(Duration::from_secs(120), refresh(state, paths)).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => failures.push(error.1),
-            Err(_) => failures.push("媒体信息恢复目录扫描请求超时，JSON 备份已保留".into()),
-        }
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(ApiError::bad(failures.join("；")))
-    }
-}
-async fn restoration_settings(
+pub(crate) async fn restoration_settings(
     state: &AppState,
-    restore: &BTreeMap<String, Prepared>,
+    targets: &[(String, String)],
+    include_extra: bool,
 ) -> Result<Value> {
+    if targets.is_empty() {
+        return Err(ApiError::bad("恢复目标为空，未清理 Emby 数据"));
+    }
     let settings = crate::strm::config(state).await?;
     if !matches!(
         settings["PersistMediaInfoMode"].as_str(),
@@ -390,13 +370,9 @@ async fn restoration_settings(
         .await?;
     let folders = media_edit::list(&folders);
     let mut libraries = BTreeSet::new();
-    for item in restore.values() {
-        let library = crate::emby::library_for_path_in(&folders, &item.path).ok_or_else(|| {
-            ApiError::bad(format!(
-                "{}：无法确定恢复媒体库，未清理 Emby 数据",
-                item.target.id
-            ))
-        })?;
+    for (id, path) in targets {
+        let library = crate::emby::library_for_path_in(&folders, path)
+            .ok_or_else(|| ApiError::bad(format!("{id}：无法确定恢复媒体库，未清理 Emby 数据")))?;
         let id = string(library, "ItemId");
         if id.is_empty() {
             return Err(ApiError::bad("恢复媒体库缺少 ID，未清理 Emby 数据"));
@@ -404,7 +380,7 @@ async fn restoration_settings(
         libraries.insert(id);
     }
     let mut changes = json!({"PersistMediaInfoMode":"Restore","LibraryScope":libraries.into_iter().collect::<Vec<_>>().join(",")});
-    if restore.values().any(|item| item.multipart) {
+    if include_extra {
         if !settings["IncludeExtra"].is_boolean() {
             return Err(ApiError::bad(
                 "神医额外媒体配置无效，无法恢复分段电影，未清理 Emby 数据",
@@ -603,7 +579,12 @@ async fn save_inner(
     if let Some(context) = context {
         context.update(35, "暂存", "暂存媒体信息和当前章节").await;
     }
-    let settings = restoration_settings(state, &restore).await?;
+    let targets = restore
+        .values()
+        .map(|item| (item.target.id.clone(), item.path.clone()))
+        .collect::<Vec<_>>();
+    let settings =
+        restoration_settings(state, &targets, restore.values().any(|item| item.multipart)).await?;
     let result = stage_all(state, &mut restore, &order).await;
     if let Err(error) = result {
         cleanup_stages(&restore).await;

@@ -416,6 +416,49 @@ fn remap(path: &str, moves: &[(PathBuf, PathBuf)]) -> String {
     }
     path.to_string_lossy().into()
 }
+fn cloud_location(raw: &str) -> (Option<reqwest::Url>, PathBuf) {
+    let url = reqwest::Url::parse(raw)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https" | "file"));
+    let path = url.as_ref().map_or(raw, |url| url.path());
+    (url.clone(), PathBuf::from(crate::media_paths::clean(path)))
+}
+fn cloud_directory_moves(
+    source: &str,
+    names: &[(String, String)],
+) -> Result<Vec<(PathBuf, PathBuf)>> {
+    let (_, source) = cloud_location(source);
+    let mut parent = source
+        .parent()
+        .ok_or_else(|| ApiError::bad("115来源缺少目录路径"))?
+        .to_path_buf();
+    let mut moves = vec![];
+    for (old, new) in names {
+        if parent.file_name().and_then(|name| name.to_str()) != Some(old.as_str()) {
+            return Err(ApiError::bad(
+                "115来源目录与当前目录身份不一致，无法安全映射关联STRM",
+            ));
+        }
+        if old != new {
+            moves.push((parent.clone(), parent.with_file_name(new)));
+        }
+        parent.pop();
+    }
+    Ok(moves)
+}
+fn remap_cloud_directory(raw: &str, moves: &[(PathBuf, PathBuf)]) -> String {
+    let (url, path) = cloud_location(raw);
+    let mapped = remap(path.to_str().unwrap_or(""), moves);
+    if mapped == path.to_string_lossy() {
+        return raw.into();
+    }
+    if let Some(mut url) = url {
+        url.set_path(&mapped);
+        url.to_string()
+    } else {
+        mapped
+    }
+}
 async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext) -> Result<Value> {
     context.checkpoint().await?;
     let source = source(state, id).await?;
@@ -483,6 +526,7 @@ async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext)
         contents: vec![],
         cloud: vec![],
     };
+    let mut cloud_directories = vec![];
     let result=async{
         let mut current=source.local.parent().unwrap().to_path_buf();
         for name in directories.iter().rev(){let new=current.with_file_name(name);changes.move_path(current.clone(),new).await?;current=current.parent().unwrap().to_path_buf();}
@@ -495,6 +539,13 @@ async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext)
             for desired in directories.iter().rev(){
                 let id=parent.parse().map_err(|_|ApiError::bad("115父目录身份无效"))?;let node=crate::p115::file_info(state,id).await?;let old=string(&node,"name");if old.is_empty(){return Err(ApiError::bad("115父目录名称缺失"));}
                 cloud_nodes.push((parent.clone(),old,desired.clone()));parent=string(&node,"parent_id");
+            }
+            if cloud_nodes.iter().any(|(_, old, new)| old != new) {
+                let names = cloud_nodes.iter().map(|(_, old, new)| (old.clone(), new.clone())).collect::<Vec<_>>();
+                let cached_source = rename::configured_cloud(&string(cache, "local_path"), &config);
+                let candidates = [source.cloud.as_deref().unwrap_or(""), &cached_source];
+                cloud_directories = candidates.iter().find_map(|path| cloud_directory_moves(path, &names).ok())
+                    .ok_or_else(|| ApiError::bad("无法确定115目录改名范围，已停止改写关联STRM"))?;
             }
             for (node,old,new) in cloud_nodes{if old!=new{crate::p115::rename(state,&node,&new).await?;changes.cloud.push((node,old));}}
             let fid=string(cache,"id");let live=crate::p115::file_info(state,fid.parse().map_err(|_|ApiError::bad("115文件ID无效"))?).await?;
@@ -511,7 +562,7 @@ async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext)
         }
         if let Some(new)=plan["cloud_path"].as_str(){for old in &tree_files{
             if old!=&source.local && (directories.is_empty() || old.extension().is_none_or(|s|!s.to_string_lossy().eq_ignore_ascii_case("strm"))){continue;}let path=PathBuf::from(remap(old.to_str().unwrap(),&changes.moves));let bytes=tokio::fs::read(&path).await?;
-            let Some(source_target)=rename::stream_target(&path).await else {continue;};let destination=if old==&source.local{new.into()}else{let name=std::path::Path::new(&crate::media_paths::clean(&source_target)).file_name().unwrap_or_default().to_string_lossy().to_string();rename::replace(&source_target,&directories,&name)?};
+            let Some(source_target)=rename::stream_target(&path).await else {continue;};let destination=if old==&source.local{new.into()}else{remap_cloud_directory(&source_target,&cloud_directories)};
             if destination!=source_target{changes.contents.push((path.clone(),bytes));tokio::fs::write(path,format!("{destination}\n")).await?;}
         }}
         if source.target.path!=source.local.to_string_lossy() && let Some(cloud)=plan["cloud_path"].as_str(){exact.insert(source.target.path.clone(),cloud.to_string());}
