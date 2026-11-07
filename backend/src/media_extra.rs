@@ -440,6 +440,11 @@ pub async fn replace_images(
                         "{episode_id}：媒体信息备份不可安全恢复，已停止截图"
                     )));
                 }
+                let restored = crate::media_info::restore_json(&info)?;
+                if restored != info {
+                    info = restored;
+                    bytes = serde_json::to_vec_pretty(&info).unwrap();
+                }
                 let saved_chapters = crate::media_info::object(&info)
                     .map(|root| &root["Chapters"])
                     .and_then(|chapters| crate::media_info::signature(chapters).ok());
@@ -682,30 +687,10 @@ pub async fn replace_images(
                 }
             }
             if !protected.is_empty() {
-                // All original files and accepted refreshes must be restored before observing stop.
-                for id in protected.keys() {
-                    let path = format!("Items/{id}/Refresh");
-                    match tokio::time::timeout(
-                        Duration::from_secs(120),
-                        state.emby(
-                            Method::POST,
-                            &path,
-                            &[
-                                ("Recursive", "false".into()),
-                                ("MetadataRefreshMode", "Default".into()),
-                                ("ImageRefreshMode", "Default".into()),
-                                ("ReplaceAllMetadata", "false".into()),
-                                ("ReplaceAllImages", "false".into()),
-                            ],
-                            None,
-                        ),
-                    )
-                    .await
-                    {
-                        Ok(Ok(_)) => {}
-                        Ok(Err(error)) => failures.push(format!("{id}：恢复刷新请求失败：{}", error.1)),
-                        Err(_) => failures.push(format!("{id}：恢复刷新请求超时，原媒体信息文件已恢复")),
-                    }
+                // Trigger JSON restoration through the same bounded directory scan as media editing.
+                let paths = protected.values().map(|(episode, _, _)| string(episode, "Path")).collect::<Vec<_>>();
+                if let Err(error) = crate::media_save::refresh_restored(state, &paths).await {
+                    failures.push(format!("恢复目录扫描失败：{}", error.1));
                 }
                 let mut pending = protected.keys().cloned().collect::<BTreeSet<_>>();
                 let mut reasons = BTreeMap::new();

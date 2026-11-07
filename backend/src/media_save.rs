@@ -63,6 +63,7 @@ struct Prepared {
     stage: Option<PathBuf>,
     chapters: Value,
     multipart: bool,
+    has_streams: bool,
 }
 fn failed(message: &str, failures: &[String], status: u16) -> Result<(u16, Value)> {
     Ok((status, json!({"error":message,"failures":failures})))
@@ -79,7 +80,13 @@ fn protected(state_config: &Value, path: &str) -> bool {
         || normalized.contains("/115/")
 }
 async fn prepare(state: &AppState, target: Target, mut info: Value) -> Result<Prepared> {
-    let item = media_edit::details(state, &target.id, "Path,PartCount,Chapters,Type").await?;
+    let item = media_edit::details(
+        state,
+        &target.id,
+        "Path,PartCount,Chapters,Type,MediaStreams,MediaSources",
+    )
+    .await?;
+    info = media_info::restore_json(&info)?;
     let path = string(&item, "Path");
     if path.is_empty() {
         return Err(ApiError::bad(format!(
@@ -98,21 +105,19 @@ async fn prepare(state: &AppState, target: Target, mut info: Value) -> Result<Pr
             .with_extension("")
             .to_string_lossy()
     ));
-    let empty = json!([]);
-    let chapters = if item["Type"] == "Audio" && item["Chapters"].is_null() {
-        &empty
-    } else {
-        &item["Chapters"]
-    };
-    let chapters = media_info::clean_chapters(chapters).map_err(|_| {
+    let source = crate::media_paths::strm_target(&path).await;
+    let paths = [&path[..], source.as_deref().unwrap_or("")];
+    let has_streams = media_info::has_media_streams(&item, &paths);
+    let chapters = media_info::recovery_chapters(&info, &item, &paths).map_err(|error| {
         ApiError(
             StatusCode::CONFLICT,
-            format!("{}: 无法保护当前章节和片头片尾标记", target.id),
+            format!("{}：无法保护当前章节或恢复备份标记：{}", target.id, error.1),
         )
     })?;
     media_info::preserve_chapters(&mut info, &chapters)?;
     Ok(Prepared {
-        source: crate::media_paths::strm_target(&path).await,
+        source,
+        has_streams,
         target,
         info,
         path,
@@ -142,8 +147,12 @@ async fn stage_all(
                 return Err(ApiError::bad("媒体资产在准备保存期间变化，未清理Emby数据"));
             }
         }
-        let current =
-            media_edit::details(state, &item.target.id, "Path,Size,MediaSources,Chapters").await?;
+        let current = media_edit::details(
+            state,
+            &item.target.id,
+            "Path,Size,MediaSources,MediaStreams,Chapters",
+        )
+        .await?;
         if string(&current, "Path") != item.path {
             return Err(ApiError::bad("Emby路径在准备保存期间变化，未清理Emby数据"));
         }
@@ -154,14 +163,9 @@ async fn stage_all(
             &serde_json::json!({"size_bytes":current["Size"]}),
             &item.info,
         )?;
-        let empty = json!([]);
-        item.chapters = media_info::clean_chapters(
-            if current["Type"] == "Audio" && current["Chapters"].is_null() {
-                &empty
-            } else {
-                &current["Chapters"]
-            },
-        )?;
+        let paths = [&item.path[..], item.source.as_deref().unwrap_or("")];
+        item.has_streams = media_info::has_media_streams(&current, &paths);
+        item.chapters = media_info::recovery_chapters(&item.info, &current, &paths)?;
         media_info::preserve_chapters(&mut item.info, &item.chapters)?;
         identity::verify(&item.target.asset, &item.info)?;
         let directory = item
@@ -324,6 +328,30 @@ pub async fn refresh(state: &AppState, paths: &[String]) -> Result<()> {
         )))
     }
 }
+pub(crate) async fn refresh_restored(state: &AppState, paths: &[String]) -> Result<()> {
+    let mut directories = BTreeMap::<PathBuf, Vec<String>>::new();
+    for path in paths {
+        if let Some(parent) = std::path::Path::new(&path.replace('\\', "/")).parent() {
+            directories
+                .entry(parent.to_path_buf())
+                .or_default()
+                .push(path.clone());
+        }
+    }
+    let mut failures = vec![];
+    for paths in directories.values() {
+        match tokio::time::timeout(Duration::from_secs(120), refresh(state, paths)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => failures.push(error.1),
+            Err(_) => failures.push("媒体信息恢复目录扫描请求超时，JSON 备份已保留".into()),
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(ApiError::bad(failures.join("；")))
+    }
+}
 pub async fn save(
     state: &AppState,
     id: &str,
@@ -399,7 +427,7 @@ async fn save_inner(
                 if let Some(source) = body["strm_source"].as_str() && crate::media_paths::strm_target(&target.path).await.unwrap_or_default() != source { return Err(ApiError::bad("STRM目标已变化，未清理Emby数据")); }
             }
             identity::verify(&target.asset,if target_id==id {&body["mediainfo"]} else {&original})?;
-            let info=if let Some(info)=rebuilt.get(target_id){info.clone()}
+            let mut info=if let Some(info)=rebuilt.get(target_id){info.clone()}
                 else if target_id==id {body["mediainfo"].clone()}
                 else {
                     let (info,report)=media_info::apply_patches(&original,&body["stream_patches"]);
@@ -407,6 +435,10 @@ async fn save_inner(
                     if report["matched"]==0 {return Ok(None);}
                     info
                 };
+            // A stale editing page may still contain empty chapters after a failed restore.
+            if let Some(chapters) = media_info::object(&original).and_then(|root| root["Chapters"].as_array()) {
+                media_info::preserve_chapters(&mut info, &json!(chapters))?;
+            }
             let mut group=BTreeSet::from([target.top_id.clone()]);
             group.extend(target.versions.iter().map(|v|string(v,"emby_id")).filter(|s|!s.is_empty()));
             groups.insert(group.into_iter().collect::<Vec<_>>());
@@ -525,6 +557,7 @@ async fn save_inner(
     // Once clear starts, finish file/group restoration even if cancellation is requested.
     let mut ungrouped = vec![];
     let mut operation_failures = vec![];
+    let mut clear_attempted = false;
     for group in &groups {
         let multipart = group
             .iter()
@@ -545,6 +578,13 @@ async fn save_inner(
         // ETK bindings may contain versions that Emby has not merged. Clear each
         // prepared item instead of assuming the first ID clears the entire group.
         for id in group {
+            if restore.get(id).is_some_and(|item| !item.has_streams) {
+                tracing::info!(
+                    "[媒体信息保存] 媒体ID {id}：当前没有音视频流，保留现有备份直接恢复，不重复清理"
+                );
+                continue;
+            }
+            clear_attempted = true;
             if let Err(error) = emby_post(state, &format!("Items/{id}/ClearMediaInfo"), &[]).await {
                 operation_failures.push(format!("{id}: {}", error.1));
                 break;
@@ -554,7 +594,9 @@ async fn save_inner(
             break;
         }
     }
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    if clear_attempted {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
     if let Some(context) = context {
         context
             .update(65, "恢复媒体信息", "恢复全部受影响版本和分段 JSON")
@@ -572,7 +614,16 @@ async fn save_inner(
                 Ok(bytes)
                     if serde_json::from_slice::<Value>(&bytes)
                         .ok()
-                        .is_some_and(|v| media_info::recoverable(&v)) => {}
+                        .is_some_and(|v| media_info::recoverable(&v)) =>
+                {
+                    tracing::info!(
+                        "[媒体信息保存] 媒体ID {id}：JSON 已恢复到 {}，文件大小 {} 字节，时长 {}，保护章节 {} 个",
+                        item.final_path.display(),
+                        bytes.len(),
+                        media_info::container(&item.info).unwrap()["RunTimeTicks"],
+                        item.chapters.as_array().unwrap().len()
+                    );
+                }
                 _ => operation_failures.push(format!("{id}: 恢复的 JSON 无效")),
             }
         }
@@ -591,27 +642,14 @@ async fn save_inner(
             operation_failures.push(format!("更新 {} 展示字段失败: {error}",item.target.id));
         }
     }
-    // Restore every affected file/group before observing cancellation. Refresh each
-    // actual item once; a parent scan can keep old complete streams or run for minutes.
-    for (id, _) in &ordered_restore {
-        let path = format!("Items/{id}/Refresh");
-        let query = [
-            ("Recursive", "false".into()),
-            ("MetadataRefreshMode", "Default".into()),
-            ("ImageRefreshMode", "Default".into()),
-            ("ReplaceAllImages", "false".into()),
-            ("ReplaceAllMetadata", "false".into()),
-        ];
-        let refresh = emby_post(state, &path, &query);
-        match tokio::time::timeout(Duration::from_secs(120), refresh).await {
-            Ok(Ok(())) => tracing::info!(
-                "[媒体信息保存] 媒体ID {id}：已提交目标媒体刷新，等待媒体流和章节实际恢复"
-            ),
-            Ok(Err(error)) => {
-                operation_failures.push(format!("{id}: 目标媒体刷新失败：{}", error.1))
-            }
-            Err(_) => operation_failures.push(format!("{id}: 目标媒体刷新请求超时")),
-        }
+    // JSON restoration runs through the library scan path. An ordinary item
+    // metadata refresh can skip restoration and instead run remote scrapers.
+    let paths = ordered_restore
+        .iter()
+        .map(|(_, item)| item.path.clone())
+        .collect::<Vec<_>>();
+    if let Err(error) = refresh_restored(state, &paths).await {
+        operation_failures.push(error.1);
     }
     let mut deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     if let Some(context) = context {
@@ -621,6 +659,7 @@ async fn save_inner(
     }
     let mut verification_failures = vec![];
     let mut heartbeat = tokio::time::Instant::now();
+    let mut diagnostics_due = true;
     loop {
         if let Some(context) = context {
             let pause = tokio::time::Instant::now();
@@ -634,6 +673,16 @@ async fn save_inner(
                     .await
                 {
                     Ok(details) => {
+                        if diagnostics_due {
+                            let file = tokio::fs::metadata(&item.final_path)
+                                .await
+                                .map(|metadata| format!("{} 字节", metadata.len()))
+                                .unwrap_or_else(|_| "文件缺失或不可读".into());
+                            tracing::info!(
+                                "[媒体信息恢复回读] 媒体ID {id}：{}；恢复 JSON：{file}",
+                                media_info::readback_summary(&details)
+                            );
+                        }
                         let source = crate::media_paths::strm_target(&item.path)
                             .await
                             .unwrap_or_default();
@@ -676,6 +725,7 @@ async fn save_inner(
             context.checkpoint().await?;
             deadline += pause.elapsed();
         }
+        diagnostics_due = false;
         match outcome {
             Ok(failures) => verification_failures = failures,
             Err(_) => {
@@ -697,6 +747,7 @@ async fn save_inner(
                 verification_failures.join("；")
             );
             heartbeat = tokio::time::Instant::now();
+            diagnostics_due = true;
         }
         let delay = std::cmp::min(
             Duration::from_secs(1),

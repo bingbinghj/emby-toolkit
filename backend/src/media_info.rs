@@ -18,6 +18,102 @@ pub fn container(info: &Value) -> Option<&Value> {
     }
     root["MediaStreams"].is_array().then_some(root)
 }
+pub(crate) fn restore_json(info: &Value) -> Result<Value> {
+    let mut entries = info
+        .as_array()
+        .cloned()
+        .unwrap_or_else(|| vec![info.clone()]);
+    if entries.is_empty() {
+        return Err(ApiError::bad("媒体信息恢复备份为空，未清理 Emby 数据"));
+    }
+    for entry in &mut entries {
+        if !entry["MediaSourceInfo"].is_object()
+            && entry["MediaSources"]
+                .as_array()
+                .is_some_and(|sources| sources.len() > 1)
+        {
+            return Err(ApiError::bad(
+                "媒体信息包含无法确定身份的多个媒体源，未清理 Emby 数据",
+            ));
+        }
+        let mut source = container(entry)
+            .cloned()
+            .ok_or_else(|| ApiError::bad("媒体信息缺少可恢复的媒体源，未清理 Emby 数据"))?;
+        let ticks = crate::identity::size(&source["RunTimeTicks"])
+            .filter(|ticks| *ticks <= i64::MAX as u64)
+            .ok_or_else(|| {
+                ApiError::bad("媒体信息备份缺少有效时长，无法供神医恢复，未清理 Emby 数据")
+            })?;
+        source["RunTimeTicks"] = serde_json::json!(ticks);
+        entry["MediaSourceInfo"] = source;
+    }
+    Ok(Value::Array(entries))
+}
+pub(crate) fn has_media_streams(item: &Value, paths: &[&str]) -> bool {
+    item_streams(item, paths).is_some_and(|streams| {
+        streams
+            .iter()
+            .any(|stream| matches!(stream["Type"].as_str(), Some("Video" | "Audio")))
+    })
+}
+pub(crate) fn readback_summary(item: &Value) -> String {
+    let counts = |streams: Option<&Vec<Value>>| {
+        let count = |kind| {
+            streams.map_or(0, |streams| {
+                streams.iter().filter(|s| s["Type"] == kind).count()
+            })
+        };
+        format!(
+            "视频 {}，音轨 {}，字幕 {}",
+            count("Video"),
+            count("Audio"),
+            count("Subtitle")
+        )
+    };
+    let sources = item["MediaSources"]
+        .as_array()
+        .map(|sources| {
+            sources
+                .iter()
+                .enumerate()
+                .map(|(index, source)| {
+                    format!(
+                        "源#{}（{}）",
+                        index + 1,
+                        counts(source["MediaStreams"].as_array())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("；")
+        })
+        .unwrap_or_else(|| "媒体源未返回".into());
+    let chapters = item["Chapters"]
+        .as_array()
+        .map(|chapters| format!("{} 个", chapters.len()))
+        .unwrap_or_else(|| "未返回或无效".into());
+    format!(
+        "顶层流：{}；{sources}；章节：{chapters}",
+        counts(item["MediaStreams"].as_array())
+    )
+}
+pub(crate) fn recovery_chapters(info: &Value, item: &Value, paths: &[&str]) -> Result<Value> {
+    if let Ok(chapters) = clean_chapters(&item["Chapters"])
+        && !chapters.as_array().unwrap().is_empty()
+    {
+        return Ok(chapters);
+    }
+    if !has_media_streams(item, paths) {
+        // Empty media info after a failed clear/restore is not evidence that the
+        // user's original chapters were removed. Keep the verified JSON backup.
+        return clean_chapters(
+            &object(info).ok_or_else(|| ApiError::bad("媒体信息备份无效"))?["Chapters"],
+        );
+    }
+    if item["Type"] == "Audio" && item["Chapters"].is_null() {
+        return Ok(serde_json::json!([]));
+    }
+    clean_chapters(&item["Chapters"])
+}
 pub(crate) fn item_streams<'a>(item: &'a Value, paths: &[&str]) -> Option<&'a Vec<Value>> {
     let sources = item["MediaSources"].as_array().filter(|v| !v.is_empty());
     if let Some(sources) = sources {
@@ -58,15 +154,17 @@ pub(crate) fn item_streams<'a>(item: &'a Value, paths: &[&str]) -> Option<&'a Ve
         };
         // Query parameters can identify different versions. Prefer the exact URL;
         // accept a normalized alias only when its target version is unambiguous.
-        select(false)
-            .or_else(|| select(true))
-            .or_else(|| {
-                (sources.len() == 1 && sources[0]["Path"].as_str().is_none_or(str::is_empty))
-                    .then(|| &sources[0])
-                    .filter(|source| source["ItemId"].as_str().is_none_or(|id| item["Id"] == id))
-            })?
-            .get("MediaStreams")?
+        let source = select(false).or_else(|| select(true)).or_else(|| {
+            (sources.len() == 1 && sources[0]["Path"].as_str().is_none_or(str::is_empty))
+                .then(|| &sources[0])
+                .filter(|source| source["ItemId"].as_str().is_none_or(|id| item["Id"] == id))
+        })?;
+        // The matched source's cache may lag behind the requested item's streams.
+        source["MediaStreams"]
             .as_array()
+            .filter(|streams| !streams.is_empty())
+            .or_else(|| item["MediaStreams"].as_array())
+            .or_else(|| source["MediaStreams"].as_array())
     } else {
         item["MediaStreams"].as_array()
     }
