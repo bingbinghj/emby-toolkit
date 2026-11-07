@@ -239,6 +239,7 @@ pub async fn cache_with_batch(
         .cloned()
         .collect::<Vec<_>>();
     let mut offline = 0;
+    let mut warning_details = vec![];
     if !missing.is_empty() {
         match emby::existing_ids(state, &missing, Some(context)).await {
             Ok(existing) => {
@@ -259,7 +260,15 @@ pub async fn cache_with_batch(
                 offline = versions::unbind(state, &removed).await?;
             }
             Err(error) if context.is_cancelled() => return Err(error),
-            Err(_) => tracing::warn!("Emby 离线核对失败，保留未扫描到的绑定和指纹"),
+            Err(error) => {
+                let warning = format!(
+                    "Emby 离线核对失败，保留 {} 个未扫描到的绑定和指纹：{}",
+                    missing.len(),
+                    error.1
+                );
+                tracing::warn!("[同步媒体] {warning}");
+                warning_details.push(warning);
+            }
         }
     }
     for (index, item) in scanned.iter().enumerate() {
@@ -513,13 +522,14 @@ pub async fn cache_with_batch(
         .await?
     };
     let message = format!(
-        "同步完成！新增/更新 {updated} 个媒体项，标记离线 {offline} 个，元数据失败 {} 项，指纹未完成 {} 项。",
+        "同步完成！新增/更新 {updated} 个媒体项，标记离线 {offline} 个，元数据失败 {} 项，指纹未完成 {} 项，离线核对警告 {} 项。",
         failures.len(),
-        fingerprints["failed"].as_u64().unwrap_or(0)
+        fingerprints["failed"].as_u64().unwrap_or(0),
+        warning_details.len()
     );
     tracing::info!("[同步媒体] {message}");
     Ok(
-        json!({"updated":updated,"offline":offline,"failures":failures,"failed":fingerprints["failed"].as_u64().unwrap_or(0),"fingerprints":fingerprints,"message":message}),
+        json!({"updated":updated,"offline":offline,"failures":failures,"failed":fingerprints["failed"].as_u64().unwrap_or(0),"fingerprints":fingerprints,"message":message,"warnings":warning_details.len(),"warning_details":warning_details}),
     )
 }
 fn merge_translations(data: &mut Value, translated: Value) {

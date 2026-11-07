@@ -83,7 +83,7 @@ async fn prepare(state: &AppState, target: Target, mut info: Value) -> Result<Pr
     let item = media_edit::details(
         state,
         &target.id,
-        "Path,PartCount,Chapters,Type,MediaStreams,MediaSources",
+        "Id,Path,PartCount,Chapters,Type,MediaStreams,MediaSources",
     )
     .await?;
     info = media_info::restore_json(&info)?;
@@ -93,6 +93,12 @@ async fn prepare(state: &AppState, target: Target, mut info: Value) -> Result<Pr
             "{}: 无法读取 Emby 原生 Path",
             target.id
         )));
+    }
+    if item["Id"] != target.id || path != target.path {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Emby媒体身份或路径与缓存不一致，请先同步媒体数据，已停止保存".into(),
+        ));
     }
     let config = state.config.read().await;
     if protected(&config, &path) {
@@ -150,11 +156,13 @@ async fn stage_all(
         let current = media_edit::details(
             state,
             &item.target.id,
-            "Path,Size,MediaSources,MediaStreams,Chapters",
+            "Id,Path,Size,MediaSources,MediaStreams,Chapters",
         )
         .await?;
-        if string(&current, "Path") != item.path {
-            return Err(ApiError::bad("Emby路径在准备保存期间变化，未清理Emby数据"));
+        if current["Id"] != item.target.id || string(&current, "Path") != item.path {
+            return Err(ApiError::bad(
+                "Emby媒体身份或路径在准备保存期间变化，未清理Emby数据",
+            ));
         }
         if crate::media_paths::strm_target(&item.path).await != item.source {
             return Err(ApiError::bad("STRM目标在准备保存期间变化，未清理Emby数据"));
@@ -213,6 +221,9 @@ async fn emby_post(state: &AppState, path: &str, query: &[(&str, String)]) -> Re
     Ok(())
 }
 pub async fn refresh(state: &AppState, paths: &[String]) -> Result<()> {
+    refresh_with_ids(state, paths).await.map(|_| ())
+}
+pub(crate) async fn refresh_with_ids(state: &AppState, paths: &[String]) -> Result<Vec<String>> {
     let config = state.config.read().await.clone();
     let local = string(&config, "local_strm_root").replace('\\', "/");
     let cd2 = string(&config, "cd2_media_root").replace('\\', "/");
@@ -234,6 +245,7 @@ pub async fn refresh(state: &AppState, paths: &[String]) -> Result<()> {
         .filter_map(|p| std::path::Path::new(&p).parent().map(|p| p.to_path_buf()))
         .collect();
     let mut failures = vec![];
+    let mut submitted = vec![];
     for mut directory in directories {
         let original_directory = directory.clone();
         let mut refreshed = false;
@@ -271,6 +283,7 @@ pub async fn refresh(state: &AppState, paths: &[String]) -> Result<()> {
                     if target_id.is_empty() {
                         return Err(ApiError::bad("Emby返回的目录缺少媒体ID"));
                     }
+                    if submitted.contains(&target_id) { return Ok(true); }
                     crate::emby::send(
                         state
                             .http
@@ -289,6 +302,7 @@ pub async fn refresh(state: &AppState, paths: &[String]) -> Result<()> {
                             ]),
                     )
                     .await?.error_for_status()?;
+                    submitted.push(target_id.clone());
                     tracing::debug!(
                         "[精准扫描] Emby已接收 {} 的目录扫描请求（媒体ID：{target_id}，路径：{path}，递归是，默认刷新，全部替换否）",
                         item["Name"].as_str().unwrap_or(&path)
@@ -320,7 +334,7 @@ pub async fn refresh(state: &AppState, paths: &[String]) -> Result<()> {
         }
     }
     if failures.is_empty() {
-        Ok(())
+        Ok(submitted)
     } else {
         Err(ApiError::bad(format!(
             "Emby目录扫描请求未成功：{}",
@@ -565,10 +579,7 @@ async fn save_inner(
                 if restore.contains_key(&part_id) {
                     continue;
                 }
-                let source = part["MediaSources"][0]["Path"]
-                    .as_str()
-                    .or_else(|| part["Path"].as_str())
-                    .unwrap_or("");
+                let source = part["Path"].as_str().unwrap_or("");
                 let target = media_edit::build(state, &part_id, source, None, None).await?;
                 let info = media_edit::load(state, &target).await?;
                 restore.insert(part_id, prepare(state, target, info).await?);
@@ -718,8 +729,12 @@ async fn save_inner(
         let probe = async {
             let mut failures = vec![];
             for (id, item) in &ordered_restore {
-                match media_edit::details(state, id, "Path,Type,Chapters,MediaSources,MediaStreams")
-                    .await
+                match media_edit::details(
+                    state,
+                    id,
+                    "Id,Path,Type,Chapters,MediaSources,MediaStreams",
+                )
+                .await
                 {
                     Ok(details) => {
                         if diagnostics_due {
@@ -736,8 +751,9 @@ async fn save_inner(
                             .await
                             .unwrap_or_default();
                         let paths = [&item.path[..], &source[..]];
-                        if string(&details, "Path") != item.path {
-                            failures.push(format!("{id}: Emby 路径在恢复期间变化"));
+                        if details["Id"] != item.target.id || string(&details, "Path") != item.path
+                        {
+                            failures.push(format!("{id}: Emby媒体身份或路径在恢复期间变化"));
                         }
                         failures.extend(
                             media_info::stream_differences(&item.info, &details, &paths)

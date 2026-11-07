@@ -33,13 +33,20 @@ struct Source {
     source: String,
     ext: String,
     fields: Value,
+    identity: Value,
 }
 async fn source(state: &AppState, id: &str) -> Result<Source> {
     let target = media_edit::target(state, id).await?;
     if target.asset["fingerprint_pending"] == true {
         return Err(ApiError::bad("文件身份待校验"));
     }
-    let item=media_edit::details(state,id,"Name,OriginalTitle,ProductionYear,ProviderIds,Type,IndexNumber,ParentIndexNumber,Path,MediaSources").await?;
+    let item=media_edit::details(state,id,"Id,Name,OriginalTitle,ProductionYear,ProviderIds,Type,IndexNumber,ParentIndexNumber,Path,Size,MediaSources").await?;
+    if item["Id"] != id || string(&item, "Path") != target.path {
+        return Err(ApiError::bad(
+            "Emby媒体身份或路径与缓存不一致，请先同步媒体数据",
+        ));
+    }
+    crate::identity::verify(&target.asset, &item)?;
     if !matches!(item["Type"].as_str(), Some("Movie" | "Episode" | "Video")) {
         return Err(ApiError::bad("请先选择电影或具体分集"));
     }
@@ -115,6 +122,18 @@ async fn source(state: &AppState, id: &str) -> Result<Source> {
         &source,
         &json!({"videoFormat":target.asset["resolution_display"].as_str().unwrap_or(""),"videoCodec":target.asset["codec_display"].as_str().unwrap_or(""),"effect":target.asset["effect_display"].as_str().unwrap_or("")}),
     );
+    let metadata = tokio::fs::metadata(&local).await?;
+    let strm = if local
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"))
+        || rename::short_name(&local.file_name().unwrap_or_default().to_string_lossy())
+    {
+        Some(tokio::fs::read(&local).await?)
+    } else {
+        None
+    };
+    let cache_identity = cache.as_ref().map(|cache| json!({"id":cache["id"],"parent_id":cache["parent_id"],"pick_code":cache["pick_code"],"sha1":cache["sha1"],"name":cache["name"],"local_path":cache["local_path"]}));
+    let identity = json!({"emby_id":id,"emby_path":item["Path"],"asset":target.asset,"sha1":target.sha,"cache":cache_identity,"local":local,"size":metadata.len(),"modified":format!("{:?}",metadata.modified()?),"strm_bytes":strm});
     Ok(Source {
         target,
         item,
@@ -124,6 +143,7 @@ async fn source(state: &AppState, id: &str) -> Result<Source> {
         source,
         ext,
         fields,
+        identity,
     })
 }
 async fn context(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>> {
@@ -302,7 +322,7 @@ async fn submit_probe(
     ))
 }
 fn token(id: &str, source: &Source, plan: &Value) -> String {
-    let value = json!({"item_id":id,"source_name":source.source,"rendered":plan["rendered"],"cloud_path":plan["cloud_path"],"local_path":plan["local_path"]});
+    let value = json!({"item_id":id,"identity":source.identity,"source_name":source.source,"rendered":plan["rendered"],"cloud_path":plan["cloud_path"],"local_path":plan["local_path"]});
     Sha256::digest(value.to_string().as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -341,32 +361,74 @@ struct Changes {
     contents: Vec<(PathBuf, Vec<u8>)>,
     cloud: Vec<(String, String)>,
 }
-fn references(value: &mut Value, moves: &[(PathBuf, PathBuf)]) {
+fn mapped_reference(
+    raw: &str,
+    moves: &[(PathBuf, PathBuf)],
+    cloud: &[(PathBuf, PathBuf)],
+    file: Option<(&str, &str)>,
+) -> String {
+    if let Some((old, new)) = file
+        && raw == old
+    {
+        return new.into();
+    }
+    let local = remap(raw, moves);
+    if local != raw {
+        local
+    } else {
+        remap_cloud_directory(raw, cloud)
+    }
+}
+
+fn references(
+    value: &mut Value,
+    moves: &[(PathBuf, PathBuf)],
+    cloud: &[(PathBuf, PathBuf)],
+    file: Option<(&str, &str)>,
+) {
     match value {
-        Value::String(s) => {
-            let mapped = remap(s, moves);
-            if mapped != *s {
-                *s = mapped;
-            } else if let Some((_, new)) = moves
-                .iter()
-                .find(|(old, _)| old.file_name().and_then(|n| n.to_str()) == Some(s.as_str()))
-            {
-                *s = new.file_name().unwrap_or_default().to_string_lossy().into();
+        Value::Array(values) => {
+            for value in values {
+                references(value, moves, cloud, file);
             }
         }
-        Value::Array(a) => {
-            for v in a {
-                references(v, moves)
+        Value::Object(values) => {
+            let source_path = values
+                .get("Path")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let source_name = values.contains_key("MediaStreams");
+            for (key, value) in values.iter_mut() {
+                if let Some(path) = value.as_str()
+                    && ["Path", "MediaPath", "FileName"].contains(&key.as_str())
+                {
+                    *value = json!(mapped_reference(path, moves, cloud, file));
+                } else {
+                    references(value, moves, cloud, file);
+                }
             }
-        }
-        Value::Object(o) => {
-            for v in o.values_mut() {
-                references(v, moves)
+            if source_name && let Some(old_path) = source_path {
+                let new_path = mapped_reference(&old_path, moves, cloud, file);
+                let old = cloud_location(&old_path).1;
+                let new = cloud_location(&new_path).1;
+                if values
+                    .get("Name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| {
+                        Some(name) == old.file_stem().and_then(|name| name.to_str())
+                    })
+                {
+                    values.insert(
+                        "Name".into(),
+                        json!(new.file_stem().unwrap_or_default().to_string_lossy()),
+                    );
+                }
             }
         }
         _ => (),
     }
 }
+
 impl Changes {
     async fn rollback(&self, state: &AppState) {
         for (id, name) in self.cloud.iter().rev() {
@@ -459,20 +521,130 @@ fn remap_cloud_directory(raw: &str, moves: &[(PathBuf, PathBuf)]) -> String {
         mapped
     }
 }
+async fn write_recovery(path: &std::path::Path, value: &Value) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let mut options = tokio::fs::OpenOptions::new();
+    options.create(true).truncate(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path).await?;
+    file.write_all(&serde_json::to_vec_pretty(value).unwrap())
+        .await?;
+    file.sync_all().await?;
+    Ok(())
+}
+async fn renamed_id(
+    state: &AppState,
+    path: &std::path::Path,
+    kind: &Value,
+) -> Result<Option<String>> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(45);
+    let path = path.to_string_lossy().to_string();
+    loop {
+        let query = [
+            ("Path", path.clone()),
+            ("Recursive", "true".into()),
+            ("Fields", "Id,Path,Type".into()),
+        ];
+        let response = tokio::time::timeout_at(
+            deadline,
+            state.emby(reqwest::Method::GET, "Items", &query, None),
+        )
+        .await;
+        let response = match response {
+            Ok(result) => result?,
+            Err(_) => return Ok(None),
+        };
+        let matches = list(&response["Items"])
+            .into_iter()
+            .filter(|item| item["Path"] == path && item["Type"] == *kind)
+            .collect::<Vec<_>>();
+        if matches.len() == 1 {
+            return Ok(matches[0]["Id"]
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .map(str::to_string));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        tokio::time::sleep(
+            std::time::Duration::from_secs(1)
+                .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+        )
+        .await;
+    }
+}
+async fn renamed_scan(
+    state: &AppState,
+    ids: &[String],
+    position: u64,
+    context: &JobContext,
+) -> Result<()> {
+    if ids.is_empty() {
+        return Err(ApiError::bad("改名后没有提交有效目录扫描，保护配置仍保留"));
+    }
+    let mut traces = ids
+        .iter()
+        .map(|id| (id, crate::media_extra::RefreshTrace::new(position), false))
+        .collect::<Vec<_>>();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+    let mut heartbeat = tokio::time::Instant::now();
+    loop {
+        let logs = tokio::time::timeout_at(
+            deadline,
+            state.emby(
+                reqwest::Method::GET,
+                "System/Logs/embyserver.txt/Lines",
+                &[("Limit", "500".into())],
+                None,
+            ),
+        )
+        .await
+        .map_err(|_| ApiError::bad("改名目录扫描完成日志读取超时"))??;
+        for (id, trace, complete) in &mut traces {
+            if !*complete {
+                *complete = trace.feed(id, &logs)?;
+            }
+        }
+        if traces.iter().all(|(_, _, complete)| *complete) {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(ApiError::bad(
+                "120秒内未确认本次改名目录扫描结束，保护配置仍保留",
+            ));
+        }
+        if heartbeat.elapsed() >= std::time::Duration::from_secs(15) {
+            context
+                .activity(
+                    "等待改名扫描",
+                    "文件与路径已提交，等待全部本次目录扫描完成后恢复保护配置",
+                )
+                .await;
+            heartbeat = tokio::time::Instant::now();
+        }
+        tokio::time::sleep(
+            std::time::Duration::from_secs(1)
+                .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+        )
+        .await;
+    }
+}
 async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext) -> Result<Value> {
+    use std::sync::atomic::{AtomicBool, Ordering};
     context.checkpoint().await?;
     let source = source(state, id).await?;
     let plan = plan(state, &source, body).await?;
     if body["preview_token"].as_str() != Some(&token(id, &source, &plan)) {
         return Err(ApiError(
             StatusCode::CONFLICT,
-            "重命名内容已变化，请重新预览".into(),
+            "重命名内容或文件身份已变化，请重新预览".into(),
         ));
     }
-    let old_cloud = source.cloud.clone();
-    if old_cloud.is_some()
+    if source.cloud.is_some()
         && source.cache.is_none()
-        && old_cloud.as_deref() != plan["cloud_path"].as_str()
+        && source.cloud.as_deref() != plan["cloud_path"].as_str()
     {
         return Err(ApiError::bad("STRM源文件未命中115缓存，拒绝只改播放路径"));
     }
@@ -481,9 +653,8 @@ async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext)
         return Err(ApiError::bad("禁止直接改名115挂载文件"));
     }
     let directories = list(&plan["directories"])
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_string)
+        .into_iter()
+        .filter_map(|value| value.as_str().map(str::to_string))
         .collect::<Vec<_>>();
     let target = PathBuf::from(string(&plan, "local_path"));
     let filename = string(&plan, "filename");
@@ -502,6 +673,7 @@ async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext)
     }
     let mut tree_files = vec![];
     while let Some(dir) = pending.pop() {
+        context.checkpoint().await?;
         let mut entries = tokio::fs::read_dir(dir).await?;
         while let Some(entry) = entries.next_entry().await? {
             let kind = entry.file_type().await?;
@@ -520,121 +692,196 @@ async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext)
         &string(&source.item["ProviderIds"], "Tmdb"),
     )
     .await?;
-    crate::strm::with_settings(state, "preserve", || async {
-    let mut changes = Changes {
-        moves: vec![],
-        contents: vec![],
-        cloud: vec![],
-    };
-    let mut cloud_directories = vec![];
-    let result=async{
-        let mut current=source.local.parent().unwrap().to_path_buf();
-        for name in directories.iter().rev(){let new=current.with_file_name(name);changes.move_path(current.clone(),new).await?;current=current.parent().unwrap().to_path_buf();}
-        let mapped=PathBuf::from(remap(source.local.to_str().unwrap(),&changes.moves));changes.move_path(mapped,target.clone()).await?;
-        for (old,new) in &sidecars {
-            let mapped=PathBuf::from(remap(old.to_str().unwrap(),&changes.moves));changes.move_path(mapped,new.clone()).await?;
-        }
-        if let Some(cache)=&source.cache{
-            let mut cloud_nodes=vec![];let mut parent=string(cache,"parent_id");
-            for desired in directories.iter().rev(){
-                let id=parent.parse().map_err(|_|ApiError::bad("115父目录身份无效"))?;let node=crate::p115::file_info(state,id).await?;let old=string(&node,"name");if old.is_empty(){return Err(ApiError::bad("115父目录名称缺失"));}
-                cloud_nodes.push((parent.clone(),old,desired.clone()));parent=string(&node,"parent_id");
-            }
-            if cloud_nodes.iter().any(|(_, old, new)| old != new) {
-                let names = cloud_nodes.iter().map(|(_, old, new)| (old.clone(), new.clone())).collect::<Vec<_>>();
-                let cached_source = rename::configured_cloud(&string(cache, "local_path"), &config);
-                let candidates = [source.cloud.as_deref().unwrap_or(""), &cached_source];
-                cloud_directories = candidates.iter().find_map(|path| cloud_directory_moves(path, &names).ok())
-                    .ok_or_else(|| ApiError::bad("无法确定115目录改名范围，已停止改写关联STRM"))?;
-            }
-            for (node,old,new) in cloud_nodes{if old!=new{crate::p115::rename(state,&node,&new).await?;changes.cloud.push((node,old));}}
-            let fid=string(cache,"id");let live=crate::p115::file_info(state,fid.parse().map_err(|_|ApiError::bad("115文件ID无效"))?).await?;
-            if live["pick_code"]!=cache["pick_code"]||live["sha1"]!=cache["sha1"]{return Err(ApiError::bad("115文件在预览后变化"));}
-            let old=string(&live,"name");if old!=filename{crate::p115::rename(state,&fid,&filename).await?;changes.cloud.push((fid,old));}
-        }
-        let mut exact=HashMap::new();for old in &tree_files{let new=remap(old.to_str().unwrap(),&changes.moves);if new!=old.to_string_lossy(){exact.insert(old.to_string_lossy().to_string(),new);}}
-        for old in &tree_files{
-            let path=PathBuf::from(remap(old.to_str().unwrap(),&changes.moves));
-            if !path.file_name().is_some_and(|n|n.to_string_lossy().ends_with("-mediainfo.json")){continue;}
-            let bytes=tokio::fs::read(&path).await?;
-            let mut data:Value=serde_json::from_str(String::from_utf8_lossy(&bytes).trim_start_matches('\u{feff}')).map_err(|_|ApiError::bad("媒体信息JSON无效"))?;let previous=data.clone();references(&mut data,&changes.moves);
-            if data!=previous{changes.contents.push((path.clone(),bytes));tokio::fs::write(path,serde_json::to_vec_pretty(&data).unwrap()).await?;}
-        }
-        if let Some(new)=plan["cloud_path"].as_str(){for old in &tree_files{
-            if old!=&source.local && (directories.is_empty() || old.extension().is_none_or(|s|!s.to_string_lossy().eq_ignore_ascii_case("strm"))){continue;}let path=PathBuf::from(remap(old.to_str().unwrap(),&changes.moves));let bytes=tokio::fs::read(&path).await?;
-            let Some(source_target)=rename::stream_target(&path).await else {continue;};let destination=if old==&source.local{new.into()}else{remap_cloud_directory(&source_target,&cloud_directories)};
-            if destination!=source_target{changes.contents.push((path.clone(),bytes));tokio::fs::write(path,format!("{destination}\n")).await?;}
-        }}
-        if source.target.path!=source.local.to_string_lossy() && let Some(cloud)=plan["cloud_path"].as_str(){exact.insert(source.target.path.clone(),cloud.to_string());}
-        let mut transaction=state.db.begin().await?;
-        let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE jsonb_typeof(asset_details_json)='array' FOR UPDATE").fetch_all(&mut *transaction).await?;
-        for row in rows{let mut assets=list(&row["asset_details_json"]);let mut touched=false;for asset in &mut assets{if let Some(new)=exact.get(&string(asset,"path")){asset["path"]=json!(new);if new==target.to_str().unwrap(){asset.as_object_mut().unwrap().extend(crate::media_display::fields(&filename).as_object().unwrap().clone());}touched=true;}}
-            if touched{sqlx::query("UPDATE media_metadata SET asset_details_json=$1,last_updated_at=NOW() WHERE tmdb_id=$2 AND item_type=$3").bind(json!(assets)).bind(string(&row,"tmdb_id")).bind(string(&row,"item_type")).execute(&mut *transaction).await?;}}
-        if let Some(cache)=&source.cache{
-            let old_local=string(cache,"local_path");let local=rename::replace(&old_local,&directories,&filename)?;
-            let old_parts=std::path::Path::new(&old_local).parent().unwrap_or(std::path::Path::new("")).components().map(|c|c.as_os_str().to_string_lossy().to_string()).collect::<Vec<_>>();
-            if old_parts.len()<directories.len(){return Err(ApiError::bad("115缓存路径层级不足"));}
-            let old_root=old_parts[..old_parts.len()-directories.len()].join("/");let old_tail=&old_parts[old_parts.len()-directories.len()..];
-            let cache_rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(c) FROM p115_filesystem_cache c WHERE local_path IS NOT NULL FOR UPDATE").fetch_all(&mut *transaction).await?;
-            for cached in cache_rows{
-                let mut path=string(&cached,"local_path");
-                for depth in (1..=directories.len()).rev(){
-                    let old_prefix=format!("{old_root}/{}",old_tail[..depth].join("/")).trim_start_matches('/').to_string();
-                    let new_prefix=format!("{old_root}/{}",directories[..depth].join("/")).trim_start_matches('/').to_string();
-                    let normalized=path.trim_start_matches('/');
-                    if normalized==old_prefix||normalized.starts_with(&format!("{old_prefix}/")){path=format!("{}{}{}",if path.starts_with('/') {"/"}else{""},new_prefix,&normalized[old_prefix.len()..]);break;}
+    let recovery = state.data_dir.join("rename-recovery").join(&context.id);
+    let confirmed = AtomicBool::new(true);
+    let outcome = crate::strm::with_settings_guarded(state, "preserve", || async {
+        context.checkpoint().await?;
+        // Resolve every cloud read before filesystem changes or database row locks.
+        let mut operations = vec![];
+        let mut cloud_directories = vec![];
+        let mut cache_directories = vec![];
+        let mut new_cache_path = None;
+        if let Some(cache) = &source.cache {
+            let fid = string(cache, "id");
+            let live = crate::p115::file_info(state, fid.parse().map_err(|_| ApiError::bad("115文件ID无效"))?).await?;
+            for field in ["sha1", "pick_code", "parent_id", "name"] {
+                let expected = string(cache, field);
+                let actual = string(&live, field);
+                if !expected.is_empty() && !actual.is_empty() && (if field == "sha1" { !expected.eq_ignore_ascii_case(&actual) } else { expected != actual }) {
+                    return Err(ApiError::bad("115文件身份在预览后变化，未执行改名"));
                 }
-                if path!=string(&cached,"local_path"){sqlx::query("UPDATE p115_filesystem_cache SET local_path=$1 WHERE id=$2").bind(path).bind(string(&cached,"id")).execute(&mut *transaction).await?;}
             }
-            for (node,_) in &changes.cloud {let node_name=if node==&string(cache,"id"){filename.clone()}else{crate::p115::file_info(state,node.parse().map_err(|_|ApiError::bad("115目录ID无效"))?).await?["name"].as_str().unwrap_or("").to_string()};sqlx::query("UPDATE p115_filesystem_cache SET name=$1 WHERE id=$2").bind(node_name).bind(node).execute(&mut *transaction).await?;}
-            sqlx::query("UPDATE p115_filesystem_cache SET name=$1,local_path=$2 WHERE id=$3").bind(&filename).bind(local).bind(string(cache,"id")).execute(&mut *transaction).await?;
+            if source.target.sha.as_ref().is_some_and(|sha| !string(&live, "sha1").eq_ignore_ascii_case(sha)) {
+                return Err(ApiError::bad("115文件SHA与当前资产不一致，未执行改名"));
+            }
+            crate::identity::verify(&source.target.asset, &json!({"Size":live["size"]}))?;
+            let mut parent = string(cache, "parent_id");
+            let mut names = vec![];
+            for desired in directories.iter().rev() {
+                context.checkpoint().await?;
+                let node = crate::p115::file_info(state, parent.parse().map_err(|_| ApiError::bad("115父目录身份无效"))?).await?;
+                let old = string(&node, "name");
+                if old.is_empty() { return Err(ApiError::bad("115父目录名称缺失")); }
+                names.push((old.clone(), desired.clone()));
+                if old != *desired { operations.push((parent.clone(), old, desired.clone())); }
+                parent = string(&node, "parent_id");
+            }
+            let old_local = string(cache, "local_path");
+            if names.iter().any(|(old, new)| old != new) {
+                let cached_source = rename::configured_cloud(&old_local, &config);
+                cloud_directories = [source.cloud.as_deref().unwrap_or(""), &cached_source].iter()
+                    .find_map(|path| cloud_directory_moves(path, &names).ok())
+                    .ok_or_else(|| ApiError::bad("无法确定115目录改名范围，未执行改名"))?;
+                cache_directories = cloud_directory_moves(&old_local, &names)?;
+            }
+            let old_name = string(&live, "name");
+            if old_name.is_empty() { return Err(ApiError::bad("115文件名称缺失")); }
+            if old_name != filename { operations.push((fid, old_name, filename.clone())); }
+            new_cache_path = Some(rename::replace(&old_local, &directories, &filename)?);
         }
-        transaction.commit().await?;Ok::<_,ApiError>(())
-    }.await;
-    if let Err(error) = result {
-        changes.rollback(state).await;
-        return Err(error);
-    }
-    crate::media_save::refresh(
-        state,
-        &[source.target.path.clone(), target.to_string_lossy().into()],
-    )
-    .await?;
-    let mut found = None;
-    for _ in 0..45 {
-        let result = state
-            .emby(
-                reqwest::Method::GET,
-                "Items",
-                &[
-                    ("Path", target.to_string_lossy().into()),
-                    ("Recursive", "true".into()),
-                    ("Fields", "Id,Path".into()),
-                ],
-                None,
-            )
-            .await?;
-        let matches = list(&result["Items"])
-            .into_iter()
-            .filter(|v| v["Path"] == target.to_string_lossy().as_ref())
-            .collect::<Vec<_>>();
-        if matches.len() == 1 {
-            found = matches[0]["Id"].as_str().map(str::to_string);
-            break;
+        let current = self::source(state, id).await?;
+        if current.identity != source.identity { return Err(ApiError(StatusCode::CONFLICT, "准备改名期间文件身份变化，未执行改名".into())); }
+        context.checkpoint().await?;
+        let mut original_json = vec![];
+        for path in &tree_files {
+            if path.file_name().is_some_and(|name| name.to_string_lossy().ends_with("-mediainfo.json")) {
+                let info: Value = serde_json::from_slice(&tokio::fs::read(path).await?).map_err(|_| ApiError::bad("媒体信息JSON无效，未执行改名"))?;
+                original_json.push(json!({"path":path,"mediainfo":info}));
+            }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        write_recovery(&recovery.join("metadata-original.json"), &json!(original_json)).await?;
+        let mut changes = Changes { moves: vec![], contents: vec![], cloud: vec![] };
+        let result = async {
+            let mut current = source.local.parent().unwrap().to_path_buf();
+            for name in directories.iter().rev() {
+                let new = current.with_file_name(name);
+                changes.move_path(current.clone(), new).await?;
+                current = current.parent().unwrap().to_path_buf();
+            }
+            changes.move_path(PathBuf::from(remap(source.local.to_str().unwrap(), &changes.moves)), target.clone()).await?;
+            for (old, new) in &sidecars { changes.move_path(PathBuf::from(remap(old.to_str().unwrap(), &changes.moves)), new.clone()).await?; }
+            for (node, old, new) in &operations {
+                crate::p115::rename(state, node, new).await?;
+                changes.cloud.push((node.clone(), old.clone()));
+            }
+            let mut exact = HashMap::new();
+            for old in &tree_files {
+                let new = remap(old.to_str().unwrap(), &changes.moves);
+                if new != old.to_string_lossy() { exact.insert(old.to_string_lossy().to_string(), new); }
+            }
+            if source.target.path != source.local.to_string_lossy() && let Some(cloud) = plan["cloud_path"].as_str() { exact.insert(source.target.path.clone(), cloud.into()); }
+            let file = source.cloud.as_deref().zip(plan["cloud_path"].as_str());
+            let mut reference_cloud = cloud_directories.clone();
+            if let Some((old, new)) = file {
+                reference_cloud.insert(0, (cloud_location(old).1, cloud_location(new).1));
+                let old_parent = cloud_location(old).1.parent().map(std::path::Path::to_path_buf);
+                let new_parent = cloud_location(new).1.parent().map(std::path::Path::to_path_buf);
+                if let Some((old_parent, new_parent)) = old_parent.zip(new_parent) {
+                    for (old, new) in &sidecars {
+                        reference_cloud.insert(0, (old_parent.join(old.file_name().unwrap()), new_parent.join(new.file_name().unwrap())));
+                    }
+                }
+            }
+            let mut updated_json = vec![];
+            for old in &tree_files {
+                let path = PathBuf::from(remap(old.to_str().unwrap(), &changes.moves));
+                if !path.file_name().is_some_and(|name| name.to_string_lossy().ends_with("-mediainfo.json")) { continue; }
+                let bytes = tokio::fs::read(&path).await?;
+                let mut info: Value = serde_json::from_slice(&bytes).map_err(|_| ApiError::bad("媒体信息JSON无效"))?;
+                let previous = info.clone();
+                references(&mut info, &changes.moves, &reference_cloud, file);
+                if info != previous { changes.contents.push((path.clone(), bytes)); tokio::fs::write(&path, serde_json::to_vec_pretty(&info).unwrap()).await?; }
+                updated_json.push(json!({"path":path,"mediainfo":info}));
+            }
+            if let Some(new) = plan["cloud_path"].as_str() {
+                for old in &tree_files {
+                    if old != &source.local && (directories.is_empty() || old.extension().is_none_or(|extension| !extension.eq_ignore_ascii_case("strm"))) { continue; }
+                    let path = PathBuf::from(remap(old.to_str().unwrap(), &changes.moves));
+                    let Some(previous) = rename::stream_target(&path).await else { continue; };
+                    let destination = if old == &source.local { new.into() } else { remap_cloud_directory(&previous, &cloud_directories) };
+                    if previous != destination { changes.contents.push((path.clone(), tokio::fs::read(&path).await?)); tokio::fs::write(&path, format!("{destination}\n")).await?; }
+                }
+            }
+            let mut paths = exact.keys().cloned().chain(file.map(|(old, _)| old.to_string())).chain(reference_cloud.iter().map(|(old, _)| old.to_string_lossy().to_string())).collect::<Vec<_>>();
+            let mut prefixes = changes.moves.iter().chain(cloud_directories.iter()).map(|(old, _)| old.to_string_lossy().to_string()).collect::<Vec<_>>();
+            for values in [&mut paths, &mut prefixes] {
+                for path in values.clone() { let mut url = reqwest::Url::parse("http://path.invalid").unwrap(); url.set_path(&path); if url.path() != path { values.push(url.path().into()); } }
+            }
+            let mut transaction = state.db.begin().await?;
+            let rows: Vec<Value> = sqlx::query_scalar(r"SELECT to_jsonb(m) FROM media_metadata m WHERE jsonb_typeof(asset_details_json)='array' AND EXISTS(SELECT 1 FROM jsonb_array_elements(asset_details_json) a CROSS JOIN LATERAL (SELECT regexp_replace(replace(a->>'path',chr(92),'/'),'^(https?|file)://[^/?#]*([^?#]*).*$','\2','i') AS path,regexp_replace(replace(a->>'fingerprint_target',chr(92),'/'),'^(https?|file)://[^/?#]*([^?#]*).*$','\2','i') AS fingerprint_target) r WHERE a->>'path'=ANY($1) OR a->>'fingerprint_target'=ANY($1) OR r.path=ANY($1) OR r.fingerprint_target=ANY($1) OR EXISTS(SELECT 1 FROM unnest($2::text[]) p WHERE r.path=p OR starts_with(r.path,p||'/') OR r.fingerprint_target=p OR starts_with(r.fingerprint_target,p||'/'))) ORDER BY tmdb_id,item_type FOR UPDATE")
+                .bind(&paths).bind(&prefixes).fetch_all(&mut *transaction).await?;
+            let mut shas = std::collections::BTreeSet::new();
+            for row in rows {
+                let mut assets = list(&row["asset_details_json"]);
+                let sha = list(&row["file_sha1_json"]);
+                let mut touched = false;
+                for (index, asset) in assets.iter_mut().enumerate() {
+                    if asset["emby_item_id"] == id && *asset != source.target.asset { return Err(ApiError::bad("媒体资产在准备提交改名时变化")); }
+                    for key in ["path", "fingerprint_target"] {
+                        let old = string(asset, key);
+                        if old.is_empty() { continue; }
+                        let new = exact.get(&old).cloned().unwrap_or_else(|| mapped_reference(&old, &changes.moves, &reference_cloud, file));
+                        if old != new { asset[key] = json!(new); touched = true; }
+                    }
+                    if touched && let Some(sha) = sha.get(index).and_then(Value::as_str) { shas.insert(sha.to_uppercase()); }
+                    if asset["emby_item_id"] == id { asset.as_object_mut().unwrap().extend(crate::media_display::fields(&filename).as_object().unwrap().clone()); }
+                }
+                if touched { sqlx::query("UPDATE media_metadata SET asset_details_json=$1,last_updated_at=NOW() WHERE tmdb_id=$2 AND item_type=$3").bind(json!(assets)).bind(string(&row,"tmdb_id")).bind(string(&row,"item_type")).execute(&mut *transaction).await?; }
+            }
+            if let Some(sha) = &source.target.sha { shas.insert(sha.to_uppercase()); }
+            let info_rows: Vec<(String, Value)> = sqlx::query_as("SELECT sha1,mediainfo_json FROM p115_mediainfo_cache WHERE UPPER(sha1)=ANY($1) AND mediainfo_json IS NOT NULL FOR UPDATE")
+                .bind(shas.into_iter().collect::<Vec<_>>()).fetch_all(&mut *transaction).await?;
+            for (sha, mut info) in info_rows {
+                let old = info.clone(); references(&mut info, &changes.moves, &reference_cloud, file);
+                if info != old { sqlx::query("UPDATE p115_mediainfo_cache SET mediainfo_json=$1 WHERE sha1=$2").bind(info).bind(sha).execute(&mut *transaction).await?; }
+            }
+            if let Some(cache) = &source.cache {
+                let fid = string(cache, "id");
+                let prefixes = cache_directories.iter().map(|(old,_)| old.to_string_lossy().trim_start_matches('/').to_string()).collect::<Vec<_>>();
+                let cached_rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(c) FROM p115_filesystem_cache c WHERE id=ANY($1) OR EXISTS(SELECT 1 FROM unnest($2::text[]) p WHERE trim(leading '/' from replace(local_path,chr(92),'/'))=p OR starts_with(trim(leading '/' from replace(local_path,chr(92),'/')),p||'/')) ORDER BY id FOR UPDATE")
+                    .bind(operations.iter().map(|(id,_,_)|id.clone()).chain(std::iter::once(fid.clone())).collect::<Vec<_>>()).bind(&prefixes).fetch_all(&mut *transaction).await?;
+                for row in cached_rows {
+                    let old = string(&row, "local_path");
+                    let normalized = cache_directories.iter().map(|(old,new)| (PathBuf::from(old.to_string_lossy().trim_start_matches('/')),PathBuf::from(new.to_string_lossy().trim_start_matches('/')))).collect::<Vec<_>>();
+                    let mapped = remap(old.trim_start_matches('/'), &normalized);
+                    let new = format!("{}{}", if old.starts_with('/') {"/"} else {""}, mapped);
+                    let name = operations.iter().find(|(node,_,_)| *node == string(&row,"id")).map(|(_,_,new)|new.clone()).unwrap_or_else(|| string(&row,"name"));
+                    let new = if row["id"] == fid { new_cache_path.as_deref().unwrap_or(&new).to_string() } else { new };
+                    if old != new || row["name"] != name { sqlx::query("UPDATE p115_filesystem_cache SET local_path=$1,name=$2 WHERE id=$3").bind(new).bind(name).bind(string(&row,"id")).execute(&mut *transaction).await?; }
+                }
+            }
+            write_recovery(&recovery.join("metadata-updated.json"), &json!(updated_json)).await?;
+            transaction.commit().await?;
+            Ok::<_,ApiError>(())
+        }.await;
+        if let Err(error) = result { changes.rollback(state).await; return Err(error); }
+        let position = crate::media_extra::log_position(state).await?;
+        write_recovery(&recovery.join("pending-scan.json"), &json!({"position":position,"ids":null})).await?;
+        confirmed.store(false, Ordering::Release);
+        let submitted = tokio::time::timeout(std::time::Duration::from_secs(120), crate::media_save::refresh_with_ids(state, &[source.target.path.clone(), target.to_string_lossy().into()])).await
+            .map_err(|_| ApiError::bad("改名目录扫描提交超时，保护配置仍保留"))??;
+        write_recovery(&recovery.join("pending-scan.json"), &json!({"position":position,"ids":submitted})).await?;
+        let (found, scanned) = tokio::join!(renamed_id(state, &target, &source.item["Type"]), renamed_scan(state, &submitted, position, context));
+        if scanned.is_ok() { confirmed.store(true, Ordering::Release); }
+        scanned?;
+        let mut warnings = vec![];
+        let found = match found { Ok(found) => found, Err(error) => { warnings.push(format!("新Emby条目查询失败：{}",error.1)); None } };
+        if let Some(new_id) = &found {
+            let mut transaction = state.db.begin().await?;
+            sqlx::query("UPDATE media_metadata SET emby_item_ids_json=(SELECT jsonb_agg(CASE WHEN eid=$1 THEN to_jsonb($2::text) ELSE to_jsonb(eid) END ORDER BY idx) FROM jsonb_array_elements_text(emby_item_ids_json) WITH ORDINALITY arr(eid,idx)),asset_details_json=(SELECT jsonb_agg(CASE WHEN a->>'emby_item_id'=$1 THEN jsonb_set(a,'{emby_item_id}',to_jsonb($2::text)) ELSE a END ORDER BY idx) FROM jsonb_array_elements(asset_details_json) WITH ORDINALITY arr(a,idx)) WHERE emby_item_ids_json @> $3")
+                .bind(id).bind(new_id).bind(json!([id])).execute(&mut *transaction).await?;
+            crate::orphans::migrate_item_logs(&mut transaction,id,new_id).await?;
+            transaction.commit().await?;
+        } else { warnings.push("45秒内未关联到唯一新Emby条目；目录扫描已确认，改名文件和路径已保留，请同步媒体数据".into()); }
+        Ok(json!({"message":if warnings.is_empty(){"媒体已重命名，路径与Emby关联已通过验收"}else{"媒体已重命名，目录扫描已完成，但Emby关联仍需处理"},"source_name":source.source,"target_name":filename,"target_cloud_path":plan["cloud_path"],"target_local_path":target,"item_id":found,"association_pending":found.is_none(),"warnings":warnings.len(),"warning_details":warnings,"recovery_path":recovery}))
+    }, &confirmed, &recovery).await;
+    if outcome
+        .as_ref()
+        .is_ok_and(|value| value["warnings"].as_u64() == Some(0))
+    {
+        let _ = tokio::fs::remove_dir_all(&recovery).await;
     }
-    if let Some(new_id) = &found {
-        let mut transaction = state.db.begin().await?;
-        sqlx::query("UPDATE media_metadata SET emby_item_ids_json=(SELECT jsonb_agg(CASE WHEN eid=$1 THEN to_jsonb($2::text) ELSE to_jsonb(eid) END ORDER BY idx) FROM jsonb_array_elements_text(emby_item_ids_json) WITH ORDINALITY arr(eid,idx)),asset_details_json=(SELECT jsonb_agg(CASE WHEN a->>'emby_item_id'=$1 THEN jsonb_set(a,'{emby_item_id}',to_jsonb($2::text)) ELSE a END ORDER BY idx) FROM jsonb_array_elements(asset_details_json) WITH ORDINALITY arr(a,idx)) WHERE emby_item_ids_json @> $3").bind(id).bind(new_id).bind(json!([id])).execute(&mut *transaction).await?;
-        crate::orphans::migrate_item_logs(&mut transaction, id, new_id).await?;
-        transaction.commit().await?;
-    }
-    Ok(
-        json!({"message":"媒体已重命名，115、STRM和媒体信息路径已同步","source_name":source.source,"target_name":filename,"target_cloud_path":plan["cloud_path"],"target_local_path":target,"item_id":found}),
-    )
-    })
-    .await
+    outcome
 }
 async fn sample(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Json<Value>> {
     let _ = state;

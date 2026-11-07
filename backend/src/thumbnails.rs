@@ -148,6 +148,8 @@ pub struct ExtractionLog {
     pub paths: BTreeSet<String>,
     pub encoders: BTreeSet<String>,
     last_activity: Option<String>,
+    failed: usize,
+    skipped: usize,
 }
 impl ExtractionLog {
     pub fn feed(&mut self, lines: &[String]) {
@@ -156,6 +158,9 @@ impl ExtractionLog {
         });
         static PROGRESS: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(r"VideoThumbnailExtract - Progress (\d+)/(\d+) - Task \d+: (.+)").unwrap()
+        });
+        static SKIPPED: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"VideoThumbnailExtract - Number of items skipped: (\d+)").unwrap()
         });
         static COMMAND: LazyLock<Regex> = LazyLock::new(|| {
             Regex::new(r#"ProcessRun '[^']+' Execute:\s*(?:"([^"]+)"|(\S+))"#).unwrap()
@@ -174,12 +179,24 @@ impl ExtractionLog {
                 self.total = c[1].parse().ok();
             }
             if let Some(c) = PROGRESS.captures(line) {
-                self.last_activity =
-                    Some(format!("正在提取视频 {}/{}：{}", &c[1], &c[2], c[3].trim()));
+                self.last_activity = Some(format!(
+                    "正在提取视频 {}/{}：{}",
+                    &c[1],
+                    &c[2],
+                    crate::media_paths::clean(c[3].trim())
+                ));
                 if let Ok(n) = c[1].parse() {
                     self.processed.insert(n);
                 }
                 self.paths.insert(c[3].trim().into());
+            }
+            if line.contains("VideoThumbnailExtract - Item failed:")
+                || line.contains("VideoThumbnailExtract - Item cancelled:")
+            {
+                self.failed += 1;
+            }
+            if let Some(c) = SKIPPED.captures(line) {
+                self.skipped = c[1].parse().unwrap_or(0);
             }
             if let Some(c) = COMMAND.captures(line) {
                 self.encoders
@@ -312,6 +329,18 @@ async fn run_native(
     expected: Option<&str>,
     context: &JobContext,
 ) -> Result<BTreeSet<String>> {
+    let mut trace = ExtractionLog::default();
+    run_with_trace(state, timeout, start, end, expected, context, &mut trace).await
+}
+async fn run_with_trace(
+    state: &AppState,
+    timeout: Duration,
+    start: u64,
+    end: u64,
+    expected: Option<&str>,
+    context: &JobContext,
+    trace: &mut ExtractionLog,
+) -> Result<BTreeSet<String>> {
     let mut current = task(state).await?;
     let deadline = tokio::time::Instant::now() + timeout;
     while active(&current) {
@@ -322,9 +351,11 @@ async fn run_native(
         tokio::time::sleep(Duration::from_secs(2)).await;
         current = task(state).await?;
     }
+    if current["State"] != "Idle" {
+        return Err(config_error("神医缩略图任务状态未确认空闲，未提交重复提取"));
+    }
     let previous = current["LastExecutionResult"]["StartTimeUtc"].clone();
     let mut cursor = LogCursor::new(state).await?;
-    let mut trace = ExtractionLog::default();
     let id = string(&current, "Id");
     context.checkpoint().await?;
     api(
@@ -350,10 +381,18 @@ async fn run_native(
                 stopped = true;
                 deadline = deadline.min(tokio::time::Instant::now() + Duration::from_secs(90));
             }
-            current = task(state).await?;
-            trace.feed(&cursor.read(state).await?);
+            let poll = async {
+                current = task(state).await?;
+                trace.feed(&cursor.read(state).await?);
+                Ok::<_, ApiError>(())
+            };
+            let polled = tokio::select! {
+                _=context.cancelled(),if !stopped=>continue,
+                result=tokio::time::timeout_at(deadline,poll)=>result,
+            };
+            polled.map_err(|_| ApiError::bad("读取本次神医缩略图任务状态或日志超时"))??;
             let result = &current["LastExecutionResult"];
-            if !active(&current)
+            if current["State"] == "Idle"
                 && !result["StartTimeUtc"].is_null()
                 && result["StartTimeUtc"] != previous
             {
@@ -410,7 +449,34 @@ async fn run_native(
         )
         .await;
     }
+    if outcome.is_err() {
+        wait_native_idle(state, &id).await?;
+    }
     outcome
+}
+async fn wait_native_idle(state: &AppState, id: &str) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+    loop {
+        let result =
+            tokio::time::timeout_at(deadline, api(state, Method::GET, "ScheduledTasks", &[])).await;
+        if let Ok(Ok(tasks)) = result
+            && list(&tasks)
+                .iter()
+                .any(|task| task["Id"] == id && task["State"] == "Idle")
+        {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(config_error(
+                "未确认神医缩略图任务结束，保留兼容编码器和文件，请检查原生任务状态",
+            ));
+        }
+        tokio::time::sleep(
+            Duration::from_secs(2)
+                .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+        )
+        .await;
+    }
 }
 async fn item(state: &AppState, id: &str) -> Result<Value> {
     let data = api(
@@ -428,8 +494,8 @@ async fn item(state: &AppState, id: &str) -> Result<Value> {
     .await?;
     list(&data["Items"])
         .into_iter()
-        .next()
-        .ok_or_else(|| ApiError::bad("媒体已不可访问"))
+        .find(|item| item["Id"] == id)
+        .ok_or_else(|| ApiError::bad("未返回请求媒体 ID 的数据，无法验收原目标"))
 }
 async fn missing(state: &AppState, item: &Value, options: &Value) -> Result<bool> {
     if number(&options["ThumbnailImagesIntervalSeconds"]) > 0.0 {
@@ -440,12 +506,21 @@ async fn missing(state: &AppState, item: &Value, options: &Value) -> Result<bool
             &[("Width", "320".into())],
         )
         .await?;
-        return Ok(list(&data["Thumbnails"]).is_empty());
+        let thumbnails = data["Thumbnails"]
+            .as_array()
+            .ok_or_else(|| ApiError::bad("Emby 未返回有效的缩略图集合，无法确认 BIF 状态"))?;
+        return Ok(thumbnails.is_empty());
     }
     let chapters = chapters(item);
     Ok(chapters.is_empty() || chapters.iter().any(|c| string(c, "ImageTag").is_empty()))
 }
 type Targets = BTreeMap<String, (Value, Value)>;
+pub(crate) struct NativeExtraction {
+    pub report: Value,
+    paths: BTreeSet<String>,
+    targets: Targets,
+}
+
 fn ordered_targets<'a>(
     targets: &'a Targets,
     order: &std::collections::HashMap<String, crate::media_order::Key>,
@@ -506,12 +581,18 @@ async fn targets(
             .ok_or_else(|| ApiError::bad(format!("无法定点定位本次文件或所属媒体库：{path}")))?
             .1;
         for item in items {
-            if missing(state, &item, &library["LibraryOptions"]).await? {
-                targets.insert(
-                    string(&item, "Id"),
-                    (item, library["LibraryOptions"].clone()),
-                );
+            if library["LibraryOptions"]["EnableChapterImageExtraction"] == false
+                || list(&item["Tags"]).iter().any(|tag| {
+                    tag.as_str()
+                        .is_some_and(|tag| tag.eq_ignore_ascii_case("videothumbnail-exclude"))
+                })
+            {
+                continue;
             }
+            targets.insert(
+                string(&item, "Id"),
+                (item, library["LibraryOptions"].clone()),
+            );
         }
     }
     Ok(targets)
@@ -536,6 +617,11 @@ async fn remaining(
             )
             .await;
         let item = item(state, id).await?;
+        if item["Path"] != before["Path"] {
+            return Err(ApiError::bad(format!(
+                "Item {id} 路径在提取期间变化，未使用新路径图片验收或修复旧目标"
+            )));
+        }
         if missing(state, &item, options).await? {
             result.insert(id.clone(), (item, options.clone()));
         } else {
@@ -745,8 +831,8 @@ async fn fallback(
         return Ok(());
     }
     context.checkpoint().await?;
-    if active(&task(state).await?) {
-        return Err(ApiError::bad("神医提取任务仍在运行，未切换编码器"));
+    if task(state).await?["State"] != "Idle" {
+        return Err(config_error("神医提取任务未确认空闲，未切换编码器"));
     }
     crate::docker_host::exec(
         &docker,
@@ -833,29 +919,125 @@ async fn fallback(
     }
     result
 }
-pub async fn repair(state: &AppState, context: &JobContext) -> Result<Value> {
-    context
-        .update(0, "神医提取", "检查配置并启动神医提取")
-        .await;
+pub(crate) async fn extract_verified(
+    state: &AppState,
+    context: &JobContext,
+) -> Result<NativeExtraction> {
+    extract_with_timeout(state, Duration::from_secs(1800), context).await
+}
+async fn extract_with_timeout(
+    state: &AppState,
+    timeout: Duration,
+    context: &JobContext,
+) -> Result<NativeExtraction> {
     let config = crate::strm::config(state).await?;
     if config["PersistMediaInfoMode"] == "Restore" {
+        return Ok(NativeExtraction {
+            report: json!({"state":"skipped","native_state":"not_started","verification":"not_requested","processed":0,"eligible":0,"verified":0,"failed":0,"needs_repair":false,"reason":"神医处于仅恢复模式，未启动实际图片提取"}),
+            paths: BTreeSet::new(),
+            targets: Targets::new(),
+        });
+    }
+    let mut trace = ExtractionLog::default();
+    let outcome = run_with_trace(state, timeout, 5, 50, None, context, &mut trace).await;
+    if context.is_cancelled() {
+        context.checkpoint().await?;
+    }
+    let ended = outcome.is_ok() || task(state).await.is_ok_and(|task| task["State"] == "Idle");
+    let native_error = outcome.as_ref().err().map(|error| error.1.clone());
+    let paths = match outcome {
+        Ok(paths) => paths,
+        Err(_) if ended => match trace.result() {
+            Ok(paths) => paths,
+            Err(error) => {
+                return Ok(NativeExtraction {
+                    report: json!({"state":"unverified","native_state":"ended","native_ended":true,"verification":"incomplete_execution_log","failed":1,"needs_repair":false,"reason":error.1}),
+                    paths: BTreeSet::new(),
+                    targets: Targets::new(),
+                });
+            }
+        },
+        Err(error) => {
+            return Ok(NativeExtraction {
+                report: json!({"state":"unverified","native_state":"unknown","native_ended":false,"verification":"not_confirmed","failed":1,"needs_repair":false,"reason":error.1}),
+                paths: BTreeSet::new(),
+                targets: Targets::new(),
+            });
+        }
+    };
+    let candidates = targets(state, &paths, context).await?;
+    let order =
+        crate::media_order::id_keys(state, &candidates.keys().cloned().collect::<Vec<_>>()).await?;
+    let missing = remaining(state, &candidates, &order, context).await?;
+    let failed = missing
+        .len()
+        .max(trace.failed)
+        .max(usize::from(native_error.is_some()));
+    let unknown_skips = trace.skipped > 0;
+    let reason = if unknown_skips {
+        format!(
+            "本次日志记录 {} 个跳过目标，但未逐项标明路径；实际缺图 {} 个，保留部分未确认范围，不自动绕过原生筛选修复",
+            trace.skipped,
+            missing.len()
+        )
+    } else if let Some(error) = native_error.as_ref() {
+        format!(
+            "原生任务失败：{error}；实际仍缺图 {} 个，失败或取消日志 {} 项",
+            missing.len(),
+            trace.failed
+        )
+    } else if failed > 0 {
+        format!(
+            "原生任务已结束，实际仍缺图 {} 个，失败或取消日志 {} 项",
+            missing.len(),
+            trace.failed
+        )
+    } else if candidates.is_empty() {
+        "本次没有可验收的目标，未确认任何单项图片提取结果".into()
+    } else {
+        format!(
+            "本次 {} 个目标的 BIF 或章节图已通过实际验收",
+            candidates.len()
+        )
+    };
+    let report = json!({"state":if unknown_skips && !missing.is_empty(){"unverified"}else if failed>0{"failed"}else if candidates.is_empty(){"skipped"}else{"completed"},
+        "native_state":if native_error.is_none(){"completed"}else{"failed"},"native_ended":ended,
+        "verification":"current_execution_log_and_item_images","scope_verification":if unknown_skips{"partial_unknown_skips"}else{"complete"},"processed":paths.len(),"eligible":candidates.len(),"skipped":trace.skipped,
+        "verified":candidates.len().saturating_sub(missing.len()),"failed":failed,"failed_ids":missing.keys().collect::<Vec<_>>(),
+        "needs_repair":!missing.is_empty() && ended && !unknown_skips,"reason":reason});
+    Ok(NativeExtraction {
+        report,
+        paths,
+        targets: missing,
+    })
+}
+pub(crate) async fn repair_extraction(
+    state: &AppState,
+    extraction: &NativeExtraction,
+    context: &JobContext,
+) -> Result<Value> {
+    if extraction.report["native_ended"] != true && !extraction.targets.is_empty() {
+        return Err(config_error("原生提取任务尚未确认结束，未启动自动修复"));
+    }
+    if extraction.report["scope_verification"] == "partial_unknown_skips" {
         return Err(ApiError::bad(
-            "神医处于仅恢复模式，请关闭后再执行图片提取修复",
+            "本次跳过目标路径未确认，未自动修复可能被原生策略排除的媒体",
         ));
     }
-    let paths = run_native(state, Duration::from_secs(86400), 5, 50, None, context).await?;
-    context
-        .update(
-            50,
-            "检查本次结果",
-            &format!("根据本次日志定点验收{}个文件", paths.len()),
-        )
-        .await;
-    let targets = targets(state, &paths, context).await?;
-    if targets.is_empty() {
+    if extraction.targets.is_empty() {
         return Ok(
-            json!({"repaired":paths.len(),"failed":0,"message":"本次未发现缺失章节图或BIF"}),
+            json!({"state":"skipped","repaired":0,"failed":0,"message":"本次没有已确认需要修复的目标，未重复启动原生提取"}),
         );
+    }
+    if extraction.report["needs_repair"] != true {
+        return Err(ApiError::bad(
+            "本次跳过目标或修复范围未确认，未自动修复可能被原生策略排除的媒体",
+        ));
+    }
+    let targets = &extraction.targets;
+    let config = crate::strm::config(state).await?;
+    if config["PersistMediaInfoMode"] == "Restore" {
+        return Err(ApiError::bad("神医处于仅恢复模式，未启动图片修复"));
     }
     let estimate = targets
         .values()
@@ -874,37 +1056,222 @@ pub async fn repair(state: &AppState, context: &JobContext) -> Result<Value> {
     let timeout = Duration::from_secs_f64(estimate.clamp(1800.0, 86400.0));
     let order =
         crate::media_order::id_keys(state, &targets.keys().cloned().collect::<Vec<_>>()).await?;
-    if let Err(error) = fallback(state, &targets, timeout, context, &order).await {
+    if let Err(error) = fallback(state, targets, timeout, context, &order).await {
         if context.is_cancelled() || error.0 == axum::http::StatusCode::CONFLICT {
             return Err(error);
         }
         tracing::warn!("自定义编码器补图未完成：{}", error.1);
     }
-    let remaining = remaining(state, &targets, &order, context).await?;
+    let remaining = remaining(state, targets, &order, context).await?;
     for (id, (item, options)) in ordered_targets(&remaining, &order) {
-        let missing = if number(&options["ThumbnailImagesIntervalSeconds"]) > 0.0 {
+        let kind = if number(&options["ThumbnailImagesIntervalSeconds"]) > 0.0 {
             "BIF"
         } else {
             "章节图"
         };
         tracing::error!(
-            "[缩略图修复] 仍缺少{missing}：{}（Item {id}）",
-            string(item, "Path")
+            "[缩略图修复] 仍缺少{kind}：{}（Item {id}）",
+            crate::media_paths::clean(&string(item, "Path"))
         );
     }
+    let repaired = targets.len().saturating_sub(remaining.len());
     context
         .update(
             100,
             "验收",
             &format!(
-                "缩略图修复完成：本次 {} 个文件，已完成 {} 个，仍缺失 {} 个",
-                paths.len(),
-                paths.len().saturating_sub(remaining.len()),
+                "缩略图修复结束：复用本次 {} 个文件结果，已修复 {repaired} 个，仍缺失 {} 个",
+                extraction.paths.len(),
                 remaining.len()
             ),
         )
         .await;
     Ok(
-        json!({"repaired":paths.len().saturating_sub(remaining.len()),"failed":remaining.len(),"message":format!("缩略图修复完成：本次{}个文件，仍缺失{}个",paths.len(),remaining.len())}),
+        json!({"state":if remaining.is_empty(){"completed"}else{"failed"},"repaired":repaired,"failed":remaining.len(),"failed_ids":remaining.keys().collect::<Vec<_>>(),"verification":"item_images","message":format!("缩略图修复结束：已修复{repaired}个，仍缺失{}个",remaining.len())}),
     )
+}
+pub async fn repair(state: &AppState, context: &JobContext) -> Result<Value> {
+    let extraction = extract_with_timeout(state, Duration::from_secs(86400), context).await?;
+    if extraction.report["state"] == "skipped" {
+        return Ok(
+            json!({"state":"skipped","repaired":0,"failed":0,"message":extraction.report["reason"],"extraction":extraction.report}),
+        );
+    }
+    if extraction.report["failed"].as_u64().unwrap_or(0) == 0 {
+        return Ok(
+            json!({"repaired":extraction.report["verified"],"failed":0,"extraction":extraction.report,"message":"本次媒体图片已通过实际验收，未发现修复目标"}),
+        );
+    }
+    if extraction.targets.is_empty() {
+        return Err(ApiError::bad(
+            extraction.report["reason"]
+                .as_str()
+                .unwrap_or("本次提取范围或结果未确认，未启动全库重复提取"),
+        ));
+    }
+    let mut report = repair_extraction(state, &extraction, context).await?;
+    report["extraction"] = extraction.report;
+    Ok(report)
+}
+
+#[derive(Default)]
+struct IntroLog {
+    started: bool,
+    complete: bool,
+    episodes: Option<usize>,
+    seasons: Option<usize>,
+    episode_progress: BTreeSet<usize>,
+    season_progress: BTreeSet<usize>,
+    episodes_skipped: usize,
+    seasons_skipped: usize,
+    failed: usize,
+}
+impl IntroLog {
+    fn feed(&mut self, lines: &[String]) {
+        static COUNT: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"IntroFingerprintExtract - Number of (episodes|seasons)( skipped)?: (\d+)")
+                .unwrap()
+        });
+        static PROGRESS: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"IntroFingerprintExtract - (Episode|Season) Progress (\d+)/(\d+) - Task ")
+                .unwrap()
+        });
+        for line in lines {
+            if self.complete {
+                break;
+            }
+            if line.contains("IntroFingerprintExtract - Scheduled Task Execute") {
+                self.started = true;
+            }
+            if !self.started {
+                continue;
+            }
+            if let Some(c) = COUNT.captures(line)
+                && let Ok(n) = c[3].parse()
+            {
+                match (&c[1], c.get(2).is_some()) {
+                    ("episodes", false) => self.episodes = Some(n),
+                    ("seasons", false) => self.seasons = Some(n),
+                    ("episodes", true) => self.episodes_skipped = n,
+                    ("seasons", true) => self.seasons_skipped = n,
+                    _ => {}
+                }
+            }
+            if let Some(c) = PROGRESS.captures(line)
+                && let Ok(n) = c[2].parse()
+            {
+                if &c[1] == "Episode" {
+                    self.episode_progress.insert(n);
+                } else {
+                    self.season_progress.insert(n);
+                }
+            }
+            if line.contains("IntroFingerprintExtract - Episode failed:")
+                || line.contains("IntroFingerprintExtract - Season failed:")
+                || line.contains("IntroFingerprintExtract - Episode cancelled:")
+                || line.contains("IntroFingerprintExtract - Season cancelled:")
+            {
+                self.failed += 1;
+            }
+            if line.contains("IntroFingerprintExtract - Scheduled Task Complete") {
+                self.complete = true;
+            }
+        }
+    }
+    fn report(&self) -> Value {
+        let bounded = self.complete
+            && self.episodes.is_some()
+            && self.seasons.is_some()
+            && self.episode_progress == (1..=self.episodes.unwrap_or(0)).collect()
+            && self.season_progress.len() + self.seasons_skipped == self.seasons.unwrap_or(0);
+        let state = if self.failed > 0 {
+            "failed"
+        } else if !bounded {
+            "unverified"
+        } else if self.episodes == Some(0) || self.episodes_skipped == self.episodes.unwrap_or(0) {
+            "skipped"
+        } else {
+            "processed"
+        };
+        let reason = if self.failed > 0 {
+            format!(
+                "本次声纹处理日志包含 {} 项失败或取消，{} 个分集跳过，{} 个季跳过",
+                self.failed, self.episodes_skipped, self.seasons_skipped
+            )
+        } else if !bounded {
+            "本次声纹处理日志不完整，不能确认单项结果".into()
+        } else if state == "skipped" {
+            format!(
+                "本次没有需要处理的片头声纹目标，跳过 {} 个分集和 {} 个季",
+                self.episodes_skipped, self.seasons_skipped
+            )
+        } else {
+            "本次原生日志已核对；未以片头标记是否存在判断声纹文件生成结果".into()
+        };
+        json!({"state":state,"native_state":"completed","verification":"current_execution_log",
+            "episodes":self.episodes,"seasons":self.seasons,"episodes_processed":self.episode_progress.len(),
+            "episodes_skipped":self.episodes_skipped,"seasons_skipped":self.seasons_skipped,
+            "failed":self.failed.max(usize::from(!bounded)),
+            "reason":reason})
+    }
+}
+pub(crate) async fn extract_intro_verified(
+    state: &AppState,
+    context: &JobContext,
+) -> Result<Value> {
+    if crate::strm::config(state).await?["PersistMediaInfoMode"] == "Restore" {
+        return Ok(
+            json!({"state":"skipped","native_state":"not_started","verification":"not_requested","failed":0,"reason":"神医处于恢复模式，未启动实际片头声纹提取"}),
+        );
+    }
+    let mut cursor = LogCursor::new(state).await?;
+    let outcome = crate::emby::scheduled(state, "IntroFingerprintExtractTask", context).await;
+    if context.is_cancelled() {
+        context.checkpoint().await?;
+    }
+    let mut trace = IntroLog::default();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut log_error = None;
+    loop {
+        let lines = tokio::time::timeout_at(deadline, cursor.read(state)).await;
+        match lines {
+            Ok(Ok(lines)) => trace.feed(&lines),
+            Ok(Err(error)) => {
+                log_error = Some(error.1);
+                break;
+            }
+            Err(_) => {
+                log_error = Some("本次片头声纹日志读取超时".into());
+                break;
+            }
+        }
+        if trace.complete || outcome.is_err() || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        context
+            .sleep(
+                Duration::from_secs(1)
+                    .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+            )
+            .await?;
+    }
+    let ended = outcome.is_ok()
+        || api(state, Method::GET, "ScheduledTasks", &[])
+            .await
+            .is_ok_and(|tasks| {
+                list(&tasks).iter().any(|task| {
+                    task["Key"] == "IntroFingerprintExtractTask" && task["State"] == "Idle"
+                })
+            });
+    let mut report = trace.report();
+    report["native_ended"] = json!(ended);
+    if let Err(error) = outcome {
+        report["state"] = json!("failed");
+        report["native_state"] = json!("failed");
+        report["failed"] = json!(report["failed"].as_u64().unwrap_or(0).max(1));
+        report["reason"] = json!(error.1);
+    } else if let Some(error) = log_error {
+        report["reason"] = json!(error);
+    }
+    Ok(report)
 }

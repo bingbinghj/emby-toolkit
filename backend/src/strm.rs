@@ -118,6 +118,7 @@ where
 {
     let _gate = state.strm.gate.lock().await;
     let id = discover(state).await?;
+    check_rename_scan_guard(state, &id).await?;
     let original = read(state, &id).await?;
     let changes = changes
         .as_object()
@@ -151,11 +152,11 @@ where
     .catch_unwind()
     .await
     .unwrap_or_else(|_| Err(ApiError::bad("任务执行异常")));
-    if applied
-        && changes
-            .get("PersistMediaInfoMode")
-            .is_some_and(|mode| mode == "Restore")
-    {
+    let restoring_media = changes
+        .get("PersistMediaInfoMode")
+        .is_some_and(|mode| mode == "Restore");
+    let replacing_encoder = restore.get("CustomEncoderPath").is_some();
+    if applied && (restoring_media || replacing_encoder) {
         let mut stopped = false;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
         loop {
@@ -165,7 +166,16 @@ where
             )
             .await;
             if let Ok(Ok(tasks)) = tasks
-                && media_tasks_idle(&tasks)
+                && if restoring_media {
+                    media_tasks_idle(&tasks)
+                } else {
+                    tasks.as_array().is_some_and(|tasks| {
+                        tasks
+                            .iter()
+                            .find(|task| task["Key"] == "VideoThumbnailExtractTask")
+                            .is_some_and(|task| task["State"] == "Idle")
+                    })
+                }
             {
                 stopped = true;
                 break;
@@ -180,12 +190,13 @@ where
             .await;
         }
         if !stopped {
-            tracing::error!(
-                "[神医临时设置] 未确认媒体信息任务结束，保留恢复模式，避免任务中途恢复实际提取"
-            );
-            return Err(ApiError::bad(
-                "未确认神医媒体信息任务结束，临时恢复模式仍保留，请检查任务状态及神医设置",
-            ));
+            let message = if restoring_media {
+                "未确认神医媒体信息任务结束，临时恢复模式仍保留，请检查任务状态及神医设置"
+            } else {
+                "未确认神医缩略图任务结束，临时编码器仍保留，请检查任务状态及神医设置"
+            };
+            tracing::error!("[神医临时设置] {message}");
+            return Err(ApiError::bad(message));
         }
     }
     if changed && !restore_settings(state, &id, &restore, mode, outcome.as_ref().err()).await {
@@ -351,24 +362,145 @@ fn settings_finished<T>(mode: &str, outcome: Result<T>) -> Result<T> {
     }
     outcome
 }
+async fn check_rename_scan_guard(state: &AppState, id: &str) -> Result<()> {
+    let root = state.data_dir.join("rename-recovery");
+    let blocked = |reason: String| {
+        ApiError(
+            axum::http::StatusCode::CONFLICT,
+            format!(
+                "前次改名扫描尚未完成验收，暂不修改神医配置；{reason}，恢复说明：{}",
+                root.display()
+            ),
+        )
+    };
+    let mut entries = match tokio::fs::read_dir(&root).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(blocked(format!("无法读取恢复记录：{error}"))),
+    };
+    let mut pending = vec![];
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|error| blocked(format!("无法读取恢复目录：{error}")))?
+    {
+        let path = entry.path().join("pending-scan.json");
+        if tokio::fs::try_exists(&path)
+            .await
+            .map_err(|error| blocked(format!("无法核对待确认标记：{error}")))?
+        {
+            pending.push(path);
+        }
+    }
+    if pending.is_empty() {
+        return Ok(());
+    }
+    if pending.len() != 1 {
+        return Err(blocked("存在多个待确认改名记录，请核对各恢复目录".into()));
+    }
+    let path = &pending[0];
+    let record: Value = serde_json::from_slice(
+        &tokio::fs::read(path)
+            .await
+            .map_err(|error| blocked(format!("无法读取待确认标记：{error}")))?,
+    )
+    .map_err(|_| blocked("待确认标记内容无效".into()))?;
+    let position = record["position"]
+        .as_u64()
+        .ok_or_else(|| blocked("待确认标记缺少本次日志位置".into()))?;
+    let ids = record["ids"]
+        .as_array()
+        .and_then(|ids| {
+            ids.iter()
+                .map(|id| id.as_str().filter(|id| !id.is_empty()).map(str::to_string))
+                .collect::<Option<Vec<_>>>()
+        })
+        .filter(|ids| !ids.is_empty())
+        .ok_or_else(|| blocked("未记录有效的本次扫描目录，无法自动验收".into()))?;
+    let logs = state
+        .emby(
+            Method::GET,
+            "System/Logs/embyserver.txt/Lines",
+            &[("Limit", "500".into())],
+            None,
+        )
+        .await
+        .map_err(|error| blocked(format!("无法回读本次扫描日志：{}", error.1)))?;
+    for id in ids {
+        if !crate::media_extra::RefreshTrace::new(position)
+            .feed(&id, &logs)
+            .map_err(|error| blocked(error.1))?
+        {
+            return Err(blocked(format!("尚未确认目录 {id} 的本次扫描结束")));
+        }
+    }
+    let recovery = path.parent().unwrap();
+    let original: Value = serde_json::from_slice(
+        &tokio::fs::read(recovery.join("original-settings.json"))
+            .await
+            .map_err(|error| blocked(format!("无法读取原配置：{error}")))?,
+    )
+    .map_err(|_| blocked("原配置恢复说明无效".into()))?;
+    if !original.as_object().is_some_and(|fields| {
+        fields.len() == 1
+            && fields
+                .get("ExclusiveControlFeatures")
+                .is_some_and(|value| value.is_string() || value.is_null())
+    }) {
+        return Err(blocked("原配置恢复说明缺少有效独占模式".into()));
+    }
+    if !restore_settings(state, id, &original, "preserve", None).await {
+        return Err(blocked("本次扫描已结束，但神医原配置恢复尚未确认".into()));
+    }
+    tokio::fs::remove_file(path).await.map_err(|error| {
+        blocked(format!(
+            "扫描已结束且原配置已恢复，但待确认标记清理失败：{error}"
+        ))
+    })?;
+    tracing::info!("[神医临时设置] 前次改名扫描已完成验收并恢复原配置，允许继续处理");
+    Ok(())
+}
 pub async fn with_settings<F, Fut, T>(state: &AppState, mode: &str, function: F) -> Result<T>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
     let _gate = state.strm.gate.lock().await;
-    apply_settings(state, mode, discover(state).await?, function).await
+    apply_settings(state, mode, discover(state).await?, function, None).await
+}
+pub(crate) async fn with_settings_guarded<F, Fut, T>(
+    state: &AppState,
+    mode: &str,
+    function: F,
+    confirmed: &std::sync::atomic::AtomicBool,
+    recovery: &std::path::Path,
+) -> Result<T>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
+    let _gate = state.strm.gate.lock().await;
+    apply_settings(
+        state,
+        mode,
+        discover(state).await?,
+        function,
+        Some((confirmed, recovery)),
+    )
+    .await
 }
 async fn apply_settings<F, Fut, T>(
     state: &AppState,
     mode: &str,
     id: String,
     function: F,
+    guard: Option<(&std::sync::atomic::AtomicBool, &std::path::Path)>,
 ) -> Result<T>
 where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
+    check_rename_scan_guard(state, &id).await?;
     let original = read(state, &id).await?;
     let removed: &[&str] = match mode {
         "preserve" => &["CatchAllAllow", "ExtractOnFileChange", "IgnoreFileChange"],
@@ -403,6 +535,30 @@ where
         restore["ExclusiveControlFeatures"] = original["ExclusiveControlFeatures"].clone();
     }
     let changed = !restore.as_object().unwrap().is_empty();
+    if let Some((_, recovery)) = guard {
+        use tokio::io::AsyncWriteExt;
+        tokio::fs::create_dir_all(recovery).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(recovery, std::fs::Permissions::from_mode(0o700)).await?;
+        }
+        let mut options = tokio::fs::OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(recovery.join("original-settings.json"))
+            .await?;
+        file.write_all(
+            &serde_json::to_vec_pretty(
+                &json!({"ExclusiveControlFeatures":original["ExclusiveControlFeatures"]}),
+            )
+            .unwrap(),
+        )
+        .await?;
+        file.sync_all().await?;
+    }
     let mode_name = settings_mode_label(mode);
     tracing::info!("[神医临时设置] {mode_name} 开始");
     let outcome = std::panic::AssertUnwindSafe(async {
@@ -420,8 +576,33 @@ where
     .catch_unwind()
     .await
     .unwrap_or_else(|_| Err(ApiError::bad("任务执行异常")));
+    if let Some((confirmed, recovery)) = guard
+        && !confirmed.load(std::sync::atomic::Ordering::Acquire)
+    {
+        tracing::error!(
+            "[神医临时设置] 未确认改名扫描结束，保留忽略文件变更保护，原配置说明位于 {}",
+            recovery.display()
+        );
+        return Err(ApiError::bad(format!(
+            "改名文件已保留，但尚未确认扫描结束；忽略文件变更保护仍保留，恢复说明：{}",
+            recovery.display()
+        )));
+    }
     if changed && !restore_settings(state, &id, &restore, mode, outcome.as_ref().err()).await {
         return Err(ApiError::bad("神医临时设置恢复失败，请核对独占模式"));
+    }
+    if let Some((_, recovery)) = guard {
+        let pending = recovery.join("pending-scan.json");
+        match tokio::fs::remove_file(&pending).await {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => {
+                return Err(ApiError::bad(format!(
+                    "改名扫描已确认且神医原配置已恢复，但待确认标记清理失败：{error}，恢复说明：{}",
+                    recovery.display()
+                )));
+            }
+        }
     }
     settings_finished(mode, outcome)
 }

@@ -205,7 +205,7 @@ pub async fn scrape(
     group: Option<&str>,
     context: &JobContext,
 ) -> Result<Value> {
-    process(state, item, episode_ids, group, context, false)
+    process(state, item, episode_ids, group, context, false, true)
         .await
         .inspect_err(|error| {
             tracing::error!(
@@ -216,6 +216,16 @@ pub async fn scrape(
             )
         })
 }
+pub(crate) async fn scrape_for_ingest(
+    state: &AppState,
+    item: &Value,
+    episode_ids: &[String],
+    group: Option<&str>,
+    context: &JobContext,
+) -> Result<Value> {
+    // Webhook finalization already refreshes metadata after fingerprint/audio work.
+    process(state, item, episode_ids, group, context, false, false).await
+}
 pub async fn prepare_new(
     state: &AppState,
     item: &Value,
@@ -223,7 +233,7 @@ pub async fn prepare_new(
     group: Option<&str>,
     context: &JobContext,
 ) -> Result<Value> {
-    process(state, item, episode_ids, group, context, true)
+    process(state, item, episode_ids, group, context, true, false)
         .await
         .inspect_err(|error| {
             tracing::error!(
@@ -241,6 +251,7 @@ async fn process(
     group: Option<&str>,
     context: &JobContext,
     pending: bool,
+    refresh_metadata: bool,
 ) -> Result<Value> {
     let mut item = item.clone();
     let library = if pending {
@@ -461,16 +472,19 @@ async fn process(
     let written = crate::nfo_files::sync(&kind, item, &payload, &cast, &options).await?;
     let images = crate::images::download(state, &kind, &tmdb, item, &payload, context).await?;
     if state.configured().await && !pending {
-        tracing::info!(
-            "Emby 元数据刷新开始：《{media_name}》，Emby {}，TMDb {tmdb}",
-            string(item, "Id")
-        );
         crate::persons::update_emby(state, &cast, &payload, item).await?;
-        crate::emby::refresh_item(state, &string(item, "Id"), kind == "Series", context).await?;
-        tracing::info!(
-            "Emby 元数据刷新请求已接收：《{media_name}》，Emby {}，TMDb {tmdb}，由 Emby 继续异步刷新",
-            string(item, "Id")
-        );
+        if refresh_metadata {
+            tracing::info!(
+                "Emby 元数据刷新开始：《{media_name}》，Emby {}，TMDb {tmdb}",
+                string(item, "Id")
+            );
+            crate::emby::refresh_item(state, &string(item, "Id"), kind == "Series", context)
+                .await?;
+            tracing::info!(
+                "Emby 元数据刷新请求已接收：《{media_name}》，Emby {}，TMDb {tmdb}，由 Emby 继续异步刷新",
+                string(item, "Id")
+            );
+        }
     }
     let mut parents = children
         .iter()

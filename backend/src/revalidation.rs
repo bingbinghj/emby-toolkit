@@ -23,7 +23,7 @@ fn text(data: &Value, keys: &[&str]) -> String {
         })
         .unwrap_or_default()
 }
-fn normalized(data: &Value) -> Value {
+pub(crate) fn normalized(data: &Value) -> Value {
     let parent = text(data, &["parent_id", "pid", "cid"]);
     let parent = if parent.is_empty() {
         data["paths"]
@@ -36,7 +36,7 @@ fn normalized(data: &Value) -> Value {
     };
     json!({"id":text(data,&["id","file_id","fid"]),"parent_id":parent,"name":text(data,&["name","file_name","fn","n"]),"pick_code":text(data,&["pick_code","pickcode","pc"]),"sha1":text(data,&["sha1","sha","file_sha1"]),"size":(["size_byte","fs","size","file_size","s"].iter().find_map(|key|identity::size(&data[*key])))})
 }
-fn is_directory(raw: &Value) -> bool {
+pub(crate) fn is_directory(raw: &Value) -> bool {
     ["fc", "file_category", "type"]
         .iter()
         .find_map(|key| raw.get(*key).filter(|v| !v.is_null()))

@@ -18,15 +18,66 @@ use std::{
 };
 use tokio::sync::Mutex;
 
+struct EnhancedItem {
+    top_id: String,
+    path: String,
+    expires: Instant,
+}
+
 #[derive(Default)]
 pub struct Service {
     pending: Mutex<BTreeMap<String, Value>>,
     batches: Mutex<BTreeMap<String, Instant>>,
-    enhanced: Mutex<BTreeMap<String, Instant>>,
+    enhanced: Mutex<BTreeMap<String, EnhancedItem>>,
     manual_deletes: Mutex<BTreeMap<String, Instant>>,
     draining: std::sync::atomic::AtomicBool,
 }
 impl Service {
+    async fn mark_enhanced(&self, top_id: &str, members: &BTreeMap<String, String>) {
+        let now = Instant::now();
+        let mut enhanced = self.enhanced.lock().await;
+        enhanced.retain(|_, item| item.expires > now);
+        for (id, path) in members
+            .iter()
+            .filter(|(id, path)| !id.is_empty() && !path.is_empty())
+        {
+            enhanced.insert(
+                id.clone(),
+                EnhancedItem {
+                    top_id: top_id.into(),
+                    path: path.clone(),
+                    expires: now + Duration::from_secs(3600),
+                },
+            );
+        }
+    }
+    async fn take_enhanced(&self, top_id: &str, members: &[Value]) -> BTreeSet<String> {
+        let now = Instant::now();
+        let mut enhanced = self.enhanced.lock().await;
+        enhanced.retain(|_, item| item.expires > now);
+        let mut covered = BTreeSet::new();
+        for member in members {
+            let id = string(member, "Id");
+            let path = string(member, "Path");
+            let owner = match member["Type"].as_str() {
+                Some("Episode") => string(member, "SeriesId"),
+                Some("Video") if member["ExtraType"] == "AdditionalPart" => {
+                    string(member, "ParentId")
+                }
+                Some("Movie") => id.clone(),
+                _ => String::new(),
+            };
+            if owner == top_id
+                && enhanced
+                    .get(&id)
+                    .is_some_and(|item| item.top_id == top_id && item.path == path)
+            {
+                enhanced.remove(&id);
+                covered.insert(id);
+            }
+        }
+        covered
+    }
     pub async fn mark_manual_delete(&self, ids: &[String]) {
         let now = Instant::now();
         let mut pending = self.manual_deletes.lock().await;
@@ -711,22 +762,48 @@ pub async fn process_emby(
     if event["event"] == "image.update" {
         return Ok(json!({"message":"图片更新已接收"}));
     }
-    let enhanced = {
-        let mut ids = state.webhooks.enhanced.lock().await;
-        ids.retain(|_, t| t.elapsed() < Duration::from_secs(3600));
-        ids.contains_key(&id)
-    };
-    if !enhanced && event["source"] == "emby" {
-        crate::media_preflight::run(state, &item, context).await?;
+    let mut members = vec![];
+    if episodes.is_empty() {
+        let original_id = string(&event["original"], "Id");
+        if !original_id.is_empty() && original_id != id && item["Type"] == "Movie" {
+            members.push(
+                details(
+                    state,
+                    &original_id,
+                    "Id,Type,Name,Path,SeriesId,ParentId,ExtraType,MediaSources,MediaStreams",
+                )
+                .await?,
+            );
+        } else if item["Type"] == "Movie" {
+            members.push(item.clone());
+        }
+    } else {
         for episode in &episodes {
             context.checkpoint().await?;
-            let item = details(
-                state,
-                episode,
-                "Id,Type,Name,Path,MediaSources,MediaStreams",
-            )
-            .await?;
-            crate::media_preflight::run(state, &item, context).await?;
+            members.push(
+                details(
+                    state,
+                    episode,
+                    "Id,Type,Name,Path,SeriesId,ParentId,ExtraType,MediaSources,MediaStreams",
+                )
+                .await?,
+            );
+        }
+    }
+    // A prepared member is consumed once. Different batches in the same series
+    // cannot inherit its shortcut, and a failed finalization leaves no claimed marker.
+    let covered = state.webhooks.take_enhanced(&id, &members).await;
+    let enhanced = !members.is_empty()
+        && members
+            .iter()
+            .all(|member| covered.contains(&string(member, "Id")));
+    if !enhanced && event["source"] == "emby" {
+        crate::media_preflight::run(state, &item, context).await?;
+        for member in &members {
+            if string(member, "Id") != id && !covered.contains(&string(member, "Id")) {
+                context.checkpoint().await?;
+                crate::media_preflight::run(state, member, context).await?;
+            }
         }
     }
     let mut result = match crate::ingest::feedback(state, &id, &episodes, false, context).await {
@@ -753,15 +830,13 @@ pub async fn process_emby(
                 crate::metadata::row(state, &string(&item["ProviderIds"], "Tmdb"), "Series")
                     .await?
                     .map(|r| string(&r, "episode_group_id"));
-            crate::ingest::scrape(state, &item, &episodes, group.as_deref(), context).await
+            crate::ingest::scrape_for_ingest(state, &item, &episodes, group.as_deref(), context)
+                .await
         }
     }?;
     let finalization = finalize(state, &id, &episodes, !episodes.is_empty(), context).await?;
     add_report_warnings(&mut result, &finalization);
     result["finalization"] = finalization;
-    if enhanced {
-        state.webhooks.enhanced.lock().await.remove(&id);
-    }
     tracing::info!(
         "Emby 入库处理完成：《{media_name}》，Emby {id}，更新 {} 条记录",
         result["updated"].as_u64().unwrap_or(0)
@@ -809,6 +884,16 @@ fn add_automatic_result(result: &mut Value, automatic: Value) {
     result["automatic_extraction"] = automatic;
 }
 
+fn extraction_state_label(report: &Value) -> &'static str {
+    match report["state"].as_str() {
+        Some("processed") => "已处理",
+        Some("completed") => "已完成",
+        Some("skipped") => "已跳过",
+        Some("failed") => "失败",
+        _ => "未确认",
+    }
+}
+
 async fn automatic_extraction(
     state: &AppState,
     series: bool,
@@ -817,123 +902,132 @@ async fn automatic_extraction(
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
     let config = state.config.read().await.clone();
-    let stages = [
-        (
-            "片头声纹提取",
-            "IntroFingerprintExtractTask",
-            "intro",
-            series && config["auto_extract_intro_fingerprint_on_ingest"] == true,
-        ),
-        (
-            "视频预览缩略图提取",
-            "VideoThumbnailExtractTask",
-            "video_thumbnails",
-            videos && config["auto_extract_video_thumbnails_on_ingest"] == true,
-        ),
-    ];
+    let intro_enabled = series && config["auto_extract_intro_fingerprint_on_ingest"] == true;
+    let thumbnails_enabled = videos && config["auto_extract_video_thumbnails_on_ingest"] == true;
     let mut report = json!({});
-    let mut warnings = 0_u64;
-    for (phase, key, field, enabled) in stages {
-        if !enabled {
-            continue;
-        }
+    let mut warning_details = vec![];
+    if intro_enabled {
         context.checkpoint().await?;
         context
             .activity(
-                phase,
-                &format!("{label}入库已完成，开始神医助手{phase}，等待原生任务结束"),
+                "片头声纹提取",
+                &format!("{label}入库已完成，开始原生声纹任务并核对本次日志"),
             )
             .await;
-        match crate::emby::scheduled(state, key, context).await {
-            Ok(()) => {
-                report[field] = json!({"state":"completed","verification":"native_task_result"});
-                tracing::info!(
-                    "[入库自动处理] {label}{phase}原生任务已确认结束，单项处理结果以 Emby 日志为准"
-                );
-            }
+        let intro = match crate::thumbnails::extract_intro_verified(state, context).await {
+            Ok(result) => result,
             Err(error) if context.is_cancelled() => return Err(error),
             Err(error) => {
-                warnings += 1;
-                report[field] = json!({"state":"failed","reason":error.1});
-                tracing::warn!(
-                    "[入库自动处理] {label}{phase}失败：{}；保留已完成的入库结果",
-                    error.1
-                );
-                if field == "intro" && stages[1].3 || field == "video_thumbnails" {
-                    context.checkpoint().await?;
-                    let tasks = state
-                        .emby(reqwest::Method::GET, "ScheduledTasks", &[], None)
-                        .await;
-                    context.checkpoint().await?;
-                    // Missing tasks and timeouts do not confirm that native work ended.
-                    let ended =
-                        tasks
-                            .as_ref()
-                            .ok()
-                            .and_then(Value::as_array)
-                            .is_some_and(|tasks| {
-                                tasks
-                                    .iter()
-                                    .find(|task| task["Key"] == key)
-                                    .is_some_and(|task| task["State"] == "Idle")
-                            });
-                    if !ended {
-                        let (next, reason) = if field == "intro" {
-                            (
-                                "video_thumbnails",
-                                "片头声纹任务尚未确认结束，跳过视频预览缩略图提取",
-                            )
-                        } else {
-                            (
-                                "video_thumbnails_repair",
-                                "原生视频预览缩略图提取任务尚未确认结束，跳过自动修复",
-                            )
-                        };
-                        report[next] = json!({"state":"skipped","reason":reason});
-                        tracing::warn!("[入库自动处理] {label}{reason}");
-                        break;
-                    }
+                json!({"state":"unverified","native_ended":false,"failed":1,"reason":error.1})
+            }
+        };
+        let failed = intro["failed"].as_u64().unwrap_or(0) > 0;
+        if failed {
+            let warning = format!(
+                "{label}片头声纹处理未全部确认：{}；保留已完成的入库结果",
+                string(&intro, "reason")
+            );
+            tracing::warn!("[入库自动处理] {warning}");
+            warning_details.push(warning);
+        } else {
+            tracing::info!(
+                "[入库自动处理] {label}片头声纹处理结果：{}；{}",
+                extraction_state_label(&intro),
+                string(&intro, "reason")
+            );
+        }
+        let ended = intro["native_ended"] == true || intro["native_state"] == "not_started";
+        report["intro"] = intro;
+        if thumbnails_enabled && !ended {
+            let reason = "片头声纹任务尚未确认结束，跳过视频预览缩略图提取";
+            report["video_thumbnails"] = json!({"state":"skipped","reason":reason});
+            tracing::warn!("[入库自动处理] {label}{reason}");
+            report["warnings"] = json!(warning_details.len());
+            report["warning_details"] = json!(warning_details);
+            return Ok(report);
+        }
+    }
+    if thumbnails_enabled {
+        context.checkpoint().await?;
+        context
+            .activity(
+                "视频预览缩略图提取",
+                &format!("{label}入库已完成，运行原生任务并核对本次目标图片"),
+            )
+            .await;
+        match crate::thumbnails::extract_verified(state, context).await {
+            Ok(extraction) => {
+                let failed = extraction.report["failed"].as_u64().unwrap_or(0) > 0;
+                if failed {
+                    let warning = format!(
+                        "{label}视频预览缩略图提取或验收未全部通过：{}；保留已完成的入库结果",
+                        string(&extraction.report, "reason")
+                    );
+                    tracing::warn!("[入库自动处理] {warning}");
+                    warning_details.push(warning);
+                } else {
+                    tracing::info!(
+                        "[入库自动处理] {label}视频预览缩略图处理结果：{}，逐项验收 {} 个目标",
+                        extraction_state_label(&extraction.report),
+                        extraction.report["verified"]
+                    );
                 }
-                if field == "video_thumbnails" {
+                report["video_thumbnails"] = extraction.report.clone();
+                if extraction.report["needs_repair"] == true {
                     context.checkpoint().await?;
                     context
                         .activity(
                             "修复视频预览缩略图",
-                            &format!("{label}原生提取失败，自动运行一次现有视频预览缩略图修复任务"),
+                            &format!("{label}复用本次缺失图片目标修复，不重复全库提取"),
                         )
                         .await;
-                    match crate::thumbnails::repair(state, context).await {
+                    match crate::thumbnails::repair_extraction(state, &extraction, context).await {
                         Ok(repair) => {
                             if repair["failed"].as_u64().unwrap_or(0) > 0 {
-                                warnings += 1;
-                                tracing::error!(
-                                    "[入库自动处理] {label}视频预览缩略图修复结束，仍有 {} 项失败",
+                                let warning = format!(
+                                    "{label}视频预览缩略图修复后仍有 {} 项失败",
                                     repair["failed"]
                                 );
-                            } else {
-                                tracing::info!("[入库自动处理] {label}视频预览缩略图修复已完成");
+                                tracing::error!("[入库自动处理] {warning}");
+                                warning_details.push(warning);
                             }
                             report["video_thumbnails_repair"] = repair;
                         }
                         Err(error) if context.is_cancelled() => return Err(error),
                         Err(error) => {
-                            warnings += 1;
-                            tracing::error!(
-                                "[入库自动处理] {label}视频预览缩略图修复失败：{}；不再自动重复重试",
+                            let warning = format!(
+                                "{label}视频预览缩略图修复失败：{}；不再自动重复重试",
                                 error.1
                             );
+                            tracing::error!("[入库自动处理] {warning}");
+                            warning_details.push(warning);
                             report["video_thumbnails_repair"] =
                                 json!({"state":"failed","reason":error.1});
                         }
                     }
+                } else if failed {
+                    report["video_thumbnails_repair"] = json!({"state":"skipped","reason":"本次原生任务状态或缺失目标范围未确认，未自动扩大修复范围"});
                 }
+            }
+            Err(error) if context.is_cancelled() => return Err(error),
+            Err(error) => {
+                let warning = format!(
+                    "{label}视频预览缩略图处理未确认：{}；未自动扩大修复范围",
+                    error.1
+                );
+                tracing::warn!("[入库自动处理] {warning}");
+                warning_details.push(warning);
+                report["video_thumbnails"] = json!({"state":"unverified","reason":error.1});
+                report["video_thumbnails_repair"] =
+                    json!({"state":"skipped","reason":"未取得本次可验证的原生处理范围"});
             }
         }
     }
     if report.as_object().unwrap().is_empty() {
         return Ok(Value::Null);
     }
-    report["warnings"] = json!(warnings);
+    report["warnings"] = json!(warning_details.len());
+    report["warning_details"] = json!(warning_details);
     Ok(report)
 }
 
@@ -1214,6 +1308,7 @@ pub async fn process_moviepilot(
         crate::emby::idle(state, context).await?;
     }
     let mut groups = BTreeMap::<String, Vec<String>>::new();
+    let mut prepared_members = BTreeMap::<String, BTreeMap<String, String>>::new();
     let mut current = vec![];
     for file in &files {
         context.checkpoint().await?;
@@ -1264,6 +1359,10 @@ pub async fn process_moviepilot(
                 "MoviePilot 入库项目缺少父项目：{path}"
             )));
         }
+        prepared_members
+            .entry(id.clone())
+            .or_default()
+            .insert(string(&item, "Id"), string(&item, "Path"));
         let episodes = groups.entry(id).or_default();
         if item["Type"] == "Episode" {
             let episode = string(&item, "Id");
@@ -1347,13 +1446,10 @@ pub async fn process_moviepilot(
             Ok(()) => match crate::ingest::feedback(state, &id, &episodes, true, context).await {
                 Ok(result) => {
                     updated += result["updated"].as_u64().unwrap_or(0);
-                    if state.config.read().await["emby_webhook_ingest_enabled"] == true {
-                        state
-                            .webhooks
-                            .enhanced
-                            .lock()
-                            .await
-                            .insert(id.clone(), Instant::now());
+                    if state.config.read().await["emby_webhook_ingest_enabled"] == true
+                        && let Some(members) = prepared_members.get(&id)
+                    {
+                        state.webhooks.mark_enhanced(&id, members).await;
                     }
                     let current = if episodes.is_empty() {
                         vec![id.clone()]

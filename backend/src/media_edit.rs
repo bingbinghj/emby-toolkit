@@ -27,6 +27,7 @@ pub struct Target {
     pub kind: String,
     pub path: String,
     pub sha: Option<String>,
+    pub pc: Option<String>,
     pub asset: Value,
     pub versions: Vec<Value>,
     pub candidates: Vec<PathBuf>,
@@ -78,7 +79,7 @@ pub async fn build(
     id: &str,
     path: &str,
     mut sha: Option<String>,
-    pc: Option<String>,
+    mut pc: Option<String>,
 ) -> Result<Target> {
     let config = state.config.read().await.clone();
     let local_root = string(&config, "local_strm_root");
@@ -89,6 +90,9 @@ pub async fn build(
         .bind(&pc).bind(&sha).bind(&paths).fetch_optional(&state.db).await?;
     if let Some(cache) = &cache {
         sha = sha.or(cache.try_get("sha1")?);
+        pc = pc.or(cache
+            .try_get::<Option<String>, _>("pick_code")?
+            .filter(|pc| !pc.is_empty()));
     }
     let cache_path = cache
         .as_ref()
@@ -101,6 +105,7 @@ pub async fn build(
         kind: String::new(),
         path: path.into(),
         sha,
+        pc,
         asset: json!({}),
         versions: vec![],
         candidates,
@@ -183,7 +188,10 @@ pub async fn target(state: &AppState, id: &str) -> Result<Target> {
     if let Some(target) = database_target(state, id).await? {
         return Ok(target);
     }
-    let part = details(state, id, "Type,ExtraType,ParentId,Path,MediaSources").await?;
+    let part = details(state, id, "Id,Type,ExtraType,ParentId,Path,MediaSources").await?;
+    if part["Id"] != id {
+        return Err(ApiError::bad("Emby额外分段身份与请求不一致，已停止读取"));
+    }
     let parent = string(&part, "ParentId");
     if part["Type"] != "Video" || part["ExtraType"] != "AdditionalPart" || parent.is_empty() {
         return Err(ApiError(
@@ -194,9 +202,8 @@ pub async fn target(state: &AppState, id: &str) -> Result<Target> {
     let parent_target = database_target(state, &parent)
         .await?
         .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "额外分段的父电影不可编辑".into()))?;
-    let path = part["MediaSources"][0]["Path"]
+    let path = part["Path"]
         .as_str()
-        .or_else(|| part["Path"].as_str())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| ApiError::bad("额外分段缺少媒体路径"))?;
     let mut target = build(state, id, path, None, None).await?;

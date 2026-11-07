@@ -808,14 +808,33 @@ struct DeleteResource {
     fid: String,
     source: String,
 }
-async fn verify_delete_resources(state: &AppState, resources: &[DeleteResource]) -> Result<()> {
+fn same_pickcode(left: Option<&str>, right: Option<&str>) -> bool {
+    left == right
+        || matches!(
+            (left.and_then(crate::fingerprints::file_id), right.and_then(crate::fingerprints::file_id)),
+            (Some(left), Some(right)) if left == right
+        )
+}
+async fn verify_delete_resources(
+    state: &AppState,
+    resources: &[DeleteResource],
+    remaining: &[String],
+) -> Result<()> {
     for resource in resources {
         let current = media_edit::target(state, &resource.target.id).await?;
+        let live = details(state, &resource.target.id, "Id,Path").await?;
+        if live["Id"] != current.id || string(&live, "Path") != current.path {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "Emby媒体身份或路径在准备删除期间变化，已停止删除".into(),
+            ));
+        }
         let source = crate::media_paths::strm_target(resource.local.to_str().unwrap_or(""))
             .await
             .unwrap_or(current.path.clone());
         if current.path != resource.target.path
             || current.sha != resource.target.sha
+            || !same_pickcode(current.pc.as_deref(), resource.target.pc.as_deref())
             || current.asset != resource.target.asset
             || source != resource.source
             || !resource.local.is_file()
@@ -824,6 +843,95 @@ async fn verify_delete_resources(state: &AppState, resources: &[DeleteResource])
                 StatusCode::CONFLICT,
                 "文件身份在准备删除期间变化，已停止删除".into(),
             ));
+        }
+        if !resource.fid.is_empty() {
+            let fid = resource
+                .fid
+                .parse()
+                .map_err(|_| ApiError::bad("115文件ID无效，已停止删除"))?;
+            let raw = crate::p115::file_info(state, fid).await?;
+            if crate::revalidation::is_directory(&raw) {
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    "115实时文件信息明确指向目录，已停止媒体版本删除".into(),
+                ));
+            }
+            let cloud = crate::revalidation::normalized(&raw);
+            let cloud_id = string(&cloud, "id");
+            if !cloud_id.is_empty() && cloud_id.parse::<u64>().ok() != Some(fid) {
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    "115返回的文件ID与请求不一致，已停止媒体版本删除".into(),
+                ));
+            }
+            let source_pc = crate::fingerprints::pickcode(&source);
+            let expected_pc = resource.target.pc.as_deref().or(source_pc.as_deref());
+            if resource
+                .target
+                .sha
+                .as_ref()
+                .is_some_and(|sha| !string(&cloud, "sha1").eq_ignore_ascii_case(sha))
+                || expected_pc
+                    .is_some_and(|pc| !same_pickcode(Some(pc), Some(&string(&cloud, "pick_code"))))
+            {
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    "115实时文件身份与当前资产不一致或字段缺失，已停止删除，请先校验指纹".into(),
+                ));
+            }
+            crate::identity::verify(&resource.target.asset, &json!({"Size":cloud["size"]}))?;
+        }
+    }
+    for id in remaining {
+        let primary = delete_resource(state, id).await?;
+        let live = details(state, id, "Id,Path,PartCount,MediaSources").await?;
+        if live["Id"] != primary.target.id || string(&live, "Path") != primary.target.path {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "保留版本的Emby媒体身份或路径变化，已停止删除及分段范围判断".into(),
+            ));
+        }
+        let mut preserved = vec![primary];
+        if live["PartCount"].as_u64().unwrap_or(1) > 1 {
+            let ids = media_edit::additional_parts(state, id, &live)
+                .await?
+                .iter()
+                .map(|part| string(part, "Id"))
+                .filter(|part| !part.is_empty() && part != id)
+                .collect::<BTreeSet<_>>();
+            for id in ids {
+                preserved.push(delete_resource(state, &id).await?);
+            }
+        }
+        for preserved in preserved {
+            let source_pc = crate::fingerprints::pickcode(&preserved.source);
+            let preserved_ids = [
+                (!preserved.fid.is_empty()).then_some(preserved.fid.as_str()),
+                preserved.target.pc.as_deref(),
+                source_pc.as_deref(),
+            ];
+            for resource in resources {
+                let source_pc = crate::fingerprints::pickcode(&resource.source);
+                let selected_ids = [
+                    (!resource.fid.is_empty()).then_some(resource.fid.as_str()),
+                    resource.target.pc.as_deref(),
+                    source_pc.as_deref(),
+                ];
+                if resource.local == preserved.local
+                    || selected_ids.into_iter().flatten().any(|selected| {
+                        preserved_ids
+                            .iter()
+                            .flatten()
+                            .any(|preserved| same_pickcode(Some(selected), Some(*preserved)))
+                    })
+                {
+                    return Err(ApiError(
+                        StatusCode::CONFLICT,
+                        "删除版本与保留版本或额外分段共用源文件，已停止整个删除，请先整理版本绑定"
+                            .into(),
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -837,10 +945,13 @@ async fn delete_resource(state: &AppState, id: &str) -> Result<DeleteResource> {
         ));
     }
     let live = details(state, id, "Id,Path,Type,MediaSources").await?;
-    let path = live["Path"]
-        .as_str()
-        .filter(|p| !p.is_empty())
-        .unwrap_or(&target.path);
+    if live["Id"] != target.id || string(&live, "Path") != target.path {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "Emby媒体身份或路径与缓存不一致，请先同步媒体数据，已停止删除".into(),
+        ));
+    }
+    let path = target.path.as_str();
     let source = crate::media_paths::strm_target(path)
         .await
         .unwrap_or_else(|| path.into());
@@ -855,6 +966,30 @@ async fn delete_resource(state: &AppState, id: &str) -> Result<DeleteResource> {
         ],
     );
     let cache:Option<Value>=sqlx::query_scalar("SELECT to_jsonb(c) FROM p115_filesystem_cache c WHERE ($1::text IS NOT NULL AND pick_code=$1) OR ($1::text IS NULL AND $2::text IS NOT NULL AND UPPER(sha1)=UPPER($2)) OR ($1::text IS NULL AND $2::text IS NULL AND trim(both '/' from replace(local_path,chr(92),'/'))=ANY($3)) ORDER BY CASE WHEN pick_code=$1 THEN 0 ELSE 1 END LIMIT 1").bind(pc.as_ref()).bind(&target.sha).bind(&candidates).fetch_optional(&state.db).await?;
+    if let Some(cache) = &cache {
+        if cache["is_dir"] == true {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "115缓存指向目录，已停止媒体版本删除".into(),
+            ));
+        }
+        let cache_sha = string(cache, "sha1");
+        let cache_pc = string(cache, "pick_code");
+        if target
+            .sha
+            .as_ref()
+            .is_some_and(|sha| !cache_sha.is_empty() && !cache_sha.eq_ignore_ascii_case(sha))
+            || target
+                .pc
+                .as_ref()
+                .is_some_and(|pc| !cache_pc.is_empty() && !same_pickcode(Some(pc), Some(&cache_pc)))
+        {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "115缓存文件身份与原绑定不一致，已停止删除，请先同步或校验指纹".into(),
+            ));
+        }
+    }
     let mut paths = vec![PathBuf::from(path), PathBuf::from(&target.path)];
     if let Some(cache) = &cache {
         let logical = string(cache, "local_path");
@@ -898,6 +1033,16 @@ async fn delete_resource(state: &AppState, id: &str) -> Result<DeleteResource> {
     let source = crate::media_paths::strm_target(local.to_str().unwrap_or(""))
         .await
         .unwrap_or(source);
+    let pc = crate::fingerprints::pickcode(&source);
+    if target.pc.as_ref().is_some_and(|expected| {
+        pc.as_ref()
+            .is_some_and(|pc| !same_pickcode(Some(pc), Some(expected)))
+    }) {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "STRM来源与原绑定PickCode不一致，已停止删除，请先同步或校验指纹".into(),
+        ));
+    }
     let fid = cache
         .as_ref()
         .map(|c| string(c, "id"))
@@ -1267,14 +1412,15 @@ pub async fn delete_version(
     let mut deleted = false;
     let mut committed = false;
     let mut recovery_failed = false;
+    let mut warning_details = vec![];
     let outcome=crate::strm::with_settings(state,"preserve",|| async {
         let result = std::panic::AssertUnwindSafe(async {
         context.checkpoint().await?;
-        verify_delete_resources(state, &resources).await?;
+        verify_delete_resources(state, &resources, &remaining).await?;
         state.emby(Method::POST,&format!("Videos/{}/AlternateSources/Delete",versions[0]),&[],None).await?;split=true;
         let survivors=crate::versions::existing(state,&versions).await?;if versions.iter().any(|v|!survivors.contains(v)){return Err(ApiError::bad("Emby版本组拆分后未保留全部版本，源文件未删除"));}
         context.checkpoint().await?;
-        verify_delete_resources(state, &resources).await?;
+        verify_delete_resources(state, &resources, &remaining).await?;
         // Finish source rollback/protection after this point even if a stop is requested.
         state.webhooks.mark_manual_delete(&versions).await;
         state.emby(Method::DELETE,&format!("Items/{id}"),&[],None).await?;deleted=true;
@@ -1284,10 +1430,14 @@ pub async fn delete_version(
         snapshot.restore(false).await?;
         if !fids.is_empty(){sqlx::query("DELETE FROM p115_filesystem_cache WHERE id=ANY($1)").bind(fids.iter().cloned().collect::<Vec<_>>()).execute(&state.db).await?;}
         crate::versions::unbind(state,&[id.into()]).await?;
-        let merge_warning=if regroup(state,&remaining).await.is_err(){"；剩余版本重新合并失败，请手动刷新版本组"}else{""};
+        if let Err(error) = regroup(state,&remaining).await {
+            let warning = format!("剩余版本重新合并失败：{}，源文件已保护，请重新合并版本组",error.1);
+            tracing::warn!("[版本删除] {warning}");
+            warning_details.push(warning);
+        }
         crate::media_save::refresh(state,&snapshot.targets.iter().map(|p|p.to_string_lossy().into_owned()).collect::<Vec<_>>()).await?;
         for (i,delay)in protection_delays.iter().enumerate(){context.update(85+(14*(i+1)/protection_delays.len())as u64,"保护剩余版本","正在安全收尾，恢复外部增量任务可能误删的剩余版本文件").await;tokio::time::sleep(*delay).await;snapshot.restore(false).await?;}
-        Ok(json!({"message":format!("指定媒体版本已删除，115、STRM、媒体信息和Emby已刷新{merge_warning}"),"deleted_item_id":id,"remaining_item_id":remaining.first()}))
+        Ok(json!({"message":format!("指定媒体版本已删除，115、STRM、媒体信息和Emby已刷新{}",if warning_details.is_empty(){String::new()}else{format!("；收尾有 {} 条警告，请查看任务结果",warning_details.len())}),"deleted_item_id":id,"remaining_item_id":remaining.first(),"warnings":warning_details.len(),"warning_details":warning_details}))
         }).catch_unwind().await.unwrap_or_else(|_| Err(ApiError::bad("版本删除执行异常")));
     if !deleted {
         state.webhooks.clear_manual_delete(&versions).await;
@@ -1305,8 +1455,11 @@ pub async fn delete_version(
                 format!("版本删除恢复失败，备份已保留：{}", snapshot.stage.display()),
             ));
         }
-        if split && !deleted {
-            let _ = regroup(state, &versions).await;
+        if split && !deleted && let Err(error) = regroup(state, &versions).await {
+            recovery_failed = true;
+            let original = result.as_ref().err().map(|error|error.1.as_str()).unwrap_or("版本删除未完成");
+            tracing::error!("[版本删除] {original}；原版本组合并恢复失败：{}，备份保留在 {}",error.1,snapshot.stage.display());
+            return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR,format!("{original}；原版本组合并恢复失败：{}，备份已保留：{}",error.1,snapshot.stage.display())));
         }
     }
         result
