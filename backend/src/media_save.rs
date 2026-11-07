@@ -58,6 +58,7 @@ struct Prepared {
     target: Target,
     info: Value,
     path: String,
+    source: Option<String>,
     final_path: PathBuf,
     stage: Option<PathBuf>,
     chapters: Value,
@@ -111,6 +112,7 @@ async fn prepare(state: &AppState, target: Target, mut info: Value) -> Result<Pr
     })?;
     media_info::preserve_chapters(&mut info, &chapters)?;
     Ok(Prepared {
+        source: crate::media_paths::strm_target(&path).await,
         target,
         info,
         path,
@@ -144,6 +146,9 @@ async fn stage_all(
             media_edit::details(state, &item.target.id, "Path,Size,MediaSources,Chapters").await?;
         if string(&current, "Path") != item.path {
             return Err(ApiError::bad("Emby路径在准备保存期间变化，未清理Emby数据"));
+        }
+        if crate::media_paths::strm_target(&item.path).await != item.source {
+            return Err(ApiError::bad("STRM目标在准备保存期间变化，未清理Emby数据"));
         }
         identity::verify(
             &serde_json::json!({"size_bytes":current["Size"]}),
@@ -334,6 +339,23 @@ pub async fn save_with_rebuilt(
     rebuilt: &BTreeMap<String, Value>,
     context: &JobContext,
 ) -> Result<(u16, Value)> {
+    save_inner(state, id, body, rebuilt, Some(context)).await
+}
+pub(crate) async fn save_titles(
+    state: &AppState,
+    id: &str,
+    body: &Value,
+    context: Option<&JobContext>,
+) -> Result<(u16, Value)> {
+    save_inner(state, id, body, &BTreeMap::new(), context).await
+}
+async fn save_inner(
+    state: &AppState,
+    id: &str,
+    body: &Value,
+    rebuilt: &BTreeMap<String, Value>,
+    context: Option<&JobContext>,
+) -> Result<(u16, Value)> {
     let mut ids = vec![id.to_string()];
     for value in body["target_item_ids"].as_array().into_iter().flatten() {
         if let Some(value) = value.as_str().filter(|s| !s.trim().is_empty())
@@ -356,20 +378,25 @@ pub async fn save_with_rebuilt(
     let mut reports = vec![];
     let mut saved = vec![];
     for (index, target_id) in ids.iter().enumerate() {
-        context.checkpoint().await?;
-        context
-            .update(
-                5 + 20 * index as u64 / ids.len() as u64,
-                "核对媒体信息",
-                &format!("核对媒体信息 {}/{}", index + 1, ids.len()),
-            )
-            .await;
+        if let Some(context) = context {
+            context.checkpoint().await?;
+        }
+        if let Some(context) = context {
+            context
+                .update(
+                    5 + 20 * index as u64 / ids.len() as u64,
+                    "核对媒体信息",
+                    &format!("核对媒体信息 {}/{}", index + 1, ids.len()),
+                )
+                .await;
+        }
         let result=async {
             let target=if rebuilt.is_empty(){media_edit::target(state,target_id).await?}else{media_edit::repair_target(state,target_id).await?};
             let original=if let Some(info)=rebuilt.get(target_id){info.clone()}else{media_edit::load(state,&target).await?};
             if target_id==id {
                 if let Some(sha)=body.get("sha1") && text(sha).to_uppercase()!=target.sha.clone().unwrap_or_default().to_uppercase() {return Err(ApiError::bad("当前文件指纹已变化，请重新打开编辑器"));}
                 if body["media_path"].as_str().is_some_and(|p|!p.is_empty() && p!=target.path) {return Err(ApiError::bad("当前文件路径已变化，请重新打开编辑器"));}
+                if let Some(source) = body["strm_source"].as_str() && crate::media_paths::strm_target(&target.path).await.unwrap_or_default() != source { return Err(ApiError::bad("STRM目标已变化，未清理Emby数据")); }
             }
             identity::verify(&target.asset,if target_id==id {&body["mediainfo"]} else {&original})?;
             let info=if let Some(info)=rebuilt.get(target_id){info.clone()}
@@ -445,7 +472,9 @@ pub async fn save_with_rebuilt(
     let mut prepared = prepared.into_iter().collect::<Vec<_>>();
     prepared.sort_by_cached_key(|(id, _)| order.get(id).cloned());
     for (id, (target, info)) in prepared {
-        context.checkpoint().await?;
+        if let Some(context) = context {
+            context.checkpoint().await?;
+        }
         let prepared = prepare(state, target, info).await?;
         if prepared.multipart {
             let details = media_edit::details(state, &id, "MediaSources").await?;
@@ -476,17 +505,23 @@ pub async fn save_with_rebuilt(
         }
         restore.insert(id, prepared);
     }
-    context.update(35, "暂存", "暂存媒体信息和当前章节").await;
+    if let Some(context) = context {
+        context.update(35, "暂存", "暂存媒体信息和当前章节").await;
+    }
     let result = stage_all(state, &mut restore, &order).await;
     if let Err(error) = result {
         cleanup_stages(&restore).await;
         return Err(error);
     }
-    if let Err(error) = context.checkpoint().await {
+    if let Some(context) = context
+        && let Err(error) = context.checkpoint().await
+    {
         cleanup_stages(&restore).await;
         return Err(error);
     }
-    context.update(50, "清理缓存", "清理旧媒体信息缓存").await;
+    if let Some(context) = context {
+        context.update(50, "清理缓存", "清理旧媒体信息缓存").await;
+    }
     // Once clear starts, finish file/group restoration even if cancellation is requested.
     let mut ungrouped = vec![];
     let mut operation_failures = vec![];
@@ -507,12 +542,9 @@ pub async fn save_with_rebuilt(
             }
             ungrouped.push(group.clone());
         }
-        let clear = if multipart {
-            group.as_slice()
-        } else {
-            &group[..1]
-        };
-        for id in clear {
+        // ETK bindings may contain versions that Emby has not merged. Clear each
+        // prepared item instead of assuming the first ID clears the entire group.
+        for id in group {
             if let Err(error) = emby_post(state, &format!("Items/{id}/ClearMediaInfo"), &[]).await {
                 operation_failures.push(format!("{id}: {}", error.1));
                 break;
@@ -523,9 +555,11 @@ pub async fn save_with_rebuilt(
         }
     }
     tokio::time::sleep(Duration::from_secs(2)).await;
-    context
-        .update(65, "恢复媒体信息", "恢复全部受影响版本和分段 JSON")
-        .await;
+    if let Some(context) = context {
+        context
+            .update(65, "恢复媒体信息", "恢复全部受影响版本和分段 JSON")
+            .await;
+    }
     let mut ordered_restore = restore.iter().collect::<Vec<_>>();
     ordered_restore.sort_by_cached_key(|(id, _)| order.get(*id).cloned());
     for (id, item) in &ordered_restore {
@@ -557,60 +591,136 @@ pub async fn save_with_rebuilt(
             operation_failures.push(format!("更新 {} 展示字段失败: {error}",item.target.id));
         }
     }
-    let paths = restore.values().map(|p| p.path.clone()).collect::<Vec<_>>();
-    refresh(state, &paths).await?;
-    context
-        .update(90, "验收", "等待 Emby 回读媒体流和章节标记")
-        .await;
+    // Restore every affected file/group before observing cancellation. Refresh each
+    // actual item once; a parent scan can keep old complete streams or run for minutes.
+    for (id, _) in &ordered_restore {
+        let path = format!("Items/{id}/Refresh");
+        let query = [
+            ("Recursive", "false".into()),
+            ("MetadataRefreshMode", "Default".into()),
+            ("ImageRefreshMode", "Default".into()),
+            ("ReplaceAllImages", "false".into()),
+            ("ReplaceAllMetadata", "false".into()),
+        ];
+        let refresh = emby_post(state, &path, &query);
+        match tokio::time::timeout(Duration::from_secs(120), refresh).await {
+            Ok(Ok(())) => tracing::info!(
+                "[媒体信息保存] 媒体ID {id}：已提交目标媒体刷新，等待媒体流和章节实际恢复"
+            ),
+            Ok(Err(error)) => {
+                operation_failures.push(format!("{id}: 目标媒体刷新失败：{}", error.1))
+            }
+            Err(_) => operation_failures.push(format!("{id}: 目标媒体刷新请求超时")),
+        }
+    }
+    let mut deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    if let Some(context) = context {
+        context
+            .update(90, "验收", "等待 Emby 回读实际媒体流、标题和章节标记")
+            .await;
+    }
     let mut verification_failures = vec![];
-    for attempt in 0..3 {
-        verification_failures.clear();
-        for (id, item) in &ordered_restore {
-            match media_edit::details(state, id, "Type,Chapters,MediaSources,MediaStreams").await {
-                Ok(details) => {
-                    let has_streams = details["MediaStreams"]
-                        .as_array()
-                        .is_some_and(|s| !s.is_empty())
-                        || details["MediaSources"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .any(|s| s["MediaStreams"].as_array().is_some_and(|s| !s.is_empty()));
-                    if !has_streams {
-                        verification_failures.push(format!("{id}: Emby 媒体流为空"));
+    let mut heartbeat = tokio::time::Instant::now();
+    loop {
+        if let Some(context) = context {
+            let pause = tokio::time::Instant::now();
+            context.checkpoint().await?;
+            deadline += pause.elapsed();
+        }
+        let probe = async {
+            let mut failures = vec![];
+            for (id, item) in &ordered_restore {
+                match media_edit::details(state, id, "Path,Type,Chapters,MediaSources,MediaStreams")
+                    .await
+                {
+                    Ok(details) => {
+                        let source = crate::media_paths::strm_target(&item.path)
+                            .await
+                            .unwrap_or_default();
+                        let paths = [&item.path[..], &source[..]];
+                        if string(&details, "Path") != item.path {
+                            failures.push(format!("{id}: Emby 路径在恢复期间变化"));
+                        }
+                        failures.extend(
+                            media_info::stream_differences(&item.info, &details, &paths)
+                                .into_iter()
+                                .map(|reason| format!("{id}: {reason}")),
+                        );
+                        let empty = json!([]);
+                        let chapters =
+                            if details["Type"] == "Audio" && details["Chapters"].is_null() {
+                                &empty
+                            } else {
+                                &details["Chapters"]
+                            };
+                        if !media_info::chapters_restored(&item.chapters, chapters) {
+                            failures.push(format!("{id}: 章节或片头片尾标记缺失、变化或无法读取"));
+                        }
                     }
-                    let empty = json!([]);
-                    let chapters = if details["Type"] == "Audio" && details["Chapters"].is_null() {
-                        &empty
-                    } else {
-                        &details["Chapters"]
-                    };
-                    if !media_info::chapters_restored(&item.chapters, chapters) {
-                        verification_failures
-                            .push(format!("{id}: 章节或片头片尾标记缺失、变化或无法读取"));
-                    }
+                    Err(error) => failures.push(format!("{id}: 回读失败：{}", error.1)),
                 }
-                Err(error) => verification_failures.push(format!("{id}: 回读失败: {}", error.1)),
+            }
+            failures
+        };
+        let probe = tokio::time::timeout_at(deadline, probe);
+        let outcome = if let Some(context) = context {
+            tokio::select! {
+                _ = context.cancelled() => { context.checkpoint().await?; unreachable!() },
+                result = probe => result,
+            }
+        } else {
+            probe.await
+        };
+        if let Some(context) = context {
+            let pause = tokio::time::Instant::now();
+            context.checkpoint().await?;
+            deadline += pause.elapsed();
+        }
+        match outcome {
+            Ok(failures) => verification_failures = failures,
+            Err(_) => {
+                if verification_failures.is_empty() {
+                    verification_failures.push("Emby 媒体信息回读请求超时，尚未确认恢复".into());
+                }
+                break;
             }
         }
         if verification_failures.is_empty() {
             break;
         }
-        if attempt < 2 {
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            refresh(state, &paths).await?;
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        if heartbeat.elapsed() >= Duration::from_secs(15) {
+            tracing::info!(
+                "[媒体信息保存] 仍在等待 Emby 恢复：{}",
+                verification_failures.join("；")
+            );
+            heartbeat = tokio::time::Instant::now();
+        }
+        let delay = std::cmp::min(
+            Duration::from_secs(1),
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+        );
+        if let Some(context) = context {
+            tokio::select! {
+                _ = context.cancelled() => { context.checkpoint().await?; },
+                _ = tokio::time::sleep(delay) => {},
+            }
+        } else {
+            tokio::time::sleep(delay).await;
         }
     }
     if !verification_failures.is_empty() {
         return failed(
-            "媒体信息文件已恢复，但 Emby 媒体流或章节标记未完整恢复",
+            "媒体信息文件已恢复，但 120 秒内未确认 Emby 媒体流、标题和章节标记一致",
             &verification_failures,
             500,
         );
     }
     if !operation_failures.is_empty() {
         return failed(
-            "媒体信息文件已恢复，但 Emby 版本操作未完整成功",
+            "媒体信息文件已恢复，但清理、版本恢复或刷新收尾未完整成功",
             &operation_failures,
             500,
         );
@@ -628,7 +738,7 @@ pub async fn save_with_rebuilt(
     );
     Ok((
         if failures.is_empty() { 200 } else { 207 },
-        json!({"message":format!("媒体信息已更新，已恢复 {} 个版本 JSON，Emby 正在重新扫描",restore.len()),"failures":failures,"batch_reports":reports,"warnings":warnings}),
+        json!({"message":format!("媒体信息已更新，已恢复 {} 个版本 JSON，Emby 媒体流、标题和章节已通过回读验收",restore.len()),"failures":failures,"batch_reports":reports,"warnings":warnings}),
     ))
 }
 fn text(value: &Value) -> String {

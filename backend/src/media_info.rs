@@ -18,6 +18,123 @@ pub fn container(info: &Value) -> Option<&Value> {
     }
     root["MediaStreams"].is_array().then_some(root)
 }
+pub(crate) fn item_streams<'a>(item: &'a Value, paths: &[&str]) -> Option<&'a Vec<Value>> {
+    let sources = item["MediaSources"].as_array().filter(|v| !v.is_empty());
+    if let Some(sources) = sources {
+        let select = |normalized: bool| {
+            let matches = sources
+                .iter()
+                .filter(|source| {
+                    if source["ItemId"].as_str().is_some_and(|id| item["Id"] != id) {
+                        return false;
+                    }
+                    source["Path"].as_str().is_some_and(|path| {
+                        !path.is_empty()
+                            && paths.iter().any(|target| {
+                                !target.is_empty()
+                                    && if normalized {
+                                        let http = path.starts_with("http://")
+                                            || path.starts_with("https://")
+                                            || target.starts_with("http://")
+                                            || target.starts_with("https://");
+                                        (!http
+                                            || item["Id"]
+                                                .as_str()
+                                                .is_some_and(|id| source["ItemId"] == id))
+                                            && crate::media_paths::clean(path)
+                                                == crate::media_paths::clean(target)
+                                    } else {
+                                        path == *target
+                                    }
+                            })
+                    })
+                })
+                .collect::<Vec<_>>();
+            matches
+                .iter()
+                .find(|source| item["Id"].as_str().is_some_and(|id| source["ItemId"] == id))
+                .copied()
+                .or_else(|| (matches.len() == 1).then(|| matches[0]))
+        };
+        // Query parameters can identify different versions. Prefer the exact URL;
+        // accept a normalized alias only when its target version is unambiguous.
+        select(false)
+            .or_else(|| select(true))
+            .or_else(|| {
+                (sources.len() == 1 && sources[0]["Path"].as_str().is_none_or(str::is_empty))
+                    .then(|| &sources[0])
+                    .filter(|source| source["ItemId"].as_str().is_none_or(|id| item["Id"] == id))
+            })?
+            .get("MediaStreams")?
+            .as_array()
+    } else {
+        item["MediaStreams"].as_array()
+    }
+}
+pub(crate) fn stream_differences(info: &Value, item: &Value, paths: &[&str]) -> Vec<String> {
+    let Some(expected) = container(info).and_then(|source| source["MediaStreams"].as_array())
+    else {
+        return vec!["保存数据缺少媒体流".into()];
+    };
+    let Some(actual) = item_streams(item, paths) else {
+        return vec!["Emby 未返回目标版本的媒体流".into()];
+    };
+    let mut differences = vec![];
+    for (kind, label) in [("Video", "视频"), ("Audio", "音轨"), ("Subtitle", "字幕")] {
+        let expected = expected
+            .iter()
+            .filter(|s| s["Type"] == kind)
+            .collect::<Vec<_>>();
+        let actual = actual
+            .iter()
+            .filter(|s| s["Type"] == kind)
+            .collect::<Vec<_>>();
+        if expected.len() != actual.len() {
+            differences.push(format!(
+                "{label}数量不一致（期望 {}，实际 {}）",
+                expected.len(),
+                actual.len()
+            ));
+        }
+        for (index, (expected, actual)) in expected.iter().zip(&actual).enumerate() {
+            for (field, name) in [
+                ("Title", "标题"),
+                ("Codec", "编码"),
+                ("Language", "语言"),
+                ("Channels", "声道数"),
+                ("IsDefault", "默认标记"),
+                ("IsForced", "强制标记"),
+            ] {
+                if field == "Language" && expected.get(field).is_none() {
+                    continue;
+                }
+                let value = &expected[field];
+                if value.is_null() && !matches!(field, "Title" | "Language") {
+                    continue;
+                }
+                let matches = match field {
+                    "Title" => value.as_str().unwrap_or("") == actual[field].as_str().unwrap_or(""),
+                    "Codec" | "Language" => value
+                        .as_str()
+                        .unwrap_or("")
+                        .eq_ignore_ascii_case(actual[field].as_str().unwrap_or("")),
+                    "IsDefault" | "IsForced" => {
+                        value.as_bool().unwrap_or(false) == actual[field].as_bool().unwrap_or(false)
+                    }
+                    _ => value == &actual[field],
+                };
+                if !matches {
+                    differences.push(format!(
+                        "{label}#{} {name}不一致（期望 {value}，实际 {}）",
+                        index + 1,
+                        actual[field]
+                    ));
+                }
+            }
+        }
+    }
+    differences
+}
 pub fn streams_mut(info: &mut Value) -> Option<&mut Vec<Value>> {
     let root = if info.is_array() {
         info.as_array_mut()?.iter_mut().find(|v| v.is_object())?

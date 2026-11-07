@@ -757,6 +757,7 @@ pub async fn process_emby(
         }
     }?;
     let finalization = finalize(state, &id, &episodes, !episodes.is_empty(), context).await?;
+    add_report_warnings(&mut result, &finalization);
     result["finalization"] = finalization;
     if enhanced {
         state.webhooks.enhanced.lock().await.remove(&id);
@@ -774,17 +775,37 @@ pub async fn process_emby(
     )
     .await?;
     add_automatic_result(&mut result, automatic);
+    if result["warnings"].as_u64().unwrap_or(0) > 0 {
+        result["message"] = json!(format!(
+            "Emby 入库完成：已更新 {} 条记录，后处理有 {} 条警告，请查看任务结果",
+            result["updated"].as_u64().unwrap_or(0),
+            result["warnings"]
+        ));
+    }
     Ok(result)
+}
+
+fn add_report_warnings(result: &mut Value, report: &Value) {
+    let warnings = report["warnings"].as_u64().unwrap_or(0);
+    if warnings > 0 {
+        result["warnings"] = json!(result["warnings"].as_u64().unwrap_or(0) + warnings);
+    }
+    if let Some(details) = report["warning_details"].as_array() {
+        if !result["warning_details"].is_array() {
+            result["warning_details"] = json!([]);
+        }
+        result["warning_details"]
+            .as_array_mut()
+            .unwrap()
+            .extend(details.iter().cloned());
+    }
 }
 
 fn add_automatic_result(result: &mut Value, automatic: Value) {
     if automatic.is_null() {
         return;
     }
-    let warnings = automatic["warnings"].as_u64().unwrap_or(0);
-    if warnings > 0 {
-        result["warnings"] = json!(result["warnings"].as_u64().unwrap_or(0) + warnings);
-    }
+    add_report_warnings(result, &automatic);
     result["automatic_extraction"] = automatic;
 }
 
@@ -1123,6 +1144,8 @@ pub async fn process_moviepilot(
     );
     let mut updated = 0;
     let mut failures = vec![];
+    let mut finalizations = vec![];
+    let mut postprocessing = json!({});
     let mut automatic_series = false;
     let mut automatic_videos = false;
     let tmdb = string(event, "tmdb_id");
@@ -1330,7 +1353,10 @@ pub async fn process_moviepilot(
                     }
                     if state.config.read().await["emby_webhook_ingest_enabled"] != true {
                         match finalize(state, &id, &episodes, !known.is_empty(), context).await {
-                            Ok(_) => {
+                            Ok(report) => {
+                                add_report_warnings(&mut postprocessing, &report);
+                                finalizations
+                                    .push(json!({"item_id":id,"name":media_name,"report":report}));
                                 automatic_series |=
                                     item["Type"] == "Series" && !episodes.is_empty();
                                 automatic_videos |= item["Type"] == "Movie"
@@ -1364,8 +1390,9 @@ pub async fn process_moviepilot(
         }
     }
     tracing::info!(
-        "MoviePilot 后置增强处理结束：TMDb {tmdb}，更新 {updated} 条，失败 {} 项",
-        failures.len()
+        "MoviePilot 后置增强处理结束：TMDb {tmdb}，更新 {updated} 条，入库失败 {} 项，后处理警告 {} 条",
+        failures.len(),
+        postprocessing["warnings"].as_u64().unwrap_or(0)
     );
     let message = if failures.is_empty() {
         format!("MoviePilot 后置增强处理完成：已更新 {updated} 条记录")
@@ -1388,8 +1415,15 @@ pub async fn process_moviepilot(
     } else {
         Value::Null
     };
-    let mut result = json!({"updated":updated,"failures":failures,"message":message});
+    let mut result = json!({"updated":updated,"failures":failures,"finalizations":finalizations,"message":message});
+    add_report_warnings(&mut result, &postprocessing);
     add_automatic_result(&mut result, automatic);
+    if failures.is_empty() && result["warnings"].as_u64().unwrap_or(0) > 0 {
+        result["message"] = json!(format!(
+            "MoviePilot 入库完成：已更新 {updated} 条记录，后处理有 {} 条警告，请查看任务结果",
+            result["warnings"]
+        ));
+    }
     Ok(result)
 }
 
@@ -1469,6 +1503,7 @@ pub async fn finalize(
                 );
                 report
             }
+            Err(error) if context.is_cancelled() => return Err(error),
             Err(error) => {
                 tracing::warn!("当前入库音轨检查失败：《{media_name}》，{}", error.1);
                 json!({"failed":1,"error":error.1})
@@ -1503,31 +1538,91 @@ pub async fn finalize(
             "入库音轨字幕标题填充开始：《{media_name}》，Emby {id}，目标 {} 个",
             targets.len()
         );
-        crate::titles::fill_in_job(state, &targets, true, context).await?
+        match crate::titles::fill_in_job(state, &targets, true, context).await {
+            Ok(report) => report,
+            Err(error) if context.is_cancelled() => return Err(error),
+            Err(error) => {
+                tracing::warn!("入库音轨字幕标题处理失败：《{media_name}》，{}", error.1);
+                json!({"failed":1,"pending":[{"reason":error.1}]})
+            }
+        }
     } else {
         json!({})
     };
-    if let Some(cover_config) = crate::db::setting(&state.db, "cover_generator_config").await?
-        && cover_config["enabled"] == true
-        && cover_config["transfer_monitor"] != false
-        && let Some(library) = crate::emby::library_for_path(state, &string(&item, "Path")).await?
-        && let Err(error) =
-            crate::covers::generate(state, Some(&[string(&library, "ItemId")]), context).await
-    {
-        tracing::warn!("入库封面生成失败：《{media_name}》，{}", error.1);
+    let mut warning_details = vec![];
+    let title_warnings = title_report["failed"]
+        .as_u64()
+        .unwrap_or(0)
+        .max(list(&title_report["pending"]).len() as u64);
+    let fingerprint_warnings = fingerprint_report["failed"].as_u64().unwrap_or(0);
+    let audio_warnings = audio_report["failed"].as_u64().unwrap_or(0);
+    let mut warnings = title_warnings + fingerprint_warnings + audio_warnings;
+    for (count, reason) in [
+        (
+            title_warnings,
+            format!(
+                "音轨字幕标题：失败 {} 个媒体，待处理 {} 项",
+                title_report["failed"].as_u64().unwrap_or(0),
+                list(&title_report["pending"]).len()
+            ),
+        ),
+        (
+            fingerprint_warnings,
+            format!("资产指纹：仍有 {fingerprint_warnings} 个未补齐"),
+        ),
+        (
+            audio_warnings,
+            format!("音轨修复：仍有 {audio_warnings} 个失败"),
+        ),
+    ] {
+        if count > 0 {
+            warning_details.push(format!("《{media_name}》（媒体ID：{id}）{reason}"));
+        }
+    }
+    let cover = async {
+        if let Some(cover_config) = crate::db::setting(&state.db, "cover_generator_config").await?
+            && cover_config["enabled"] == true
+            && cover_config["transfer_monitor"] != false
+            && let Some(library) =
+                crate::emby::library_for_path(state, &string(&item, "Path")).await?
+        {
+            crate::covers::generate(state, Some(&[string(&library, "ItemId")]), context).await?;
+        }
+        Ok::<_, ApiError>(())
+    }
+    .await;
+    if let Err(error) = cover {
+        if context.is_cancelled() {
+            return Err(error);
+        }
+        warnings += 1;
+        let reason = format!(
+            "《{media_name}》（媒体ID：{id}）入库封面生成失败：{}",
+            error.1
+        );
+        tracing::warn!("{reason}");
+        warning_details.push(reason);
     }
     if let Err(error) =
         crate::notifications::media(state, &item, updated, episode_ids, &title_report).await
     {
-        tracing::warn!("入库通知失败：《{media_name}》，{}", error.1);
+        if context.is_cancelled() {
+            return Err(error);
+        }
+        warnings += 1;
+        let reason = format!("《{media_name}》（媒体ID：{id}）入库通知失败：{}", error.1);
+        tracing::warn!("{reason}");
+        warning_details.push(reason);
     }
     tracing::info!(
-        "入库收尾处理结束：Emby {id}，名称 {}，指纹未完成 {} 个，音轨失败 {} 个",
+        "入库收尾处理结束：Emby {id}，名称 {}，指纹未完成 {} 个，音轨修复失败 {} 个，标题失败 {} 个、待处理 {} 项，后处理警告 {warnings} 条",
         string(&item, "Name"),
-        fingerprint_report["failed"].as_u64().unwrap_or(0),
-        audio_report["failed"].as_u64().unwrap_or(0)
+        fingerprint_warnings,
+        audio_warnings,
+        title_report["failed"].as_u64().unwrap_or(0),
+        list(&title_report["pending"]).len()
     );
     Ok(
-        json!({"title_fill":title_report,"fingerprints":fingerprint_report,"audio_repair":audio_report}),
+        json!({"title_fill":title_report,"fingerprints":fingerprint_report,"audio_repair":audio_report,"warnings":warnings,"warning_details":warning_details}),
     )
 }

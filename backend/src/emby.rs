@@ -353,6 +353,16 @@ pub async fn items(
     Ok(result)
 }
 
+async fn checkpoint_deadline(
+    context: &JobContext,
+    deadline: &mut tokio::time::Instant,
+) -> Result<()> {
+    let before = tokio::time::Instant::now();
+    context.checkpoint().await?;
+    *deadline += before.elapsed();
+    Ok(())
+}
+
 pub async fn refresh_item(
     state: &AppState,
     id: &str,
@@ -389,10 +399,21 @@ pub async fn idle(state: &AppState, context: &JobContext) -> Result<()> {
         "update emby.apiclient",
         "merge multi versions",
     ];
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+    let mut deadline = tokio::time::Instant::now() + Duration::from_secs(300);
     loop {
-        context.checkpoint().await?;
-        let tasks = state.emby(Method::GET, "ScheduledTasks", &[], None).await?;
+        checkpoint_deadline(context, &mut deadline).await?;
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        let readback = tokio::select! {
+            _ = context.cancelled() => return context.checkpoint().await,
+            result = tokio::time::timeout_at(deadline, state.emby(Method::GET, "ScheduledTasks", &[], None)) => result,
+        };
+        checkpoint_deadline(context, &mut deadline).await?;
+        let tasks = match readback {
+            Ok(result) => result?,
+            Err(_) => break,
+        };
         if tasks.as_array().is_some_and(|tasks| {
             !tasks.iter().any(|task| {
                 task["State"] == "Running"
@@ -403,16 +424,30 @@ pub async fn idle(state: &AppState, context: &JobContext) -> Result<()> {
         }) {
             return Ok(());
         }
-        if tokio::time::Instant::now() >= deadline {
-            tracing::warn!("等待 Emby 空闲超时 (300s)，继续提交并验收实际刷新");
-            return Ok(());
+        let delay = Duration::from_secs(2)
+            .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+        tokio::select! {
+            _ = context.cancelled() => return context.checkpoint().await,
+            _ = tokio::time::sleep(delay) => {}
         }
-        context.sleep(Duration::from_secs(2)).await?;
     }
+    tracing::warn!("等待 Emby 空闲超时 (300s)，继续提交并验收实际刷新");
+    Ok(())
 }
 pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Result<()> {
-    context.checkpoint().await?;
-    let tasks = state.emby(Method::GET, "ScheduledTasks", &[], None).await?;
+    let started = tokio::time::Instant::now();
+    let mut deadline = started + Duration::from_secs(1800);
+    checkpoint_deadline(context, &mut deadline).await?;
+    let discovery = tokio::select! {
+        _ = context.cancelled() => return context.checkpoint().await,
+        result = tokio::time::timeout_at(deadline, state.emby(Method::GET, "ScheduledTasks", &[], None)) => result,
+    };
+    checkpoint_deadline(context, &mut deadline).await?;
+    let tasks = discovery.map_err(|_| {
+        ApiError::bad(format!(
+            "等待 Emby 计划任务超时：{key}（任务发现请求未完成）"
+        ))
+    })??;
     let task = tasks
         .as_array()
         .and_then(|tasks| tasks.iter().find(|t| t["Key"] == key))
@@ -438,7 +473,12 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
     } else {
         native_name
     };
-    let started = tokio::time::Instant::now();
+    let timeout = || {
+        ApiError::bad(format!(
+            "等待 Emby 计划任务超时：{task_name}（任务ID：{id}，已等待 {} 秒）",
+            started.elapsed().as_secs()
+        ))
+    };
     context
         .activity(
             "等待Emby计划任务",
@@ -453,22 +493,46 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
         )
         .await;
     if !running {
-        context.checkpoint().await?;
-        state
-            .emby(
-                Method::POST,
-                &format!("ScheduledTasks/Running/{id}"),
-                &[],
-                None,
-            )
-            .await?;
+        checkpoint_deadline(context, &mut deadline).await?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(timeout());
+        }
+        let path = format!("ScheduledTasks/Running/{id}");
+        let submission = tokio::select! {
+            _ = context.cancelled() => return context.checkpoint().await,
+            result = tokio::time::timeout_at(deadline, state.emby(Method::POST, &path, &[], None)) => result,
+        };
+        checkpoint_deadline(context, &mut deadline).await?;
+        submission.map_err(|_| timeout())??;
         tracing::info!(
             "[Emby计划任务] {task_name}（任务ID：{id}）启动请求已接收，等待本次执行结果"
         );
     }
-    for attempt in 0..900 {
-        context.sleep(Duration::from_secs(2)).await?;
-        let tasks = state.emby(Method::GET, "ScheduledTasks", &[], None).await?;
+    let mut next_notice = started;
+    loop {
+        checkpoint_deadline(context, &mut deadline).await?;
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        let delay = Duration::from_secs(2)
+            .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+        tokio::select! {
+            _ = context.cancelled() => return context.checkpoint().await,
+            _ = tokio::time::sleep(delay) => {}
+        }
+        checkpoint_deadline(context, &mut deadline).await?;
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        let readback = tokio::select! {
+            _ = context.cancelled() => return context.checkpoint().await,
+            result = tokio::time::timeout_at(deadline, state.emby(Method::GET, "ScheduledTasks", &[], None)) => result,
+        };
+        checkpoint_deadline(context, &mut deadline).await?;
+        let tasks = match readback {
+            Ok(result) => result?,
+            Err(_) => break,
+        };
         let task = tasks
             .as_array()
             .and_then(|tasks| tasks.iter().find(|t| t["Id"] == id))
@@ -481,7 +545,7 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
                     .as_str()
                     .unwrap_or("未知");
                 return Err(ApiError::bad(format!(
-                    "Emby 任务未成功完成：{key}（{status}）"
+                    "Emby 任务未成功完成：{task_name}（{status}）"
                 )));
             }
             tracing::info!(
@@ -490,7 +554,7 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
             );
             return Ok(());
         }
-        if attempt % 15 == 0 {
+        if tokio::time::Instant::now() >= next_notice {
             let state_name = match task["State"].as_str() {
                 Some("Running") => "运行中",
                 Some("Cancelling") => "正在停止",
@@ -506,12 +570,10 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
                     ),
                 )
                 .await;
+            next_notice = tokio::time::Instant::now() + Duration::from_secs(30);
         }
     }
-    Err(ApiError::bad(format!(
-        "等待 Emby 计划任务超时：{task_name}（任务ID：{id}，已等待 {} 秒）",
-        started.elapsed().as_secs()
-    )))
+    Err(timeout())
 }
 pub async fn library_for_path(state: &AppState, path: &str) -> Result<Option<Value>> {
     let folders = state
@@ -554,6 +616,8 @@ async fn wait_item_refresh(
     label: &str,
 ) -> Result<()> {
     let started = tokio::time::Instant::now();
+    let mut deadline = started + Duration::from_secs(120);
+    let mut next_notice = started + Duration::from_secs(15);
     let status = |trace: Option<&crate::media_extra::RefreshTrace>| match trace {
         Some(trace) if trace.pending_count() > 0 => {
             format!("已开始，尚有 {} 次目标刷新未结束", trace.pending_count())
@@ -564,57 +628,71 @@ async fn wait_item_refresh(
     context
         .activity(phase, &format!("{label}：请求已接收，等待实际刷新完成"))
         .await;
-    for attempt in 0..120 {
-        context.checkpoint().await?;
-        if let Some(previous) = previous {
-            let details = crate::media_edit::details(state, id, "DateLastRefreshed").await?;
-            let current = string(&details, "DateLastRefreshed").trim().to_string();
-            if !current.is_empty() && current != previous {
+    loop {
+        checkpoint_deadline(context, &mut deadline).await?;
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        // Bound the complete probe, including HTTP retries, by the same wall-clock deadline.
+        let probe = async {
+            if let Some(previous) = previous {
+                let details = crate::media_edit::details(state, id, "DateLastRefreshed").await?;
+                let current = string(&details, "DateLastRefreshed").trim().to_string();
+                if !current.is_empty() && current != previous {
+                    return Ok(Some("媒体刷新时间变化"));
+                }
+            }
+            if let Some(log_trace) = trace.as_mut() {
+                let completed = async {
+                    let logs = state
+                        .emby(
+                            Method::GET,
+                            "System/Logs/embyserver.txt/Lines",
+                            &[("Limit", "500".into())],
+                            None,
+                        )
+                        .await?;
+                    log_trace.feed(id, &logs)
+                }
+                .await;
+                match completed {
+                    Ok(true) => return Ok(Some("Emby 刷新完成日志")),
+                    Ok(false) => {}
+                    Err(error) if previous.is_some_and(|value| !value.is_empty()) => {
+                        tracing::warn!(
+                            "[入库刷新] {label} · {phase} 完成日志不可用，继续验收刷新时间：{}",
+                            error.1
+                        );
+                        trace = None;
+                    }
+                    Err(error) => {
+                        return Err(ApiError(
+                            error.0,
+                            format!("{label} · {phase} 刷新日志读取或验收失败：{}", error.1),
+                        ));
+                    }
+                }
+            }
+            Ok(None)
+        };
+        let completed = tokio::select! {
+            _ = context.cancelled() => return context.checkpoint().await,
+            result = tokio::time::timeout_at(deadline, probe) => result,
+        };
+        checkpoint_deadline(context, &mut deadline).await?;
+        match completed {
+            Ok(Ok(Some(source))) => {
                 tracing::info!(
-                    "[入库刷新] {label} · {phase} 已确认完成（依据：媒体刷新时间变化，等待 {} 秒）",
+                    "[入库刷新] {label} · {phase} 已确认完成（依据：{source}，等待 {} 秒）",
                     started.elapsed().as_secs()
                 );
                 return Ok(());
             }
+            Ok(Ok(None)) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(_) => break,
         }
-        if let Some(log_trace) = trace.as_mut() {
-            let completed = async {
-                let logs = state
-                    .emby(
-                        Method::GET,
-                        "System/Logs/embyserver.txt/Lines",
-                        &[("Limit", "500".into())],
-                        None,
-                    )
-                    .await?;
-                log_trace.feed(id, &logs)
-            }
-            .await;
-            match completed {
-                Ok(true) => {
-                    tracing::info!(
-                        "[入库刷新] {label} · {phase} 已确认完成（依据：Emby 刷新完成日志，等待 {} 秒）",
-                        started.elapsed().as_secs()
-                    );
-                    return Ok(());
-                }
-                Ok(false) => {}
-                Err(error) if previous.is_some_and(|value| !value.is_empty()) => {
-                    tracing::warn!(
-                        "[入库刷新] {label} · {phase} 完成日志不可用，继续验收刷新时间：{}",
-                        error.1
-                    );
-                    trace = None;
-                }
-                Err(error) => {
-                    return Err(ApiError(
-                        error.0,
-                        format!("{label} · {phase} 刷新日志读取或验收失败：{}", error.1),
-                    ));
-                }
-            }
-        }
-        if attempt > 0 && attempt % 15 == 0 {
+        if tokio::time::Instant::now() >= next_notice {
             context
                 .activity(
                     phase,
@@ -625,8 +703,14 @@ async fn wait_item_refresh(
                     ),
                 )
                 .await;
+            next_notice = tokio::time::Instant::now() + Duration::from_secs(15);
         }
-        context.sleep(Duration::from_secs(1)).await?;
+        let delay = Duration::from_secs(1)
+            .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+        tokio::select! {
+            _ = context.cancelled() => return context.checkpoint().await,
+            _ = tokio::time::sleep(delay) => {}
+        }
     }
     Err(ApiError::bad(format!(
         "{label} · {phase} 等待超时（已等待 {} 秒；{}）",
@@ -741,9 +825,9 @@ pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobConte
     let trace = crate::media_extra::RefreshTrace::new(position);
     context.checkpoint().await?;
     tracing::debug!(
-        "[顶层NFO扫描] {label}：立即刷新根目录 {series_path}，递归是，元数据/图片使用默认刷新，全部替换否；刷新日志起始行 {position}"
+        "[顶层NFO扫描] {label}：仅刷新剧集根项目 {series_path}，递归否，元数据/图片使用默认刷新，全部替换否；刷新日志起始行 {position}"
     );
-    refresh_item(state, &id, true, context)
+    refresh_item(state, &id, false, context)
         .await
         .map_err(|error| {
             ApiError(
@@ -751,9 +835,7 @@ pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobConte
                 format!("{label}：顶层NFO扫描请求失败：{}", error.1),
             )
         })?;
-    tracing::info!(
-        "[顶层NFO扫描] {label}：目录刷新请求已接收，等待本次开始与完成日志；ETK仅重读NFO文件"
-    );
+    tracing::info!("[顶层NFO扫描] {label}：剧集根项目刷新请求已接收，等待本次开始与完成日志");
     wait_item_refresh(
         state,
         &id,
@@ -791,10 +873,24 @@ pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobConte
     tracing::info!("[年份验收] {label}：NFO首播年份 {year}，需要连续3次一致；保留原连载状态");
     let mut stable = 0;
     let mut corrections = 0;
-    for _ in 0..30 {
-        context.checkpoint().await?;
-        let mut details =
-            crate::media_edit::details(state, &id, "ProductionYear,EndDate,Status").await?;
+    let mut deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        checkpoint_deadline(context, &mut deadline).await?;
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        let readback = tokio::select! {
+            _ = context.cancelled() => return context.checkpoint().await,
+            result = tokio::time::timeout_at(
+                deadline,
+                crate::media_edit::details(state, &id, "ProductionYear,EndDate,Status"),
+            ) => result,
+        };
+        checkpoint_deadline(context, &mut deadline).await?;
+        let mut details = match readback {
+            Ok(result) => result?,
+            Err(_) => break,
+        };
         if details["ProductionYear"].as_i64() == Some(year as i64)
             && details["EndDate"].as_str().is_none_or(str::is_empty)
         {
@@ -829,15 +925,36 @@ pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobConte
                 ] {
                     details.as_object_mut().unwrap().remove(key);
                 }
-                state
-                    .emby(Method::POST, &format!("Items/{id}"), &[], Some(details))
-                    .await?;
+                checkpoint_deadline(context, &mut deadline).await?;
+                if tokio::time::Instant::now() >= deadline {
+                    break;
+                }
+                let path = format!("Items/{id}");
+                let correction = tokio::select! {
+                    _ = context.cancelled() => return context.checkpoint().await,
+                    result = tokio::time::timeout_at(
+                        deadline,
+                        state.emby(Method::POST, &path, &[], Some(details)),
+                    ) => result,
+                };
+                checkpoint_deadline(context, &mut deadline).await?;
+                match correction {
+                    Ok(result) => {
+                        result?;
+                    }
+                    Err(_) => break,
+                }
             }
         }
-        context.sleep(Duration::from_secs(1)).await?;
+        let delay = Duration::from_secs(1)
+            .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+        tokio::select! {
+            _ = context.cancelled() => return context.checkpoint().await,
+            _ = tokio::time::sleep(delay) => {}
+        }
     }
     Err(ApiError::bad(format!(
-        "{label}：电视剧首播年份未稳定，无法确认入库收尾完成"
+        "{label}：首播年份验收超时（30秒内未连续3次确认年份 {year}、结束日期为空），无法确认入库收尾完成"
     )))
 }
 

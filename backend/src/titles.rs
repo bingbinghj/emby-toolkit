@@ -12,7 +12,6 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeSet, HashSet},
     path::Path,
-    time::Duration,
 };
 
 fn protected(path: &Path) -> bool {
@@ -73,41 +72,49 @@ fn expected_titles(info: &Value, report: &Value) -> Vec<Value> {
     expected
 }
 fn mismatches(expected: &[Value], item: &Value, paths: &[&str]) -> Vec<Value> {
-    let sources = list(&item["MediaSources"]);
-    let streams = sources
-        .iter()
-        .find(|s| s["Path"].as_str().is_some_and(|path| paths.contains(&path)))
-        .or_else(|| {
-            (sources.len() == 1 && string(&sources[0], "Path").is_empty()).then(|| &sources[0])
-        })
-        .and_then(|s| s["MediaStreams"].as_array())
-        .or_else(|| {
-            if sources.is_empty() {
-                item["MediaStreams"].as_array()
-            } else {
-                None
-            }
-        });
+    let streams = media_info::item_streams(item, paths);
     expected
         .iter()
-        .filter(|entry| {
-            let stream = streams.and_then(|s| {
-                s.iter()
-                    .filter(|v| v["Type"] == entry["type"])
+        .filter_map(|entry| {
+            let stream = streams.and_then(|streams| {
+                streams
+                    .iter()
+                    .filter(|s| s["Type"] == entry["type"])
                     .nth(entry["ordinal"].as_u64().unwrap() as usize - 1)
             });
-            stream.is_none_or(|s| {
-                s["Title"] != entry["title"]
-                    || entry["codec"].as_str().is_some_and(|c| {
-                        s["Codec"]
+            let reason = match stream {
+                None => Some("Emby 未返回目标版本的对应轨道".to_string()),
+                Some(stream) if stream["Title"] != entry["title"] => Some(format!(
+                    "标题不一致（期望 {}，实际 {}）",
+                    entry["title"], stream["Title"]
+                )),
+                Some(stream)
+                    if entry["codec"].as_str().is_some_and(|codec| {
+                        stream["Codec"]
                             .as_str()
-                            .is_none_or(|v| !v.eq_ignore_ascii_case(c))
-                    })
+                            .is_none_or(|actual| !actual.eq_ignore_ascii_case(codec))
+                    }) =>
+                {
+                    Some(format!(
+                        "轨道编码不一致（期望 {}，实际 {}）",
+                        entry["codec"], stream["Codec"]
+                    ))
+                }
+                _ => None,
+            };
+            reason.map(|reason| {
+                let mut entry = entry.clone();
+                entry["reason"] = json!(reason);
+                entry["actual_title"] =
+                    stream.map_or(Value::Null, |stream| stream["Title"].clone());
+                entry["actual_codec"] =
+                    stream.map_or(Value::Null, |stream| stream["Codec"].clone());
+                entry
             })
         })
-        .cloned()
         .collect()
 }
+
 async fn checkpoint(context: Option<&JobContext>) -> Result<()> {
     if let Some(context) = context {
         context.checkpoint().await?;
@@ -190,9 +197,7 @@ async fn fill_inner(
         return Ok(result);
     };
     let mappings = crate::db::setting(&state.db, "language_mapping")
-        .await
-        .ok()
-        .flatten()
+        .await?
         .unwrap_or(json!([]));
     let mut processed = HashSet::new();
     for id in ids.iter().collect::<BTreeSet<_>>() {
@@ -237,6 +242,9 @@ async fn fill_inner(
                 if !path.starts_with(&root) || protected(&path) || processed.contains(&path) || !path.is_file() { continue; }
                 let original: Value = serde_json::from_slice(&tokio::fs::read(&path).await?).map_err(|_| ApiError::bad("媒体信息 JSON 无效"))?;
                 identity::verify(&target.asset, &original)?;
+                if !media_info::recoverable(&original) || !crate::media_paths::matches_container(&original, &target.path) {
+                    return Err(ApiError::bad("本地媒体信息不可恢复或与当前媒体文件格式不一致，未清理 Emby 数据"));
+                }
                 let (updated, report) = language::fill(&original, &mappings, skip_chinese);
                 pending.extend(list(&report["pending"]).into_iter().map(|mut entry| {
                     entry["file"] = json!(Path::new(&target.path).file_name().unwrap_or_default().to_string_lossy());
@@ -256,10 +264,11 @@ async fn fill_inner(
                             tracing::warn!("[语言标题] {label} 本地 JSON 已保存，缓存同步失败：{error}");
                     }
                 }
-                expected = Some(expected_titles(&updated, &report));
+                let titles = expected_titles(&updated, &report);
+                expected = Some((updated, titles));
                 break;
             }
-            let Some(expected) = expected else {
+            let Some((updated, expected)) = expected else {
                 pending.push(annotate(json!({"reason":"未找到本地媒体信息 JSON"})));
                 return Ok((true, 0));
             };
@@ -273,21 +282,19 @@ async fn fill_inner(
             checkpoint(context).await?;
             let readback = async {
                 if let Some(context) = context {
-                    context.activity("提交标题刷新", &format!("正在通知 Emby 重新读取 {label} 的 {} 条标题", expected.len())).await;
+                    context.activity("恢复标题到 Emby", &format!("正在通过受控媒体信息保存恢复 {label} 的 {} 条标题", expected.len())).await;
                 }
-                crate::media_save::refresh(state, &[string(&item, "Path")]).await?;
-                let mut missing = expected.clone();
-                for attempt in 0..3 {
-                    if let Some(context) = context {
-                        let tracks = missing.iter().map(track_label).collect::<Vec<_>>().join("；");
-                        context.activity("等待标题回读", &format!("正在验收 {label}，第 {}/3 次回读：{tracks}", attempt + 1)).await;
-                    }
-                    let live = media_edit::details(state, id, "MediaSources,MediaStreams").await?;
-                    missing = mismatches(&expected, &live, &source_paths);
-                    if missing.is_empty() { break; }
-                    if attempt < 2 { tokio::time::sleep(Duration::from_secs(1)).await; }
+                let body = json!({"mediainfo":updated,"media_path":target.path,"sha1":target.sha,"strm_source":strm_source});
+                let (status, report) = crate::media_save::save_titles(state, id, &body, context).await?;
+                if status >= 400 {
+                    return Err(ApiError::bad(format!("{}；{}", string(&report, "error"), list(&report["failures"]).iter().filter_map(Value::as_str).collect::<Vec<_>>().join("；"))));
                 }
-                Ok::<_, ApiError>(missing)
+                checkpoint(context).await?;
+                if let Some(context) = context {
+                    context.activity("标题回读验收", &format!("正在核对 {label} 的实际音轨和字幕标题")).await;
+                }
+                let live = media_edit::details(state, id, "MediaSources,MediaStreams").await?;
+                Ok::<_, ApiError>(mismatches(&expected, &live, &source_paths))
             }.await;
             match readback {
                 Ok(missing) if missing.is_empty() => {
@@ -298,12 +305,12 @@ async fn fill_inner(
                 }
                 Ok(missing) => {
                     pending.extend(missing.into_iter().map(|mut entry| {
-                        entry["reason"] = json!(format!("本地标题已保存，但 Emby 回读标题未一致（期望：{}），请重新读取后检查", string(&entry, "title")));
+                        entry["reason"] = json!(format!("本地标题已保存，但 Emby 回读标题未一致：{}", string(&entry, "reason")));
                         annotate(entry)
                     }));
                     Err(ApiError::bad("Emby 回读标题未一致"))
                 }
-                Err(error) => Err(ApiError::bad(format!("本地标题已保存，通知 Emby 重新读取或回读失败：{}", error.1))),
+                Err(error) => Err(ApiError::bad(format!("本地标题已保存，恢复到 Emby 或回读验收失败：{}", error.1))),
             }
         }.await;
         result["changed_items"] =
