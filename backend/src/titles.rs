@@ -99,7 +99,45 @@ fn preserve_skipped_titles(
         .ok_or_else(|| ApiError::bad("无法确认当前Emby中文字幕，已停止自动保存，未覆盖原标题"))?;
     let streams = media_info::streams_mut(info)
         .ok_or_else(|| ApiError::bad("本地媒体信息缺少字幕流，无法保护当前中文字幕标题"))?;
+    let original_subtitles = streams
+        .iter()
+        .filter(|stream| stream["Type"] == "Subtitle")
+        .collect::<Vec<_>>();
+    let current_subtitles = live
+        .iter()
+        .filter(|stream| stream["Type"] == "Subtitle")
+        .collect::<Vec<_>>();
+    if original_subtitles.len() != current_subtitles.len() {
+        return Err(ApiError::bad(format!(
+            "Emby字幕范围变化（本地 {} 条，当前 {} 条），已停止自动保存，未覆盖原标题",
+            original_subtitles.len(),
+            current_subtitles.len()
+        )));
+    }
+    if original_subtitles
+        .iter()
+        .zip(&current_subtitles)
+        .any(|(original, current)| {
+            original["Codec"]
+                .as_str()
+                .filter(|codec| !codec.is_empty())
+                .is_none_or(|codec| {
+                    current["Codec"]
+                        .as_str()
+                        .is_none_or(|actual| !actual.eq_ignore_ascii_case(codec))
+                })
+                || original["IsExternal"].as_bool().unwrap_or(false)
+                    != current["IsExternal"].as_bool().unwrap_or(false)
+        })
+    {
+        return Err(ApiError::bad(
+            "Emby中文字幕编码与本地记录不一致，或字幕内外置身份变化，已停止自动保存，未覆盖原标题",
+        ));
+    }
     for entry in skipped {
+        if entry["type"] != "Subtitle" {
+            return Err(ApiError::bad("中文字幕类型无效，已停止自动保存"));
+        }
         let index = entry["ordinal"]
             .as_u64()
             .and_then(|n| n.checked_sub(1))
@@ -115,20 +153,6 @@ fn preserve_skipped_titles(
             .filter(|s| s["Type"] == entry["type"])
             .nth(index)
             .ok_or_else(|| ApiError::bad("Emby中文字幕范围变化，已停止自动保存"))?;
-        if entry["type"] != "Subtitle"
-            || original["Codec"]
-                .as_str()
-                .filter(|codec| !codec.is_empty())
-                .is_none_or(|codec| {
-                    current["Codec"]
-                        .as_str()
-                        .is_none_or(|actual| !actual.eq_ignore_ascii_case(codec))
-                })
-        {
-            return Err(ApiError::bad(
-                "Emby中文字幕编码与本地记录不一致，已停止自动保存，未覆盖原标题",
-            ));
-        }
         for field in ["Title", "Language"] {
             if let Some(value) = current.get(field) {
                 original[field] = value.clone();
@@ -467,3 +491,6 @@ fn log_report(report: &Value) {
         list(&report["pending"]).len()
     );
 }
+
+#[cfg(test)]
+mod tests;

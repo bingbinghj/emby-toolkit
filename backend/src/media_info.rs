@@ -156,11 +156,15 @@ pub(crate) fn item_streams<'a>(item: &'a Value, paths: &[&str]) -> Option<&'a Ve
                     })
                 })
                 .collect::<Vec<_>>();
-            matches
+            let mut owned = matches
                 .iter()
-                .find(|source| item["Id"].as_str().is_some_and(|id| source["ItemId"] == id))
                 .copied()
-                .or_else(|| (matches.len() == 1).then(|| matches[0]))
+                .filter(|source| item["Id"].as_str().is_some_and(|id| source["ItemId"] == id));
+            let owner = owned.next();
+            if owned.next().is_some() {
+                return None;
+            }
+            owner.or_else(|| (matches.len() == 1).then(|| matches[0]))
         };
         // Query parameters can identify different versions. Prefer the exact URL;
         // accept a normalized alias only when its target version is unambiguous.
@@ -515,3 +519,6 @@ pub fn chapters_restored(expected: &Value, actual: &Value) -> bool {
         .iter()
         .all(|(key, count)| actual.get(key).unwrap_or(&0) >= count)
 }
+
+#[cfg(test)]
+mod tests;

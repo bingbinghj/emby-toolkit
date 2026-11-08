@@ -894,6 +894,45 @@ async fn save_inner(
     } else {
         String::new()
     };
+    let mut video_thumbnails = json!({"state":"not_requested"});
+    let saved_videos = saved
+        .iter()
+        .filter_map(|id| {
+            let item = restore.get(id)?;
+            media_info::container(&item.info)?["MediaStreams"]
+                .as_array()?
+                .iter()
+                .any(|stream| stream["Type"] == "Video")
+                .then(|| (id.clone(), item.path.clone()))
+        })
+        .collect::<Vec<_>>();
+    if refresh_metadata
+        && let Some(context) = context
+        && !saved_videos.is_empty()
+    {
+        context.checkpoint().await?;
+        context
+            .activity(
+                "重建视频缩略图",
+                "媒体信息已保存并通过回读，运行神医缩略图提取和验收流程",
+            )
+            .await;
+        video_thumbnails =
+            match crate::thumbnails::repair_saved(state, &saved_videos, context).await {
+                Ok(report) => report,
+                Err(error) if context.is_cancelled() => return Err(error),
+                Err(error) => json!({"state":"failed","failed":1,"reason":error.1}),
+            };
+        if video_thumbnails["failed"].as_u64().unwrap_or(0) > 0 {
+            let reason = video_thumbnails["reason"]
+                .as_str()
+                .or_else(|| video_thumbnails["message"].as_str())
+                .unwrap_or("仍有目标未通过图片验收");
+            let warning = format!("媒体信息已保存，视频缩略图提取或验收未完成：{reason}");
+            tracing::warn!("[媒体信息保存] {warning}");
+            warning_details.push(warning);
+        }
+    }
     let skipped_tracks: usize = reports
         .iter()
         .map(|v| v["skipped"].as_array().map_or(0, Vec::len))
@@ -908,7 +947,7 @@ async fn save_inner(
     );
     Ok((
         if failures.is_empty() { 200 } else { 207 },
-        json!({"message":format!("媒体信息已更新，已恢复 {} 个版本 JSON，Emby 媒体流、标题和章节已通过回读验收{metadata_message}",restore.len()),"failures":failures,"batch_reports":reports,"warnings":warnings,"warning_details":warning_details,"metadata_refresh":{"state":metadata_state,"requested_ids":metadata_requested,"failed_ids":metadata_failed}}),
+        json!({"message":format!("媒体信息已更新，已恢复 {} 个版本 JSON，Emby 媒体流、标题和章节已通过回读验收{metadata_message}",restore.len()),"failures":failures,"batch_reports":reports,"warnings":warnings,"warning_details":warning_details,"metadata_refresh":{"state":metadata_state,"requested_ids":metadata_requested,"failed_ids":metadata_failed},"video_thumbnails":video_thumbnails}),
     ))
 }
 fn text(value: &Value) -> String {

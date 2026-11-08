@@ -23,6 +23,8 @@ static REGION: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"(?i)\blatin[\s-]+america(?:n)?\b").unwrap());
 static TAIWAN_DUB: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"[\p{Han}A-Za-z0-9]*(?:台配|台湾配音|臺灣配音)").unwrap());
+static CANTONESE_SOURCE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)dvd|tvb").unwrap());
 static DUB_SOURCE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"[\p{Han}]*(?:配音|译制|译製|配|译|譯)(?:版)?").unwrap());
 static NON_DUB_PREFIX: LazyLock<regex::Regex> = LazyLock::new(|| {
@@ -280,9 +282,17 @@ fn dubbing_title(
     label: &str,
     fallback: String,
 ) -> String {
-    let source = (code(entry) == "chi")
-        .then(|| taiwan_source(cleaned))
-        .flatten();
+    let source = match code(entry).as_str() {
+        "chi" => taiwan_source(cleaned),
+        "yue" => hits.first().and_then(|(start, _, _)| {
+            let prefix = &cleaned[..*start];
+            CANTONESE_SOURCE
+                .find_iter(prefix)
+                .find(|word| boundary(prefix, word.start(), word.end(), word.as_str()))
+                .map(|word| word.as_str().to_ascii_uppercase())
+        }),
+        _ => None,
+    };
     let Some((start, _, _)) = hits.first() else {
         if let Some(source) = source {
             let rest = DUB_SOURCE.replace_all(cleaned, "");

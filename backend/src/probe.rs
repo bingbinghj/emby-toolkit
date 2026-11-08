@@ -174,7 +174,7 @@ pub fn build(probe: &Value, node: &Value, mappings: &Value) -> Option<Value> {
             }
             "audio" | "subtitle" => {
                 let capital = if kind == "audio" { "Audio" } else { "Subtitle" };
-                let (lang, display, title) = probe_display::friendly(
+                let (lang, display, _) = probe_display::friendly(
                     tags["language"].as_str().unwrap_or(""),
                     tags["title"].as_str().unwrap_or(""),
                     capital,
@@ -182,6 +182,7 @@ pub fn build(probe: &Value, node: &Value, mappings: &Value) -> Option<Value> {
                     tags["IsHearingImpaired"] == true,
                     mappings,
                 );
+                let title = text(tags, "title", "");
                 stream["Type"] = json!(capital);
                 stream["Title"] = json!(title);
                 stream["Language"] = json!(lang);

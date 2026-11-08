@@ -14,6 +14,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+mod tests;
+
 fn config_error(message: &str) -> ApiError {
     ApiError(axum::http::StatusCode::CONFLICT, message.into())
 }
@@ -24,10 +27,8 @@ fn number(value: &Value) -> f64 {
         .unwrap_or(0.0)
 }
 fn chapters(item: &Value) -> Vec<Value> {
+    // 神医也会为片头、片尾标记取图，验收和末尾取帧修复必须覆盖同一列表。
     list(&item["Chapters"])
-        .into_iter()
-        .filter(|c| matches!(c["MarkerType"].as_str(), None | Some("" | "Chapter")))
-        .collect()
 }
 pub fn source(item: &Value) -> Result<Value> {
     crate::media_info::item_source(item, &[&string(item, "Path")])
@@ -1102,6 +1103,45 @@ pub async fn repair(state: &AppState, context: &JobContext) -> Result<Value> {
     }
     let mut report = repair_extraction(state, &extraction, context).await?;
     report["extraction"] = extraction.report;
+    Ok(report)
+}
+
+pub(crate) async fn repair_saved(
+    state: &AppState,
+    saved: &[(String, String)],
+    context: &JobContext,
+) -> Result<Value> {
+    let mut report = repair(state, context).await?;
+    for (id, path) in saved {
+        context.checkpoint().await?;
+        if item(state, id).await?["Path"] != *path {
+            return Err(ApiError::bad("保存目标路径变化，无法确认原视频的缩略图"));
+        }
+    }
+    // 原生任务可能仅处理其他文件，必须另行验收本次保存目标，不重复提取或绕过排除策略。
+    let paths = saved.iter().map(|(_, path)| path.clone()).collect();
+    let mut candidates = targets(state, &paths, context).await?;
+    candidates.retain(|id, _| saved.iter().any(|(saved_id, _)| id == saved_id));
+    let order =
+        crate::media_order::id_keys(state, &candidates.keys().cloned().collect::<Vec<_>>()).await?;
+    let missing = remaining(state, &candidates, &order, context).await?;
+    report["saved_items"] = json!({"eligible":candidates.len(),"verified":candidates.len()-missing.len(),"skipped":saved.len()-candidates.len(),"failed":missing.len(),"failed_ids":missing.keys().collect::<Vec<_>>()});
+    if !missing.is_empty() {
+        report["state"] = json!("failed");
+        report["failed"] = json!(
+            report["failed"]
+                .as_u64()
+                .unwrap_or(0)
+                .max(missing.len() as u64)
+        );
+        report["reason"] = json!(format!(
+            "本次保存的 {} 个视频仍缺少章节图或 BIF，请检查原生提取范围与执行结果",
+            missing.len()
+        ));
+    } else if candidates.is_empty() {
+        report["state"] = json!("skipped");
+        report["reason"] = json!("本次保存目标被当前媒体库缩略图设置或排除标签跳过");
+    }
     Ok(report)
 }
 

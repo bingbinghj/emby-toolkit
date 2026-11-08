@@ -352,9 +352,6 @@ async fn capture(
                 ])
                 .arg(&stage);
             let _slot = crate::strm::slot(state, "main", context).await?;
-            if overwrite && target.exists() {
-                tokio::fs::remove_file(target).await?;
-            }
             let output = tokio::time::timeout(Duration::from_secs(30), command.output())
                 .await
                 .map_err(|_| ApiError::bad("视频截图超时"))??;
