@@ -47,6 +47,7 @@ async fn atomic(path: &Path, data: &Value) -> Result<()> {
 // Type-local ordinal avoids comparing Emby stream Index with ffprobe/local JSON Index.
 fn expected_titles(info: &Value, report: &Value) -> Vec<Value> {
     let pending = list(&report["pending"]);
+    let skipped = list(&report["skipped_tracks"]);
     let mut expected = vec![];
     let mut ordinals = [0_u64; 2];
     for stream in media_info::container(info)
@@ -61,17 +62,85 @@ fn expected_titles(info: &Value, report: &Value) -> Vec<Value> {
         };
         ordinals[slot] += 1;
         let ordinal = ordinals[slot];
-        if pending
+        let unresolved = pending
             .iter()
-            .any(|p| p["type"] == stream["Type"] && p["ordinal"] == ordinal)
+            .find(|entry| entry["type"] == stream["Type"] && entry["ordinal"] == ordinal);
+        if unresolved.is_some_and(|entry| entry["title_ready"] != true)
+            || skipped
+                .iter()
+                .any(|entry| entry["type"] == stream["Type"] && entry["ordinal"] == ordinal)
         {
             continue;
         }
-        expected.push(json!({"type":stream["Type"],"ordinal":ordinal,"language":stream["Language"],"codec":stream["Codec"],"title":stream["Title"]}));
+        expected.push(json!({"type":stream["Type"],"ordinal":ordinal,"language":stream["Language"],"check_language":unresolved.is_none(),"codec":stream["Codec"],"title":stream["Title"]}));
     }
     expected
 }
-fn mismatches(expected: &[Value], item: &Value, paths: &[&str]) -> Vec<Value> {
+fn same_language(expected: &Value, actual: &Value, mappings: &Value) -> bool {
+    let canonical = |value: &Value| {
+        let raw = value.as_str().unwrap_or("");
+        language::lookup(raw, mappings)
+            .map(|entry| language::code(&entry))
+            .unwrap_or_else(|| language::token(raw))
+    };
+    canonical(expected) == canonical(actual)
+}
+
+fn preserve_skipped_titles(
+    info: &mut Value,
+    item: &Value,
+    paths: &[&str],
+    skipped: &[Value],
+) -> Result<()> {
+    if skipped.is_empty() {
+        return Ok(());
+    }
+    let live = media_info::item_streams(item, paths)
+        .ok_or_else(|| ApiError::bad("无法确认当前Emby中文字幕，已停止自动保存，未覆盖原标题"))?;
+    let streams = media_info::streams_mut(info)
+        .ok_or_else(|| ApiError::bad("本地媒体信息缺少字幕流，无法保护当前中文字幕标题"))?;
+    for entry in skipped {
+        let index = entry["ordinal"]
+            .as_u64()
+            .and_then(|n| n.checked_sub(1))
+            .ok_or_else(|| ApiError::bad("中文字幕序号无效，已停止自动保存"))?
+            as usize;
+        let original = streams
+            .iter_mut()
+            .filter(|s| s["Type"] == entry["type"])
+            .nth(index)
+            .ok_or_else(|| ApiError::bad("本地中文字幕范围变化，已停止自动保存"))?;
+        let current = live
+            .iter()
+            .filter(|s| s["Type"] == entry["type"])
+            .nth(index)
+            .ok_or_else(|| ApiError::bad("Emby中文字幕范围变化，已停止自动保存"))?;
+        if entry["type"] != "Subtitle"
+            || original["Codec"]
+                .as_str()
+                .filter(|codec| !codec.is_empty())
+                .is_none_or(|codec| {
+                    current["Codec"]
+                        .as_str()
+                        .is_none_or(|actual| !actual.eq_ignore_ascii_case(codec))
+                })
+        {
+            return Err(ApiError::bad(
+                "Emby中文字幕编码与本地记录不一致，已停止自动保存，未覆盖原标题",
+            ));
+        }
+        for field in ["Title", "Language"] {
+            if let Some(value) = current.get(field) {
+                original[field] = value.clone();
+            } else {
+                original.as_object_mut().unwrap().remove(field);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn mismatches(expected: &[Value], item: &Value, paths: &[&str], mappings: &Value) -> Vec<Value> {
     let streams = media_info::item_streams(item, paths);
     expected
         .iter()
@@ -100,6 +169,15 @@ fn mismatches(expected: &[Value], item: &Value, paths: &[&str]) -> Vec<Value> {
                         entry["codec"], stream["Codec"]
                     ))
                 }
+                Some(stream)
+                    if entry["check_language"] == true
+                        && !same_language(&entry["language"], &stream["Language"], mappings) =>
+                {
+                    Some(format!(
+                        "语言不一致（期望 {}，实际 {}）",
+                        entry["language"], stream["Language"]
+                    ))
+                }
                 _ => None,
             };
             reason.map(|reason| {
@@ -109,6 +187,8 @@ fn mismatches(expected: &[Value], item: &Value, paths: &[&str]) -> Vec<Value> {
                     stream.map_or(Value::Null, |stream| stream["Title"].clone());
                 entry["actual_codec"] =
                     stream.map_or(Value::Null, |stream| stream["Codec"].clone());
+                entry["actual_language"] =
+                    stream.map_or(Value::Null, |stream| stream["Language"].clone());
                 entry
             })
         })
@@ -164,7 +244,9 @@ fn track_label(entry: &Value) -> String {
 pub async fn fill(state: &AppState, ids: &[String], skip_chinese: bool) -> Value {
     fill_inner(state, ids, skip_chinese, None)
         .await
-        .unwrap_or_else(|error| json!({"failed":1,"pending":[{"reason":error.1}]}))
+        .unwrap_or_else(
+            |error| json!({"completed":false,"failed":1,"pending":[{"reason":error.1}]}),
+        )
 }
 pub async fn fill_in_job(
     state: &AppState,
@@ -185,7 +267,7 @@ async fn fill_inner(
         .await
         .ok()
         .filter(|p| p.is_dir() && !protected(p));
-    let mut result = json!({"scanned":0,"changed_items":0,"changed_streams":0,"verified_items":0,"verified_streams":0,"skipped":0,"failed":0,"pending":[]});
+    let mut result = json!({"completed":false,"scanned":0,"changed_items":0,"changed_streams":0,"changed_languages":0,"verified_items":0,"verified_streams":0,"skipped":0,"skipped_chinese_streams":0,"failed":0,"pending":[]});
     let Some(root) = root else {
         result["skipped"] = json!(ids.len());
         result["pending"] = json!(
@@ -204,12 +286,13 @@ async fn fill_inner(
         checkpoint(context).await?;
         if let Some(context) = context {
             context
-                .activity("读取语言标题", &format!("正在读取媒体ID {id} 的媒体信息"))
+                .activity("读取语言和标题", &format!("正在读取媒体ID {id} 的媒体信息"))
                 .await;
         }
         result["scanned"] = json!(result["scanned"].as_u64().unwrap() + 1);
         let mut pending = vec![];
         let mut changed = 0;
+        let mut changed_languages = 0;
         let mut label = format!("媒体ID：{id}");
         let outcome = async {
             let item = media_edit::details(state, id, "Id,Name,Path,MediaSources,MediaStreams,PartCount,ExtraType,IndexNumber,ParentIndexNumber").await?;
@@ -217,7 +300,7 @@ async fn fill_inner(
             let file = Path::new(&clean_path).file_name().unwrap_or_default().to_string_lossy();
             label = media_label(&string(&item, "Name"), item["ParentIndexNumber"].as_i64(), item["IndexNumber"].as_i64(), &file, id);
             if let Some(context) = context {
-                context.activity("填充语言标题", &format!("正在检查 {label} 的音轨和字幕标题")).await;
+                context.activity("填充语言和标题", &format!("正在检查 {label} 的音轨和字幕语言及标题")).await;
             }
             let annotate = |mut entry: Value| {
                 entry["item_id"] = json!(id);
@@ -245,26 +328,35 @@ async fn fill_inner(
                 if !media_info::recoverable(&original) || !crate::media_paths::matches_container(&original, &target.path) {
                     return Err(ApiError::bad("本地媒体信息不可恢复或与当前媒体文件格式不一致，未清理 Emby 数据"));
                 }
-                let (updated, report) = language::fill(&original, &mappings, skip_chinese);
+                let (mut updated, report) = language::fill(&original, &mappings, skip_chinese);
+                let skipped = list(&report["skipped_tracks"]);
+                result["skipped_chinese_streams"] = json!(result["skipped_chinese_streams"].as_u64().unwrap() + skipped.len() as u64);
+                if !skipped.is_empty() {
+                    tracing::info!("[语言标题] {label} 正常跳过 {} 条中文字幕，保留当前语言和标题", skipped.len());
+                }
                 pending.extend(list(&report["pending"]).into_iter().map(|mut entry| {
                     entry["file"] = json!(Path::new(&target.path).file_name().unwrap_or_default().to_string_lossy());
                     annotate(entry)
                 }));
                 processed.insert(path.clone());
                 let count = report["changed"].as_u64().unwrap_or(0);
+                let titles = expected_titles(&updated, &report);
+                if !titles.is_empty() && (count > 0 || !mismatches(&titles, &item, &source_paths, &mappings).is_empty()) {
+                    preserve_skipped_titles(&mut updated, &item, &source_paths, &skipped)?;
+                }
                 if count > 0 {
                     if let Some(context) = context {
-                        context.activity("保存语言标题", &format!("正在保存 {label} 的 {count} 条本地标题")).await;
+                        context.activity("保存语言和标题", &format!("正在保存 {label} 的 {count} 条轨道语言和标题")).await;
                     }
                     atomic(&path, &updated).await?;
                     changed = count;
+                    changed_languages = report["changed_languages"].as_u64().unwrap_or(0);
                     if let Some(sha) = &target.sha
                         && let Err(error) = sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2) ON CONFLICT(sha1) DO UPDATE SET mediainfo_json=EXCLUDED.mediainfo_json")
                             .bind(sha.to_uppercase()).bind(&updated).execute(&state.db).await {
                             tracing::warn!("[语言标题] {label} 本地 JSON 已保存，缓存同步失败：{error}");
                     }
                 }
-                let titles = expected_titles(&updated, &report);
                 expected = Some((updated, titles));
                 break;
             }
@@ -273,16 +365,16 @@ async fn fill_inner(
                 return Ok((true, 0));
             };
             if expected.is_empty() { return Ok((false, 0)); }
-            if changed == 0 && mismatches(&expected, &item, &source_paths).is_empty() {
+            if changed == 0 && mismatches(&expected, &item, &source_paths, &mappings).is_empty() {
                 if let Some(context) = context {
-                    context.activity("标题已一致", &format!("{label} 的 {} 条 Emby 标题已与本地一致，无需重新扫描", expected.len())).await;
+                    context.activity("语言和标题已一致", &format!("{label} 的 {} 条待处理轨道已通过语言和标题核对，无需重新扫描", expected.len())).await;
                 }
                 return Ok((false, expected.len()));
             }
             checkpoint(context).await?;
             let readback = async {
                 if let Some(context) = context {
-                    context.activity("恢复标题到 Emby", &format!("正在通过受控媒体信息保存恢复 {label} 的 {} 条标题", expected.len())).await;
+                    context.activity("恢复语言和标题到 Emby", &format!("正在通过受控媒体信息保存恢复 {label} 的 {} 条轨道语言和标题", expected.len())).await;
                 }
                 let body = json!({"mediainfo":updated,"media_path":target.path,"sha1":target.sha,"strm_source":strm_source});
                 let (status, report) = crate::media_save::save_titles(state, id, &body, context).await?;
@@ -291,15 +383,15 @@ async fn fill_inner(
                 }
                 checkpoint(context).await?;
                 if let Some(context) = context {
-                    context.activity("标题回读验收", &format!("正在核对 {label} 的实际音轨和字幕标题")).await;
+                    context.activity("语言和标题回读验收", &format!("正在核对 {label} 的实际音轨和字幕语言及标题")).await;
                 }
                 let live = media_edit::details(state, id, "MediaSources,MediaStreams").await?;
-                Ok::<_, ApiError>(mismatches(&expected, &live, &source_paths))
+                Ok::<_, ApiError>(mismatches(&expected, &live, &source_paths, &mappings))
             }.await;
             match readback {
                 Ok(missing) if missing.is_empty() => {
                     if let Some(context) = context {
-                        context.activity("标题回读完成", &format!("{label} 的 {} 条音轨和字幕标题已通过 Emby 回读验收", expected.len())).await;
+                        context.activity("语言和标题回读完成", &format!("{label} 的 {} 条音轨和字幕已通过 Emby 语言和标题回读验收", expected.len())).await;
                     }
                     Ok((false, expected.len()))
                 }
@@ -316,6 +408,8 @@ async fn fill_inner(
         result["changed_items"] =
             json!(result["changed_items"].as_u64().unwrap() + u64::from(changed > 0));
         result["changed_streams"] = json!(result["changed_streams"].as_u64().unwrap() + changed);
+        result["changed_languages"] =
+            json!(result["changed_languages"].as_u64().unwrap() + changed_languages);
         match outcome {
             Ok((skipped, verified)) => {
                 result["skipped"] = json!(result["skipped"].as_u64().unwrap() + u64::from(skipped));
@@ -325,7 +419,7 @@ async fn fill_inner(
                     json!(result["verified_streams"].as_u64().unwrap() + verified as u64);
             }
             Err(error) => {
-                tracing::warn!("[语言标题] {label} 标题填充或回读失败：{}", error.1);
+                tracing::warn!("[语言标题] {label} 语言和标题填充或回读失败：{}", error.1);
                 result["failed"] = json!(result["failed"].as_u64().unwrap() + 1);
                 if !pending
                     .iter()
@@ -339,6 +433,11 @@ async fn fill_inner(
         result["pending"].as_array_mut().unwrap().extend(pending);
         checkpoint(context).await?;
     }
+    result["completed"] = json!(
+        result["scanned"].as_u64().unwrap_or(0) > 0
+            && result["failed"].as_u64().unwrap_or(0) == 0
+            && list(&result["pending"]).is_empty()
+    );
     log_report(&result);
     Ok(result)
 }
@@ -358,10 +457,12 @@ fn log_report(report: &Value) {
         );
     }
     tracing::info!(
-        "[语言标题] 检查 {} 个目标媒体，本地填充 {} 条标题，Emby 回读确认 {} 条，失败 {} 个，待手动处理 {} 项",
+        "[语言标题] 检查 {} 个目标媒体，本地更新 {} 条轨道的语言和标题，其中语言变化 {} 条，Emby 回读确认 {} 条轨道，正常跳过 {} 条中文字幕，失败 {} 个，待手动处理 {} 项",
         report["scanned"],
         report["changed_streams"],
+        report["changed_languages"],
         report["verified_streams"],
+        report["skipped_chinese_streams"],
         report["failed"],
         list(&report["pending"]).len()
     );

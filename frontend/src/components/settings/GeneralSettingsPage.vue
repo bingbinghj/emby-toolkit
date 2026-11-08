@@ -853,11 +853,11 @@
                         </n-text>
                       </template>
                     </n-form-item-grid-item>
-                    <n-form-item-grid-item label="入库自动填充语言标题" path="auto_fill_language_titles_on_ingest">
+                    <n-form-item-grid-item label="入库自动填充语言和标题" path="auto_fill_language_titles_on_ingest">
                       <n-switch v-model:value="configModel.auto_fill_language_titles_on_ingest" />
                       <template #feedback>
                         <n-text depth="3" style="font-size:0.8em;">
-                          为可识别语言的音轨和非中文字幕填充语言标题；中文字幕保留原标题并发出提醒，未知语言需手动确认。默认关闭。
+                          根据原始标题识别语言，填充音轨和非中文字幕的语言及标题；中文字幕正常跳过并保留原样，未知语言需手动确认。默认关闭。
                         </n-text>
                       </template>
                     </n-form-item-grid-item>
@@ -865,7 +865,7 @@
                       <n-switch v-model:value="configModel.auto_extract_intro_fingerprint_on_ingest" />
                       <template #feedback>
                         <n-text depth="3" style="font-size:0.8em;">
-                          电视剧入库后自动提取片头声纹，电影不处理。默认关闭。
+                          电视剧入库且标题填充、回读验收完成后自动提取片头声纹，电影不处理。标题未完成时跳过。默认关闭。
                         </n-text>
                       </template>
                     </n-form-item-grid-item>
@@ -873,7 +873,7 @@
                       <n-switch v-model:value="configModel.auto_extract_video_thumbnails_on_ingest" />
                       <template #feedback>
                         <n-text depth="3" style="font-size:0.8em;">
-                          为入库的电视剧和电影生成视频预览缩略图，失败时自动尝试修复。默认关闭。
+                          电视剧和电影入库且标题填充、回读验收完成后生成视频预览缩略图，失败时自动尝试修复。标题未完成时跳过。默认关闭。
                         </n-text>
                       </template>
                     </n-form-item-grid-item>

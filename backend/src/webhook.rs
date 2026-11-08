@@ -835,6 +835,7 @@ pub async fn process_emby(
         }
     }?;
     let finalization = finalize(state, &id, &episodes, !episodes.is_empty(), context).await?;
+    let titles_completed = finalization["title_fill"]["completed"] == true;
     add_report_warnings(&mut result, &finalization);
     result["finalization"] = finalization;
     tracing::info!(
@@ -845,6 +846,7 @@ pub async fn process_emby(
         state,
         item["Type"] == "Series" && !episodes.is_empty(),
         item["Type"] == "Movie" || item["Type"] == "Series" && !episodes.is_empty(),
+        titles_completed,
         &format!("《{media_name}》"),
         context,
     )
@@ -976,12 +978,29 @@ async fn automatic_extraction(
     state: &AppState,
     series: bool,
     videos: bool,
+    titles_completed: bool,
     label: &str,
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
     let config = state.config.read().await.clone();
     let intro_enabled = series && config["auto_extract_intro_fingerprint_on_ingest"] == true;
     let thumbnails_enabled = videos && config["auto_extract_video_thumbnails_on_ingest"] == true;
+    if !intro_enabled && !thumbnails_enabled {
+        return Ok(Value::Null);
+    }
+    if !titles_completed {
+        let reason = "标题填充与 Emby 回读尚未完成，已跳过入库片头声纹和视频预览缩略图提取";
+        tracing::info!("[入库自动处理] {label}{reason}");
+        let mut report =
+            json!({"state":"skipped","reason":reason,"warnings":0,"warning_details":[]});
+        if intro_enabled {
+            report["intro"] = json!({"state":"skipped","reason":reason});
+        }
+        if thumbnails_enabled {
+            report["video_thumbnails"] = json!({"state":"skipped","reason":reason});
+        }
+        return Ok(report);
+    }
     let mut report = json!({});
     let mut warning_details = vec![];
     if intro_enabled {
@@ -1325,6 +1344,7 @@ pub async fn process_moviepilot(
     let mut postprocessing = json!({});
     let mut automatic_series = false;
     let mut automatic_videos = false;
+    let mut titles_completed = true;
     let tmdb = string(event, "tmdb_id");
     let rows: Vec<Value> = if tmdb.is_empty() {
         vec![]
@@ -1536,6 +1556,11 @@ pub async fn process_moviepilot(
                     if state.config.read().await["emby_webhook_ingest_enabled"] != true {
                         match finalize(state, &id, &episodes, !known.is_empty(), context).await {
                             Ok(report) => {
+                                if item["Type"] == "Movie"
+                                    || item["Type"] == "Series" && !episodes.is_empty()
+                                {
+                                    titles_completed &= report["title_fill"]["completed"] == true;
+                                }
                                 add_report_warnings(&mut postprocessing, &report);
                                 finalizations
                                     .push(json!({"item_id":id,"name":media_name,"report":report}));
@@ -1590,6 +1615,7 @@ pub async fn process_moviepilot(
             state,
             automatic_series,
             automatic_videos,
+            titles_completed,
             "本批媒体",
             context,
         )
@@ -1725,11 +1751,11 @@ pub async fn finalize(
             Err(error) if context.is_cancelled() => return Err(error),
             Err(error) => {
                 tracing::warn!("入库音轨字幕标题处理失败：《{media_name}》，{}", error.1);
-                json!({"failed":1,"pending":[{"reason":error.1}]})
+                json!({"completed":false,"failed":1,"pending":[{"reason":error.1}]})
             }
         }
     } else {
-        json!({})
+        json!({"completed":false,"skipped":true,"reason":"入库语言标题填充未启用"})
     };
     let mut warning_details = vec![];
     let title_warnings = title_report["failed"]

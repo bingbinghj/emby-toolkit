@@ -1,0 +1,293 @@
+[
+  {
+    "MediaSourceInfo": {
+      "Container": "mkv",
+      "Size": 19973564455,
+      "RunTimeTicks": 50788670000,
+      "Path": "/cd2/61616.mkv",
+      "MediaStreams": [
+        {
+          "Type": "Video",
+          "Index": 0,
+          "Codec": "h264",
+          "DisplayTitle": "1080p H264",
+          "BitRate": 31461449,
+          "BitDepth": 8,
+          "IsDefault": true,
+          "IsForced": false,
+          "IsExternal": false,
+          "Width": 1920,
+          "Height": 1080
+        },
+        {
+          "Type": "Audio",
+          "Index": 1,
+          "Codec": "pcm_s16le",
+          "Language": "chi",
+          "Title": "LPCM.爱子粤语",
+          "DisplayLanguage": "Chinese",
+          "DisplayTitle": "Chinese PCM_S16LE 2 ch (默认)",
+          "Channels": 2,
+          "SampleRate": 48000,
+          "BitRate": 1536000,
+          "BitDepth": 16,
+          "IsDefault": true,
+          "IsForced": false,
+          "IsExternal": false
+        },
+        {
+          "Type": "Audio",
+          "Index": 2,
+          "Codec": "pcm_s16le",
+          "Language": "chi",
+          "Title": "LPCM.台配国语",
+          "DisplayLanguage": "Chinese",
+          "DisplayTitle": "Chinese PCM_S16LE 2 ch (默认)",
+          "Channels": 2,
+          "SampleRate": 48000,
+          "BitRate": 1536000,
+          "BitDepth": 16,
+          "IsDefault": true,
+          "IsForced": false,
+          "IsExternal": false
+        },
+        {
+          "Type": "Audio",
+          "Index": 3,
+          "Codec": "pcm_s16le",
+          "Language": "chi",
+          "Title": "LPCM.东和台配",
+          "DisplayLanguage": "Chinese",
+          "DisplayTitle": "Chinese PCM_S16LE 2 ch (默认)",
+          "Channels": 2,
+          "SampleRate": 48000,
+          "BitRate": 1536000,
+          "BitDepth": 16,
+          "IsDefault": true,
+          "IsForced": false,
+          "IsExternal": false
+        },
+        {
+          "Type": "Audio",
+          "Index": 4,
+          "Codec": "pcm_s16le",
+          "Language": "jpn",
+          "Title": "LPCM.原声日语",
+          "DisplayLanguage": "Japanese",
+          "DisplayTitle": "Japanese PCM_S16LE 2 ch (默认)",
+          "Channels": 2,
+          "SampleRate": 48000,
+          "BitRate": 1536000,
+          "BitDepth": 16,
+          "IsDefault": true,
+          "IsForced": false,
+          "IsExternal": false
+        },
+        {
+          "Type": "Subtitle",
+          "Index": 5,
+          "Codec": "PGSSUB",
+          "Language": "chi",
+          "Title": "特效简中",
+          "DisplayLanguage": "Chinese",
+          "DisplayTitle": "Chinese (默认 PGSSUB)",
+          "IsDefault": true,
+          "IsForced": false,
+          "IsExternal": false
+        },
+        {
+          "Type": "Subtitle",
+          "Index": 6,
+          "Codec": "PGSSUB",
+          "Language": "chi",
+          "Title": "特效繁中",
+          "DisplayLanguage": "Chinese",
+          "DisplayTitle": "Chinese (默认 PGSSUB)",
+          "IsDefault": true,
+          "IsForced": false,
+          "IsExternal": false
+        },
+        {
+          "Type": "Subtitle",
+          "Index": 7,
+          "Codec": "PGSSUB",
+          "Language": "chi",
+          "Title": "中文简体",
+          "DisplayLanguage": "Chinese Simplified",
+          "DisplayTitle": "Chinese Simplified (默认 PGSSUB)",
+          "IsDefault": true,
+          "IsForced": false,
+          "IsExternal": false
+        },
+        {
+          "Type": "Subtitle",
+          "Index": 8,
+          "Codec": "PGSSUB",
+          "Language": "chi",
+          "Title": "中文繁体",
+          "DisplayLanguage": "Chinese Traditional",
+          "DisplayTitle": "Chinese Traditional (默认 PGSSUB)",
+          "IsDefault": true,
+          "IsForced": false,
+          "IsExternal": false
+        },
+        {
+          "Type": "Subtitle",
+          "Index": 9,
+          "Codec": "ass",
+          "Language": "chi",
+          "Title": "国配简中",
+          "DisplayLanguage": "Chinese",
+          "DisplayTitle": "Chinese (默认 ASS)",
+          "IsDefault": true,
+          "IsForced": false,
+          "IsExternal": false
+        },
+        {
+          "Type": "Subtitle",
+          "Index": 10,
+          "Codec": "ass",
+          "Language": "chi",
+          "Title": "东和简中",
+          "DisplayLanguage": "Chinese",
+          "DisplayTitle": "Chinese (默认 ASS)",
+          "IsDefault": true,
+          "IsForced": false,
+          "IsExternal": false
+        },
+        {
+          "Type": "Subtitle",
+          "Index": 11,
+          "Codec": "subrip",
+          "Language": "chi",
+          "Title": "台配简中",
+          "DisplayLanguage": "Chinese",
+          "DisplayTitle": "Chinese (默认 SUBRIP)",
+          "IsDefault": true,
+          "IsForced": false,
+          "IsExternal": false
+        },
+        {
+          "Type": "Subtitle",
+          "Index": 12,
+          "Codec": "PGSSUB",
+          "Language": "chi",
+          "Title": "原声简中",
+          "DisplayLanguage": "Chinese",
+          "DisplayTitle": "Chinese (默认 PGSSUB)",
+          "IsDefault": true,
+          "IsForced": false,
+          "IsExternal": false
+        },
+        {
+          "Type": "Subtitle",
+          "Index": 13,
+          "Codec": "subrip",
+          "Language": "chi",
+          "Title": "粤语繁中",
+          "DisplayLanguage": "Chinese",
+          "DisplayTitle": "Chinese (默认 SUBRIP)",
+          "IsDefault": true,
+          "IsForced": false,
+          "IsExternal": false
+        },
+        {
+          "Type": "Subtitle",
+          "Index": 14,
+          "Codec": "PGSSUB",
+          "Language": "jpn",
+          "Title": "日文字幕",
+          "DisplayLanguage": "Japanese",
+          "DisplayTitle": "Japanese (默认 PGSSUB)",
+          "IsDefault": true,
+          "IsForced": false,
+          "IsExternal": false
+        },
+        {
+          "Type": "Subtitle",
+          "Index": 15,
+          "Codec": "PGSSUB",
+          "Language": "eng",
+          "Title": "英文字幕",
+          "DisplayLanguage": "English",
+          "DisplayTitle": "English (默认 PGSSUB)",
+          "IsDefault": true,
+          "IsForced": false,
+          "IsExternal": false
+        }
+      ]
+    },
+    "Chapters": [
+      {
+        "Name": "第 01 章",
+        "StartPositionTicks": 0,
+        "MarkerType": "Chapter"
+      },
+      {
+        "Name": "第 02 章",
+        "StartPositionTicks": 897560000,
+        "MarkerType": "Chapter"
+      },
+      {
+        "Name": "第 03 章",
+        "StartPositionTicks": 4649640000,
+        "MarkerType": "Chapter"
+      },
+      {
+        "Name": "第 04 章",
+        "StartPositionTicks": 8503490000,
+        "MarkerType": "Chapter"
+      },
+      {
+        "Name": "第 05 章",
+        "StartPositionTicks": 10308210000,
+        "MarkerType": "Chapter"
+      },
+      {
+        "Name": "第 06 章",
+        "StartPositionTicks": 17509160000,
+        "MarkerType": "Chapter"
+      },
+      {
+        "Name": "第 07 章",
+        "StartPositionTicks": 23191500000,
+        "MarkerType": "Chapter"
+      },
+      {
+        "Name": "第 08 章",
+        "StartPositionTicks": 29034840000,
+        "MarkerType": "Chapter"
+      },
+      {
+        "Name": "第 09 章",
+        "StartPositionTicks": 35236450000,
+        "MarkerType": "Chapter"
+      },
+      {
+        "Name": "第 10 章",
+        "StartPositionTicks": 38730360000,
+        "MarkerType": "Chapter"
+      },
+      {
+        "Name": "第 11 章",
+        "StartPositionTicks": 42279740000,
+        "MarkerType": "Chapter"
+      },
+      {
+        "Name": "第 12 章",
+        "StartPositionTicks": 46168620000,
+        "MarkerType": "Chapter"
+      },
+      {
+        "Name": "第 13 章",
+        "StartPositionTicks": 48185640000,
+        "MarkerType": "Chapter"
+      },
+      {
+        "Name": "第 14 章",
+        "StartPositionTicks": 50658520000,
+        "MarkerType": "Chapter"
+      }
+    ]
+  }
+]
