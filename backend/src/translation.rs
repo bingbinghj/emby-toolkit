@@ -178,9 +178,21 @@ pub async fn metadata_tree(
     data: &mut Value,
     item_name: &str,
 ) -> Result<usize> {
+    Ok(
+        metadata_tree_report(state, kind, data, item_name).await?["completed"]
+            .as_u64()
+            .unwrap_or(0) as usize,
+    )
+}
+pub async fn metadata_tree_report(
+    state: &AppState,
+    kind: &str,
+    data: &mut Value,
+    item_name: &str,
+) -> Result<Value> {
     let config = state.config.read().await.clone();
     if string(&config, "ai_api_key").is_empty() {
-        return Ok(0);
+        return Ok(json!({"completed":0,"warnings":0,"warning_details":[]}));
     }
     let mut fields = BTreeMap::<String, BTreeMap<String, (String, String)>>::new();
     let mut persons = BTreeMap::new();
@@ -269,6 +281,9 @@ pub async fn metadata_tree(
                 }
             }
             let source = string(node, field);
+            if chinese(&source) {
+                continue;
+            }
             if !source.is_empty() {
                 fields
                     .entry(purpose.into())
@@ -370,6 +385,7 @@ pub async fn metadata_tree(
         );
     }
     let mut translated = 0;
+    let mut warning_details = vec![];
     for purpose in ["overview", "tagline", "title"] {
         let Some(fields) = fields.get(purpose) else {
             continue;
@@ -388,7 +404,7 @@ pub async fn metadata_tree(
         } else {
             json!({"title":item_name})
         };
-        let output = ai::translate(
+        let (output, warnings) = ai::translate_report(
             state,
             &inputs,
             if purpose == "title" {
@@ -400,6 +416,7 @@ pub async fn metadata_tree(
             &Value::Null,
         )
         .await?;
+        warning_details.extend(warnings);
         tracing::info!(
             "元数据字段翻译返回：名称 {item_name}，用途 {purpose_name}，可用结果 {} 个",
             output.len()
@@ -419,7 +436,7 @@ pub async fn metadata_tree(
         purpose: &str,
         context: &Value,
         actors: &Value,
-    ) -> Result<BTreeMap<String, String>> {
+    ) -> Result<(BTreeMap<String, String>, Vec<String>)> {
         let purpose_name = ai::purpose_label(purpose);
         let mut output = BTreeMap::new();
         let mut missing = BTreeMap::new();
@@ -467,7 +484,8 @@ pub async fn metadata_tree(
             .ai
             .cache_revision
             .load(std::sync::atomic::Ordering::SeqCst);
-        let translated = ai::translate(state, &missing, purpose, context, actors).await?;
+        let (translated, warnings) =
+            ai::translate_report(state, &missing, purpose, context, actors).await?;
         let _gate = state.ai.cache_gate.read().await;
         if purpose != "quality_mode"
             && revision
@@ -494,9 +512,9 @@ pub async fn metadata_tree(
             tracing::debug!("人物翻译缓存写入跳过：用途 {purpose_name}，质量模式或缓存版本已变化");
         }
         output.extend(translated);
-        Ok(output)
+        Ok((output, warnings))
     }
-    let people = terms(
+    let (people, warnings) = terms(
         state,
         &persons,
         "transliterate_mode",
@@ -504,6 +522,7 @@ pub async fn metadata_tree(
         &Value::Null,
     )
     .await?;
+    warning_details.extend(warnings);
     for actor in role_actors.values_mut() {
         if let Some(value) = people.get(actor.as_str().unwrap_or("")) {
             *actor = json!(value);
@@ -520,7 +539,8 @@ pub async fn metadata_tree(
     } else {
         json!({})
     };
-    let roles = terms(state, &roles, purpose, &context, &json!(role_actors)).await?;
+    let (roles, warnings) = terms(state, &roles, purpose, &context, &json!(role_actors)).await?;
+    warning_details.extend(warnings);
     for (path, _) in nodes {
         let Some(node) = data.pointer_mut(&path) else {
             continue;
@@ -569,5 +589,17 @@ pub async fn metadata_tree(
             "元数据翻译完成：类型 {kind}，名称 {item_name}，字段和人物结果 {translated} 个"
         );
     }
-    Ok(translated)
+    let warning_details = warning_details
+        .into_iter()
+        .map(|reason| {
+            if item_name.is_empty() {
+                format!("类型 {kind}：{reason}")
+            } else {
+                format!("《{item_name}》（类型 {kind}）{reason}")
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(
+        json!({"completed":translated,"warnings":warning_details.len(),"warning_details":warning_details}),
+    )
 }

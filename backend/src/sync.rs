@@ -382,9 +382,29 @@ pub async fn cache_with_batch(
             let mut tops = vec![];
             let mut children = vec![];
             let ids = ids.into_iter().collect::<Vec<_>>();
-            for mut top in emby::by_ids(state, &ids, FIELDS, Some(context)).await? {
+            let details = emby::by_ids(state, &ids, FIELDS, Some(context)).await?;
+            let fetched = details
+                .iter()
+                .filter(|item| item["Type"] == work.1)
+                .map(|item| string(item, "Id"))
+                .collect::<HashSet<_>>();
+            let missing = ids
+                .iter()
+                .filter(|id| observed.contains(*id) && !fetched.contains(*id))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                let reason = format!(
+                    "《{title}》（TMDb {}）本次已扫描到的媒体详情回读不完整，原生 ID {} 未取得匹配详情，已保留现有记录并跳过这些条目",
+                    work.0,
+                    missing.join("、")
+                );
+                tracing::warn!("[同步媒体] {reason}");
+                warning_details.push(reason);
+            }
+            for mut top in details {
                 let id = string(&top, "Id");
-                if top["Type"] != work.1 {
+                if !ids.contains(&id) || top["Type"] != work.1 {
                     continue;
                 }
                 if emby::path_ignored(state, &string(&top, "Path")).await? {
@@ -450,15 +470,29 @@ pub async fn cache_with_batch(
         for (work, _, _, _, title) in &groups {
             context.checkpoint().await?;
             if let Some(error) = metadata_errors.remove(work) {
-                tracing::warn!(
-                    "[同步媒体] 《{title}》读取 TMDb 元数据失败，使用现有媒体信息：{error}"
+                let reason = format!(
+                    "《{title}》（类型 {}，TMDb {}）读取元数据失败，使用现有媒体信息：{}",
+                    work.1,
+                    work.0,
+                    crate::logs::redact(&error)
                 );
+                tracing::warn!("[同步媒体] {reason}");
+                warning_details.push(reason);
             }
             let data = metadata.get_mut(work).unwrap();
             if config["ai_translate_on_sync"] == true {
                 let mut pruned = data.clone();
                 crate::translation::prune(&work.1, &mut pruned);
-                crate::translation::metadata_tree(state, &work.1, &mut pruned, "").await?;
+                let report =
+                    crate::translation::metadata_tree_report(state, &work.1, &mut pruned, "")
+                        .await?;
+                warning_details.extend(list(&report["warning_details"]).into_iter().filter_map(
+                    |reason| {
+                        reason
+                            .as_str()
+                            .map(|reason| format!("《{title}》（TMDb {}）{reason}", work.0))
+                    },
+                ));
                 merge_translations(data, pruned);
             }
         }
@@ -521,12 +555,18 @@ pub async fn cache_with_batch(
         )
         .await?
     };
-    let message = format!(
-        "同步完成！新增/更新 {updated} 个媒体项，标记离线 {offline} 个，元数据失败 {} 项，指纹未完成 {} 项，离线核对警告 {} 项。",
+    let mut message = format!(
+        "同步完成！新增/更新 {updated} 个媒体项，标记离线 {offline} 个，元数据处理失败 {} 项，指纹未完成 {} 项，处理警告 {} 项。",
         failures.len(),
         fingerprints["failed"].as_u64().unwrap_or(0),
         warning_details.len()
     );
+    if let Some(reason) = warning_details.first() {
+        message.push_str(&format!(
+            "提醒：{}；完整明细见任务结果",
+            crate::logs::redact(reason)
+        ));
+    }
     tracing::info!("[同步媒体] {message}");
     Ok(
         json!({"updated":updated,"offline":offline,"failures":failures,"failed":fingerprints["failed"].as_u64().unwrap_or(0),"fingerprints":fingerprints,"message":message,"warnings":warning_details.len(),"warning_details":warning_details}),

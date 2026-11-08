@@ -546,20 +546,11 @@ async fn search_file(
 
 pub async fn observation(state: &AppState, item: &Value) -> (String, String, Option<u64>) {
     let path = string(item, "Path");
-    let sources = list(&item["MediaSources"]);
-    let matches = sources
-        .iter()
-        .filter(|s| {
-            string(s, "Id").trim_start_matches("mediasource_") == string(item, "Id")
-                || s["Path"] == path
-        })
-        .collect::<Vec<_>>();
-    let source = if matches.len() == 1 {
-        matches[0]
-    } else {
-        &Value::Null
-    };
-    let target = media_paths::strm_target(&path).await.unwrap_or_else(|| {
+    let strm_target = media_paths::strm_target(&path).await;
+    let source =
+        crate::media_info::item_source(item, &[&path, strm_target.as_deref().unwrap_or("")])
+            .unwrap_or(&Value::Null);
+    let target = strm_target.unwrap_or_else(|| {
         source["Path"]
             .as_str()
             .filter(|s| !s.is_empty())

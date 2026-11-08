@@ -276,7 +276,7 @@ pub async fn prepare_batch(
     context: &JobContext,
     cancel: &CancellationToken,
 ) -> Result<Value> {
-    let mut result = json!({"prepared":0,"failed":0,"failed_groups":[],"cache_hits":0,"nfo_written":0,"images_downloaded":0});
+    let mut result = json!({"prepared":0,"failed":0,"failed_groups":[],"cache_hits":0,"nfo_written":0,"images_downloaded":0,"warnings":0,"warning_details":[]});
     let mut notify = BTreeSet::new();
     let mut directories = BTreeSet::new();
     for (index, group) in groups.iter().enumerate() {
@@ -325,6 +325,12 @@ pub async fn prepare_batch(
                     json!(result["nfo_written"].as_u64().unwrap() + data.nfo as u64);
                 result["images_downloaded"] =
                     json!(result["images_downloaded"].as_u64().unwrap() + data.images as u64);
+                result["warnings"] =
+                    json!(result["warnings"].as_u64().unwrap() + data.warning_details.len() as u64);
+                result["warning_details"]
+                    .as_array_mut()
+                    .unwrap()
+                    .extend(data.warning_details);
             }
             Err(error) => {
                 check_active(state, group, context, cancel, true).await?;
@@ -358,6 +364,16 @@ pub async fn prepare_batch(
         )
         .await?;
     }
+    if let Some(reason) = result["warning_details"]
+        .as_array()
+        .and_then(|details| details.first())
+        .and_then(Value::as_str)
+    {
+        result["message"] = json!(format!(
+            "实时监控预处理完成，已处理 {} 组媒体，有 {} 条提醒：{reason}；完整明细见任务结果",
+            result["prepared"], result["warnings"]
+        ));
+    }
     Ok(result)
 }
 struct Prepared {
@@ -366,6 +382,7 @@ struct Prepared {
     cache_hit: bool,
     nfo: usize,
     images: usize,
+    warning_details: Vec<Value>,
 }
 fn scope_covers(payload: &Value, scope: &[(i64, i64)], id: &str) -> bool {
     scope.iter().all(|(season, ep)| {
@@ -471,6 +488,7 @@ async fn prepare_group(
             cache_hit: true,
             nfo: 0,
             images: 0,
+            warning_details: vec![],
         });
     }
     item["Path"] = json!(paths[0]);
@@ -492,6 +510,7 @@ async fn prepare_group(
     let cached = crate::metadata::reconstruct_full(state, &id, &kind, false).await?;
     let mut cache_hit = false;
     let mut patch_records = vec![];
+    let mut warning_details = vec![];
     let (mut payload, cast) = if let Some((mut payload, cast)) = cached.filter(|(p, _)| {
         kind == "Movie" || string(p, "episode_group_id").is_empty() || scope_covers(p, &scope, &id)
     }) {
@@ -505,7 +524,10 @@ async fn prepare_group(
                 .as_object()
                 .map(|o| o.keys().cloned().collect::<BTreeSet<_>>())
                 .unwrap_or_default();
-            if crate::ingest::patch_cached_series(state, &id, &mut payload, &scope).await? {
+            let report =
+                crate::ingest::patch_cached_series_report(state, &id, &mut payload, &scope).await?;
+            warning_details.extend(list(&report["warning_details"]));
+            if report["patched"] == true {
                 let mut additions = payload.clone();
                 additions["seasons_details"] = json!(
                     list(&payload["seasons_details"])
@@ -576,8 +598,16 @@ async fn prepare_group(
             .collect::<String>()
         );
         dummy["Genres"] = top["genres"].clone();
-        crate::douban::premerge_in_job(state, &dummy, top, context).await?;
-        crate::translation::metadata_tree(state, &kind, &mut data, &string(&dummy, "Name")).await?;
+        let report = crate::douban::premerge_in_job_report(state, &dummy, top, context).await?;
+        warning_details.extend(list(&report["warning_details"]));
+        let report = crate::translation::metadata_tree_report(
+            state,
+            &kind,
+            &mut data,
+            &string(&dummy, "Name"),
+        )
+        .await?;
+        warning_details.extend(list(&report["warning_details"]));
         let top = if kind == "Series" {
             &data["series_details"]
         } else {
@@ -647,10 +677,18 @@ async fn prepare_group(
         0
     } else {
         match download_images(state, &kind, &id, &payload, &paths, roots, context, cancel).await {
-            Ok(count) => count,
+            Ok((count, warnings)) => {
+                warning_details.extend(warnings);
+                count
+            }
             Err(error) => {
                 check_active(state, &paths, context, cancel, true).await?;
                 tracing::warn!(reason=%error.1, "实时监控图片下载失败，保留 NFO 并继续入库通知：《{}》", string(&item, "Name"));
+                warning_details.push(json!(format!(
+                    "实时监控图片下载失败：《{}》，{}",
+                    string(&item, "Name"),
+                    crate::logs::redact(&error.1)
+                )));
                 0
             }
         }
@@ -678,6 +716,7 @@ async fn prepare_group(
         cache_hit,
         nfo,
         images,
+        warning_details,
     })
 }
 async fn movie_files(media_path: &Path) -> Result<Vec<PathBuf>> {
@@ -829,7 +868,7 @@ async fn download_images(
     roots: &[PathBuf],
     context: &JobContext,
     cancel: &CancellationToken,
-) -> Result<usize> {
+) -> Result<(usize, Vec<Value>)> {
     check_active(state, paths, context, cancel, true).await?;
     let root = media_root(kind, paths);
     ensure(root, roots).await?;
@@ -840,6 +879,9 @@ async fn download_images(
         .unwrap_or_default();
     let original = base["original_language"].as_str().unwrap_or("en");
     let mut images = json!({});
+    let mut query_error = None;
+    let mut query_succeeded = false;
+    let mut warning_details = vec![];
     for languages in
         crate::images::strategies(original, config["tmdb_image_language_preference"] == "zh")
     {
@@ -862,9 +904,13 @@ async fn download_images(
         )
         .await;
         let response = match response {
-            Ok(response) => response,
+            Ok(response) => {
+                query_succeeded = true;
+                response
+            }
             Err(error) => {
                 tracing::warn!(reason=%error.1, "实时监控图片语言候选查询失败，继续下一候选：TMDb {id}");
+                query_error = Some(crate::logs::redact(&error.1));
                 continue;
             }
         };
@@ -872,6 +918,11 @@ async fn download_images(
             images = response;
             break;
         }
+    }
+    if !query_succeeded && let Some(error) = query_error {
+        warning_details.push(json!(format!(
+            "实时监控图片候选查询全部失败：TMDb {id}，{error}"
+        )));
     }
     let mut count = 0;
     let files = if kind == "Movie" {
@@ -893,6 +944,11 @@ async fn download_images(
             Err(error) => {
                 check_active(state, paths, context, cancel, true).await?;
                 tracing::warn!(file=%path.display(), reason=%error.1, "实时监控图片下载失败，继续处理其它图片");
+                warning_details.push(json!(format!(
+                    "实时监控图片下载失败：{}，{}",
+                    path.display(),
+                    crate::logs::redact(&error.1)
+                )));
                 continue;
             }
         };
@@ -902,22 +958,30 @@ async fn download_images(
         match tokio::fs::write(&path, bytes).await {
             Ok(()) => count += 1,
             Err(error) => {
-                tracing::warn!(file=%path.display(), %error, "实时监控图片写入失败，继续处理其它图片")
+                tracing::warn!(file=%path.display(), %error, "实时监控图片写入失败，继续处理其它图片");
+                warning_details.push(json!(format!(
+                    "实时监控图片写入失败：{}，{error}",
+                    path.display()
+                )));
             }
         }
     }
-    if kind == "Series" {
+    let video_report = if kind == "Series" {
         check_active(state, paths, context, cancel, true).await?;
-        count += crate::video_images::missing(state, &files, payload, Some(context)).await?;
+        crate::video_images::missing_report(state, &files, payload, Some(context)).await?
     } else if kind == "Movie" {
         check_active(state, paths, context, cancel, true).await?;
         if images["runtime"].is_null() {
             images["runtime"] = payload["runtime"].clone();
         }
-        count += crate::video_images::movie_missing(state, &paths[0], root, &images, Some(context))
-            .await?;
-    }
-    Ok(count)
+        crate::video_images::movie_missing_report(state, &paths[0], root, &images, Some(context))
+            .await?
+    } else {
+        json!({})
+    };
+    count += video_report["captured"].as_u64().unwrap_or(0) as usize;
+    warning_details.extend(list(&video_report["warning_details"]));
+    Ok((count, warning_details))
 }
 pub fn image_plan(
     kind: &str,

@@ -387,24 +387,57 @@ pub async fn online(
     }
     let mut records = pending(kind, package, cast, item)?;
     if kind == "Movie" {
+        if item["Type"] != "Movie" || string(item, "Path").is_empty() {
+            return Err(ApiError::bad(
+                "电影的 Emby 类型或原生路径无效，已停止资产绑定",
+            ));
+        }
         let sources = list(&item["MediaSources"]);
         let mut versions = vec![];
         if sources.is_empty() {
             versions.push(item.clone());
         } else {
+            let mut seen = std::collections::HashSet::new();
+            let source_count = sources.len();
             for source in sources {
-                if string(&source, "Path").is_empty() {
-                    continue;
+                let source_id = string(&source, "ItemId");
+                let source_id = if source_id.is_empty() {
+                    string(&source, "Id")
+                        .trim_start_matches("mediasource_")
+                        .to_string()
+                } else {
+                    source_id
+                };
+                let source_id = if source_id.is_empty() && source_count == 1 {
+                    id.clone()
+                } else {
+                    source_id
+                };
+                if source_id.is_empty() || !seen.insert(source_id.clone()) {
+                    return Err(ApiError::bad(
+                        "电影媒体源缺少唯一的 Emby Item ID，已停止资产绑定",
+                    ));
                 }
-                let mut version = item.clone();
-                version["Id"] = json!(
-                    source["Id"]
-                        .as_str()
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or(&id)
-                        .replace("mediasource_", "")
-                );
-                version["Path"] = source["Path"].clone();
+                // MediaSource.Path is a playback URL or mount path; only the
+                // linked native Item.Path may identify the library file.
+                let mut version = if source_id == id {
+                    item.clone()
+                } else {
+                    crate::media_edit::details(
+                        state,
+                        &source_id,
+                        "Id,Type,Path,ParentId,DateCreated",
+                    )
+                    .await?
+                };
+                if version["Id"] != source_id
+                    || version["Type"] != "Movie"
+                    || string(&version, "Path").is_empty()
+                {
+                    return Err(ApiError::bad(
+                        "电影关联版本的 Emby 身份或原生路径无效，已停止资产绑定",
+                    ));
+                }
                 for key in ["Container", "Size", "RunTimeTicks", "MediaStreams"] {
                     if let Some(value) = source.get(key) {
                         version[key] = value.clone();
@@ -564,9 +597,12 @@ async fn online_assets(
         let (pc, sha, cache_path) = crate::fingerprints::lookup(state, &raw).await?;
         let mut version = version.clone();
         let id = string(&version, "Id").replace("mediasource_", "");
-        let path =
+        let path = if movie {
+            raw.clone()
+        } else {
             crate::fingerprints::asset_path(state, &raw, pc.as_deref(), &cache_path, item, &id)
-                .await;
+                .await
+        };
         version["Path"] = json!(path);
         let empty = std::collections::HashMap::new();
         let mut asset = crate::assets::parse(

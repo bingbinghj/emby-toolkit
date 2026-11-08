@@ -321,6 +321,7 @@ pub async fn repair_all(state: &AppState, context: &JobContext) -> Result<Value>
         .ok_or_else(|| ApiError::bad("Emby 媒体库列表无效"))?;
     let mut ids = BTreeMap::new();
     let mut scanned = 0;
+    let mut warning_details = vec![];
     for library in libraries {
         context.checkpoint().await?;
         let library_id = string(library, "Id");
@@ -360,6 +361,7 @@ pub async fn repair_all(state: &AppState, context: &JobContext) -> Result<Value>
                 continue;
             }
             let sources = list(&item["MediaSources"]);
+            let source_count = sources.len();
             if sources.is_empty() {
                 ids.entry(string(&item, "Id"))
                     .or_insert_with(|| crate::media_order::key(&item));
@@ -369,10 +371,20 @@ pub async fn repair_all(state: &AppState, context: &JobContext) -> Result<Value>
                     let source_id = string(&source, "Id");
                     let id = if !id.is_empty() {
                         id
-                    } else if !source_id.is_empty() && !source_id.starts_with("mediasource_") {
+                    } else if !source_id.is_empty() {
                         source_id
-                    } else {
+                            .strip_prefix("mediasource_")
+                            .unwrap_or(&source_id)
+                            .to_string()
+                    } else if source_count == 1 {
                         string(&item, "Id")
+                    } else {
+                        warning_details.push(format!(
+                            "《{}》（媒体ID：{}）有版本缺少原生 ID，未自动纠正该版本音轨",
+                            string(&item, "Name"),
+                            string(&item, "Id")
+                        ));
+                        continue;
                     };
                     let mut key = crate::media_order::key(&item);
                     key.4 = index as u64;
@@ -397,6 +409,19 @@ pub async fn repair_all(state: &AppState, context: &JobContext) -> Result<Value>
     )
     .await?;
     result["scanned"] = json!(scanned);
+    if !warning_details.is_empty() {
+        result["warnings"] =
+            json!(result["warnings"].as_u64().unwrap_or(0) + warning_details.len() as u64);
+        result["warning_details"]
+            .as_array_mut()
+            .unwrap()
+            .extend(warning_details.into_iter().map(|reason| json!(reason)));
+        result["message"] = json!(format!(
+            "{}；有 {} 条警告，请查看任务结果",
+            string(&result, "message"),
+            result["warnings"]
+        ));
+    }
     Ok(result)
 }
 pub async fn repair(state: &AppState, ids: &[String], context: &JobContext) -> Result<Value> {
@@ -428,7 +453,12 @@ pub async fn repair(state: &AppState, ids: &[String], context: &JobContext) -> R
             if item["PartCount"].as_u64().unwrap_or(0)>1||!string(&item,"ExtraType").is_empty(){return Ok(("skipped",json!({"item_id":id,"reason":"分段或附加内容"})));}
             let target=media_edit::repair_target(state,id).await?;
             let original=media_edit::load(state,&target).await?;
-            let live=list(&item["MediaSources"]).into_iter().find(|s|s["Path"]==target.path||s["Id"]==id.as_str()).unwrap_or_else(||json!({"MediaStreams":item["MediaStreams"]}));
+            let strm_source=crate::media_paths::strm_target(&target.path).await.unwrap_or_default();
+            let live=match crate::media_info::item_source(&item,&[&target.path,&string(&item,"Path"),&strm_source]) {
+                Some(source)=>source.clone(),
+                None if list(&item["MediaSources"]).is_empty()=>json!({"MediaStreams":item["MediaStreams"]}),
+                None=>return Ok(("ambiguous",json!({"item_id":id,"reason":"无法唯一确认当前版本的 Emby 音轨，拒绝自动纠正"}))),
+            };
             let streams=crate::media_info::container(&original).map(|c|list(&c["MediaStreams"])).unwrap_or_default();
             let mut audio=streams.iter().filter(|s|s["Type"]=="Audio").collect::<Vec<_>>();
             let potential=audio.windows(2).any(|p|crate::audio::compatible(p[0],p[1],true));audio.sort_by_key(|s|s["Index"].as_i64().unwrap_or(0));
@@ -494,6 +524,17 @@ pub async fn repair(state: &AppState, ids: &[String], context: &JobContext) -> R
         }
     }
     context.checkpoint().await?;
+    result["warnings"] = result["ambiguous"].clone();
+    result["warning_details"] = json!(
+        list(&result["ambiguous_items"])
+            .iter()
+            .map(|item| format!(
+                "音轨纠正（媒体ID：{}）：{}",
+                string(item, "item_id"),
+                string(item, "reason")
+            ))
+            .collect::<Vec<_>>()
+    );
     result["message"] = json!(format!(
         "高清音轨纠正完成：成功 {}，歧义 {}，失败 {}",
         result["repaired"], result["ambiguous"], result["failed"]

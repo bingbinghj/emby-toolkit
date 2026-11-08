@@ -30,18 +30,9 @@ fn chapters(item: &Value) -> Vec<Value> {
         .collect()
 }
 pub fn source(item: &Value) -> Result<Value> {
-    let sources = list(&item["MediaSources"]);
-    let matched = sources
-        .iter()
-        .filter(|s| string(s, "ItemId") == string(item, "Id"))
-        .collect::<Vec<_>>();
-    if matched.len() == 1 {
-        return Ok(matched[0].clone());
-    }
-    if sources.len() == 1 {
-        return Ok(sources[0].clone());
-    }
-    Err(ApiError::bad("无法唯一确定当前版本的媒体输入路径"))
+    crate::media_info::item_source(item, &[&string(item, "Path")])
+        .cloned()
+        .ok_or_else(|| ApiError::bad("无法唯一确定当前版本的媒体输入路径"))
 }
 pub fn repair_rule(item: &Value, probe: &Value, stderr: &str) -> Result<Option<Value>> {
     let source = source(item)?;

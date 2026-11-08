@@ -199,8 +199,8 @@ async fn translate_persons(state: &AppState, context: &crate::jobs::JobContext) 
             &format!("正在翻译 {} 个外文人物名", inputs.len()),
         )
         .await;
-    let translated =
-        crate::ai::translate(state, &inputs, "fast_mode", &json!({}), &Value::Null).await?;
+    let (translated, warning_details) =
+        crate::ai::translate_report(state, &inputs, "fast_mode", &json!({}), &Value::Null).await?;
     tracing::info!(
         "[人物中文化] 请求翻译 {} 个名称，取得 {} 个结果，开始回写人物",
         inputs.len(),
@@ -258,19 +258,19 @@ async fn translate_persons(state: &AppState, context: &crate::jobs::JobContext) 
         }
     }
     context.checkpoint().await?;
+    let mut message = format!(
+        "人物中文化完成：更新 {updated} 人，失败 {} 人，警告 {} 条",
+        failures.len(),
+        warning_details.len()
+    );
+    if let Some(reason) = warning_details.first() {
+        message.push_str(&format!("；{reason}；完整明细见任务结果"));
+    }
     context
-        .update_counted(
-            total as u64,
-            total as u64,
-            "人物中文化",
-            &format!(
-                "人物中文化完成：更新 {updated} 人，失败 {} 人",
-                failures.len()
-            ),
-        )
+        .update_counted(total as u64, total as u64, "人物中文化", &message)
         .await;
     Ok(
-        json!({"updated":updated,"failures":failures,"message":format!("人物中文化完成：更新 {updated} 人，失败 {} 人", failures.len())}),
+        json!({"updated":updated,"failures":failures,"warnings":warning_details.len(),"warning_details":warning_details,"message":message}),
     )
 }
 async fn translate_roles(
@@ -282,6 +282,8 @@ async fn translate_roles(
     if config["ai_translate_actor_role"] != true {
         return Ok(json!({"updated":0,"message":"AI翻译功能未启用，跳过任务。"}));
     }
+    let mut warnings = 0_u64;
+    let mut warning_details = vec![];
     let mut ignored_ids = std::collections::HashSet::<String>::new();
     if !crate::media_edit::list(&config["libraries_to_ignore"]).is_empty() {
         let rows: Vec<(Value, Value)> = sqlx::query_as(
@@ -329,18 +331,42 @@ async fn translate_roles(
             alive.insert(crate::state::string(item, "Id"));
             if item["Type"] == "Movie" {
                 for source in crate::media_edit::list(&item["MediaSources"]) {
-                    let id = crate::state::string(&source, "Id").replace("mediasource_", "");
+                    let id = source["ItemId"]
+                        .as_str()
+                        .filter(|id| !id.is_empty())
+                        .or_else(|| source["Id"].as_str())
+                        .unwrap_or("")
+                        .trim_start_matches("mediasource_")
+                        .to_string();
                     if !id.is_empty() {
                         alive.insert(id);
                     }
                 }
             }
         }
-        let removed: Vec<String> =
+        let candidates: Vec<String> =
             sqlx::query_scalar("SELECT item_id FROM processed_log WHERE NOT (item_id=ANY($1))")
                 .bind(alive.into_iter().collect::<Vec<_>>())
                 .fetch_all(&state.db)
                 .await?;
+        // A source ID is not proof that its native version disappeared.
+        let removed = match crate::emby::existing_ids(state, &candidates, Some(context)).await {
+            Ok(existing) => candidates
+                .into_iter()
+                .filter(|id| !existing.contains(id))
+                .collect::<Vec<_>>(),
+            Err(error) if context.is_cancelled() => return Err(error),
+            Err(error) => {
+                let reason = format!(
+                    "角色中文化清理未确认媒体存活状态，已保留处理和复核记录：{}",
+                    error.1
+                );
+                tracing::warn!("{reason}");
+                warnings += 1;
+                warning_details.push(json!(reason));
+                vec![]
+            }
+        };
         if !removed.is_empty() {
             let mut transaction = state.db.begin().await?;
             for table in ["failed_log", "processed_log"] {
@@ -405,8 +431,10 @@ async fn translate_roles(
             .await
         };
         match result {
-            Ok(_) => {
+            Ok(report) => {
                 updated += 1;
+                warnings += report["warnings"].as_u64().unwrap_or(0);
+                warning_details.extend(crate::media_edit::list(&report["warning_details"]));
                 tracing::info!("[角色中文化] 《{name}》处理完成（Item {id}）");
             }
             Err(error) => {
@@ -431,7 +459,7 @@ async fn translate_roles(
         )
         .await;
     Ok(
-        json!({"updated":updated,"failures":failures,"message":format!("角色中文化完成：处理 {updated} 项，失败 {} 项", failures.len())}),
+        json!({"updated":updated,"failures":failures,"warnings":warnings,"warning_details":warning_details,"message":format!("角色中文化完成：处理 {updated} 项，失败 {} 项，警告 {warnings} 条", failures.len())}),
     )
 }
 
@@ -553,6 +581,7 @@ async fn restore_metadata(state: &AppState, context: &crate::jobs::JobContext) -
     let mut written = 0;
     let mut images = 0;
     let mut failures = vec![];
+    let mut warning_details = vec![];
     for (index, row) in rows.iter().enumerate() {
         context.checkpoint().await?;
         let id = crate::state::string(row, "tmdb_id");
@@ -583,7 +612,7 @@ async fn restore_metadata(state: &AppState, context: &crate::jobs::JobContext) -
                 return Err(ApiError::bad("缺失本地媒体路径"));
             }
             if crate::emby::path_ignored(state, &path).await? {
-                return Ok((0, 0));
+                return Ok((0, 0, vec![]));
             }
             let (payload, cast) = crate::metadata::reconstruct_full(state, &id, &kind, true)
                 .await?
@@ -591,15 +620,20 @@ async fn restore_metadata(state: &AppState, context: &crate::jobs::JobContext) -
             let item = json!({"Path":path,"Type":kind});
             let nfo = crate::nfo_files::sync(&kind, &item, &payload, &cast, &options).await?;
             let images =
-                crate::images::download(state, &kind, &id, &item, &payload, context).await?;
-            Ok::<_, ApiError>((nfo, images))
+                crate::images::download_report(state, &kind, &id, &item, &payload, context).await?;
+            Ok::<_, ApiError>((
+                nfo,
+                images["downloaded"].as_u64().unwrap_or(0),
+                crate::media_edit::list(&images["warning_details"]),
+            ))
         }
         .await;
         match result {
-            Ok((nfo, count)) => {
+            Ok((nfo, count, warnings)) => {
                 updated += 1;
                 written += nfo;
                 images += count;
+                warning_details.extend(warnings);
                 tracing::info!(
                     "[NFO和封面还原] 《{title}》完成：写入 {nfo} 个 NFO、{count} 张图片"
                 );
@@ -615,8 +649,9 @@ async fn restore_metadata(state: &AppState, context: &crate::jobs::JobContext) -
     }
     context.checkpoint().await?;
     let message = format!(
-        "NFO和封面还原完成：处理 {updated} 项，写入 {written} 个 NFO、{images} 张图片，失败 {} 项",
-        failures.len()
+        "NFO和封面还原完成：处理 {updated} 项，写入 {written} 个 NFO、{images} 张图片，失败 {} 项，警告 {} 条",
+        failures.len(),
+        warning_details.len()
     );
     tracing::info!("[NFO和封面还原] {message}");
     context
@@ -628,7 +663,7 @@ async fn restore_metadata(state: &AppState, context: &crate::jobs::JobContext) -
         )
         .await;
     Ok(
-        json!({"updated":updated,"written":written,"images":images,"failures":failures,"message":message}),
+        json!({"updated":updated,"written":written,"images":images,"failures":failures,"warnings":warning_details.len(),"warning_details":warning_details,"message":message}),
     )
 }
 

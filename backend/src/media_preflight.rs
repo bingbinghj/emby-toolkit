@@ -22,18 +22,26 @@ pub fn size_matches(info: &Value, expected: u64) -> bool {
 }
 
 pub fn valid_video(item: &Value) -> bool {
-    list(&item["MediaStreams"])
-        .into_iter()
-        .chain(
-            list(&item["MediaSources"])
-                .iter()
-                .flat_map(|source| list(&source["MediaStreams"])),
-        )
-        .any(|stream| {
-            stream["Type"] == "Video"
-                && stream["Width"].as_f64().is_some_and(|n| n > 0.0)
-                && stream["Height"].as_f64().is_some_and(|n| n > 0.0)
-        })
+    let streams = if item["MediaSources"]
+        .as_array()
+        .is_some_and(|sources| !sources.is_empty())
+    {
+        let Some(source) = media_info::item_source(item, &[item["Path"].as_str().unwrap_or("")])
+        else {
+            return false;
+        };
+        source["MediaStreams"]
+            .as_array()
+            .filter(|streams| !streams.is_empty())
+            .or_else(|| item["MediaStreams"].as_array())
+    } else {
+        item["MediaStreams"].as_array()
+    };
+    streams.into_iter().flatten().any(|stream| {
+        stream["Type"] == "Video"
+            && stream["Width"].as_f64().is_some_and(|n| n > 0.0)
+            && stream["Height"].as_f64().is_some_and(|n| n > 0.0)
+    })
 }
 
 pub(crate) async fn valid_video_sidecar(path: &std::path::Path) -> bool {
@@ -244,19 +252,14 @@ async fn preflight(state: &AppState, item: &Value, context: &JobContext) -> Resu
     }
     let id = string(item, "Id");
     let media_name = string(item, "Name");
-    let path = item["Path"]
-        .as_str()
-        .filter(|path| !path.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            list(&item["MediaSources"])
-                .first()
-                .map(|source| string(source, "Path"))
-                .unwrap_or_default()
-        });
     if id.is_empty() {
         return Ok(json!({"skipped":true}));
     }
+    let path = item["Path"]
+        .as_str()
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| ApiError::bad("入库项目缺少 Emby 原生路径，未使用播放路径执行媒体信息预检"))?
+        .to_string();
     let config = state.config.read().await.clone();
     let reuse = config["p115_generate_mediainfo"] != true;
     tracing::info!("入库媒体信息预检开始：《{media_name}》，Emby {id}");

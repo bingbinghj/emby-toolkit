@@ -48,7 +48,14 @@ async fn synchronization_persists_translated_movie_and_episode_fields_and_keeps_
         .route("/Items", get(move |Query(query): Query<HashMap<String, String>>| {
             let all = all.clone();
             async move {
-                let items = if query["ParentId"] == "series" { all[2..].to_vec() } else { all };
+                let items = if let Some(ids) = query.get("Ids") {
+                    let ids = ids.split(',').collect::<Vec<_>>();
+                    all.into_iter().filter(|item| ids.contains(&item["Id"].as_str().unwrap())).collect()
+                } else if query.get("ParentId").is_some_and(|parent| parent == "series") {
+                    all[2..].to_vec()
+                } else {
+                    all
+                };
                 Json(json!({"TotalRecordCount":items.len(),"Items":items}))
             }
         }))

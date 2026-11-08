@@ -522,9 +522,7 @@ pub fn parse_with_cache(
     mappings: &Value,
     cached: &Value,
 ) -> Value {
-    let emby_source = item["MediaSources"]
-        .as_array()
-        .and_then(|v| v.first())
+    let emby_source = crate::media_info::item_source(item, &[item["Path"].as_str().unwrap_or("")])
         .unwrap_or(&Value::Null);
     let native = if !list(&emby_source["MediaStreams"]).is_empty() {
         list(&emby_source["MediaStreams"])

@@ -380,12 +380,22 @@ async fn process(
         crate::tmdb::aggregate(state, &tmdb, &target_numbers).await?
     };
     tracing::info!("TMDb 元数据已获取：《{media_name}》，TMDb {tmdb}，类型 {type_label}");
-    if kind == "Series" {
-        crate::douban::premerge_in_job(state, item, &mut data["series_details"], context).await?;
+    let douban_report = if kind == "Series" {
+        crate::douban::premerge_in_job_report(state, item, &mut data["series_details"], context)
+            .await?
     } else {
-        crate::douban::premerge_in_job(state, item, &mut data, context).await?;
-    }
-    crate::translation::metadata_tree(state, &kind, &mut data, &string(item, "Name")).await?;
+        crate::douban::premerge_in_job_report(state, item, &mut data, context).await?
+    };
+    let translation_report =
+        crate::translation::metadata_tree_report(state, &kind, &mut data, &string(item, "Name"))
+            .await?;
+    let mut warning_details = list(&douban_report["warning_details"]);
+    warning_details.extend(list(&translation_report["warning_details"]));
+    let mut message = if pending {
+        "入库预处理完成，等待轻量回流绑定资产".to_string()
+    } else {
+        "完整刮削已完成，元数据已写入本地文件与数据库".to_string()
+    };
     let target_scope = episodes
         .iter()
         .filter(|e| episode_ids.is_empty() || episode_ids.contains(&string(e, "Id")))
@@ -470,7 +480,10 @@ async fn process(
         ..Default::default()
     };
     let written = crate::nfo_files::sync(&kind, item, &payload, &cast, &options).await?;
-    let images = crate::images::download(state, &kind, &tmdb, item, &payload, context).await?;
+    let image_report =
+        crate::images::download_report(state, &kind, &tmdb, item, &payload, context).await?;
+    let images = image_report["downloaded"].as_u64().unwrap_or(0);
+    warning_details.extend(list(&image_report["warning_details"]));
     if state.configured().await && !pending {
         crate::persons::update_emby(state, &cast, &payload, item).await?;
         if refresh_metadata {
@@ -511,13 +524,20 @@ async fn process(
         crate::metadata_records::online(state, &kind, &payload, &cast, item, &input).await?
     };
     metadata::ingest(state, &mut records, !pending && group.is_some()).await?;
+    if let Some(reason) = warning_details.first().and_then(Value::as_str) {
+        message.push_str(&format!(
+            "；有 {} 条提醒：{}；完整明细见任务结果",
+            warning_details.len(),
+            reason
+        ));
+    }
     if pending {
         tracing::info!(
             "入库预处理完成：《{media_name}》，TMDb {tmdb}，数据库记录 {} 条，NFO 写入 {written} 个，图片下载 {images} 个，等待回流",
             records.len()
         );
         return Ok(
-            json!({"updated":records.len(),"nfo_written":written,"images_downloaded":images,"message":"入库预处理完成，等待轻量回流绑定资产"}),
+            json!({"updated":records.len(),"nfo_written":written,"images_downloaded":images,"message":message,"warnings":warning_details.len(),"warning_details":warning_details}),
         );
     }
     let score = review(state, item, &cast, pending).await?;
@@ -527,7 +547,7 @@ async fn process(
         records.len()
     );
     Ok(
-        json!({"updated":records.len(),"nfo_written":written,"images_downloaded":images,"score":score,"message":"完整刮削已完成，元数据已写入本地文件与数据库"}),
+        json!({"updated":records.len(),"nfo_written":written,"images_downloaded":images,"score":score,"message":message,"warnings":warning_details.len(),"warning_details":warning_details}),
     )
 }
 
@@ -537,6 +557,14 @@ pub async fn patch_cached_series(
     payload: &mut Value,
     scope: &[(i64, i64)],
 ) -> Result<bool> {
+    Ok(patch_cached_series_report(state, id, payload, scope).await?["patched"] == true)
+}
+pub async fn patch_cached_series_report(
+    state: &AppState,
+    id: &str,
+    payload: &mut Value,
+    scope: &[(i64, i64)],
+) -> Result<Value> {
     let media_name = string(payload, "name");
     let scope_text = scope_label(scope);
     tracing::info!(
@@ -646,14 +674,21 @@ pub async fn patch_cached_series(
         || patch["episodes_details"]
             .as_object()
             .is_some_and(|o| !o.is_empty());
+    let mut report = json!({"patched":patched,"warnings":0,"warning_details":[]});
     if patched {
         tracing::info!(
             "追更缓存补齐数据已就绪：《{media_name}》，TMDb {id}，新增季 {} 个，补齐分集 {} 个",
             list(&patch["seasons_details"]).len(),
             patch["episodes_details"].as_object().map_or(0, |o| o.len())
         );
-        crate::translation::metadata_tree(state, "Series", &mut patch, &string(payload, "name"))
-            .await?;
+        report = crate::translation::metadata_tree_report(
+            state,
+            "Series",
+            &mut patch,
+            &string(payload, "name"),
+        )
+        .await?;
+        report["patched"] = json!(patched);
         for season in list(&patch["seasons_details"]) {
             seasons.insert(season["season_number"].as_i64().unwrap(), season);
         }
@@ -674,7 +709,7 @@ pub async fn patch_cached_series(
             "目标季集缓存完整，无需更新"
         }
     );
-    Ok(patched)
+    Ok(report)
 }
 pub async fn prepare_cached(
     state: &AppState,
@@ -683,11 +718,26 @@ pub async fn prepare_cached(
     requested_group: Option<&str>,
     context: &JobContext,
 ) -> Result<bool> {
+    Ok(
+        prepare_cached_report(state, item, episode_ids, requested_group, context)
+            .await?
+            .is_some(),
+    )
+}
+pub async fn prepare_cached_report(
+    state: &AppState,
+    item: &Value,
+    episode_ids: &[String],
+    requested_group: Option<&str>,
+    context: &JobContext,
+) -> Result<Option<Value>> {
     let media_name = string(item, "Name");
     context.checkpoint().await?;
     if emby::path_ignored(state, &string(item, "Path")).await? {
         tracing::info!("缓存预处理跳过：《{media_name}》，所属媒体库在忽略列表中");
-        return Ok(true);
+        return Ok(Some(
+            json!({"status":"ignored_library","warnings":0,"warning_details":[]}),
+        ));
     }
     tracing::info!(
         "缓存预处理开始：Emby {}，名称 {}，目标分集 {} 个",
@@ -709,13 +759,13 @@ pub async fn prepare_cached(
         tracing::info!(
             "缓存预处理未命中：《{media_name}》，类型 {type_label}，TMDb {id}，没有可复用的元数据或演员缓存"
         );
-        return Ok(false);
+        return Ok(None);
     };
     if kind == "Series"
         && requested_group.is_some_and(|group| group != string(&payload, "episode_group_id"))
     {
         tracing::info!("缓存预处理未命中：《{media_name}》，TMDb {id}，请求剧集组与缓存不一致");
-        return Ok(false);
+        return Ok(None);
     }
     let children = if kind == "Series" {
         emby::items(
@@ -779,7 +829,7 @@ pub async fn prepare_cached(
             tracing::info!(
                 "缓存预处理未命中：《{media_name}》，TMDb {id}，目标季集 {scope_text} 与缓存剧集组不匹配"
             );
-            return Ok(false);
+            return Ok(None);
         }
     }
     if kind == "Series"
@@ -796,7 +846,7 @@ pub async fn prepare_cached(
         tracing::info!(
             "缓存预处理未命中：《{media_name}》，TMDb {id}，目标季集 {scope_text} 的剧集组缓存不完整"
         );
-        return Ok(false);
+        return Ok(None);
     }
     let old_seasons = list(&payload["seasons_details"])
         .iter()
@@ -806,11 +856,12 @@ pub async fn prepare_cached(
         .as_object()
         .map(|m| m.keys().cloned().collect::<std::collections::BTreeSet<_>>())
         .unwrap_or_default();
-    let patched = if kind == "Series" && string(&payload, "episode_group_id").is_empty() {
-        patch_cached_series(state, &id, &mut payload, &scope).await?
+    let mut report = if kind == "Series" && string(&payload, "episode_group_id").is_empty() {
+        patch_cached_series_report(state, &id, &mut payload, &scope).await?
     } else {
-        false
+        json!({"patched":false,"warnings":0,"warning_details":[]})
     };
+    let patched = report["patched"] == true;
     let config = state.config.read().await.clone();
     let defaults: Value = serde_json::from_str(include_str!("../assets/defaults.json")).unwrap();
     let studios = crate::db::setting(&state.db, "studio_mapping")
@@ -866,7 +917,15 @@ pub async fn prepare_cached(
     };
     if !root.join("poster.jpg").is_file() {
         tracing::info!("缓存恢复图片补抓开始：《{media_name}》，TMDb {id}，本地海报缺失");
-        crate::images::download(state, &kind, &id, item, &payload, context).await?;
+        let images =
+            crate::images::download_report(state, &kind, &id, item, &payload, context).await?;
+        report["warnings"] = json!(
+            report["warnings"].as_u64().unwrap_or(0) + images["warnings"].as_u64().unwrap_or(0)
+        );
+        report["warning_details"]
+            .as_array_mut()
+            .unwrap()
+            .extend(list(&images["warning_details"]));
     } else {
         tracing::info!("缓存恢复图片补抓跳过：《{media_name}》，TMDb {id}，本地海报已存在");
     }
@@ -880,7 +939,7 @@ pub async fn prepare_cached(
             "目标缓存完整，直接复用"
         }
     );
-    Ok(true)
+    Ok(Some(report))
 }
 
 async fn review(

@@ -219,7 +219,15 @@ pub async fn repair_target(state: &AppState, id: &str) -> Result<Target> {
     if let Some(target) = database_target(state, id).await? {
         return Ok(target);
     }
-    let item = details(state, id, "Type,Path,Size,MediaSources,PartCount,ExtraType").await?;
+    let item = details(
+        state,
+        id,
+        "Id,Type,Path,Size,MediaSources,PartCount,ExtraType",
+    )
+    .await?;
+    if item["Id"] != id {
+        return Err(ApiError::bad("音轨纠正目标的 Emby 身份与请求不一致"));
+    }
     if !matches!(item["Type"].as_str(), Some("Movie" | "Episode" | "Video")) {
         return Err(ApiError::bad("音轨纠正目标不是视频媒体"));
     }
@@ -240,15 +248,31 @@ pub async fn repair_target(state: &AppState, id: &str) -> Result<Target> {
             id.into()
         } else {
             let source_id = string(&source, "Id");
-            if source_id.is_empty() || source_id.starts_with("mediasource_") {
+            let source_id = source_id
+                .strip_prefix("mediasource_")
+                .unwrap_or(&source_id)
+                .to_string();
+            if source_id.is_empty() {
                 return Err(ApiError::bad("关联媒体源没有可验证的 Emby Item ID"));
             }
             source_id
         };
         if seen.insert(source_id.clone()) {
+            let native = if source_id == id {
+                item.clone()
+            } else {
+                details(state, &source_id, "Id,Type,Path").await?
+            };
+            let native_path = string(&native, "Path");
+            if native["Id"] != source_id || native["Type"] != item["Type"] || native_path.is_empty()
+            {
+                return Err(ApiError::bad(
+                    "关联版本的原生身份、类型或路径未确认，已停止音轨纠正",
+                ));
+            }
             target
                 .versions
-                .push(json!({"emby_id":source_id,"path":source_path}));
+                .push(json!({"emby_id":source_id,"path":native_path}));
         }
     }
     Ok(target)
@@ -412,51 +436,77 @@ async fn version(
     )
 }
 pub async fn additional_parts(state: &AppState, id: &str, info: &Value) -> Result<Vec<Value>> {
+    if info["Id"]
+        .as_str()
+        .is_some_and(|native| !native.is_empty() && native != id)
+    {
+        return Err(ApiError::bad("Emby额外分段的原生身份与请求不一致"));
+    }
     let user = string(&*state.config.read().await, "emby_user_id");
+    let mut owner = info.clone();
+    owner["Id"] = json!(id);
+    let path = string(info, "Path");
+    let target = media_paths::strm_target(&path).await.unwrap_or_default();
+    let sources = list(&info["MediaSources"]);
+    let source = media_info::item_source(&owner, &[&path, &target])
+        .or_else(|| {
+            (sources.len() == 1
+                && (sources[0]["ItemId"].is_null() || sources[0]["ItemId"] == "")
+                && sources[0]["Id"]
+                    .as_str()
+                    .and_then(|source_id| source_id.strip_prefix("mediasource_"))
+                    .is_none_or(|owner| owner == id))
+            .then(|| &sources[0])
+        })
+        .ok_or_else(|| ApiError::bad("无法唯一确定当前版本的额外分段媒体源，已停止处理"))?;
+    let source_id = string(source, "Id");
+    if source_id.is_empty() {
+        return Err(ApiError::bad(
+            "当前版本缺少原生媒体源 ID，已停止读取额外分段",
+        ));
+    }
+    let response = state
+        .emby(
+            Method::GET,
+            &format!("Videos/{id}/AdditionalParts"),
+            &[
+                ("UserId", user),
+                ("mediaSourceId", source_id),
+                ("Fields", "Path,MediaSources,ExtraType,ParentId".into()),
+            ],
+            None,
+        )
+        .await
+        .inspect_err(|error| tracing::warn!("[Emby额外分段] 查询 Item {id} 失败：{}", error.1))?;
+    let items = response["Items"]
+        .as_array()
+        .ok_or_else(|| ApiError::bad("Emby额外分段响应无效，已停止分段范围判断"))?;
     let mut parts = vec![];
     let mut positions = std::collections::HashMap::new();
-    for source in info["MediaSources"].as_array().into_iter().flatten() {
-        let source_id = string(source, "Id").trim().to_string();
-        if source_id.is_empty() {
-            continue;
-        }
-        let response = state
-            .emby(
-                Method::GET,
-                &format!("Videos/{id}/AdditionalParts"),
-                &[
-                    ("UserId", user.clone()),
-                    ("mediaSourceId", source_id),
-                    ("Fields", "Path,MediaSources,ExtraType,ParentId".into()),
-                ],
-                None,
-            )
-            .await;
-        let response = match response {
-            Ok(response) => response,
-            Err(error) => {
-                tracing::warn!(
-                    "[Emby额外分段] 查询 Item {id} / MediaSource 失败：{}",
-                    error.1
-                );
-                continue;
-            }
-        };
-        for part in response["Items"].as_array().into_iter().flatten() {
-            let part_id = string(part, "Id").trim().to_string();
-            let parent = string(part, "ParentId").trim().to_string();
-            if !part_id.is_empty() && (parent.is_empty() || parent == id) {
-                if let Some(position) = positions.get(&part_id) {
-                    parts[*position] = part.clone();
-                } else {
-                    positions.insert(part_id, parts.len());
-                    parts.push(part.clone());
-                }
+    for part in items {
+        let part_id = string(part, "Id").trim().to_string();
+        let parent = string(part, "ParentId").trim().to_string();
+        if !part_id.is_empty() && (parent.is_empty() || parent == id) {
+            if let Some(position) = positions.get(&part_id) {
+                parts[*position] = part.clone();
+            } else {
+                positions.insert(part_id, parts.len());
+                parts.push(part.clone());
             }
         }
     }
+    if let Some(count) = info["PartCount"].as_u64().filter(|count| *count > 1)
+        && parts.len() as u64 + 1 != count
+    {
+        return Err(ApiError::bad(format!(
+            "Emby额外分段范围不完整：期望 {} 个额外分段，实际 {} 个，已停止处理",
+            count - 1,
+            parts.len()
+        )));
+    }
     Ok(parts)
 }
+
 async fn edit(State(state): State<AppState>, Path(id): Path<String>) -> Result<Json<Value>> {
     let result = edit_data(&state, &id).await;
     match &result {

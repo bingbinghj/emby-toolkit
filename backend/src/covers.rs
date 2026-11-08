@@ -198,6 +198,7 @@ pub async fn generate(
     ];
     let mut updated = 0;
     let mut failures = vec![];
+    let mut warning_details = vec![];
     let mut libraries = list(&views["Items"]);
     crate::media_order::sort(&mut libraries);
     for library in libraries {
@@ -281,15 +282,27 @@ pub async fn generate(
                     context.activity("读取封面来源", &format!("媒体库《{name}》正在读取《{}》的封面（第 {} 张）", string(&item, "Name"), index + 1)).await;
                     let image_path=image_path(&item,&config,multi).unwrap();
                     let app_config = state.config.read().await.clone();
-                    let response = crate::emby::send(state
+                    let response = match crate::emby::send(state
                         .http
                         .get(format!(
                             "{}{image_path}",
                             string(&app_config, "emby_server_url").trim_end_matches('/')
                         ))
                         .header("X-Emby-Token", string(&app_config, "emby_api_key")))
-                        .await?;
+                        .await {
+                            Ok(response) => response,
+                            Err(error) => {
+                                context.checkpoint().await?;
+                                let reason = format!("媒体库《{name}》封面来源《{}》下载失败：{}，继续处理其它图片", string(&item, "Name"), error.without_url());
+                                tracing::warn!("{reason}");
+                                warning_details.push(reason);
+                                continue;
+                            }
+                        };
                     if !response.status().is_success() {
+                        let reason = format!("媒体库《{name}》封面来源《{}》下载失败：HTTP {}，继续处理其它图片", string(&item, "Name"), response.status());
+                        tracing::warn!("{reason}");
+                        warning_details.push(reason);
                         continue;
                     }
                     let path = folder.join(format!("{}.jpg", index + 1));
@@ -332,7 +345,11 @@ pub async fn generate(
                     tokio::fs::create_dir_all(&output).await?;
                     tokio::fs::write(PathBuf::from(output).join(format!("{name}.jpg")), &bytes).await
                 }.await;
-                if let Err(error) = saved { tracing::error!("另存封面失败：{error}，继续上传媒体库《{name}》封面。"); }
+                if let Err(error) = saved {
+                    let reason=format!("媒体库《{name}》另存封面失败：{error}，继续上传 Emby 封面");
+                    tracing::warn!("{reason}");
+                    warning_details.push(reason);
+                }
             }
             let app_config = state.config.read().await.clone();
             context.activity("上传封面", &format!("正在将媒体库《{name}》的封面上传到 Emby")).await;
@@ -375,7 +392,7 @@ pub async fn generate(
         )
         .await;
     Ok(
-        json!({"updated":updated,"failures":failures,"message":format!("封面生成完成：成功 {updated} 个媒体库，失败 {} 个", failures.len())}),
+        json!({"updated":updated,"failures":failures,"warnings":warning_details.len(),"warning_details":warning_details,"message":format!("封面生成完成：成功 {updated} 个媒体库，失败 {} 个，提醒 {} 条", failures.len(),warning_details.len())}),
     )
 }
 fn rating(row: &Value, mapping: &Value) -> i64 {

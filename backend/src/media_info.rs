@@ -117,11 +117,21 @@ pub(crate) fn recovery_chapters(info: &Value, item: &Value, paths: &[&str]) -> R
 pub(crate) fn item_streams<'a>(item: &'a Value, paths: &[&str]) -> Option<&'a Vec<Value>> {
     let sources = item["MediaSources"].as_array().filter(|v| !v.is_empty());
     if let Some(sources) = sources {
+        let owner_matches = |source: &Value| {
+            if let Some(owner) = source["ItemId"].as_str().filter(|owner| !owner.is_empty()) {
+                return item["Id"] == owner;
+            }
+            (source["ItemId"].is_null() || source["ItemId"] == "")
+                && source["Id"]
+                    .as_str()
+                    .and_then(|source_id| source_id.strip_prefix("mediasource_"))
+                    .is_none_or(|owner| item["Id"] == owner)
+        };
         let select = |normalized: bool| {
             let matches = sources
                 .iter()
                 .filter(|source| {
-                    if source["ItemId"].as_str().is_some_and(|id| item["Id"] != id) {
+                    if !owner_matches(source) {
                         return false;
                     }
                     source["Path"].as_str().is_some_and(|path| {
@@ -157,7 +167,7 @@ pub(crate) fn item_streams<'a>(item: &'a Value, paths: &[&str]) -> Option<&'a Ve
         let source = select(false).or_else(|| select(true)).or_else(|| {
             (sources.len() == 1 && sources[0]["Path"].as_str().is_none_or(str::is_empty))
                 .then(|| &sources[0])
-                .filter(|source| source["ItemId"].as_str().is_none_or(|id| item["Id"] == id))
+                .filter(|source| owner_matches(source))
         })?;
         // The matched source's cache may lag behind the requested item's streams.
         source["MediaStreams"]
@@ -168,6 +178,50 @@ pub(crate) fn item_streams<'a>(item: &'a Value, paths: &[&str]) -> Option<&'a Ve
     } else {
         item["MediaStreams"].as_array()
     }
+}
+
+// MediaSource.Id identifies a source, while ItemId identifies its native item.
+// Prefer an unambiguous native owner and never borrow another version's source.
+pub(crate) fn item_source<'a>(item: &'a Value, paths: &[&str]) -> Option<&'a Value> {
+    let id = item["Id"].as_str().filter(|id| !id.is_empty())?;
+    let sources = item["MediaSources"].as_array()?;
+    let matches = sources
+        .iter()
+        .filter(|source| {
+            let owner = source["ItemId"].as_str().filter(|owner| !owner.is_empty());
+            if let Some(owner) = owner {
+                return owner == id;
+            }
+            (source["ItemId"].is_null() || source["ItemId"] == "")
+                && source["Id"].as_str().is_some_and(|source_id| {
+                    source_id.strip_prefix("mediasource_").unwrap_or(source_id) == id
+                })
+        })
+        .collect::<Vec<_>>();
+    if matches.len() == 1 {
+        return Some(matches[0]);
+    }
+    let candidates = if matches.is_empty() {
+        sources.iter().collect::<Vec<_>>()
+    } else {
+        matches
+    };
+    let mut matched = candidates.into_iter().filter(|source| {
+        (source["ItemId"] == id
+            || ((source["ItemId"].is_null() || source["ItemId"] == "")
+                && source["Id"]
+                    .as_str()
+                    .and_then(|source_id| source_id.strip_prefix("mediasource_"))
+                    .is_none_or(|owner| owner == id)))
+            && source["Path"].as_str().is_some_and(|path| {
+                !path.is_empty()
+                    && paths
+                        .iter()
+                        .any(|target| !target.is_empty() && path == *target)
+            })
+    });
+    let source = matched.next()?;
+    matched.next().is_none().then_some(source)
 }
 pub(crate) fn stream_differences(info: &Value, item: &Value, paths: &[&str]) -> Vec<String> {
     let Some(expected) = container(info).and_then(|source| source["MediaStreams"].as_array())

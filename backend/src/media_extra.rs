@@ -81,12 +81,18 @@ pub async fn preview_cast(state: &AppState, id: &str, context: &JobContext) -> R
         .map(str::to_string)
         .or_else(|| bound.as_ref().map(|r| string(r, "tmdb_id")))
         .unwrap_or_default();
+    let mut warning_details = vec![];
     let mut raw = if !tmdb.is_empty()
         && matches!(kind.as_str(), "Movie" | "Series")
         && !string(&config, "tmdb_api_key").is_empty()
     {
         let mut data = crate::tmdb::details(state, &kind, &tmdb).await?;
-        crate::douban::premerge_online(state, &item, &mut data).await?;
+        let report = crate::douban::premerge_online_report(state, &item, &mut data).await?;
+        warning_details.extend(
+            list(&report["warning_details"])
+                .into_iter()
+                .filter_map(|reason| reason.as_str().map(str::to_owned)),
+        );
         list(&data["credits"]["cast"])
     } else if !tmdb.is_empty() {
         crate::metadata::reconstruct_full(state, &tmdb, &kind, true)
@@ -146,7 +152,7 @@ pub async fn preview_cast(state: &AppState, id: &str, context: &JobContext) -> R
         } else {
             "fast_mode"
         };
-        let translated = crate::ai::translate_preview(
+        let (translated, warnings) = crate::ai::translate_preview_report(
             state,
             &terms,
             purpose,
@@ -154,16 +160,25 @@ pub async fn preview_cast(state: &AppState, id: &str, context: &JobContext) -> R
             &json!(roles),
         )
         .await?;
+        warning_details.extend(warnings);
         for actor in &mut actors {
             for field in ["name", "character"] {
                 if let Some(value) = translated.get(&string(actor, field)) {
                     actor[field] = json!(value);
+                } else if crate::translation::needs_translation(&string(actor, field)) {
+                    actor["_translation_incomplete"] = json!(true);
                 }
             }
         }
         actors = crate::cast::format(&actors, &item, &config);
     }
-    Ok(json!(actors.iter().map(|a| json!({"embyPersonId":a["emby_person_id"],"name":a["name"],"role":a["character"],"imdbId":a["imdb_id"],"doubanId":a.get("douban_id").unwrap_or(&a["douban_celebrity_id"]),"tmdbId":a["id"],"matchStatus":"已刷新"})).collect::<Vec<_>>()))
+    Ok(json!(actors.iter().map(|a| {
+        let mut actor = json!({"embyPersonId":a["emby_person_id"],"name":a["name"],"role":a["character"],"imdbId":a["imdb_id"],"doubanId":a.get("douban_id").unwrap_or(&a["douban_celebrity_id"]),"tmdbId":a["id"],"matchStatus":if a["_translation_incomplete"]==true {"翻译未完成"} else if !warning_details.is_empty() {"已刷新，有提醒"} else {"已刷新"}});
+        if !warning_details.is_empty() {
+            actor["translationWarning"] = json!(warning_details.join("；"));
+        }
+        actor
+    }).collect::<Vec<_>>()))
 }
 
 async fn configured_file(state: &AppState, path: &str) -> Option<PathBuf> {

@@ -390,7 +390,7 @@ pub async fn translate_cast(state: &AppState, body: &Value) -> Result<Value> {
         .ai
         .cache_revision
         .load(std::sync::atomic::Ordering::SeqCst);
-    let translated = crate::ai::translate(
+    let (translated, warnings) = crate::ai::translate_report(
         state,
         &missing,
         if quality { "quality_mode" } else { "fast_mode" },
@@ -415,6 +415,7 @@ pub async fn translate_cast(state: &AppState, body: &Value) -> Result<Value> {
     cached.extend(translated);
     for actor in &mut actors {
         let old = actor.clone();
+        let mut incomplete = false;
         for field in ["name", "role"] {
             let text = if field == "role" {
                 crate::cast::clean_character(&string(actor, field))
@@ -423,10 +424,22 @@ pub async fn translate_cast(state: &AppState, body: &Value) -> Result<Value> {
             };
             if let Some(value) = cached.get(&text) {
                 actor[field] = json!(value);
+            } else if crate::translation::needs_translation(&text) {
+                incomplete = true;
             }
         }
-        if old["name"] != actor["name"] || old["role"] != actor["role"] {
-            actor["matchStatus"] = json!("已翻译");
+        if incomplete {
+            actor["matchStatus"] = json!("翻译未完成");
+            actor["translationWarning"] = json!(warnings.join("；"));
+        } else {
+            if let Some(actor) = actor.as_object_mut() {
+                actor.remove("translationWarning");
+            }
+            if old["name"] != actor["name"] || old["role"] != actor["role"] {
+                actor["matchStatus"] = json!("已翻译");
+            } else if old["matchStatus"] == "翻译未完成" {
+                actor["matchStatus"] = json!("无需翻译");
+            }
         }
     }
     Ok(json!(actors))

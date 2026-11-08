@@ -562,7 +562,7 @@ async fn save_inner(
         }
         let prepared = prepare(state, target, info).await?;
         if prepared.multipart {
-            let details = media_edit::details(state, &id, "MediaSources").await?;
+            let details = media_edit::details(state, &id, "Id,Path,PartCount,MediaSources").await?;
             let parts = media_edit::additional_parts(state, &id, &details).await?;
             if parts.is_empty() {
                 return failed(

@@ -64,7 +64,19 @@ pub async fn missing(
     aggregate: &Value,
     context: Option<&JobContext>,
 ) -> Result<usize> {
-    missing_with_overwrite(state, files, aggregate, context, &[]).await
+    Ok(
+        missing_report(state, files, aggregate, context).await?["captured"]
+            .as_u64()
+            .unwrap_or(0) as usize,
+    )
+}
+pub async fn missing_report(
+    state: &AppState,
+    files: &[PathBuf],
+    aggregate: &Value,
+    context: Option<&JobContext>,
+) -> Result<Value> {
+    missing_with_overwrite_report(state, files, aggregate, context, &[]).await
 }
 pub async fn missing_with_overwrite(
     state: &AppState,
@@ -73,8 +85,22 @@ pub async fn missing_with_overwrite(
     context: Option<&JobContext>,
     force_overwrite_episodes: &[String],
 ) -> Result<usize> {
+    Ok(
+        missing_with_overwrite_report(state, files, aggregate, context, force_overwrite_episodes)
+            .await?["captured"]
+            .as_u64()
+            .unwrap_or(0) as usize,
+    )
+}
+pub async fn missing_with_overwrite_report(
+    state: &AppState,
+    files: &[PathBuf],
+    aggregate: &Value,
+    context: Option<&JobContext>,
+    force_overwrite_episodes: &[String],
+) -> Result<Value> {
     if state.config.read().await["extract_thumb"] != true {
-        return Ok(0);
+        return Ok(json!({"captured":0,"warnings":0,"warning_details":[]}));
     }
     let numbers = regex::Regex::new(r"(?i)s(\d{1,4})e(\d{1,4})").unwrap();
     let mut tasks = vec![];
@@ -123,7 +149,7 @@ pub async fn missing_with_overwrite(
         tasks.push((season, episode, file.clone(), target, data, overwrite));
     }
     if tasks.is_empty() {
-        return Ok(0);
+        return Ok(json!({"captured":0,"warnings":0,"warning_details":[]}));
     }
     tasks.sort_by_key(|(season, episode, _, _, _, _)| (*season, *episode));
     use futures_util::{FutureExt, StreamExt, stream};
@@ -155,6 +181,7 @@ pub async fn missing_with_overwrite(
         .buffer_unordered(limit);
     tokio::pin!(pending);
     let mut captured = 0;
+    let mut warning_details = vec![];
     let mut cancelled = None;
     let mut finished = std::collections::BTreeMap::new();
     let mut next = 0;
@@ -166,6 +193,10 @@ pub async fn missing_with_overwrite(
                     captured += done;
                     if let Some(error) = error {
                         tracing::warn!(file = %name, error = %error, "[视频截图] 截取失败，保留现有图片");
+                        warning_details.push(format!(
+                            "视频补图失败：{name}，{}，保留现有图片",
+                            crate::logs::redact(&error)
+                        ));
                     } else if done > 0 {
                         tracing::info!(file = %name, "[视频截图] 分集图已生成");
                     }
@@ -181,7 +212,9 @@ pub async fn missing_with_overwrite(
     if let Some(context) = context {
         context.checkpoint().await?;
     }
-    Ok(captured)
+    Ok(
+        json!({"captured":captured,"warnings":warning_details.len(),"warning_details":warning_details}),
+    )
 }
 
 pub async fn movie_missing(
@@ -191,6 +224,19 @@ pub async fn movie_missing(
     data: &Value,
     context: Option<&JobContext>,
 ) -> Result<usize> {
+    Ok(
+        movie_missing_report(state, file, root, data, context).await?["captured"]
+            .as_u64()
+            .unwrap_or(0) as usize,
+    )
+}
+pub async fn movie_missing_report(
+    state: &AppState,
+    file: &Path,
+    root: &Path,
+    data: &Value,
+    context: Option<&JobContext>,
+) -> Result<Value> {
     if let Some(context) = context {
         context.checkpoint().await?;
     }
@@ -205,9 +251,10 @@ pub async fn movie_missing(
             .iter()
             .any(|image| !string(image, "file_path").is_empty())
     {
-        return Ok(0);
+        return Ok(json!({"captured":0,"warnings":0,"warning_details":[]}));
     }
-    match capture(state, file, &landscape, data, context, false).await {
+    let mut warning_details = vec![];
+    let captured = match capture(state, file, &landscape, data, context, false).await {
         Ok(true) => {
             if let Some(context) = context {
                 context.checkpoint().await?;
@@ -216,20 +263,32 @@ pub async fn movie_missing(
                 && let Err(error) = tokio::fs::copy(&landscape, &fanart).await
             {
                 tracing::warn!(error = %error, "[视频截图] 电影备用背景图复制失败：{}", fanart.display());
+                warning_details.push(format!(
+                    "电影备用背景图复制失败：{}，{error}",
+                    fanart.display()
+                ));
             }
             if let Some(context) = context {
                 context.checkpoint().await?;
             }
             tracing::info!("[视频截图] 电影背景图已生成：{}", landscape.display());
-            Ok(1)
+            1
         }
-        Ok(false) => Ok(0),
-        Err(error) if context.is_some_and(JobContext::is_cancelled) => Err(error),
+        Ok(false) => 0,
+        Err(error) if context.is_some_and(JobContext::is_cancelled) => return Err(error),
         Err(error) => {
             tracing::warn!(error = %error.1, "[视频截图] 电影截取失败，保留现有图片：{}", file.display());
-            Ok(0)
+            warning_details.push(format!(
+                "电影视频补图失败：{}，{}，保留现有图片",
+                file.display(),
+                crate::logs::redact(&error.1)
+            ));
+            0
         }
-    }
+    };
+    Ok(
+        json!({"captured":captured,"warnings":warning_details.len(),"warning_details":warning_details}),
+    )
 }
 
 async fn capture(

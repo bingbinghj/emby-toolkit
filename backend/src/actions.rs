@@ -47,8 +47,20 @@ async fn all(
     let work = state.clone();
     let task=state.jobs.submit("重新处理待复核项",move|context|async move{
         let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(f) FROM failed_log f WHERE ($1='' OR reason LIKE $1||'%') AND ($2='' OR item_type=$2 OR ($2='Series' AND item_type IN ('Season','Episode')))").bind(reason).bind(kind).fetch_all(&work.db).await?;
-        let mut updated=0;let mut failures=vec![];for row in rows{context.checkpoint().await?;let id=string(&row,"item_id");match reprocess(&work,&id,&string(&row,"reason"),&context).await{Ok(_)=>updated+=1,Err(error)=>failures.push(format!("{id}: {}",error.1))}}
-        Ok(json!({"updated":updated,"failures":failures,"message":"待复核项目重新处理完成"}))
+        let mut updated=0;let mut failures=vec![];let mut warnings=0_u64;let mut warning_details=vec![];
+        for row in rows{
+            context.checkpoint().await?;let id=string(&row,"item_id");
+            match reprocess(&work,&id,&string(&row,"reason"),&context).await{
+                Ok(report)=>{
+                    updated+=1;
+                    warnings+=report["warnings"].as_u64().unwrap_or(0);
+                    warning_details.extend(crate::media_edit::list(&report["warning_details"]));
+                },
+                Err(error) if context.is_cancelled()=>return Err(error),
+                Err(error)=>failures.push(format!("{id}: {}",error.1))
+            }
+        }
+        Ok(json!({"updated":updated,"failures":failures,"warnings":warnings,"warning_details":warning_details,"message":format!("待复核项目重新处理完成：处理 {updated} 项，失败 {} 项，提醒 {warnings} 条",failures.len())}))
     }).await?;
     Ok((
         StatusCode::ACCEPTED,

@@ -400,6 +400,17 @@ pub async fn translate(
     context: &Value,
     actors: &Value,
 ) -> Result<BTreeMap<String, String>> {
+    Ok(translate_report(state, inputs, purpose, context, actors)
+        .await?
+        .0)
+}
+pub async fn translate_report(
+    state: &AppState,
+    inputs: &BTreeMap<String, String>,
+    purpose: &str,
+    context: &Value,
+    actors: &Value,
+) -> Result<(BTreeMap<String, String>, Vec<String>)> {
     translate_inner(state, inputs, purpose, context, actors, true).await
 }
 pub async fn translate_preview(
@@ -409,6 +420,19 @@ pub async fn translate_preview(
     context: &Value,
     actors: &Value,
 ) -> Result<BTreeMap<String, String>> {
+    Ok(
+        translate_preview_report(state, inputs, purpose, context, actors)
+            .await?
+            .0,
+    )
+}
+pub async fn translate_preview_report(
+    state: &AppState,
+    inputs: &BTreeMap<String, String>,
+    purpose: &str,
+    context: &Value,
+    actors: &Value,
+) -> Result<(BTreeMap<String, String>, Vec<String>)> {
     translate_inner(state, inputs, purpose, context, actors, false).await
 }
 async fn translate_inner(
@@ -418,16 +442,19 @@ async fn translate_inner(
     context: &Value,
     actors: &Value,
     persist: bool,
-) -> Result<BTreeMap<String, String>> {
+) -> Result<(BTreeMap<String, String>, Vec<String>)> {
     if inputs.is_empty() {
-        return Ok(BTreeMap::new());
+        return Ok((BTreeMap::new(), vec![]));
     }
     if purpose == "batch_joke_fallback" {
-        return Ok(generate_jokes(state, inputs)
-            .await?
-            .into_iter()
-            .filter_map(|(key, value)| value.as_str().map(|text| (key, text.to_string())))
-            .collect());
+        return Ok((
+            generate_jokes(state, inputs)
+                .await?
+                .into_iter()
+                .filter_map(|(key, value)| value.as_str().map(|text| (key, text.to_string())))
+                .collect(),
+            vec![],
+        ));
     }
     let mut memory = state.ai.translations.lock().await;
     let revision = state
@@ -475,6 +502,7 @@ async fn translate_inner(
         system = system.replace("{{", "{").replace("}}", "}");
     }
     let mut output = BTreeMap::new();
+    let mut warning_details = vec![];
     let mut missing = BTreeMap::new();
     let mut keys = BTreeMap::new();
     for (id, source) in inputs {
@@ -659,12 +687,23 @@ async fn translate_inner(
                 output.len() - before,
                 chunk.len() - (output.len() - before)
             );
+            let incomplete = chunk.len() - (output.len() - before);
+            if incomplete > 0 {
+                let reason = format!(
+                    "AI 翻译未完成：用途 {purpose_name}，批次 {}，{incomplete} 条没有返回通过中文和质量校验的译文，已保留原值",
+                    index + 1
+                );
+                tracing::warn!("{reason}");
+                warning_details.push(reason);
+            }
         } else {
-            tracing::warn!(
-                "AI 翻译批次失败，保留此前完成的结果：用途 {purpose_name}，批次 {}，{}",
+            let reason = format!(
+                "AI 翻译批次失败：用途 {purpose_name}，批次 {}，{}，已保留此前译文与未完成原值",
                 index + 1,
-                response.unwrap_err().1
+                crate::logs::redact(&response.unwrap_err().1)
             );
+            tracing::warn!("{reason}");
+            warning_details.push(reason);
         }
     }
     tracing::info!(
@@ -672,5 +711,5 @@ async fn translate_inner(
         output.len(),
         inputs.len() - output.len()
     );
-    Ok(output)
+    Ok((output, warning_details))
 }

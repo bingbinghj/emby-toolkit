@@ -5,7 +5,7 @@ use crate::{
     state::string,
     tmdb,
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -134,7 +134,21 @@ pub async fn download(
     aggregate: &Value,
     context: &crate::jobs::JobContext,
 ) -> Result<usize> {
-    download_with_overwrite(state, kind, id, item, aggregate, context, &[]).await
+    Ok(
+        download_report(state, kind, id, item, aggregate, context).await?["downloaded"]
+            .as_u64()
+            .unwrap_or(0) as usize,
+    )
+}
+pub async fn download_report(
+    state: &AppState,
+    kind: &str,
+    id: &str,
+    item: &Value,
+    aggregate: &Value,
+    context: &crate::jobs::JobContext,
+) -> Result<Value> {
+    download_with_overwrite_report(state, kind, id, item, aggregate, context, &[]).await
 }
 pub async fn download_with_overwrite(
     state: &AppState,
@@ -145,6 +159,28 @@ pub async fn download_with_overwrite(
     context: &crate::jobs::JobContext,
     force_overwrite_episodes: &[String],
 ) -> Result<usize> {
+    Ok(download_with_overwrite_report(
+        state,
+        kind,
+        id,
+        item,
+        aggregate,
+        context,
+        force_overwrite_episodes,
+    )
+    .await?["downloaded"]
+        .as_u64()
+        .unwrap_or(0) as usize)
+}
+pub async fn download_with_overwrite_report(
+    state: &AppState,
+    kind: &str,
+    id: &str,
+    item: &Value,
+    aggregate: &Value,
+    context: &crate::jobs::JobContext,
+    force_overwrite_episodes: &[String],
+) -> Result<Value> {
     let media_name = string(item, "Name");
     tracing::info!(
         "图片资产下载开始：类型 {kind}，TMDb {id}，名称 {}",
@@ -153,7 +189,7 @@ pub async fn download_with_overwrite(
     let raw = string(item, "Path");
     if raw.is_empty() || raw.starts_with("http") {
         tracing::info!("图片资产下载跳过：《{media_name}》，TMDb {id}，缺少本地路径");
-        return Ok(0);
+        return Ok(json!({"downloaded":0,"warnings":0,"warning_details":[]}));
     }
     let path = Path::new(&raw);
     let directory = if path.is_file() || path.extension().is_some() {
@@ -169,7 +205,7 @@ pub async fn download_with_overwrite(
     };
     if !root.is_dir() {
         tracing::info!("图片资产下载跳过：《{media_name}》，TMDb {id}，本地目录不存在");
-        return Ok(0);
+        return Ok(json!({"downloaded":0,"warnings":0,"warning_details":[]}));
     }
     let config = state.config.read().await.clone();
     let endpoint = format!("/{}/{id}", if kind == "Movie" { "movie" } else { "tv" });
@@ -178,6 +214,9 @@ pub async fn download_with_overwrite(
         .unwrap_or_default();
     let original = base["original_language"].as_str().unwrap_or("en");
     let mut data = None;
+    let mut query_succeeded = false;
+    let mut query_errors = vec![];
+    let mut warning_details = vec![];
     for languages in strategies(
         original,
         config["tmdb_image_language_preference"]
@@ -186,7 +225,7 @@ pub async fn download_with_overwrite(
             == "zh",
     ) {
         tracing::debug!("图片语言策略查询：《{media_name}》，TMDb {id}，语言 {languages}");
-        if let Ok(response) = tmdb::get(
+        match tmdb::get(
             state,
             &endpoint,
             &[
@@ -203,17 +242,33 @@ pub async fn download_with_overwrite(
             ],
         )
         .await
-            && !list(&response["images"]["posters"]).is_empty()
         {
-            data = Some(response);
-            break;
+            Ok(response) => {
+                query_succeeded = true;
+                if !list(&response["images"]["posters"]).is_empty() {
+                    data = Some(response);
+                    break;
+                }
+            }
+            Err(error) if context.is_cancelled() => return Err(error),
+            Err(error) => query_errors.push(crate::logs::redact(&error.1)),
         }
     }
     let Some(data) = data else {
+        if !query_succeeded && !query_errors.is_empty() {
+            let reason = format!(
+                "《{media_name}》（TMDb {id}）图片查询失败：所有语言策略均未成功，{}",
+                query_errors[0]
+            );
+            tracing::warn!("{reason}");
+            warning_details.push(reason);
+        }
         tracing::info!(
             "图片资产下载跳过：《{media_name}》，TMDb {id}，未取得可用海报，未生成下载计划"
         );
-        return Ok(0);
+        return Ok(
+            json!({"downloaded":0,"warnings":warning_details.len(),"warning_details":warning_details}),
+        );
     };
     let mut pending = vec![root.to_path_buf()];
     let mut files = vec![];
@@ -266,7 +321,7 @@ pub async fn download_with_overwrite(
                 "图片下载跳过：《{media_name}》，TMDb {id}，文件 {} 已存在",
                 path.display()
             );
-            return Ok((0, 1, 0));
+            return Ok((0, 1, None));
         }
         tracing::debug!(
             "图片下载开始：《{media_name}》，TMDb {id}，文件 {}",
@@ -285,14 +340,14 @@ pub async fn download_with_overwrite(
                     "图片下载完成：《{media_name}》，TMDb {id}，文件 {}，{size} 字节",
                     path.display()
                 );
-                Ok((1, 0, 0))
+                Ok((1, 0, None))
             }
             Err(error) if context.is_cancelled() => Err(error),
-            Err(error) => { tracing::warn!(
-                "图片下载失败：《{media_name}》，TMDb {id}，文件 {}，{}，继续处理其它图片",
-                path.display(),
-                error.1
-            ); Ok((0, 0, 1)) },
+            Err(error) => {
+                let reason = format!("《{media_name}》（TMDb {id}）图片下载失败：文件 {}，{}，继续处理其它图片", path.display(), crate::logs::redact(&error.1));
+                tracing::warn!("{reason}");
+                Ok((0, 0, Some(reason)))
+            },
         }
         }.boxed()
         })
@@ -303,10 +358,13 @@ pub async fn download_with_overwrite(
     let mut failed = 0_usize;
     while let Some(result) = pending.next().await {
         match result {
-            Ok((done, existing, errors)) => {
+            Ok((done, existing, error)) => {
                 count += done;
                 skipped += existing;
-                failed += errors;
+                if let Some(reason) = error {
+                    failed += 1;
+                    warning_details.push(reason);
+                }
             }
             Err(error) => cancelled = Some(error),
         }
@@ -315,26 +373,36 @@ pub async fn download_with_overwrite(
         return Err(error);
     }
     let downloaded = count;
-    if kind == "Series" {
-        count += crate::video_images::missing_with_overwrite(
+    let video_report = if kind == "Series" {
+        crate::video_images::missing_with_overwrite_report(
             state,
             &files,
             aggregate,
             Some(context),
             force_overwrite_episodes,
         )
-        .await?;
+        .await?
     } else if kind == "Movie" {
         let mut movie_data = data.clone();
         if movie_data["runtime"].is_null() {
             movie_data["runtime"] = aggregate["runtime"].clone();
         }
-        count += crate::video_images::movie_missing(state, path, root, &movie_data, Some(context))
-            .await?;
-    }
+        crate::video_images::movie_missing_report(state, path, root, &movie_data, Some(context))
+            .await?
+    } else {
+        json!({})
+    };
+    count += video_report["captured"].as_u64().unwrap_or(0) as usize;
+    warning_details.extend(
+        list(&video_report["warning_details"])
+            .into_iter()
+            .filter_map(|reason| reason.as_str().map(str::to_owned)),
+    );
     tracing::info!(
         "图片资产处理结束：《{media_name}》，TMDb {id}，下载计划 {planned} 个，下载成功 {downloaded} 个，已存在跳过 {skipped} 个，下载失败 {failed} 个，视频补图 {} 个，共新增 {count} 个",
         count - downloaded
     );
-    Ok(count)
+    Ok(
+        json!({"downloaded":count,"warnings":warning_details.len(),"warning_details":warning_details}),
+    )
 }

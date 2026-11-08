@@ -338,14 +338,22 @@ fn add_actor(actors: &mut Vec<Value>, candidate: &Value, id: i32, metadata: &Val
     actors.push(actor);
 }
 pub async fn supplement(state: &AppState, raw: &[Value], douban: &[Value]) -> Result<Vec<Value>> {
+    Ok(supplement_report(state, raw, douban).await?.0)
+}
+async fn supplement_report(
+    state: &AppState,
+    raw: &[Value],
+    douban: &[Value],
+) -> Result<(Vec<Value>, Vec<String>)> {
     let mut actors = premerge_cast(raw, douban, true);
+    let mut warning_details = vec![];
     let config = state.config.read().await.clone();
     let limit = config["max_actors_to_process"]
         .as_u64()
         .filter(|limit| *limit > 0)
         .unwrap_or(30) as usize;
     if douban.is_empty() || actor_count(&actors) >= limit {
-        return Ok(actors);
+        return Ok((actors, warning_details));
     }
     let original_ids = raw.iter().filter_map(actor_id).collect::<HashSet<_>>();
     let mut names = HashSet::new();
@@ -399,7 +407,13 @@ pub async fn supplement(state: &AppState, raw: &[Value], douban: &[Value]) -> Re
             let details = match details {
                 Ok(details) => details,
                 Err(error) => {
-                    tracing::warn!(douban_id = %id, "豆瓣演员详情查询失败：{}，{}", string(candidate, "name"), error.1);
+                    let reason = format!(
+                        "豆瓣演员详情查询失败：{}（豆瓣ID {id}），{}，保留现有演员资料",
+                        string(candidate, "name"),
+                        crate::logs::redact(&error.1)
+                    );
+                    tracing::warn!("{reason}");
+                    warning_details.push(reason);
                     continue;
                 }
             };
@@ -480,20 +494,27 @@ pub async fn supplement(state: &AppState, raw: &[Value], douban: &[Value]) -> Re
     if added > 0 {
         tracing::info!(added, photos, "[演员资料] 豆瓣补充演员身份与头像检查完成");
     }
-    Ok(actors)
+    Ok((actors, warning_details))
 }
 pub async fn premerge_online(state: &AppState, item: &Value, data: &mut Value) -> Result<()> {
+    premerge_online_report(state, item, data).await.map(|_| ())
+}
+pub async fn premerge_online_report(
+    state: &AppState,
+    item: &Value,
+    data: &mut Value,
+) -> Result<Value> {
     let media_name = string(item, "Name");
     let raw = list(&data["credits"]["cast"]);
     if !should_fetch(&raw, &*state.config.read().await) {
-        return Ok(());
+        return Ok(json!({"warnings":0,"warning_details":[]}));
     }
     tracing::info!(item_id = %string(item, "Id"), "[演员资料] 开始匹配《{media_name}》豆瓣演员与角色");
     match cast(state, item, data).await {
         Ok(cast) => {
             tracing::info!(
-                matched = cast.len(),
-                "[演员资料] 《{media_name}》豆瓣演员匹配完成"
+                count = cast.len(),
+                "[演员资料] 《{media_name}》豆瓣演员表已返回"
             );
             // Keep Douban's foreign names available for matching before the shared translation pass.
             let cast = cast
@@ -503,11 +524,19 @@ pub async fn premerge_online(state: &AppState, item: &Value, data: &mut Value) -
                     a
                 })
                 .collect::<Vec<_>>();
-            data["credits"]["cast"] = json!(supplement(state, &raw, &cast).await?);
+            let (actors, warning_details) = supplement_report(state, &raw, &cast).await?;
+            data["credits"]["cast"] = json!(actors);
+            Ok(json!({"warnings":warning_details.len(),"warning_details":warning_details}))
         }
-        Err(error) => tracing::warn!("豆瓣演员补充失败：《{media_name}》，{}", error.1),
+        Err(error) => {
+            let reason = format!(
+                "《{media_name}》豆瓣演员补充失败，继续使用 TMDb 与现有演员资料：{}",
+                crate::logs::redact(&error.1)
+            );
+            tracing::warn!("{reason}");
+            Ok(json!({"warnings":1,"warning_details":[reason]}))
+        }
     }
-    Ok(())
 }
 
 pub async fn premerge_in_job(
@@ -516,9 +545,22 @@ pub async fn premerge_in_job(
     data: &mut Value,
     context: &crate::jobs::JobContext,
 ) -> Result<()> {
+    premerge_in_job_report(state, item, data, context)
+        .await
+        .map(|_| ())
+}
+pub async fn premerge_in_job_report(
+    state: &AppState,
+    item: &Value,
+    data: &mut Value,
+    context: &crate::jobs::JobContext,
+) -> Result<Value> {
     context.checkpoint().await?;
     tokio::select! {
-        _ = context.cancelled() => context.checkpoint().await,
-        result = premerge_online(state, item, data) => result,
+        _ = context.cancelled() => {
+            context.checkpoint().await?;
+            Err(ApiError::bad("豆瓣演员补充已取消"))
+        },
+        result = premerge_online_report(state, item, data) => result,
     }
 }
