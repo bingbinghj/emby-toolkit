@@ -308,6 +308,7 @@ fn matches(actual: &Value, expected: &Value) -> bool {
 fn settings_mode_label(mode: &str) -> &str {
     match mode {
         "preserve" | "ignore_file_change" => "忽略文件变更",
+        "restore_media_info" => "仅从 JSON 重载媒体信息",
         "capture" => "图片捕获",
         _ => mode,
     }
@@ -363,7 +364,7 @@ fn settings_finished<T>(mode: &str, outcome: Result<T>) -> Result<T> {
     outcome
 }
 async fn check_rename_scan_guard(state: &AppState, id: &str) -> Result<()> {
-    let root = state.data_dir.join("rename-recovery");
+    let root = state.data_dir.join("backups/media-info-reload");
     let blocked = |reason: String| {
         ApiError(
             axum::http::StatusCode::CONFLICT,
@@ -373,23 +374,31 @@ async fn check_rename_scan_guard(state: &AppState, id: &str) -> Result<()> {
             ),
         )
     };
-    let mut entries = match tokio::fs::read_dir(&root).await {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(blocked(format!("无法读取恢复记录：{error}"))),
-    };
     let mut pending = vec![];
-    while let Some(entry) = entries
-        .next_entry()
-        .await
-        .map_err(|error| blocked(format!("无法读取恢复目录：{error}")))?
-    {
-        let path = entry.path().join("pending-scan.json");
-        if tokio::fs::try_exists(&path)
+    for directory in [&root, &state.data_dir.join("rename-recovery")] {
+        let mut entries = match tokio::fs::read_dir(directory).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(blocked(format!("无法读取恢复记录：{error}"))),
+        };
+        while let Some(entry) = entries
+            .next_entry()
             .await
-            .map_err(|error| blocked(format!("无法核对待确认标记：{error}")))?
+            .map_err(|error| blocked(format!("无法读取恢复目录：{error}")))?
         {
-            pending.push(path);
+            if tokio::fs::try_exists(entry.path().join("media-reload.json")).await? {
+                return Err(blocked(format!(
+                    "媒体信息重载尚未完成，请先核对恢复目录 {}",
+                    entry.path().display()
+                )));
+            }
+            let path = entry.path().join("pending-scan.json");
+            if tokio::fs::try_exists(&path)
+                .await
+                .map_err(|error| blocked(format!("无法核对待确认标记：{error}")))?
+            {
+                pending.push(path);
+            }
         }
     }
     if pending.is_empty() {
@@ -449,7 +458,16 @@ async fn check_rename_scan_guard(state: &AppState, id: &str) -> Result<()> {
     )
     .map_err(|_| blocked("原配置恢复说明无效".into()))?;
     if !original.as_object().is_some_and(|fields| {
-        fields.len() == 1
+        !fields.is_empty()
+            && fields.keys().all(|key| {
+                matches!(
+                    key.as_str(),
+                    "ExclusiveControlFeatures" | "PersistMediaInfoMode"
+                )
+            })
+            && fields
+                .get("PersistMediaInfoMode")
+                .is_none_or(Value::is_string)
             && fields
                 .get("ExclusiveControlFeatures")
                 .is_some_and(|value| value.is_string() || value.is_null())
@@ -520,8 +538,17 @@ where
 {
     check_rename_scan_guard(state, &id).await?;
     let original = read(state, &id).await?;
+    if mode == "restore_media_info"
+        && !media_tasks_idle(&state.emby(Method::GET, "ScheduledTasks", &[], None).await?)
+    {
+        return Err(ApiError::bad(
+            "神医媒体信息、指纹或缩略图任务尚未结束，未清理媒体信息",
+        ));
+    }
     let removed: &[&str] = match mode {
-        "preserve" => &["CatchAllAllow", "ExtractOnFileChange", "IgnoreFileChange"],
+        "preserve" | "restore_media_info" => {
+            &["CatchAllAllow", "ExtractOnFileChange", "IgnoreFileChange"]
+        }
         "ignore_file_change" => &["ExtractOnFileChange", "IgnoreFileChange"],
         "capture" => &[
             "CatchAllBlock",
@@ -539,7 +566,10 @@ where
         .map(str::to_string)
         .collect::<Vec<_>>();
     values.push(
-        if matches!(mode, "preserve" | "ignore_file_change") {
+        if matches!(
+            mode,
+            "preserve" | "ignore_file_change" | "restore_media_info"
+        ) {
             "IgnoreFileChange"
         } else {
             "CatchAllAllow"
@@ -547,11 +577,22 @@ where
         .into(),
     );
     desired["ExclusiveControlFeatures"] = json!(values.join(","));
+    if mode == "restore_media_info" {
+        if !original["PersistMediaInfoMode"].is_string() {
+            return Err(ApiError::bad("神医恢复模式配置无效，未清理媒体信息"));
+        }
+        desired["PersistMediaInfoMode"] = json!("Restore");
+    }
     let mut restore = json!({});
     if features(&desired["ExclusiveControlFeatures"])
         != features(&original["ExclusiveControlFeatures"])
     {
         restore["ExclusiveControlFeatures"] = original["ExclusiveControlFeatures"].clone();
+    }
+    if mode == "restore_media_info"
+        && desired["PersistMediaInfoMode"] != original["PersistMediaInfoMode"]
+    {
+        restore["PersistMediaInfoMode"] = original["PersistMediaInfoMode"].clone();
     }
     let changed = !restore.as_object().unwrap().is_empty();
     if let Some((_, recovery)) = guard {
@@ -569,13 +610,12 @@ where
         let mut file = options
             .open(recovery.join("original-settings.json"))
             .await?;
-        file.write_all(
-            &serde_json::to_vec_pretty(
-                &json!({"ExclusiveControlFeatures":original["ExclusiveControlFeatures"]}),
-            )
-            .unwrap(),
-        )
-        .await?;
+        let mut backup = json!({"ExclusiveControlFeatures":original["ExclusiveControlFeatures"]});
+        if mode == "restore_media_info" {
+            backup["PersistMediaInfoMode"] = original["PersistMediaInfoMode"].clone();
+        }
+        file.write_all(&serde_json::to_vec_pretty(&backup).unwrap())
+            .await?;
         file.sync_all().await?;
     }
     let mode_name = settings_mode_label(mode);

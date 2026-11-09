@@ -20,13 +20,14 @@ fn protected(path: &Path) -> bool {
             .contains(&part.as_os_str().to_string_lossy().to_lowercase().as_str())
     })
 }
-async fn atomic(path: &Path, data: &Value) -> Result<()> {
+async fn atomic(state: &AppState, path: &Path, data: &Value) -> Result<()> {
     use tokio::io::AsyncWriteExt;
-    let stage = path.with_file_name(format!(
-        ".{}.language-title-{}",
-        path.file_name().unwrap_or_default().to_string_lossy(),
-        uuid::Uuid::new_v4().simple()
-    ));
+    let directory = state
+        .data_dir
+        .join("backups/media-info-reload")
+        .join(format!("staging-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&directory).await?;
+    let stage = directory.join("mediainfo.json");
     let result = async {
         let mut file = tokio::fs::OpenOptions::new()
             .create_new(true)
@@ -36,11 +37,12 @@ async fn atomic(path: &Path, data: &Value) -> Result<()> {
         file.write_all(&serde_json::to_vec_pretty(data).unwrap())
             .await?;
         file.sync_all().await?;
-        tokio::fs::rename(&stage, path).await?;
+        crate::media_save::commit_json_stage(&stage, path).await?;
         Ok(())
     }
     .await;
     let _ = tokio::fs::remove_file(stage).await;
+    let _ = tokio::fs::remove_dir(directory).await;
     result
 }
 
@@ -90,7 +92,7 @@ async fn title_readback_before_deadline<T>(
 }
 
 // Type-local ordinal avoids comparing Emby stream Index with ffprobe/local JSON Index.
-fn expected_titles(info: &Value, report: &Value) -> Vec<Value> {
+pub(crate) fn expected_titles(info: &Value, report: &Value) -> Vec<Value> {
     let pending = list(&report["pending"]);
     let skipped = list(&report["skipped_tracks"]);
     let mut expected = vec![];
@@ -311,15 +313,9 @@ fn track_label(entry: &Value) -> String {
 }
 
 pub async fn fill(state: &AppState, ids: &[String], skip_chinese: bool) -> Value {
-    fill_inner(
-        state,
-        ids,
-        skip_chinese,
-        None,
-        None::<std::future::Ready<Result<()>>>,
-    )
+    fill_guarded(state, ids, skip_chinese, None)
     .await
-    .unwrap_or_else(|error| json!({"completed":false,"failed":1,"pending":[{"reason":error.1}]}))
+    .unwrap_or_else(|error| json!({"completed":false,"failed":1,"refresh_state":"failed","pending":[{"reason":error.1}]}))
 }
 pub async fn fill_in_job(
     state: &AppState,
@@ -327,14 +323,68 @@ pub async fn fill_in_job(
     skip_chinese: bool,
     context: &JobContext,
 ) -> Result<Value> {
-    fill_inner(
+    fill_guarded(state, ids, skip_chinese, Some(context)).await
+}
+
+async fn fill_guarded(
+    state: &AppState,
+    ids: &[String],
+    skip_chinese: bool,
+    context: Option<&JobContext>,
+) -> Result<Value> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let recovery_context = JobContext::for_recovery(None).await;
+    let context = context.unwrap_or(&recovery_context);
+    let confirmed = AtomicBool::new(true);
+    let recovery = state
+        .data_dir
+        .join("backups/media-info-reload")
+        .join(format!("titles-{}", uuid::Uuid::new_v4()));
+    let mut warnings = vec![];
+    let outcome = crate::strm::with_settings_guarded(
         state,
-        ids,
-        skip_chinese,
-        Some(context),
-        None::<std::future::Ready<Result<()>>>,
+        "restore_media_info",
+        || {
+            fill_inner(
+                state,
+                ids,
+                skip_chinese,
+                Some(context),
+                Some(async {
+                    warnings = crate::media_save::reload_filled_titles(
+                        state,
+                        ids,
+                        skip_chinese,
+                        context,
+                        &confirmed,
+                        &recovery,
+                    )
+                    .await?;
+                    Ok(())
+                }),
+                false,
+            )
+        },
+        &confirmed,
+        &recovery,
     )
-    .await
+    .await;
+    if confirmed.load(Ordering::Acquire)
+        && !outcome.as_ref().is_err_and(|error| {
+            error.0 == axum::http::StatusCode::CONFLICT && error.1 != "任务已取消"
+        })
+    {
+        let _ = tokio::fs::remove_dir_all(&recovery).await;
+    }
+    let mut report = outcome?;
+    if !warnings.is_empty() {
+        report["completed"] = json!(false);
+        report["pending"]
+            .as_array_mut()
+            .unwrap()
+            .extend(warnings.into_iter().map(|reason| json!({"reason":reason})));
+    }
+    Ok(report)
 }
 pub async fn fill_in_job_with_refresh(
     state: &AppState,
@@ -343,7 +393,7 @@ pub async fn fill_in_job_with_refresh(
     context: &JobContext,
     refresh: impl std::future::Future<Output = Result<()>>,
 ) -> Result<Value> {
-    fill_inner(state, ids, skip_chinese, Some(context), Some(refresh)).await
+    fill_inner(state, ids, skip_chinese, Some(context), Some(refresh), true).await
 }
 async fn fill_inner(
     state: &AppState,
@@ -351,8 +401,8 @@ async fn fill_inner(
     skip_chinese: bool,
     context: Option<&JobContext>,
     refresh: Option<impl std::future::Future<Output = Result<()>>>,
+    final_refresh: bool,
 ) -> Result<Value> {
-    let final_refresh = refresh.is_some();
     let config = state.config.read().await.clone();
     let root = tokio::fs::canonicalize(string(&config, "local_strm_root"))
         .await
@@ -463,13 +513,14 @@ async fn fill_inner(
                         context.activity("保存语言和标题", &format!("正在保存 {label} 的本地媒体信息，本次规范化 {count} 条轨道语言和标题")).await;
                     }
                     verify_saved_target(state, id, &snapshot).await.inspect_err(|_| unsafe_target = true)?;
-                    atomic(&path, &updated).await?;
+                    atomic(state, &path, &updated).await?;
                     changed = count;
                     changed_languages = report["changed_languages"].as_u64().unwrap_or(0);
                     if let Some(sha) = &target.sha
                         && let Err(error) = sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2) ON CONFLICT(sha1) DO UPDATE SET mediainfo_json=EXCLUDED.mediainfo_json")
                             .bind(sha.to_uppercase()).bind(&updated).execute(&state.db).await {
                             tracing::warn!("[语言标题] {label} 本地 JSON 已保存，缓存同步失败：{error}");
+                            pending.push(annotate(json!({"reason":"本地 JSON 已保存，媒体信息缓存同步失败，请查看日志"})));
                     }
                 }
                 expected = Some(titles);
@@ -565,11 +616,12 @@ async fn fill_inner(
                 preserve_skipped_titles(&mut updated, &live, &source_paths, &skipped)?;
                 if updated != original {
                     verify_saved_target(state, id, snapshot).await?;
-                    atomic(path, &updated).await?;
+                    atomic(state, path, &updated).await?;
                     if let Some(sha) = snapshot["sha1"].as_str()
                         && let Err(error) = sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2) ON CONFLICT(sha1) DO UPDATE SET mediainfo_json=EXCLUDED.mediainfo_json")
                             .bind(sha.to_uppercase()).bind(&updated).execute(&state.db).await {
                         tracing::warn!("[语言标题] 本地 JSON 已保存，缓存同步失败：{error}");
+                        result["pending"].as_array_mut().unwrap().push(json!({"item_id":id,"reason":"本地 JSON 已保存，媒体信息缓存同步失败，请查看日志"}));
                     }
                 }
             }

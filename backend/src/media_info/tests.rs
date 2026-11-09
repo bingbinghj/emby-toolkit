@@ -10,6 +10,60 @@ fn item(sources: Vec<Value>) -> Value {
 }
 
 #[test]
+fn preserve_linked_version_uses_native_streams_and_keeps_container_fields() {
+    let original = json!({"MediaSourceInfo":{"Size":100,"Container":"mkv","MediaStreams":[
+        {"Type":"Audio","Index":1,"Title":"旧标题","Language":"jpn","IsDefault":true}
+    ]},"Chapters":[]});
+    let streams = json!([
+        {"Type":"Video","Index":0,"Codec":"hevc"},
+        {"Type":"Audio","Index":1,"Codec":"aac","Title":"用户国语","Language":"chi","IsDefault":false},
+        {"Type":"Subtitle","Index":2,"Title":"用户字幕","Language":"yue","IsForced":true,"IsExternal":true,"Path":"/media/movie.zh.srt"}
+    ]);
+    let live = json!({"Id":"102","MediaSources":[
+        {"ItemId":"101","Path":"/media/movie.mkv","MediaStreams":[{"Type":"Audio","Title":"其他版本"}]},
+        {"ItemId":"102","Path":"/media/movie.mkv","MediaStreams":streams}
+    ]});
+    let mut protected = original.clone();
+    preserve_live_streams(&mut protected, &live, &["/media/movie.mkv"]).unwrap();
+    assert_eq!(protected["MediaSourceInfo"]["MediaStreams"], streams);
+    assert_eq!(
+        protected["MediaSourceInfo"]["Size"],
+        original["MediaSourceInfo"]["Size"]
+    );
+    assert_eq!(
+        protected["MediaSourceInfo"]["Container"],
+        original["MediaSourceInfo"]["Container"]
+    );
+}
+
+#[test]
+fn preserve_linked_version_keeps_recoverable_backup_when_native_streams_are_empty() {
+    let original =
+        json!({"MediaSourceInfo":{"MediaStreams":[{"Type":"Audio","Title":"恢复备份"}]}});
+    for live in [
+        json!({"Id":"102","MediaSources":[],"MediaStreams":[]}),
+        json!({"Id":"102","MediaSources":[{"ItemId":"102","Path":"/media/movie.mkv","MediaStreams":[]}]}),
+    ] {
+        let mut protected = original.clone();
+        preserve_live_streams(&mut protected, &live, &["/media/movie.mkv"]).unwrap();
+        assert_eq!(protected, original);
+    }
+}
+
+#[test]
+fn preserve_linked_version_rejects_ambiguous_native_sources_without_changing_backup() {
+    let live = item(vec![
+        source("one", Some("102"), "/media/movie.mkv"),
+        source("two", Some("102"), "/media/movie.mkv"),
+    ]);
+    let original =
+        json!({"MediaSourceInfo":{"MediaStreams":[{"Type":"Audio","Title":"恢复备份"}]}});
+    let mut protected = original.clone();
+    assert!(preserve_live_streams(&mut protected, &live, &["/media/movie.mkv"]).is_err());
+    assert_eq!(protected, original);
+}
+
+#[test]
 fn matching_sources_with_the_same_explicit_owner_are_ambiguous() {
     let item = item(vec![
         source("source-a", Some("102"), "/media/movie.mkv"),

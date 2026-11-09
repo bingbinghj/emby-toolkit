@@ -556,6 +556,9 @@
                       <n-form-item-grid-item label="APIKey" path="emby_api_key" label-width="100">
                         <n-input v-model:value="configModel.emby_api_key" type="password" show-password-on="click" placeholder="输入 API Key" />
                       </n-form-item-grid-item>
+                      <n-form-item-grid-item label="元数据目录" path="emby_metadata_path" label-width="100">
+                        <n-input v-model:value="configModel.emby_metadata_path" placeholder="工具内的 Emby 元数据目录；相同路径可留空" />
+                      </n-form-item-grid-item>
 
                       <n-form-item-grid-item label="Webhook密钥" path="emby_webhook_secret" label-width="100">
                         <n-input v-model:value="configModel.emby_webhook_secret" type="password" show-password-on="click" placeholder="用于 /webhook/emby?token=..." />
@@ -2256,7 +2259,7 @@ const cardFields = {
   sources: ['tmdb_api_key', 'tmdb_api_base_url', 'douban_enable_online_api', 'api_douban_default_cooldown_seconds', 'douban_cookie'],
   p115Account: ['p115_auth_method', 'p115_app_id', 'p115_api_priority', 'p115_request_interval'],
   fingerprints: ['local_strm_root', 'cd2_media_root', 'p115_fingerprint_media_root_cid', 'p115_fingerprint_media_root_path', 'p115_generate_mediainfo', 'p115_enable_sync_delete'],
-  emby: ['emby_server_url', 'emby_public_url', 'emby_api_key', 'emby_webhook_secret', 'emby_webhook_ingest_enabled', 'emby_user_id', 'emby_admin_user', 'emby_admin_pass', 'emby_api_timeout', 'libraries_to_ignore'],
+  emby: ['emby_server_url', 'emby_public_url', 'emby_api_key', 'emby_webhook_secret', 'emby_webhook_ingest_enabled', 'emby_user_id', 'emby_metadata_path', 'emby_admin_user', 'emby_admin_pass', 'emby_api_timeout', 'libraries_to_ignore'],
   ai: ['ai_provider', 'ai_api_key', 'ai_model_name', 'ai_base_url', 'ai_request_timeout', 'ai_max_retries', 'ai_translation_batch_size', 'ai_translate_actor_role', 'ai_translate_on_sync', 'ai_translate_title', 'ai_translate_overview', 'ai_translate_episode_overview', 'ai_joke_fallback', 'ai_translation_mode'],
   logs: ['log_rotation_size_mb', 'log_rotation_backup_count'],
   ingest: ['auto_repair_truehd_core_on_ingest', 'auto_fill_language_titles_on_ingest', 'auto_extract_intro_fingerprint_on_ingest', 'auto_extract_video_thumbnails_on_ingest', 'extract_video_thumbnails_after_save'],

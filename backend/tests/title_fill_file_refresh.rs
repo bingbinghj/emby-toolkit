@@ -51,6 +51,27 @@ fn read_info(root: &Path, id: &str) -> Value {
     serde_json::from_slice(&std::fs::read(root.join(format!("{id}-mediainfo.json"))).unwrap())
         .unwrap()
 }
+fn chapter_bif(ticks: u64) -> Vec<u8> {
+    let mut jpeg = vec![];
+    image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+        .encode(
+            &vec![80; 320 * 180 * 3],
+            320,
+            180,
+            image::ExtendedColorType::Rgb8,
+        )
+        .unwrap();
+    let mut bytes = vec![0; 80];
+    bytes[..8].copy_from_slice(b"\x89BIF\r\n\x1a\n");
+    bytes[12..16].copy_from_slice(&1_u32.to_le_bytes());
+    bytes[16..24].copy_from_slice(&1_u64.to_le_bytes());
+    bytes[64..68].copy_from_slice(&u32::try_from(ticks.div_ceil(10000)).unwrap().to_le_bytes());
+    bytes[68..72].copy_from_slice(&80_u32.to_le_bytes());
+    bytes[72..76].copy_from_slice(&u32::MAX.to_le_bytes());
+    bytes[76..80].copy_from_slice(&u32::try_from(80 + jpeg.len()).unwrap().to_le_bytes());
+    bytes.extend(jpeg);
+    bytes
+}
 async fn restore_write_fault(h: &Host) {
     let backup = h.root.join("10001-write-fault-original.json");
     if backup.exists() {
@@ -74,6 +95,14 @@ async fn import_json(h: &Host, ids: &[String]) {
         };
         item["MediaStreams"] = data[0]["MediaSourceInfo"]["MediaStreams"].clone();
         item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
+        item["Size"] = data[0]["MediaSourceInfo"]["Size"].clone();
+        if item["Chapters"].as_array().is_some_and(Vec::is_empty) {
+            item["Chapters"] = data[0]["Chapters"].clone();
+            if h.root.join(format!("{id}-320-10.bif")).is_file() {
+                item["Chapters"][0]["ImageTag"] =
+                    json!(format!("image-{}", data[0]["EpisodeProof"]));
+            }
+        }
         // The modeled final refresh preserves existing chapter-image references.
     }
 }
@@ -87,7 +116,7 @@ async fn ignore_file_change_active(h: &Host) -> bool {
         .collect::<Vec<_>>();
     flags.contains(&"IgnoreFileChange") && !flags.contains(&"ExtractOnFileChange")
 }
-async fn finish_scan(h: &Host, ids: &[String], root_refresh: bool, fault: &str) {
+async fn finish_scan(h: &Host, ids: &[String], root_refresh: bool, fault: &str, refresh_id: &str) {
     if root_refresh && !ignore_file_change_active(h).await {
         h.guard_violations.fetch_add(1, Ordering::SeqCst);
     } else if fault == "regress-final" {
@@ -111,13 +140,8 @@ async fn finish_scan(h: &Host, ids: &[String], root_refresh: bool, fault: &str) 
     }
     if root_refresh {
         h.final_scan_complete.store(true, Ordering::SeqCst);
-        let root_id = if ids.len() == 1 && h.items.lock().await[&ids[0]]["Type"] == "Movie" {
-            ids[0].clone()
-        } else {
-            "series".into()
-        };
         h.refresh_log.lock().await.push(format!(
-            "Info ProviderManager: RefreshItem Complete: {root_id} item"
+            "Info ProviderManager: RefreshItem Complete: {refresh_id} item"
         ));
     }
 }
@@ -128,6 +152,19 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
             .into_owned()
             .collect();
     if request.method() == axum::http::Method::GET {
+        if path.ends_with("/SpecialFeatures") {
+            return Json(json!([])).into_response();
+        }
+        if path.ends_with("/ThumbnailSet") {
+            let id = path.split('/').nth(2).unwrap();
+            let exists = h.root.join(format!("{id}-320-10.bif")).is_file();
+            return Json(json!({"Thumbnails":if exists {vec![json!({"Index":0})]} else {vec![]}}))
+                .into_response();
+        }
+        if path == "/System/Info" {
+            return Json(json!({"Id":"fixture", "InternalMetadataPath":h.root.join("metadata")}))
+                .into_response();
+        }
         if path == "/ScheduledTasks" {
             return Json(json!([{"Id":"media","Key":"MediaInfoExtractTask","Name":"Extract MediaInfo","State":"Idle"}])).into_response();
         }
@@ -236,9 +273,12 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
                     .await
                     .values()
                     .filter(|item| {
-                        query
-                            .get("Ids")
-                            .is_some_and(|ids| ids.split(',').any(|id| item["Id"] == id))
+                        (!query.contains_key("Ids")
+                            && !query.contains_key("Path")
+                            && !item["IsFolder"].as_bool().unwrap_or(false))
+                            || query
+                                .get("Ids")
+                                .is_some_and(|ids| ids.split(',').any(|id| item["Id"] == id))
                             || query.get("Path").is_some_and(|p| item["Path"] == *p)
                     })
                     .cloned()
@@ -261,8 +301,12 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
                 .iter()
                 .find(|(id, item)| Some(id.as_str()) == requested_id && item["Type"] == "Movie")
                 .map(|(id, _)| id.clone());
-            let root_refresh =
-                full_refresh && (path == "/Items/series/Refresh" || movie_id.is_some());
+            let restoring = full_refresh
+                && query
+                    .get("ImageRefreshMode")
+                    .is_some_and(|mode| mode == "ValidationOnly");
+            let root_refresh = full_refresh
+                && (path == "/Items/series/Refresh" || movie_id.is_some() || restoring);
             let nfo_refresh = path == "/Items/series/Refresh"
                 && query.get("Recursive").is_some_and(|value| value == "false")
                 && query
@@ -275,6 +319,7 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
                     .is_some_and(|item| item["Type"] == "Series");
             let watcher_import =
                 path == "/Items/directory/Refresh" && h.file_watcher.load(Ordering::SeqCst);
+            let refresh_id = requested_id.unwrap_or("directory").to_string();
             h.refreshes.lock().await.push((path.clone(), query));
             let fault = h.fault.lock().await.clone();
             if fault == "denied" {
@@ -320,10 +365,14 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
                 .await
                 .iter()
                 .filter(|(id, item)| {
-                    !root_refresh
-                        || movie_id
-                            .as_ref()
-                            .map_or(item["SeriesId"] == "series", |movie| *id == movie)
+                    if restoring {
+                        Some(id.as_str()) == requested_id
+                    } else {
+                        !root_refresh
+                            || movie_id
+                                .as_ref()
+                                .map_or(item["SeriesId"] == "series", |movie| *id == movie)
+                    }
                 })
                 .map(|(id, _)| id.clone())
                 .collect::<Vec<_>>();
@@ -339,9 +388,8 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
                 });
                 h.refresh_saw_ready_titles.store(ready, Ordering::SeqCst);
                 h.refresh_accepted.store(true, Ordering::SeqCst);
-                let root_id = movie_id.as_deref().unwrap_or("series");
                 h.refresh_log.lock().await.push(format!(
-                    "Info ProviderManager: RefreshItem Start: {root_id} item"
+                    "Info ProviderManager: RefreshItem Start: {refresh_id} item"
                 ));
             }
             if fault == "change-other-setting" {
@@ -357,15 +405,35 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
                     } else {
                         tokio::time::sleep(Duration::from_millis(250)).await;
                     }
-                    finish_scan(&h, &ids, root_refresh, &fault).await;
+                    finish_scan(&h, &ids, root_refresh, &fault, &refresh_id).await;
                 });
             } else {
-                finish_scan(&h, &ids, root_refresh, &fault).await;
+                finish_scan(&h, &ids, root_refresh, &fault, &refresh_id).await;
             }
             return StatusCode::NO_CONTENT.into_response();
         }
         if path.ends_with("/ClearMediaInfo") {
             h.clears.fetch_add(1, Ordering::SeqCst);
+            let id = path.split('/').nth(2).unwrap();
+            let mut items = h.items.lock().await;
+            let key = items[id]["PresentationUniqueKey"].clone();
+            for item in items
+                .values_mut()
+                .filter(|item| item["PresentationUniqueKey"] == key)
+            {
+                let target = item["Id"].as_str().unwrap();
+                tokio::fs::remove_file(h.root.join(format!("{target}-mediainfo.json")))
+                    .await
+                    .unwrap();
+                tokio::fs::remove_file(h.root.join(format!("{target}-320-10.bif")))
+                    .await
+                    .unwrap();
+                item["MediaStreams"] = json!([]);
+                item["MediaSources"][0]["MediaStreams"] = json!([]);
+                item["Chapters"] = json!([]);
+                item["Size"] = json!(0);
+            }
+            return StatusCode::NO_CONTENT.into_response();
         } else if path.starts_with("/ScheduledTasks/Running/") {
             h.native_starts.fetch_add(1, Ordering::SeqCst);
         } else if path == "/UI/Command" {
@@ -510,20 +578,26 @@ impl Fixture {
             }
             let mut chapters = backup[0]["Chapters"].clone();
             chapters[0]["ImageTag"] = json!(format!("image-{index}"));
+            std::fs::write(
+                directory.path().join(format!("{id}-320-10.bif")),
+                chapter_bif(chapters[0]["StartPositionTicks"].as_u64().unwrap()),
+            )
+            .unwrap();
             std::fs::write(&path, &playback).unwrap();
             std::fs::write(
                 directory.path().join(format!("{id}-mediainfo.json")),
                 serde_json::to_vec(&backup).unwrap(),
             )
             .unwrap();
-            host.items.lock().await.insert(id.clone(),json!({"Id":id,"Type":"Episode","SeriesId":"series","Name":format!("episode{index}"),"IndexNumber":index+1,"ParentIndexNumber":1,"Path":path,"Size":1000+index,"PartCount":1,"MediaStreams":streams,"MediaSources":[{"Id":format!("mediasource_{id}"),"ItemId":id,"Path":playback,"MediaStreams":streams}],"Chapters":chapters}));
+            host.items.lock().await.insert(id.clone(),json!({"Id":id,"Guid":uuid::Uuid::from_u128(10001+index as u128).to_string(),"PresentationUniqueKey":format!("episode-{id}"),"Type":"Episode","SeriesId":"series","Name":format!("episode{index}"),"IndexNumber":index+1,"ParentIndexNumber":1,"Path":path,"Size":1000+index,"PartCount":1,"MediaStreams":streams,"MediaSources":[{"Id":format!("mediasource_{id}"),"ItemId":id,"Path":playback,"MediaStreams":streams}],"Chapters":chapters}));
             sqlx::query("INSERT INTO media_metadata(tmdb_id,item_type,emby_item_ids_json,asset_details_json,file_sha1_json,file_pickcode_json) VALUES($1,'Episode',$2,$3,$4,$5)").bind(format!("fixture-{index}")).bind(json!([id])).bind(json!([{"emby_item_id":id,"path":path,"size_bytes":1000+index}])).bind(json!([format!("{:040X}",index+1)])).bind(json!([null])).execute(&state.db).await.unwrap();
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let app = Router::new().fallback(api).with_state(host.clone());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        state.save_config(&json!({"emby_server_url":format!("http://{address}"),"emby_api_key":"fixture","emby_user_id":"user","local_strm_root":directory.path(),"monitor_sha1_pc_search":false})).await.unwrap();
+        std::fs::create_dir_all(directory.path().join("metadata")).unwrap();
+        state.save_config(&json!({"emby_server_url":format!("http://{address}"),"emby_api_key":"fixture","emby_user_id":"user","local_strm_root":directory.path(),"emby_metadata_path":directory.path().join("metadata"),"monitor_sha1_pc_search":false})).await.unwrap();
         Self {
             state,
             admin,
@@ -638,7 +712,7 @@ impl Fixture {
                         }
                         Ok(())
                     };
-                    let result = strm::with_settings(&state, "ignore_file_change", || {
+                    let result = strm::with_settings(&state, "preserve", || {
                         titles::fill_in_job_with_refresh(&state, &ids, true, &context, refresh)
                     })
                     .await;
@@ -717,6 +791,13 @@ impl Fixture {
         let writes = self.host.configuration_writes.lock().await.clone();
         let guard_violations = self.host.guard_violations.load(Ordering::SeqCst);
         let fault = self.host.fault.lock().await.clone();
+        let recoveries = self.state.data_dir.join("backups/media-info-reload");
+        let pending_restore = std::fs::read_dir(&recoveries).ok().is_some_and(|entries| {
+            entries.flatten().any(|entry| {
+                entry.path().join("media-reload.json").is_file()
+                    || entry.path().join("pending-scan.json").is_file()
+            })
+        });
         self.state.jobs.shutdown().await;
         self.server.abort();
         self.state.db.close().await;
@@ -725,10 +806,13 @@ impl Fixture {
             .await
             .unwrap();
         self.admin.close().await;
-        assert_eq!(
-            counts.0, 0,
-            "automatic title fill must never clear media info"
-        );
+        if counts.0 > 0 {
+            assert!(
+                writes
+                    .iter()
+                    .any(|write| write["PersistMediaInfoMode"] == "Restore")
+            );
+        }
         assert_eq!(
             counts.1, 0,
             "automatic title fill must never run native Restore"
@@ -739,18 +823,33 @@ impl Fixture {
             "guard must cover JSON preparation, refresh and readback"
         );
         if let Some(original) = original_configuration {
+            if pending_restore {
+                assert!(
+                    configuration["ExclusiveControlFeatures"]
+                        .as_str()
+                        .unwrap()
+                        .split(',')
+                        .any(|flag| flag == "IgnoreFileChange")
+                );
+                assert_eq!(configuration["PersistMediaInfoMode"], "Restore");
+            }
             for key in [
                 "ExclusiveControlFeatures",
                 "PersistMediaInfoMode",
                 "LibraryScope",
                 "MediaInfoJsonRootFolder",
             ] {
+                if pending_restore
+                    && matches!(key, "ExclusiveControlFeatures" | "PersistMediaInfoMode")
+                {
+                    continue;
+                }
                 assert_eq!(
                     configuration[key], original[key],
                     "original {key} must be restored"
                 );
             }
-            if fault != "change-other-setting" {
+            if fault != "change-other-setting" && !pending_restore {
                 assert_eq!(configuration, original);
             }
             for write in &writes {
@@ -759,6 +858,9 @@ impl Fixture {
                     "LibraryScope",
                     "MediaInfoJsonRootFolder",
                 ] {
+                    if key == "PersistMediaInfoMode" && write[key] == "Restore" {
+                        continue;
+                    }
                     assert_eq!(write[key], original[key], "{key} must never be changed");
                 }
             }
@@ -771,7 +873,8 @@ impl Fixture {
                     .collect::<Vec<_>>();
                 assert!(flags.contains(&"IgnoreFileChange"));
                 assert!(!flags.contains(&"ExtractOnFileChange"));
-                for preserved in ["CatchAllAllow", "CatchAllBlock", "CustomFlag"] {
+                assert!(!flags.contains(&"CatchAllAllow"));
+                for preserved in ["CatchAllBlock", "CustomFlag"] {
                     if original["ExclusiveControlFeatures"]
                         .as_str()
                         .unwrap()
@@ -784,7 +887,11 @@ impl Fixture {
                 }
                 assert_eq!(
                     writes.last().unwrap()["ExclusiveControlFeatures"],
-                    original["ExclusiveControlFeatures"]
+                    if pending_restore {
+                        configuration["ExclusiveControlFeatures"].clone()
+                    } else {
+                        original["ExclusiveControlFeatures"].clone()
+                    }
                 );
             }
         } else {
@@ -914,7 +1021,7 @@ async fn initially_matching_titles_must_still_be_verified_after_final_refresh() 
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
-async fn ignore_guard_preserves_existing_control_flags_and_later_other_setting_changes() {
+async fn preserve_guard_restores_original_control_flags_and_keeps_other_setting_changes() {
     let f = Fixture::new(&["raw"]).await;
     f.host.configuration.lock().await["ExclusiveControlFeatures"] =
         json!("CatchAllAllow,CatchAllBlock,ExtractOnFileChange,CustomFlag");
@@ -999,7 +1106,7 @@ async fn native_titles_without_etk_bindings_are_saved_and_verified() {
         "{result}"
     );
     assert_eq!(result["result"]["title_fill"]["verified_streams"], 2);
-    assert_eq!(refreshes.len(), 1);
+    assert_eq!(refreshes.len(), 2);
     assert_eq!(
         saved[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"],
         "日语"
@@ -1051,7 +1158,64 @@ async fn fingerprint_query_failure_does_not_prevent_titles_or_final_refresh() {
     );
     assert_eq!(result["result"]["fingerprints"]["failed"], 1, "{result}");
     assert!(result["result"]["warnings"].as_u64().unwrap() > 0);
-    assert_eq!(refreshes.len(), 1);
+    assert_eq!(refreshes.len(), 2);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn title_cache_write_failure_is_reported_after_live_titles_are_verified() {
+    let f = Fixture::new(&["gaia"]).await;
+    sqlx::query("CREATE FUNCTION reject_title_cache() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture rejects cache write'; END $$")
+        .execute(&f.state.db).await.unwrap();
+    sqlx::query("CREATE TRIGGER reject_title_cache BEFORE INSERT OR UPDATE ON p115_mediainfo_cache FOR EACH ROW EXECUTE FUNCTION reject_title_cache()")
+        .execute(&f.state.db).await.unwrap();
+    let report = f.run_with_file_watcher().await;
+    let live = f.host.items.lock().await["10001"].clone();
+    f.close().await;
+    assert_eq!(live["MediaStreams"][1]["Title"], "日语");
+    assert_eq!(report["verified_streams"], 2, "{report}");
+    assert_eq!(report["completed"], false, "{report}");
+    assert!(
+        report["pending"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["reason"]
+                .as_str()
+                .unwrap_or("")
+                .contains("缓存同步失败")),
+        "{report}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn automatic_titles_preserve_native_video_title_and_audio_default() {
+    let f = Fixture::new(&["gaia"]).await;
+    f.make_movie().await;
+    {
+        let mut items = f.host.items.lock().await;
+        let item = items.get_mut("10001").unwrap();
+        item["MediaStreams"][0]["Title"] = json!("用户视频标记");
+        item["MediaStreams"][1]["IsDefault"] = json!(false);
+        item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
+    }
+    let task = f.start_real_finalize().await;
+    let result = f.wait_job(&task).await;
+    let live = f.host.items.lock().await["10001"].clone();
+    let stored = f.files().remove(0);
+    f.close().await;
+    assert_eq!(
+        result["result"]["title_fill"]["completed"], true,
+        "{result}"
+    );
+    assert_eq!(live["MediaStreams"][0]["Title"], "用户视频标记");
+    assert_eq!(live["MediaStreams"][1]["IsDefault"], false);
+    assert_eq!(live["MediaStreams"][1]["Title"], "日语");
+    assert_eq!(
+        stored[0]["MediaSourceInfo"]["MediaStreams"],
+        live["MediaStreams"]
+    );
 }
 
 #[tokio::test]
@@ -1089,9 +1253,11 @@ async fn real_webhook_finalization_saves_custom_audio_titles_before_movie_refres
         "{result}"
     );
     assert_eq!(result["result"]["title_fill"]["verified_streams"], 2);
-    assert_eq!(refreshes.len(), 1);
+    assert_eq!(refreshes.len(), 2);
     assert_eq!(refreshes[0].0, "/Items/10001/Refresh");
     assert_eq!(refreshes[0].1["Recursive"], "false");
+    assert_eq!(refreshes[0].1["ImageRefreshMode"], "ValidationOnly");
+    assert_eq!(refreshes[1].1["ImageRefreshMode"], "FullRefresh");
     assert!(
         ready,
         "real webhook must finish title writes before its final refresh"
@@ -1168,13 +1334,18 @@ async fn real_series_webhook_saves_titles_before_full_refresh_and_verifies_after
         ready,
         "both JSON files must be normalized before the root Full refresh"
     );
-    assert_eq!(refreshes.len(), 2);
-    assert_eq!(refreshes[0].0, "/Items/series/Refresh");
-    assert_eq!(refreshes[0].1["MetadataRefreshMode"], "FullRefresh");
-    assert_eq!(refreshes[0].1["Recursive"], "true");
-    assert_eq!(refreshes[1].0, "/Items/series/Refresh");
-    assert_eq!(refreshes[1].1["MetadataRefreshMode"], "Default");
-    assert_eq!(refreshes[1].1["Recursive"], "false");
+    assert_eq!(refreshes.len(), 4);
+    for (index, id) in ["10001", "10002"].iter().enumerate() {
+        assert_eq!(refreshes[index].0, format!("/Items/{id}/Refresh"));
+        assert_eq!(refreshes[index].1["Recursive"], "false");
+        assert_eq!(refreshes[index].1["ImageRefreshMode"], "ValidationOnly");
+    }
+    assert_eq!(refreshes[2].0, "/Items/series/Refresh");
+    assert_eq!(refreshes[2].1["MetadataRefreshMode"], "FullRefresh");
+    assert_eq!(refreshes[2].1["Recursive"], "true");
+    assert_eq!(refreshes[3].0, "/Items/series/Refresh");
+    assert_eq!(refreshes[3].1["MetadataRefreshMode"], "Default");
+    assert_eq!(refreshes[3].1["Recursive"], "false");
     assert_eq!(year_reads, 3);
     assert!(title_reads >= 2);
     assert_eq!(
@@ -1218,10 +1389,9 @@ async fn cancellation_after_real_refresh_acceptance_keeps_ignore_until_completio
     .await
     .unwrap();
     f.state.jobs.control(Some(&task), "stop").await.unwrap();
-    let result = f.wait_job(&task).await;
     let ignored_while_running = ignore_file_change_active(&f.host).await;
     let writes_before_complete = f.host.config_writes.load(Ordering::SeqCst);
-    let recovery = f.state.data_dir.join("rename-recovery");
+    let recovery = f.state.data_dir.join("backups/media-info-reload");
     let pending = std::fs::read_dir(&recovery)
         .unwrap()
         .filter_map(Result::ok)
@@ -1229,22 +1399,12 @@ async fn cancellation_after_real_refresh_acceptance_keeps_ignore_until_completio
         .filter(|path| path.exists())
         .collect::<Vec<_>>();
     f.host.release_scan.notify_one();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !f.host.final_scan_complete.load(Ordering::SeqCst) {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let ignored_before_followup = ignore_file_change_active(&f.host).await;
-    let followup = strm::with_settings(&f.state, "ignore_file_change", || async { Ok(()) }).await;
+    let result = f.wait_job(&task).await;
     let configuration = f.host.configuration.lock().await.clone();
     let still_pending = pending.iter().any(|path| path.exists());
+    let backups_empty = std::fs::read_dir(&recovery).unwrap().next().is_none();
     f.close().await;
-    assert_ne!(
-        result["result"]["title_fill"]["completed"], true,
-        "{result}"
-    );
+    assert_eq!(result["state"], "cancelled", "{result}");
     assert!(
         ignored_while_running,
         "cancellation must not restore during an accepted scan"
@@ -1254,12 +1414,11 @@ async fn cancellation_after_real_refresh_acceptance_keeps_ignore_until_completio
         "only enabling Ignore is allowed before scan completion"
     );
     assert_eq!(pending.len(), 1);
-    assert!(
-        ignored_before_followup,
-        "completion must be verified before restoring settings"
-    );
-    assert!(followup.is_ok(), "{followup:?}");
     assert!(!still_pending);
+    assert!(
+        backups_empty,
+        "completed recovery must remove ETK staging and backups"
+    );
     assert_eq!(
         configuration["ExclusiveControlFeatures"],
         "CatchAllAllow,ExtractOnFileChange,CustomFlag"
@@ -1276,7 +1435,12 @@ async fn asynchronous_file_refresh_waits_for_live_titles_without_repeating_notif
     f.close().await;
     assert_eq!(report["completed"], true, "{report}");
     assert_eq!(report["verified_items"], 2, "{report}");
-    assert_eq!(refreshes.len(), 1);
+    assert_eq!(refreshes.len(), 2);
+    assert!(
+        refreshes.iter().all(
+            |(path, query)| path != "/Items/directory/Refresh" && query["Recursive"] == "false"
+        )
+    );
 }
 
 #[tokio::test]
@@ -1301,12 +1465,17 @@ async fn distinct_episode_files_and_cache_refresh_once_without_losing_chapter_im
     assert_eq!(report["refresh_state"], "submitted", "{report}");
     assert_eq!(report["verified_items"], count, "{report}");
     assert_eq!(report["skipped_chinese_streams"], count);
-    assert_eq!(
-        refreshes.len(),
-        1,
-        "one directory notification to the explicit file-watcher model"
+    assert_eq!(refreshes.len(), count, "each exact target is reloaded once");
+    let refreshed = refreshes
+        .iter()
+        .map(|(path, _)| path.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(refreshed.len(), count);
+    assert!(
+        refreshes
+            .iter()
+            .all(|(_, query)| query["Recursive"] == "false")
     );
-    assert_eq!(refreshes[0].0, "/Items/directory/Refresh");
     assert_eq!(caches.len(), count);
     for (index, file) in files.iter().enumerate() {
         let id = format!("{}", 10001 + index);
@@ -1527,18 +1696,24 @@ async fn failed_or_ineffective_refresh_never_claims_live_titles_are_updated() {
         *f.host.fault.lock().await = fault.into();
         let report = f.run_with_file_watcher().await;
         let live = f.host.items.lock().await.clone();
+        let protected = ignore_file_change_active(&f.host).await;
+        let backups = f.state.data_dir.join("backups/media-info-reload");
+        let pending = std::fs::read_dir(&backups)
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.path().join("media-reload.json").is_file());
         f.close().await;
-        assert_eq!(report["completed"], false, "{fault}: {report}");
-        assert_eq!(
-            report["refresh_state"],
-            if fault == "denied" {
-                "failed"
-            } else {
-                "submitted"
-            },
+        assert!(
+            report["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("尚未确认媒体刷新结束")),
             "{fault}: {report}"
         );
-        assert!(!report["pending"].as_array().unwrap().is_empty());
-        assert_eq!(live["10001"]["MediaStreams"][1]["Title"], "AAC.原生日语");
+        assert_ne!(report["completed"], true, "{fault}: {report}");
+        assert!(
+            protected && pending,
+            "incomplete import must retain protection and recovery data"
+        );
+        assert_ne!(live["10001"]["MediaStreams"][1]["Title"], "日语");
     }
 }

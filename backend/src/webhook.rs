@@ -1851,7 +1851,7 @@ async fn finalize_inner(
     let entered = std::sync::atomic::AtomicBool::new(false);
     let recovery = state
         .data_dir
-        .join("rename-recovery")
+        .join("backups/media-info-reload")
         .join(format!("titles-{}", uuid::Uuid::new_v4()));
     let refresh_guard = (&confirmed, recovery.as_path());
     let refresh_item = &item;
@@ -1889,14 +1889,19 @@ async fn finalize_inner(
         Ok::<_, ApiError>(())
     };
     // Prepare title JSON before the existing final refresh, then verify Emby.
+    let mut reload_warnings = vec![];
     let title_report = if config["auto_fill_language_titles_on_ingest"] == true {
         tracing::info!(
             "入库音轨字幕标题填充开始：《{media_name}》，Emby {id}，目标 {} 个",
             targets.len()
         );
+        let warning_target = &mut reload_warnings;
+        let reload_targets = &targets;
+        let reload_confirmed = &confirmed;
+        let reload_recovery = &recovery;
         let outcome = crate::strm::with_settings_guarded(
             state,
-            "ignore_file_change",
+            "restore_media_info",
             || {
                 entered.store(true, std::sync::atomic::Ordering::Release);
                 crate::titles::fill_in_job_with_refresh(
@@ -1904,7 +1909,18 @@ async fn finalize_inner(
                     &targets,
                     true,
                     context,
-                    final_refresh(true),
+                    async move {
+                        *warning_target = crate::media_save::reload_filled_titles(
+                            state,
+                            reload_targets,
+                            true,
+                            context,
+                            reload_confirmed,
+                            reload_recovery,
+                        )
+                        .await?;
+                        final_refresh(true).await
+                    },
                 )
             },
             &confirmed,
@@ -1912,7 +1928,15 @@ async fn finalize_inner(
         )
         .await;
         match outcome {
-            Ok(report) => {
+            Ok(mut report) => {
+                if !reload_warnings.is_empty() {
+                    report["completed"] = json!(false);
+                    report["pending"].as_array_mut().unwrap().extend(
+                        reload_warnings
+                            .into_iter()
+                            .map(|reason| json!({"reason":reason})),
+                    );
+                }
                 let _ = tokio::fs::remove_dir_all(&recovery).await;
                 report
             }
@@ -1929,7 +1953,14 @@ async fn finalize_inner(
                 let _ = tokio::fs::remove_dir_all(&recovery).await;
                 json!({"completed":false,"failed":1,"pending":[{"reason":error.1}]})
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                if confirmed.load(std::sync::atomic::Ordering::Acquire)
+                    && (error.0 != StatusCode::CONFLICT || error.1 == "任务已取消")
+                {
+                    let _ = tokio::fs::remove_dir_all(&recovery).await;
+                }
+                return Err(error);
+            }
         }
     } else {
         final_refresh(false).await?;

@@ -56,6 +56,35 @@ pub(crate) fn has_media_streams(item: &Value, paths: &[&str]) -> bool {
             .any(|stream| matches!(stream["Type"].as_str(), Some("Video" | "Audio")))
     })
 }
+// A linked version's JSON may lag behind edits that exist only in Emby.
+pub(crate) fn preserve_live_streams(info: &mut Value, item: &Value, paths: &[&str]) -> Result<()> {
+    let has_av = |streams: &Vec<Value>| {
+        streams
+            .iter()
+            .any(|stream| matches!(stream["Type"].as_str(), Some("Video" | "Audio")))
+    };
+    let Some(streams) = item_streams(item, paths) else {
+        let visible_av = item["MediaStreams"].as_array().is_some_and(has_av)
+            || item["MediaSources"].as_array().is_some_and(|sources| {
+                sources
+                    .iter()
+                    .any(|source| source["MediaStreams"].as_array().is_some_and(has_av))
+            });
+        return if visible_av {
+            Err(ApiError::bad(
+                "无法唯一确定当前版本的媒体流，未覆盖关联版本备份",
+            ))
+        } else {
+            Ok(())
+        };
+    };
+    if has_av(streams) {
+        let saved =
+            streams_mut(info).ok_or_else(|| ApiError::bad("关联版本备份缺少可恢复的媒体流"))?;
+        *saved = streams.clone();
+    }
+    Ok(())
+}
 pub(crate) fn readback_summary(item: &Value) -> String {
     let counts = |streams: Option<&Vec<Value>>| {
         let count = |kind| {

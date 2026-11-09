@@ -609,7 +609,7 @@ pub(crate) async fn path_ignored_in(state: &AppState, path: &str, folders: &[Val
         .is_some_and(|library| library_ignored(&config, &string(library, "ItemId")))
 }
 
-async fn wait_item_refresh(
+pub(crate) async fn wait_item_refresh(
     state: &AppState,
     id: &str,
     previous: Option<&str>,
@@ -734,7 +734,7 @@ pub(crate) async fn finalize_refresh_guarded(
 ) -> Result<()> {
     finalize_refresh_inner(state, item, context, Some((confirmed, recovery))).await
 }
-async fn prepare_refresh_guard(
+pub(crate) async fn prepare_refresh_guard(
     guard: Option<(&std::sync::atomic::AtomicBool, &std::path::Path)>,
     id: &str,
     position: Option<u64>,

@@ -64,6 +64,7 @@ struct Prepared {
     chapters: Value,
     multipart: bool,
     has_streams: bool,
+    preserve_streams: bool,
 }
 fn failed(message: &str, failures: &[String], status: u16) -> Result<(u16, Value)> {
     Ok((status, json!({"error":message,"failures":failures})))
@@ -79,7 +80,12 @@ fn protected(state_config: &Value, path: &str) -> bool {
         || normalized.contains("/115open/")
         || normalized.contains("/115/")
 }
-async fn prepare(state: &AppState, target: Target, mut info: Value) -> Result<Prepared> {
+async fn prepare(
+    state: &AppState,
+    target: Target,
+    mut info: Value,
+    preserve_streams: bool,
+) -> Result<Prepared> {
     let item = media_edit::details(
         state,
         &target.id,
@@ -114,6 +120,9 @@ async fn prepare(state: &AppState, target: Target, mut info: Value) -> Result<Pr
     let source = crate::media_paths::strm_target(&path).await;
     let paths = [&path[..], source.as_deref().unwrap_or("")];
     let has_streams = media_info::has_media_streams(&item, &paths);
+    if preserve_streams {
+        media_info::preserve_live_streams(&mut info, &item, &paths)?;
+    }
     let chapters = media_info::recovery_chapters(&info, &item, &paths).map_err(|error| {
         ApiError(
             StatusCode::CONFLICT,
@@ -124,6 +133,7 @@ async fn prepare(state: &AppState, target: Target, mut info: Value) -> Result<Pr
     Ok(Prepared {
         source,
         has_streams,
+        preserve_streams,
         target,
         info,
         path,
@@ -138,7 +148,7 @@ async fn stage_all(
     prepared: &mut BTreeMap<String, Prepared>,
     order: &std::collections::HashMap<String, crate::media_order::Key>,
 ) -> Result<()> {
-    // All identity and chapter reads finish before any persistent write or cache clear.
+    // All identity, stream and chapter reads finish before any persistent write or cache clear.
     let mut ids = prepared.keys().cloned().collect::<Vec<_>>();
     ids.sort_by_cached_key(|id| order.get(id).cloned());
     for id in ids {
@@ -172,28 +182,29 @@ async fn stage_all(
         )?;
         let paths = [&item.path[..], item.source.as_deref().unwrap_or("")];
         item.has_streams = media_info::has_media_streams(&current, &paths);
+        if item.preserve_streams {
+            media_info::preserve_live_streams(&mut item.info, &current, &paths)?;
+        }
         item.chapters = media_info::recovery_chapters(&item.info, &current, &paths)?;
         media_info::preserve_chapters(&mut item.info, &item.chapters)?;
         identity::verify(&item.target.asset, &item.info)?;
-        let directory = item
-            .final_path
-            .parent()
-            .ok_or_else(|| ApiError::bad("媒体信息目标目录无效"))?;
         let filename = item
             .final_path
             .file_name()
             .and_then(|s| s.to_str())
             .ok_or_else(|| ApiError::bad("媒体信息目标文件名无效"))?;
-        let path = directory.join(format!(
-            ".{filename}.etk-stage-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let directory = state
+            .data_dir
+            .join("backups/media-info-reload")
+            .join(format!("staging-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&directory).await?;
+        let path = directory.join(filename);
+        item.stage = Some(path.clone());
         let mut file = tokio::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&path)
             .await?;
-        item.stage = Some(path);
         file.write_all(
             &serde_json::to_vec_pretty(&item.info)
                 .map_err(|_| ApiError::bad("媒体信息 JSON 无效"))?,
@@ -202,6 +213,24 @@ async fn stage_all(
         file.sync_all().await?;
     }
     Ok(())
+}
+pub(crate) async fn commit_json_stage(
+    stage: &std::path::Path,
+    destination: &std::path::Path,
+) -> Result<()> {
+    let parent = destination
+        .parent()
+        .ok_or_else(|| ApiError::bad("媒体信息目标目录无效"))?;
+    let commit = parent.join(format!(".etk-commit-{}", uuid::Uuid::new_v4().simple()));
+    let outcome = async {
+        tokio::fs::copy(stage, &commit).await?;
+        tokio::fs::File::open(&commit).await?.sync_all().await?;
+        tokio::fs::rename(&commit, destination).await?;
+        Ok(())
+    }
+    .await;
+    let _ = tokio::fs::remove_file(commit).await;
+    outcome
 }
 pub(crate) async fn cache_saved(state: &AppState, sha: Option<&str>, info: &Value) -> Result<()> {
     if let Some(sha) = sha {
@@ -252,6 +281,126 @@ pub(crate) async fn saved_details(state: &AppState, target: &SavedTarget) -> Res
         .map_err(|error| ApiError(StatusCode::CONFLICT, error.1))?;
     Ok(live)
 }
+
+pub(crate) async fn reload_filled_titles(
+    state: &AppState,
+    ids: &[String],
+    skip_chinese: bool,
+    context: &JobContext,
+    confirmed: &std::sync::atomic::AtomicBool,
+    recovery: &std::path::Path,
+) -> Result<Vec<String>> {
+    let mut pending = ids.iter().cloned().collect::<BTreeSet<_>>();
+    let mut saved = BTreeMap::new();
+    let mappings = crate::db::setting(&state.db, "language_mapping")
+        .await?
+        .unwrap_or(json!([]));
+    while let Some(id) = pending.pop_first() {
+        if saved.contains_key(&id) {
+            continue;
+        }
+        context.checkpoint().await?;
+        let target = media_edit::repair_target(state, &id).await?;
+        if crate::emby::path_ignored(state, &target.path).await? {
+            return Err(ApiError::bad("关联版本位于忽略媒体库，未清理媒体信息"));
+        }
+        let source = crate::media_paths::strm_target(&target.path).await;
+        let live = media_edit::details(
+            state,
+            &id,
+            "Id,Path,Type,Size,ExtraType,PartCount,Chapters,MediaSources,MediaStreams",
+        )
+        .await?;
+        if ids.contains(&id)
+            && (!string(&live, "ExtraType").is_empty()
+                || live["PartCount"].as_u64().unwrap_or(0) > 1)
+        {
+            continue;
+        }
+        pending.extend(
+            target
+                .versions
+                .iter()
+                .map(|v| string(v, "emby_id"))
+                .filter(|v| !v.is_empty()),
+        );
+        let mut info = media_info::restore_json(&media_edit::load(state, &target).await?)?;
+        let paths = [target.path.as_str(), source.as_deref().unwrap_or("")];
+        if ids.contains(&id) {
+            let expected = crate::titles::expected_titles(
+                &info,
+                &crate::language::fill(&info, &mappings, skip_chinese).1,
+            );
+            if media_info::has_media_streams(&live, &paths) {
+                let original = media_info::container(&info).unwrap()["MediaStreams"]
+                    .as_array()
+                    .unwrap();
+                let current = media_info::item_streams(&live, &paths)
+                    .ok_or_else(|| ApiError::bad("无法唯一确认当前媒体流，未清理媒体信息"))?;
+                if ["Video", "Audio", "Subtitle"].iter().any(|kind| {
+                    original.iter().filter(|s| s["Type"] == *kind).count()
+                        != current.iter().filter(|s| s["Type"] == *kind).count()
+                }) {
+                    return Err(ApiError::bad("填充期间轨道范围变化，未清理媒体信息"));
+                }
+            }
+            media_info::preserve_live_streams(&mut info, &live, &paths)?;
+            for entry in expected {
+                let stream = media_info::streams_mut(&mut info)
+                    .unwrap()
+                    .iter_mut()
+                    .filter(|s| s["Type"] == entry["type"])
+                    .nth(entry["ordinal"].as_u64().unwrap() as usize - 1)
+                    .ok_or_else(|| ApiError::bad("填充期间轨道范围变化，未清理媒体信息"))?;
+                if entry["codec"].as_str().is_some_and(|codec| {
+                    !stream["Codec"]
+                        .as_str()
+                        .unwrap_or("")
+                        .eq_ignore_ascii_case(codec)
+                }) {
+                    return Err(ApiError::bad("填充期间轨道编码变化，未清理媒体信息"));
+                }
+                stream["Title"] = entry["title"].clone();
+                if entry["check_language"] == true {
+                    stream["Language"] = entry["language"].clone();
+                }
+            }
+        } else {
+            media_info::preserve_live_streams(&mut info, &live, &paths)?;
+        }
+        let chapters = media_info::recovery_chapters(&info, &live, &paths)?;
+        media_info::preserve_chapters(&mut info, &chapters)?;
+        if live["PartCount"].as_u64().unwrap_or(0) > 1 {
+            pending.extend(
+                media_edit::additional_parts(state, &id, &live)
+                    .await?
+                    .iter()
+                    .map(|part| string(part, "Id"))
+                    .filter(|v| !v.is_empty()),
+            );
+        }
+        saved.insert(
+            id.clone(),
+            SavedTarget {
+                id,
+                path: target.path,
+                source,
+                sha: target.sha,
+                asset: (!target.kind.is_empty()).then_some(target.asset),
+                info,
+                refresh_required: true,
+            },
+        );
+    }
+    crate::media_reload::reload(
+        state,
+        &saved.into_values().collect::<Vec<_>>(),
+        context,
+        confirmed,
+        recovery,
+    )
+    .await
+}
 pub(crate) async fn refresh_saved<F, Fut>(
     state: &AppState,
     context: &JobContext,
@@ -265,14 +414,14 @@ where
     let confirmed = AtomicBool::new(true);
     let recovery = state
         .data_dir
-        .join("rename-recovery")
+        .join("backups/media-info-reload")
         .join(format!("saved-{}", uuid::Uuid::new_v4()));
     let mut report = json!({"state":"not_requested","requested_ids":[],"verified_ids":[],"failed_ids":[],"failures":[]});
     let mut targets = vec![];
-    let outcome = crate::strm::with_settings_guarded(state, "ignore_file_change", || async {
+    let outcome = crate::strm::with_settings_guarded(state, "restore_media_info", || async {
         targets = prepare().await?;
-        // Every JSON is already saved. Refresh only its exact Movie/Episode ID,
-        // then verify streams and chapters while the file-change guard is held.
+        // Every JSON is already saved. Reload only the protected native versions.
+        let mut reload = vec![];
         for target in &targets {
             context.checkpoint().await?;
             let live = saved_details(state, target).await?;
@@ -281,8 +430,9 @@ where
             }
             if !target.refresh_required { continue; }
             report["requested_ids"].as_array_mut().unwrap().push(json!(target.id));
-            crate::emby::finalize_refresh_guarded(state, &live, context, &confirmed, &recovery).await?;
+            reload.push(target.clone());
         }
+        report["warning_details"] = json!(crate::media_reload::reload(state, &reload, context, &confirmed, &recovery).await?);
         let mut pending = targets.iter().map(|target| (target.id.clone(), "尚未完成媒体流和章节回读".to_string())).collect::<BTreeMap<_, _>>();
         let mut deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         while !pending.is_empty() && tokio::time::Instant::now() < deadline {
@@ -316,6 +466,7 @@ where
                 if differences.is_empty() {
                     pending.remove(&target.id);
                     report["verified_ids"].as_array_mut().unwrap().push(json!(target.id));
+                    tracing::info!("[媒体信息保存回读] 媒体ID {}：媒体流、标题和章节已通过验收", target.id);
                 } else {
                     pending.insert(target.id.clone(), differences.join("；"));
                 }
@@ -329,6 +480,7 @@ where
         }
         report["state"] = json!(if pending.is_empty() { "verified" } else { "unverified" });
         for (id, reason) in pending {
+            tracing::warn!("[媒体信息保存回读] 媒体ID {id}：未通过验收：{reason}");
             report["failed_ids"].as_array_mut().unwrap().push(json!(id));
             report["failures"].as_array_mut().unwrap().push(json!({"item_id":id,"reason":reason}));
         }
@@ -336,9 +488,21 @@ where
     }, &confirmed, &recovery).await;
     let keep_recovery = outcome
         .as_ref()
-        .is_err_and(|error| error.0 == StatusCode::CONFLICT);
+        .is_err_and(|error| error.0 == StatusCode::CONFLICT && error.1 != "任务已取消");
     if let Err(error) = outcome {
+        let ids = targets
+            .iter()
+            .map(|target| target.id.as_str())
+            .collect::<Vec<_>>()
+            .join("、");
+        tracing::warn!(
+            "[媒体信息保存回读] 目标媒体ID [{ids}]：保存或刷新验收流程中断：{}",
+            error.1
+        );
         if context.is_cancelled() {
+            if confirmed.load(Ordering::Acquire) && !keep_recovery {
+                let _ = tokio::fs::remove_dir_all(&recovery).await;
+            }
             return Err(error);
         }
         report["state"] = json!("failed");
@@ -365,6 +529,13 @@ async fn cleanup_stages(prepared: &BTreeMap<String, Prepared>) {
     for item in prepared.values() {
         if let Some(path) = &item.stage {
             let _ = tokio::fs::remove_file(path).await;
+            if let Some(parent) = path.parent()
+                && parent
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("staging-"))
+            {
+                let _ = tokio::fs::remove_dir(parent).await;
+            }
         }
     }
 }
@@ -725,7 +896,7 @@ async fn save_inner(
         if let Some(context) = context {
             context.checkpoint().await?;
         }
-        let prepared = prepare(state, target, info).await?;
+        let prepared = prepare(state, target, info, !saved.contains(&id)).await?;
         if prepared.multipart {
             let details = media_edit::details(state, &id, "Id,Path,PartCount,MediaSources").await?;
             let parts = media_edit::additional_parts(state, &id, &details).await?;
@@ -747,7 +918,7 @@ async fn save_inner(
                 let source = part["Path"].as_str().unwrap_or("");
                 let target = media_edit::build(state, &part_id, source, None, None).await?;
                 let info = media_edit::load(state, &target).await?;
-                restore.insert(part_id, prepare(state, target, info).await?);
+                restore.insert(part_id, prepare(state, target, info, true).await?);
             }
         }
         restore.insert(id, prepared);
@@ -779,8 +950,8 @@ async fn save_inner(
                         refresh_required: true,
                     };
                     saved_details(state, &saved).await?;
-                    if let Err(error) = tokio::fs::rename(stage, &item.final_path).await {
-                        failures.push(format!("{id}：媒体信息 JSON 保存失败：{error}"));
+                    if let Err(error) = commit_json_stage(stage, &item.final_path).await {
+                        failures.push(format!("{id}：媒体信息 JSON 保存失败：{}", error.1));
                         continue;
                     }
                     written_ids.push(id.clone());
@@ -826,6 +997,12 @@ async fn save_inner(
         .await;
         cleanup_stages(&restore).await;
         let metadata_refresh = refresh_outcome?;
+        warning_details.extend(
+            media_edit::list(&metadata_refresh["warning_details"])
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string),
+        );
         if written_ids.is_empty() || saved.is_empty() {
             failures.extend(
                 media_edit::list(&metadata_refresh["failures"])
@@ -951,8 +1128,8 @@ async fn save_inner(
     }
     for (id, item) in &ordered_restore {
         if let Some(stage) = &item.stage {
-            if let Err(error) = tokio::fs::rename(stage, &item.final_path).await {
-                operation_failures.push(format!("{id}: 无法恢复 JSON: {error}"));
+            if let Err(error) = commit_json_stage(stage, &item.final_path).await {
+                operation_failures.push(format!("{id}: 无法恢复 JSON: {}", error.1));
                 continue;
             }
             match tokio::fs::read(&item.final_path).await {
