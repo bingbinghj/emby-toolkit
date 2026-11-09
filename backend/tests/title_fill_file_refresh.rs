@@ -8,7 +8,7 @@ use axum::{
 use emby_toolkit::{AppState, error::ApiError, language, strm, titles, webhook};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -55,6 +55,8 @@ struct Host {
     native_starts: Arc<AtomicUsize>,
     config_writes: Arc<AtomicUsize>,
     refreshes: Arc<Mutex<Vec<RefreshRequest>>>,
+    syncs: Arc<Mutex<Vec<String>>>,
+    sync_inputs: Arc<Mutex<Vec<(String, Value)>>>,
     fault: Arc<Mutex<String>>,
     drift: Arc<Mutex<String>>,
     file_watcher: Arc<AtomicBool>,
@@ -100,6 +102,35 @@ fn chapter_bif(ticks: u64) -> Vec<u8> {
     bytes.extend(jpeg);
     bytes
 }
+fn bif_thumbnails(path: &Path) -> Vec<Value> {
+    let Some(bytes) = std::fs::read(path).ok() else {
+        return vec![];
+    };
+    let word = |offset| {
+        bytes
+            .get(offset..offset + 4)
+            .and_then(|slice| <[u8; 4]>::try_from(slice).ok())
+            .map(u32::from_le_bytes)
+    };
+    let (Some(count), Some(scale)) = (word(12), word(16)) else {
+        return vec![];
+    };
+    if bytes.get(..8) != Some(&b"\x89BIF\r\n\x1a\n"[..])
+        || scale == 0
+        || count > 100_000
+        || bytes.len() < 64 + 8 * (count as usize + 1)
+    {
+        return vec![];
+    }
+    (0..count as usize)
+        .filter_map(|index| {
+            u64::from(word(64 + 8 * index)?)
+                .checked_mul(u64::from(scale))?
+                .checked_mul(10_000)
+                .map(|ticks| json!({"PositionTicks":ticks,"ImageTag":"old-thumbnail"}))
+        })
+        .collect()
+}
 async fn restore_write_fault(h: &Host) {
     let backup = h.root.join("10001-write-fault-original.json");
     if backup.exists() {
@@ -124,14 +155,50 @@ async fn import_json(h: &Host, ids: &[String]) {
         item["MediaStreams"] = data[0]["MediaSourceInfo"]["MediaStreams"].clone();
         item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
         item["Size"] = data[0]["MediaSourceInfo"]["Size"].clone();
-        if item["Chapters"].as_array().is_some_and(Vec::is_empty) {
-            item["Chapters"] = data[0]["Chapters"].clone();
-            if h.root.join(format!("{id}-320-10.bif")).is_file() {
-                item["Chapters"][0]["ImageTag"] =
-                    json!(format!("image-{}", data[0]["EpisodeProof"]));
-            }
+        item["Chapters"] = data[0]["Chapters"].clone();
+        if !item["Chapters"].as_array().unwrap().is_empty()
+            && h.root.join(format!("{id}-320-10.bif")).is_file()
+        {
+            item["Chapters"][0]["ImageTag"] = json!(format!("image-{}", data[0]["EpisodeProof"]));
         }
-        // The modeled final refresh preserves existing chapter-image references.
+    }
+}
+fn filter_pro_bundle(bundle: &mut Value) {
+    bundle["MediaSourceInfo"]["MediaStreams"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|stream| {
+            let local = stream["Protocol"].is_null()
+                || stream["Protocol"] == 0
+                || stream["Protocol"]
+                    .as_str()
+                    .is_some_and(|protocol| protocol.eq_ignore_ascii_case("File"));
+            !(stream["IsExternal"] == true
+                && local
+                && matches!(stream["Type"].as_str(), Some("Audio" | "Subtitle")))
+        });
+    bundle["Chapters"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|chapter| {
+            !matches!(
+                chapter["MarkerType"].as_str(),
+                Some("IntroStart" | "IntroEnd" | "CreditsStart")
+            )
+        });
+}
+fn apply_pro_bundle(root: &Path, id: &str, item: &mut Value, bundle: &Value) {
+    item["MediaStreams"] = bundle["MediaSourceInfo"]["MediaStreams"].clone();
+    item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
+    item["Size"] = bundle["MediaSourceInfo"]["Size"].clone();
+    item["RunTimeTicks"] = bundle["MediaSourceInfo"]["RunTimeTicks"].clone();
+    item["MediaSources"][0]["Size"] = bundle["MediaSourceInfo"]["Size"].clone();
+    item["MediaSources"][0]["RunTimeTicks"] = bundle["MediaSourceInfo"]["RunTimeTicks"].clone();
+    item["Chapters"] = bundle["Chapters"].clone();
+    if !item["Chapters"].as_array().unwrap().is_empty()
+        && root.join(format!("{id}-320-10.bif")).is_file()
+    {
+        item["Chapters"][0]["ImageTag"] = json!(format!("image-{}", bundle["EpisodeProof"]));
     }
 }
 async fn ignore_file_change_active(h: &Host) -> bool {
@@ -163,7 +230,9 @@ async fn finish_scan(h: &Host, ids: &[String], root_refresh: bool, fault: &str, 
             }
             item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
         }
-    } else if fault != "no-import" {
+    } else if !root_refresh && fault != "no-import" {
+        // An explicitly configured external watcher is the sole legacy importer.
+        // Ordinary FullRefresh never loads media-info JSON.
         import_json(h, ids).await;
     }
     if root_refresh {
@@ -180,14 +249,23 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
             .into_owned()
             .collect();
     if request.method() == axum::http::Method::GET {
+        if path == "/Plugins" {
+            return Json(json!([{"Id":"63c322b7-a371-41a3-b11f-04f8418b37d8","Name":"Strm Assistant PRO","Version":"3.0.0.57"}])).into_response();
+        }
+        if path == "/swagger.json" {
+            return Json(
+                serde_json::from_str::<Value>(include_str!("fixtures/pro_sync_contract.json"))
+                    .unwrap(),
+            )
+            .into_response();
+        }
         if path.starts_with("/Users/user/Items/") && path.ends_with("/SpecialFeatures") {
             return Json(json!([])).into_response();
         }
         if path.ends_with("/ThumbnailSet") {
             let id = path.split('/').nth(2).unwrap();
-            let exists = h.root.join(format!("{id}-320-10.bif")).is_file();
-            return Json(json!({"Thumbnails":if exists {vec![json!({"Index":0})]} else {vec![]}}))
-                .into_response();
+            let thumbnails = bif_thumbnails(&h.root.join(format!("{id}-320-10.bif")));
+            return Json(json!({"Thumbnails":thumbnails})).into_response();
         }
         if path == "/System/Info" {
             return Json(json!({"Id":"fixture", "InternalMetadataPath":h.root.join("metadata")}))
@@ -317,6 +395,68 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
             return Json(json!({"Items":items,"TotalRecordCount":items.len()})).into_response();
         }
     } else if request.method() == axum::http::Method::POST {
+        if path == "/Items/SyncMediaInfo" {
+            let Some(id) = query.get("Id") else {
+                return StatusCode::BAD_REQUEST.into_response();
+            };
+            if !h.items.lock().await.contains_key(id)
+                || query.contains_key("Path")
+                || query.contains_key("Ids")
+            {
+                return StatusCode::BAD_REQUEST.into_response();
+            }
+            let body: Value =
+                serde_json::from_slice(&to_bytes(request.into_body(), 1024 * 1024).await.unwrap())
+                    .unwrap();
+            if body.as_array().is_some_and(Vec::is_empty) {
+                // The real SDK returns [] without reading the formal JSON.
+                return Json(json!([])).into_response();
+            }
+            if body
+                .as_array()
+                .is_some_and(|bundles| bundles.iter().any(Value::is_null))
+            {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+            if body.as_array().is_none_or(|bundles| bundles.len() != 1)
+                || !body[0]["MediaSourceInfo"]["MediaStreams"].is_array()
+            {
+                return Json(json!([])).into_response();
+            }
+            assert_eq!(
+                body,
+                read_info(&h.root, id),
+                "send the full prepared Bundle"
+            );
+            h.sync_inputs.lock().await.push((id.clone(), body.clone()));
+            h.syncs.lock().await.push(id.clone());
+            if !ignore_file_change_active(&h).await {
+                h.guard_violations.fetch_add(1, Ordering::SeqCst);
+            }
+            {
+                let configuration = h.configuration.lock().await;
+                assert_eq!(configuration["PersistMediaInfoMode"], "Restore");
+                assert_eq!(configuration["IsModSupported"], true);
+            }
+            let mut data = body;
+            filter_pro_bundle(&mut data[0]);
+            let fault = h.fault.lock().await.clone();
+            if fault == "denied" {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":"fixture rejects target SyncMediaInfo"})),
+                )
+                    .into_response();
+            }
+            if matches!(fault.as_str(), "delayed" | "late-import") {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            if fault != "no-import" {
+                let mut items = h.items.lock().await;
+                apply_pro_bundle(&h.root, id, items.get_mut(id).unwrap(), &data[0]);
+            }
+            return Json(data).into_response();
+        }
         if path.ends_with("/Refresh") {
             let full_refresh = query
                 .get("MetadataRefreshMode")
@@ -560,6 +700,8 @@ impl Fixture {
             native_starts: Arc::default(),
             config_writes: Arc::default(),
             refreshes: Arc::default(),
+            syncs: Arc::default(),
+            sync_inputs: Arc::default(),
             fault: Arc::default(),
             drift: Arc::default(),
             file_watcher: Arc::default(),
@@ -569,7 +711,7 @@ impl Fixture {
             guard_violations: Arc::default(),
             configuration: Arc::new(Mutex::new(json!({
                 "ExclusiveControlFeatures":"CatchAllAllow,ExtractOnFileChange,CustomFlag",
-                "PersistMediaInfoMode":"Default","LibraryScope":"existing-library",
+                "PersistMediaInfoMode":"Default","IsModSupported":true,"LibraryScope":"existing-library",
                 "MediaInfoJsonRootFolder":"","OtherOption":"original"
             }))),
             original_configuration: Arc::default(),
@@ -719,6 +861,21 @@ impl Fixture {
                         if *host.fault.lock().await == "final-error" {
                             return Err(ApiError::bad("fixture root metadata refresh failed"));
                         }
+                        for id in ids.iter().collect::<BTreeSet<_>>() {
+                            if id == "10001"
+                                && matches!(fault.as_str(), "read-title-json" | "write-title-json")
+                            {
+                                continue;
+                            }
+                            state
+                                .emby(
+                                    reqwest::Method::POST,
+                                    "Items/SyncMediaInfo",
+                                    &[("Id", id.clone())],
+                                    Some(read_info(&host.root, id)),
+                                )
+                                .await?;
+                        }
                         state
                             .emby(
                                 reqwest::Method::POST,
@@ -742,7 +899,7 @@ impl Fixture {
                         }
                         Ok(())
                     };
-                    let result = strm::with_settings(&state, "preserve", || {
+                    let result = strm::with_settings(&state, "restore_media_info", || {
                         titles::fill_in_job_with_refresh(&state, &ids, true, &context, refresh)
                     })
                     .await;
@@ -840,13 +997,10 @@ impl Fixture {
             .await
             .unwrap();
         self.admin.close().await;
-        if counts.0 > 0 {
-            assert!(
-                writes
-                    .iter()
-                    .any(|write| write["PersistMediaInfoMode"] == "Restore")
-            );
-        }
+        assert_eq!(
+            counts.0, 0,
+            "target JSON sync must never clear native media info"
+        );
         assert_eq!(
             counts.1, 0,
             "automatic title fill must never run native Restore"
@@ -939,6 +1093,110 @@ impl Fixture {
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn empty_sync_does_not_load_formal_json_or_change_native_media() {
+    let f = Fixture::new(&["raw"]).await;
+    let before = f.host.items.lock().await["10001"].clone();
+    let mut formal = f.files().remove(0);
+    formal[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("日语");
+    let bytes = serde_json::to_vec(&formal).unwrap();
+    std::fs::write(f.directory.path().join("10001-mediainfo.json"), &bytes).unwrap();
+    let bif_before = std::fs::read(f.directory.path().join("10001-320-10.bif")).unwrap();
+    let base = f.state.config.read().await["emby_server_url"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for (body, status) in [
+        (json!([]), StatusCode::OK),
+        (json!([{}]), StatusCode::OK),
+        (json!([null]), StatusCode::INTERNAL_SERVER_ERROR),
+    ] {
+        let response = f
+            .state
+            .http
+            .post(format!("{base}/Items/SyncMediaInfo"))
+            .query(&[("Id", "10001")])
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{body}");
+        if status == StatusCode::OK {
+            assert_eq!(response.json::<Value>().await.unwrap(), json!([]));
+        }
+    }
+    assert_eq!(f.host.items.lock().await["10001"], before);
+    assert_eq!(
+        std::fs::read(f.directory.path().join("10001-mediainfo.json")).unwrap(),
+        bytes
+    );
+    assert_eq!(
+        std::fs::read(f.directory.path().join("10001-320-10.bif")).unwrap(),
+        bif_before
+    );
+    assert!(f.host.sync_inputs.lock().await.is_empty());
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn ordinary_204_refresh_cannot_replace_target_json_sync() {
+    let f = Fixture::new(&["raw"]).await;
+    f.make_movie().await;
+    let mut saved = f.files().remove(0);
+    saved[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("日语");
+    std::fs::write(
+        f.directory.path().join("10001-mediainfo.json"),
+        serde_json::to_vec(&saved).unwrap(),
+    )
+    .unwrap();
+    let before = f.host.items.lock().await["10001"].clone();
+    let base = f.state.config.read().await["emby_server_url"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    strm::with_settings(&f.state, "preserve", || async {
+        let response = f
+            .state
+            .http
+            .post(format!("{base}/Items/10001/Refresh"))
+            .query(&[
+                ("Recursive", "false"),
+                ("MetadataRefreshMode", "FullRefresh"),
+                ("ImageRefreshMode", "ValidationOnly"),
+                ("ReplaceAllMetadata", "false"),
+                ("ReplaceAllImages", "false"),
+            ])
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(f.host.items.lock().await["10001"], before);
+    assert!(f.host.syncs.lock().await.is_empty());
+    // The ordinary refresh has finished; the next task may analyze without a guard.
+    f.host.guarded_run.store(false, Ordering::SeqCst);
+    let report = f.run().await;
+    let live = f.host.items.lock().await["10001"].clone();
+    let syncs = f.host.syncs.lock().await.clone();
+    let sync_inputs = f.host.sync_inputs.lock().await.clone();
+    let prepared = f.files().remove(0);
+    let refreshes = f.host.refreshes.lock().await.clone();
+    f.close().await;
+    assert_eq!(report["completed"], true, "{report}");
+    assert_eq!(live["MediaStreams"][1]["Title"], "日语");
+    assert_eq!(syncs, vec!["10001".to_string()]);
+    assert_eq!(sync_inputs, vec![("10001".into(), prepared)]);
+    assert_eq!(
+        refreshes.len(),
+        1,
+        "sync needs no fallback ordinary refresh"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
 async fn gaia_fifty_one_episode_json_titles_reach_emby_without_refreshing_other_episodes() {
     let mut modes = vec!["gaia"; 51];
     modes.push("raw");
@@ -953,6 +1211,7 @@ async fn gaia_fifty_one_episode_json_titles_reach_emby_without_refreshing_other_
     let live = f.host.items.lock().await.clone();
     let refreshes = f.host.refreshes.lock().await.clone();
     let final_calls = f.host.final_calls.load(Ordering::SeqCst);
+    let syncs = f.host.syncs.lock().await.clone();
     let configuration_writes = f.host.config_writes.load(Ordering::SeqCst);
     let cached: Vec<Value> =
         sqlx::query_scalar("SELECT mediainfo_json FROM p115_mediainfo_cache ORDER BY sha1")
@@ -968,6 +1227,13 @@ async fn gaia_fifty_one_episode_json_titles_reach_emby_without_refreshing_other_
     assert_eq!(report["changed_languages"], 0);
     assert_eq!(cached.len(), 51);
     assert_eq!(final_calls, 1);
+    assert_eq!(
+        syncs.len(),
+        51,
+        "each selected target is synced exactly once"
+    );
+    assert_eq!(syncs.iter().collect::<BTreeSet<_>>().len(), 51);
+    assert!(!syncs.iter().any(|id| id == "10052"));
     assert_eq!(configuration_writes, 2);
     assert_eq!(
         refreshes.len(),
@@ -1134,13 +1400,15 @@ async fn native_titles_without_etk_bindings_are_saved_and_verified() {
     let result = f.wait_job(&task).await;
     let saved = f.files().remove(0);
     let refreshes = f.host.refreshes.lock().await.clone();
+    let syncs = f.host.syncs.lock().await.clone();
     f.close().await;
     assert_eq!(
         result["result"]["title_fill"]["completed"], true,
         "{result}"
     );
     assert_eq!(result["result"]["title_fill"]["verified_streams"], 2);
-    assert_eq!(refreshes.len(), 2);
+    assert_eq!(syncs, vec!["10001".to_string()]);
+    assert_eq!(refreshes.len(), 1);
     assert_eq!(
         saved[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"],
         "日语"
@@ -1185,6 +1453,7 @@ async fn fingerprint_query_failure_does_not_prevent_titles_or_final_refresh() {
     let task = f.start_real_finalize().await;
     let result = f.wait_job(&task).await;
     let refreshes = f.host.refreshes.lock().await.clone();
+    let syncs = f.host.syncs.lock().await.clone();
     f.close().await;
     assert_eq!(
         result["result"]["title_fill"]["completed"], true,
@@ -1192,7 +1461,8 @@ async fn fingerprint_query_failure_does_not_prevent_titles_or_final_refresh() {
     );
     assert_eq!(result["result"]["fingerprints"]["failed"], 1, "{result}");
     assert!(result["result"]["warnings"].as_u64().unwrap() > 0);
-    assert_eq!(refreshes.len(), 2);
+    assert_eq!(syncs, vec!["10001".to_string()]);
+    assert_eq!(refreshes.len(), 1);
 }
 
 #[tokio::test]
@@ -1280,6 +1550,7 @@ async fn real_webhook_finalization_saves_custom_audio_titles_before_movie_refres
     let saved = f.files().remove(0);
     let live = f.host.items.lock().await["10001"].clone();
     let refreshes = f.host.refreshes.lock().await.clone();
+    let syncs = f.host.syncs.lock().await.clone();
     let ready = f.host.refresh_saw_ready_titles.load(Ordering::SeqCst);
     f.close().await;
     assert_eq!(
@@ -1287,11 +1558,10 @@ async fn real_webhook_finalization_saves_custom_audio_titles_before_movie_refres
         "{result}"
     );
     assert_eq!(result["result"]["title_fill"]["verified_streams"], 2);
-    assert_eq!(refreshes.len(), 2);
+    assert_eq!(syncs, vec!["10001".to_string()]);
+    assert_eq!(refreshes.len(), 1);
     assert_eq!(refreshes[0].0, "/Items/10001/Refresh");
-    assert_eq!(refreshes[0].1["Recursive"], "false");
-    assert_eq!(refreshes[0].1["ImageRefreshMode"], "ValidationOnly");
-    assert_eq!(refreshes[1].1["ImageRefreshMode"], "FullRefresh");
+    assert_eq!(refreshes[0].1["ImageRefreshMode"], "FullRefresh");
     assert!(
         ready,
         "real webhook must finish title writes before its final refresh"
@@ -1354,6 +1624,7 @@ async fn real_series_webhook_saves_titles_before_full_refresh_and_verifies_after
     let live = f.host.items.lock().await.clone();
     let files = f.files();
     let refreshes = f.host.refreshes.lock().await.clone();
+    let syncs = f.host.syncs.lock().await.clone();
     let ready = f.host.refresh_saw_ready_titles.load(Ordering::SeqCst);
     let year_reads = f.host.stable_year_reads.load(Ordering::SeqCst);
     let title_reads = f.host.post_nfo_title_reads.load(Ordering::SeqCst);
@@ -1368,18 +1639,14 @@ async fn real_series_webhook_saves_titles_before_full_refresh_and_verifies_after
         ready,
         "both JSON files must be normalized before the root Full refresh"
     );
-    assert_eq!(refreshes.len(), 4);
-    for (index, id) in ["10001", "10002"].iter().enumerate() {
-        assert_eq!(refreshes[index].0, format!("/Items/{id}/Refresh"));
-        assert_eq!(refreshes[index].1["Recursive"], "false");
-        assert_eq!(refreshes[index].1["ImageRefreshMode"], "ValidationOnly");
-    }
-    assert_eq!(refreshes[2].0, "/Items/series/Refresh");
-    assert_eq!(refreshes[2].1["MetadataRefreshMode"], "FullRefresh");
-    assert_eq!(refreshes[2].1["Recursive"], "true");
-    assert_eq!(refreshes[3].0, "/Items/series/Refresh");
-    assert_eq!(refreshes[3].1["MetadataRefreshMode"], "Default");
-    assert_eq!(refreshes[3].1["Recursive"], "false");
+    assert_eq!(syncs, vec!["10001".to_string(), "10002".to_string()]);
+    assert_eq!(refreshes.len(), 2);
+    assert_eq!(refreshes[0].0, "/Items/series/Refresh");
+    assert_eq!(refreshes[0].1["MetadataRefreshMode"], "FullRefresh");
+    assert_eq!(refreshes[0].1["Recursive"], "true");
+    assert_eq!(refreshes[1].0, "/Items/series/Refresh");
+    assert_eq!(refreshes[1].1["MetadataRefreshMode"], "Default");
+    assert_eq!(refreshes[1].1["Recursive"], "false");
     assert_eq!(year_reads, 3);
     assert!(title_reads >= 2);
     assert_eq!(
@@ -1466,14 +1733,14 @@ async fn asynchronous_file_refresh_waits_for_live_titles_without_repeating_notif
     *f.host.fault.lock().await = "delayed".into();
     let report = f.run_with_file_watcher().await;
     let refreshes = f.host.refreshes.lock().await.clone();
+    let syncs = f.host.syncs.lock().await.clone();
     f.close().await;
     assert_eq!(report["completed"], true, "{report}");
     assert_eq!(report["verified_items"], 2, "{report}");
-    assert_eq!(refreshes.len(), 2);
+    assert_eq!(syncs, vec!["10001".to_string(), "10002".to_string()]);
     assert!(
-        refreshes.iter().all(
-            |(path, query)| path != "/Items/directory/Refresh" && query["Recursive"] == "false"
-        )
+        refreshes.is_empty(),
+        "sync must not fall back to directory scans"
     );
 }
 
@@ -1489,6 +1756,7 @@ async fn distinct_episode_files_and_cache_refresh_once_without_losing_chapter_im
     let files = f.files();
     let live = f.host.items.lock().await.clone();
     let refreshes = f.host.refreshes.lock().await.clone();
+    let syncs = f.host.syncs.lock().await.clone();
     let caches: Vec<Value> =
         sqlx::query_scalar("SELECT mediainfo_json FROM p115_mediainfo_cache ORDER BY sha1")
             .fetch_all(&f.state.db)
@@ -1499,16 +1767,11 @@ async fn distinct_episode_files_and_cache_refresh_once_without_losing_chapter_im
     assert_eq!(report["refresh_state"], "submitted", "{report}");
     assert_eq!(report["verified_items"], count, "{report}");
     assert_eq!(report["skipped_chinese_streams"], count);
-    assert_eq!(refreshes.len(), count, "each exact target is reloaded once");
-    let refreshed = refreshes
-        .iter()
-        .map(|(path, _)| path.clone())
-        .collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(refreshed.len(), count);
+    assert_eq!(syncs.len(), count, "each exact target is reloaded once");
+    assert_eq!(syncs.iter().collect::<BTreeSet<_>>().len(), count);
     assert!(
-        refreshes
-            .iter()
-            .all(|(_, query)| query["Recursive"] == "false")
+        refreshes.is_empty(),
+        "target sync needs no ordinary refresh"
     );
     assert_eq!(caches.len(), count);
     for (index, file) in files.iter().enumerate() {
@@ -1541,12 +1804,14 @@ async fn matching_live_titles_allow_local_json_updates_without_refresh() {
     let report = f.run_with_file_watcher().await;
     let files = f.files();
     let refreshes = f.host.refreshes.lock().await.clone();
+    let syncs = f.host.syncs.lock().await.clone();
     f.close().await;
     assert_eq!(report["completed"], true, "{report}");
     assert_eq!(report["refresh_state"], "not_requested", "{report}");
     assert_eq!(report["changed_items"], 2);
     assert_eq!(report["verified_items"], 2);
     assert!(refreshes.is_empty());
+    assert!(syncs.is_empty(), "matching live titles need no import");
     for (index, file) in files.iter().enumerate() {
         assert_eq!(
             file[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"],
@@ -1563,6 +1828,7 @@ async fn shared_directory_refresh_preserves_subtitles_of_matching_and_unchanged_
     let files = f.files();
     let live = f.host.items.lock().await.clone();
     let refreshes = f.host.refreshes.lock().await.clone();
+    let syncs = f.host.syncs.lock().await.clone();
     let caches: Vec<Value> =
         sqlx::query_scalar("SELECT mediainfo_json FROM p115_mediainfo_cache ORDER BY sha1")
             .fetch_all(&f.state.db)
@@ -1572,7 +1838,8 @@ async fn shared_directory_refresh_preserves_subtitles_of_matching_and_unchanged_
     assert_eq!(report["completed"], true, "{report}");
     assert_eq!(report["refresh_state"], "submitted", "{report}");
     assert_eq!(report["verified_items"], 3, "{report}");
-    assert_eq!(refreshes.len(), 1);
+    assert_eq!(syncs, vec!["10002".to_string()]);
+    assert!(refreshes.is_empty());
     assert_eq!(caches.len(), 3);
     for index in [0, 2] {
         let id = format!("{}", 10001 + index);
@@ -1645,10 +1912,12 @@ async fn unknown_titles_keep_batch_incomplete_without_destructive_fallback() {
     let f = Fixture::new(&["raw", "same", "unknown"]).await;
     let report = f.run_with_file_watcher().await;
     let refreshes = f.host.refreshes.lock().await.clone();
+    let syncs = f.host.syncs.lock().await.clone();
     f.close().await;
     assert_eq!(report["completed"], false, "{report}");
     assert_eq!(report["failed"], 0, "{report}");
-    assert_eq!(refreshes.len(), 1);
+    assert_eq!(syncs, vec!["10001".to_string()]);
+    assert!(refreshes.is_empty());
     assert!(
         report["pending"]
             .as_array()
@@ -1697,10 +1966,12 @@ async fn nexus_short_audio_sources_and_mislabeled_chinese_subtitles_survive_file
         .await
         .unwrap();
     let refreshes = f.host.refreshes.lock().await.clone();
+    let syncs = f.host.syncs.lock().await.clone();
     f.close().await;
     assert_eq!(report["completed"], true, "{report}");
     assert_eq!(report["skipped_chinese_streams"], 3);
-    assert_eq!(refreshes.len(), 1);
+    assert_eq!(syncs, vec!["10001".to_string()]);
+    assert!(refreshes.is_empty());
     assert_eq!(saved, cache);
     assert_eq!(saved[0]["Chapters"], backup[0]["Chapters"]);
     let saved_streams = &saved[0]["MediaSourceInfo"]["MediaStreams"];

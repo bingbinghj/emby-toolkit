@@ -420,9 +420,6 @@ async fn check_rename_scan_guard(state: &AppState, id: &str) -> Result<()> {
             .map_err(|error| blocked(format!("无法读取待确认标记：{error}")))?,
     )
     .map_err(|_| blocked("待确认标记内容无效".into()))?;
-    let position = record["position"]
-        .as_u64()
-        .ok_or_else(|| blocked("待确认标记缺少本次日志位置".into()))?;
     let ids = record["ids"]
         .as_array()
         .and_then(|ids| {
@@ -432,21 +429,32 @@ async fn check_rename_scan_guard(state: &AppState, id: &str) -> Result<()> {
         })
         .filter(|ids| !ids.is_empty())
         .ok_or_else(|| blocked("未记录有效的本次扫描目录，无法自动验收".into()))?;
-    let logs = state
-        .emby(
-            Method::GET,
-            "System/Logs/embyserver.txt/Lines",
-            &[("Limit", "500".into())],
-            None,
-        )
-        .await
-        .map_err(|error| blocked(format!("无法回读本次扫描日志：{}", error.1)))?;
-    for id in ids {
-        if !crate::media_extra::RefreshTrace::new(position)
-            .feed(&id, &logs)
-            .map_err(|error| blocked(error.1))?
-        {
-            return Err(blocked(format!("尚未确认目录 {id} 的本次扫描结束")));
+    if record["kind"] == "native-sync" {
+        if record["verified"] != true {
+            return Err(blocked(
+                "目标同步尚未记录有效返回和完整回读，无法自动恢复配置".into(),
+            ));
+        }
+    } else {
+        let position = record["position"]
+            .as_u64()
+            .ok_or_else(|| blocked("待确认标记缺少本次日志位置".into()))?;
+        let logs = state
+            .emby(
+                Method::GET,
+                "System/Logs/embyserver.txt/Lines",
+                &[("Limit", "500".into())],
+                None,
+            )
+            .await
+            .map_err(|error| blocked(format!("无法回读本次扫描日志：{}", error.1)))?;
+        for id in ids {
+            if !crate::media_extra::RefreshTrace::new(position)
+                .feed(&id, &logs)
+                .map_err(|error| blocked(error.1))?
+            {
+                return Err(blocked(format!("尚未确认目录 {id} 的本次扫描结束")));
+            }
         }
     }
     let recovery = path.parent().unwrap();

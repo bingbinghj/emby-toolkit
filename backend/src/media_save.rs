@@ -840,6 +840,7 @@ async fn save_inner(
         let result=async {
             let target=if rebuilt.is_empty(){media_edit::target(state,target_id).await?}else{media_edit::repair_target(state,target_id).await?};
             let original=if let Some(info)=rebuilt.get(target_id){info.clone()}else{media_edit::load(state,&target).await?};
+            if file_refresh { crate::media_reload::ensure_single_bundle(&original)?; }
             if target_id==id {
                 if let Some(sha)=body.get("sha1") && text(sha).to_uppercase()!=target.sha.clone().unwrap_or_default().to_uppercase() {return Err(ApiError::bad("当前文件指纹已变化，请重新打开编辑器"));}
                 if body["media_path"].as_str().is_some_and(|p|!p.is_empty() && p!=target.path) {return Err(ApiError::bad("当前文件路径已变化，请重新打开编辑器"));}
@@ -854,6 +855,7 @@ async fn save_inner(
                     if report["matched"]==0 {return Ok(None);}
                     info
                 };
+            if file_refresh { crate::media_reload::ensure_json_unfiltered(&info,target_id)?; }
             // A stale editing page may still contain empty chapters after a failed restore.
             if let Some(chapters) = media_info::object(&original).and_then(|root| root["Chapters"].as_array()) {
                 media_info::preserve_chapters(&mut info, &json!(chapters))?;
@@ -957,6 +959,14 @@ async fn save_inner(
         context.update(35, "暂存", "暂存媒体信息和当前章节").await;
     }
     if file_refresh {
+        for item in restore.values() {
+            crate::media_reload::ensure_single_bundle(&item.info)?;
+            if let Ok(bytes) = tokio::fs::read(&item.final_path).await
+                && let Ok(original) = serde_json::from_slice::<Value>(&bytes)
+            {
+                crate::media_reload::ensure_single_bundle(&original)?;
+            }
+        }
         let staged = stage_all(state, &mut restore, &order).await;
         if let Err(error) = staged {
             cleanup_stages(&restore).await;

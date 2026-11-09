@@ -54,6 +54,7 @@ struct Host {
     starts: Arc<AtomicUsize>,
     clears: Arc<AtomicUsize>,
     refreshes: Arc<AtomicUsize>,
+    syncs: Arc<AtomicUsize>,
     config_writes: Arc<AtomicUsize>,
     wrong_final_language: Arc<AtomicBool>,
     refresh_logs: Arc<Mutex<Vec<String>>>,
@@ -292,7 +293,7 @@ async fn details(
     let mut item = host.item.lock().await.clone();
     let fields = query.get("Fields").map(String::as_str).unwrap_or("");
     if host.wrong_final_language.load(Ordering::SeqCst)
-        && (host.starts.load(Ordering::SeqCst) > 0 || host.refreshes.load(Ordering::SeqCst) > 0)
+        && (host.starts.load(Ordering::SeqCst) > 0 || host.syncs.load(Ordering::SeqCst) > 0)
         && fields.contains("MediaStreams")
         && !fields.contains("Chapters")
         && !fields.contains("PartCount")
@@ -366,38 +367,127 @@ async fn exact_refresh(
         .lock()
         .await
         .push("2026-11-09 00:00:01.000 RefreshItem Start: 61616 fixture".into());
-    let mut item = host.item.lock().await;
-    if item["MediaStreams"].as_array().unwrap().is_empty()
-        && host.settings.lock().await["PersistMediaInfoMode"] == "Restore"
-    {
-        let info: Value = serde_json::from_slice(
-            &tokio::fs::read(host.directory.join("61616-mediainfo.json"))
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        item["MediaStreams"] = info[0]["MediaSourceInfo"]["MediaStreams"].clone();
-        item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
-        item["Size"] = info[0]["MediaSourceInfo"]["Size"].clone();
-        item["Chapters"] = info[0]["Chapters"].clone();
-        let images = native_chapter_images(&host, &item);
-        for (chapter, exists) in item["Chapters"]
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .zip(images)
-        {
-            if exists {
-                chapter["ImageTag"] = json!("old-thumbnail");
-            }
-        }
-    }
+    // A successful native refresh is not the PRO JSON import operation.
     host.refreshes.fetch_add(1, Ordering::SeqCst);
     host.refresh_logs
         .lock()
         .await
         .push("2026-11-09 00:00:02.000 RefreshItem Complete: 61616 fixture".into());
     StatusCode::NO_CONTENT
+}
+
+fn pro_plugins() -> Value {
+    json!([{"Id":"63c322b7-a371-41a3-b11f-04f8418b37d8","Name":"Strm Assistant PRO","Version":"3.0.0.57"}])
+}
+
+fn pro_swagger() -> Value {
+    serde_json::from_str(include_str!("fixtures/pro_sync_contract.json")).unwrap()
+}
+
+async fn apply_pro_bundle(host: &Host, item: &mut Value, bundle: &Value) {
+    assert!(bundle.is_object());
+    // PRO filters unsupported incoming entries, then replaces the native lists.
+    // A caller must reject these before Sync rather than silently losing them.
+    let mut bundle = bundle.clone();
+    bundle["MediaSourceInfo"]["MediaStreams"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|stream| {
+            let local = stream["Protocol"].is_null()
+                || stream["Protocol"] == 0
+                || stream["Protocol"]
+                    .as_str()
+                    .is_some_and(|p| p.eq_ignore_ascii_case("File"));
+            !(stream["IsExternal"] == true
+                && local
+                && matches!(stream["Type"].as_str(), Some("Audio" | "Subtitle")))
+        });
+    if let Some(chapters) = bundle["Chapters"].as_array_mut() {
+        chapters.retain(|chapter| {
+            !matches!(
+                chapter["MarkerType"].as_str(),
+                Some("IntroStart" | "IntroEnd" | "CreditsStart")
+            ) && !matches!(chapter["MarkerType"].as_u64(), Some(1..=3))
+        });
+    }
+    let source = &bundle["MediaSourceInfo"];
+    if item["Type"] == "Audio" {
+        if bundle["EmbeddedInfo"].is_object() {
+            for key in ["Name", "Overview", "Genres"] {
+                if let Some(value) = bundle["EmbeddedInfo"].get(key) {
+                    item[key] = value.clone();
+                }
+            }
+        }
+        if let Some(embedded) = bundle["EmbeddedImage"].as_str() {
+            use base64::Engine;
+            let cover = item_metadata_directory(host, item).join("primary.jpg");
+            tokio::fs::create_dir_all(cover.parent().unwrap())
+                .await
+                .unwrap();
+            tokio::fs::write(
+                cover,
+                base64::engine::general_purpose::STANDARD
+                    .decode(embedded)
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+            item["ImageTags"]["Primary"] = json!("cached-old-cover");
+        }
+    }
+    item["MediaStreams"] = source["MediaStreams"].clone();
+    item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
+    item["Size"] = source["Size"].clone();
+    item["RunTimeTicks"] = source["RunTimeTicks"].clone();
+    item["MediaSources"][0]["Size"] = source["Size"].clone();
+    item["MediaSources"][0]["RunTimeTicks"] = source["RunTimeTicks"].clone();
+    item["Chapters"] = bundle["Chapters"].clone();
+    let images = native_chapter_images(host, item);
+    for (chapter, exists) in item["Chapters"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .zip(images)
+    {
+        if exists {
+            chapter["ImageTag"] = json!("old-thumbnail");
+        }
+    }
+}
+
+async fn sync_media_info(
+    State(host): State<Host>,
+    Query(query): Query<HashMap<String, String>>,
+    Json(body): Json<Value>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    assert_eq!(query.get("Id").map(String::as_str), Some("61616"));
+    assert!(!query.contains_key("Path"));
+    host.syncs.fetch_add(1, Ordering::SeqCst);
+    if body == json!([null]) {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    if body == json!([]) || body == json!([{}]) {
+        return Json(json!([])).into_response();
+    }
+    assert_eq!(
+        host.settings.lock().await["PersistMediaInfoMode"],
+        "Restore"
+    );
+    let prepared: Value = serde_json::from_slice(
+        &tokio::fs::read(host.directory.join("61616-mediainfo.json"))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body.as_array().unwrap().len(), 1);
+    assert_eq!(
+        body, prepared,
+        "Sync must receive the complete prepared Bundle"
+    );
+    apply_pro_bundle(&host, &mut *host.item.lock().await, &body[0]).await;
+    Json(body).into_response()
 }
 
 struct Fixture {
@@ -452,7 +542,7 @@ impl Fixture {
                 }
             }
         }
-        let original_settings = json!({"ExclusiveControlFeatures":"NONE","PersistMediaInfoMode":"Default","LibraryScope":"library","MediaInfoJsonRootFolder":"","IncludeExtra":false});
+        let original_settings = json!({"ExclusiveControlFeatures":"NONE","PersistMediaInfoMode":"Default","LibraryScope":"library","MediaInfoJsonRootFolder":"","IncludeExtra":false,"IsModSupported":true});
         let host = Host {
             directory: directory.path().into(),
             metadata_root: directory.path().join("metadata"),
@@ -463,6 +553,7 @@ impl Fixture {
             starts: Arc::default(),
             clears: Arc::default(),
             refreshes: Arc::default(),
+            syncs: Arc::default(),
             config_writes: Arc::default(),
             wrong_final_language: Arc::new(AtomicBool::new(wrong_final_language)),
             refresh_logs: Arc::new(Mutex::new(vec![
@@ -475,6 +566,9 @@ impl Fixture {
             .unwrap();
         seed_chapter_images(&host, &*host.item.lock().await).await;
         let api = Router::new()
+            .route("/Plugins", get(|| async { Json(pro_plugins()) }))
+            .route("/swagger.json", get(|| async { Json(pro_swagger()) }))
+            .route("/Items/SyncMediaInfo", post(sync_media_info))
             .route("/Users/user/Items/61616", get(details))
             .route("/Items", get(|State(host):State<Host>,Query(query):Query<HashMap<String,String>>|async move {
                 let items = if query.get("Path").is_some_and(|path| std::path::Path::new(path) == host.directory) {
@@ -487,7 +581,7 @@ impl Fixture {
             }))
             .route("/Items/directory/Refresh", post(file_refresh))
             .route("/Items/61616/Refresh", post(exact_refresh))
-            .route("/Items/61616/ThumbnailSet", get(|State(host): State<Host>| async move { let frames=native_bif_frames(&*host.item.lock().await).unwrap_or_default();Json(json!({"Thumbnails":frames.iter().map(|(ms,_)|json!({"Time":ms,"Tag":"old-thumbnail"})).collect::<Vec<_>>()})) }))
+            .route("/Items/61616/ThumbnailSet", get(|State(host): State<Host>| async move { let frames=native_bif_frames(&*host.item.lock().await).unwrap_or_default();Json(json!({"Thumbnails":frames.iter().map(|(ms,_)|json!({"PositionTicks":ms.checked_mul(10_000).unwrap(),"ImageTag":"old-thumbnail"})).collect::<Vec<_>>()})) }))
             .route("/Users/user/Items/61616/SpecialFeatures", get(|| async { Json(json!([])) }))
             .route("/Videos/61616/AdditionalParts", get(|| async { Json(json!({"Items":[]})) }))
             .route("/Items/61616/ClearMediaInfo", post(clear))
@@ -586,11 +680,9 @@ impl Fixture {
         self.admin.close().await;
     }
 
-    async fn assert_file_refresh_only(&self) {
-        assert_eq!(
-            self.host.clears.load(Ordering::SeqCst),
-            self.host.refreshes.load(Ordering::SeqCst)
-        );
+    async fn assert_exact_sync_only(&self) {
+        assert_eq!(self.host.clears.load(Ordering::SeqCst), 0);
+        assert_eq!(self.host.refreshes.load(Ordering::SeqCst), 0);
         assert_eq!(self.host.starts.load(Ordering::SeqCst), 0);
         assert_eq!(*self.host.settings.lock().await, self.original_settings);
     }
@@ -652,8 +744,8 @@ async fn original_tiga_audio_titles_restore_languages_and_preserve_live_chinese_
     assert_eq!(live["Chapters"], f.original[0]["Chapters"]);
     assert_eq!(saved[0]["Chapters"], f.original[0]["Chapters"]);
     assert_eq!(*f.host.settings.lock().await, f.original_settings);
-    assert_eq!(f.host.refreshes.load(Ordering::SeqCst), 1);
-    f.assert_file_refresh_only().await;
+    assert_eq!(f.host.syncs.load(Ordering::SeqCst), 1);
+    f.assert_exact_sync_only().await;
     f.close().await;
 }
 
@@ -673,8 +765,8 @@ async fn matching_titles_do_not_complete_when_final_language_readback_is_wrong()
         "{result}"
     );
     assert_eq!(*f.host.settings.lock().await, f.original_settings);
-    assert_eq!(f.host.refreshes.load(Ordering::SeqCst), 1);
-    f.assert_file_refresh_only().await;
+    assert_eq!(f.host.syncs.load(Ordering::SeqCst), 1);
+    f.assert_exact_sync_only().await;
     f.close().await;
 }
 
@@ -694,8 +786,8 @@ async fn local_language_corrections_are_not_forgotten_when_file_refresh_is_retri
     let live = f.host.item.lock().await.clone();
     assert_eq!(live["MediaStreams"][1]["Title"], "粤语");
     assert_eq!(live["MediaStreams"][1]["Language"], "yue", "{result}");
-    assert_eq!(f.host.refreshes.load(Ordering::SeqCst), 1, "{result}");
-    f.assert_file_refresh_only().await;
+    assert_eq!(f.host.syncs.load(Ordering::SeqCst), 1, "{result}");
+    f.assert_exact_sync_only().await;
     assert_eq!(*f.host.settings.lock().await, f.original_settings);
     f.close().await;
 }
@@ -725,8 +817,8 @@ async fn equivalent_language_aliases_do_not_trigger_unnecessary_file_refresh() {
         let result = f.run().await;
         assert_eq!(result["result"]["completed"], true, "{result}");
         assert_eq!(result["result"]["changed_streams"], 0, "{result}");
-        assert_eq!(f.host.refreshes.load(Ordering::SeqCst), 0, "{result}");
-        f.assert_file_refresh_only().await;
+        assert_eq!(f.host.syncs.load(Ordering::SeqCst), 0, "{result}");
+        f.assert_exact_sync_only().await;
     }
     f.close().await;
 }
@@ -742,8 +834,8 @@ async fn commentary_without_number_fills_title_without_a_language_prefix() {
     assert_eq!(live["MediaStreams"][1]["Title"], "导评");
     assert_eq!(live["MediaStreams"][1]["Language"], "eng");
     assert_eq!(*f.host.settings.lock().await, f.original_settings);
-    assert_eq!(f.host.refreshes.load(Ordering::SeqCst), 1);
-    f.assert_file_refresh_only().await;
+    assert_eq!(f.host.syncs.load(Ordering::SeqCst), 1);
+    f.assert_exact_sync_only().await;
     f.close().await;
 }
 
@@ -765,8 +857,8 @@ async fn numbered_commentary_title_is_saved_while_unknown_language_remains_incom
     assert_eq!(live["MediaStreams"][1]["Title"], "导评3");
     assert_eq!(live["MediaStreams"][1]["Language"], "und");
     assert_eq!(*f.host.settings.lock().await, f.original_settings);
-    assert_eq!(f.host.refreshes.load(Ordering::SeqCst), 1);
-    f.assert_file_refresh_only().await;
+    assert_eq!(f.host.syncs.load(Ordering::SeqCst), 1);
+    f.assert_exact_sync_only().await;
     f.close().await;
 }
 

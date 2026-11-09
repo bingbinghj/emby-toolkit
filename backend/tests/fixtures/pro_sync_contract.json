@@ -1,0 +1,666 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "PRO 3.0.0.57 verified SyncMediaInfo contract",
+    "version": "3.0.0.57"
+  },
+  "paths": {
+    "/Items/SyncMediaInfo": {
+      "post": {
+        "tags": [
+          "MediaInfoService"
+        ],
+        "description": "Requires authentication as administrator",
+        "operationId": "postItemsSyncmediainfo",
+        "consumes": [
+          "application/json",
+          "application/xml"
+        ],
+        "produces": [
+          "application/json",
+          "application/xml"
+        ],
+        "parameters": [
+          {
+            "in": "query",
+            "name": "Id",
+            "description": "Preferred Item Id",
+            "type": "string"
+          },
+          {
+            "in": "query",
+            "name": "Path",
+            "description": "Optional Item Path",
+            "type": "string"
+          },
+          {
+            "in": "body",
+            "name": "body",
+            "description": "List`1: ",
+            "required": true,
+            "schema": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/StrmAssistant.Dto.MediaInfoBundle"
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Operation successful. Returning a List<MediaInfoBundle> object.",
+            "schema": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/StrmAssistant.Dto.MediaInfoBundle"
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/responses/400"
+          },
+          "401": {
+            "$ref": "#/responses/401"
+          },
+          "403": {
+            "$ref": "#/responses/403"
+          },
+          "404": {
+            "$ref": "#/responses/404"
+          },
+          "500": {
+            "$ref": "#/responses/500"
+          }
+        },
+        "security": [
+          {
+            "apikeyauth": []
+          },
+          {
+            "embyauth": []
+          }
+        ],
+        "x-RequiredAuthentication": "Requires authentication as administrator"
+      }
+    }
+  },
+  "definitions": {
+    "ChapterInfo": {
+      "type": "object",
+      "properties": {
+        "StartPositionTicks": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "Name": {
+          "type": "string"
+        },
+        "ImageTag": {
+          "type": "string"
+        },
+        "MarkerType": {
+          "$ref": "#/definitions/MarkerType"
+        },
+        "ChapterIndex": {
+          "format": "int32",
+          "type": "integer"
+        }
+      },
+      "x-internal-ref-name": "MediaBrowser.Model.Entities.ChapterInfo"
+    },
+    "ExtendedVideoSubTypes": {
+      "enum": [
+        "None",
+        "Hdr10",
+        "HyperLogGamma",
+        "Hdr10Plus0",
+        "DoviProfile02",
+        "DoviProfile10",
+        "DoviProfile22",
+        "DoviProfile30",
+        "DoviProfile42",
+        "DoviProfile50",
+        "DoviProfile61",
+        "DoviProfile76",
+        "DoviProfile81",
+        "DoviProfile82",
+        "DoviProfile83",
+        "DoviProfile84",
+        "DoviProfile85",
+        "DoviProfile92"
+      ],
+      "type": "string",
+      "x-internal-ref-name": "MediaBrowser.Model.Entities.ExtendedVideoSubTypes"
+    },
+    "ExtendedVideoTypes": {
+      "enum": [
+        "None",
+        "Hdr10",
+        "Hdr10Plus",
+        "HyperLogGamma",
+        "DolbyVision"
+      ],
+      "type": "string",
+      "x-internal-ref-name": "MediaBrowser.Model.Entities.ExtendedVideoTypes"
+    },
+    "MarkerType": {
+      "enum": [
+        "Chapter",
+        "IntroStart",
+        "IntroEnd",
+        "CreditsStart"
+      ],
+      "type": "string",
+      "x-internal-ref-name": "MediaBrowser.Model.Entities.MarkerType"
+    },
+    "MediaProtocol": {
+      "enum": [
+        "File",
+        "Http",
+        "Rtmp",
+        "Rtsp",
+        "Udp",
+        "Rtp",
+        "Ftp",
+        "Mms"
+      ],
+      "type": "string",
+      "x-internal-ref-name": "MediaBrowser.Model.MediaInfo.MediaProtocol"
+    },
+    "MediaSourceInfo": {
+      "type": "object",
+      "properties": {
+        "Chapters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ChapterInfo"
+          }
+        },
+        "Protocol": {
+          "$ref": "#/definitions/MediaProtocol"
+        },
+        "Id": {
+          "type": "string"
+        },
+        "Path": {
+          "type": "string"
+        },
+        "EncoderPath": {
+          "type": "string"
+        },
+        "EncoderProtocol": {
+          "$ref": "#/definitions/MediaProtocol"
+        },
+        "Type": {
+          "$ref": "#/definitions/MediaSourceType"
+        },
+        "ProbePath": {
+          "type": "string"
+        },
+        "ProbeProtocol": {
+          "$ref": "#/definitions/MediaProtocol"
+        },
+        "Container": {
+          "type": "string"
+        },
+        "Size": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "Name": {
+          "type": "string"
+        },
+        "SortName": {
+          "type": "string"
+        },
+        "IsRemote": {
+          "type": "boolean"
+        },
+        "HasMixedProtocols": {
+          "type": "boolean"
+        },
+        "RunTimeTicks": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "ContainerStartTimeTicks": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "SupportsTranscoding": {
+          "type": "boolean"
+        },
+        "TrancodeLiveStartIndex": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "WallClockStart": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "SupportsDirectStream": {
+          "type": "boolean"
+        },
+        "SupportsDirectPlay": {
+          "type": "boolean"
+        },
+        "IsInfiniteStream": {
+          "type": "boolean"
+        },
+        "RequiresOpening": {
+          "type": "boolean"
+        },
+        "OpenToken": {
+          "type": "string"
+        },
+        "RequiresClosing": {
+          "type": "boolean"
+        },
+        "LiveStreamId": {
+          "type": "string"
+        },
+        "BufferMs": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "RequiresLooping": {
+          "type": "boolean"
+        },
+        "SupportsProbing": {
+          "type": "boolean"
+        },
+        "Video3DFormat": {
+          "$ref": "#/definitions/Video3DFormat"
+        },
+        "MediaStreams": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/MediaStream"
+          }
+        },
+        "Formats": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "Bitrate": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "Timestamp": {
+          "$ref": "#/definitions/TransportStreamTimestamp"
+        },
+        "RequiredHttpHeaders": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "DirectStreamUrl": {
+          "type": "string"
+        },
+        "AddApiKeyToDirectStreamUrl": {
+          "type": "boolean"
+        },
+        "TranscodingUrl": {
+          "type": "string"
+        },
+        "TranscodingSubProtocol": {
+          "type": "string"
+        },
+        "TranscodingContainer": {
+          "type": "string"
+        },
+        "AnalyzeDurationMs": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "ReadAtNativeFramerate": {
+          "type": "boolean"
+        },
+        "DefaultAudioStreamIndex": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "DefaultSubtitleStreamIndex": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "ItemId": {
+          "type": "string"
+        },
+        "ServerId": {
+          "type": "string"
+        },
+        "MimeType": {
+          "type": "string"
+        },
+        "TranscodingMimeType": {
+          "type": "string"
+        }
+      },
+      "x-internal-ref-name": "MediaBrowser.Model.Dto.MediaSourceInfo"
+    },
+    "MediaSourceType": {
+      "enum": [
+        "Default",
+        "Grouping",
+        "Placeholder"
+      ],
+      "type": "string",
+      "x-internal-ref-name": "MediaBrowser.Model.Dto.MediaSourceType"
+    },
+    "MediaStream": {
+      "type": "object",
+      "properties": {
+        "Codec": {
+          "type": "string"
+        },
+        "CodecTag": {
+          "type": "string"
+        },
+        "Language": {
+          "type": "string"
+        },
+        "ColorTransfer": {
+          "type": "string"
+        },
+        "ColorPrimaries": {
+          "type": "string"
+        },
+        "ColorSpace": {
+          "type": "string"
+        },
+        "Comment": {
+          "type": "string"
+        },
+        "StreamStartTimeTicks": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "TimeBase": {
+          "type": "string"
+        },
+        "Title": {
+          "type": "string"
+        },
+        "Extradata": {
+          "type": "string"
+        },
+        "VideoRange": {
+          "type": "string"
+        },
+        "DisplayTitle": {
+          "type": "string"
+        },
+        "DisplayLanguage": {
+          "type": "string"
+        },
+        "NalLengthSize": {
+          "type": "string"
+        },
+        "IsInterlaced": {
+          "type": "boolean"
+        },
+        "IsAVC": {
+          "type": "boolean"
+        },
+        "ChannelLayout": {
+          "type": "string"
+        },
+        "BitRate": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "BitDepth": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "RefFrames": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "Rotation": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "Channels": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "SampleRate": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "IsDefault": {
+          "type": "boolean"
+        },
+        "IsForced": {
+          "type": "boolean"
+        },
+        "IsHearingImpaired": {
+          "type": "boolean"
+        },
+        "Height": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "Width": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "AverageFrameRate": {
+          "format": "float",
+          "type": "number"
+        },
+        "RealFrameRate": {
+          "format": "float",
+          "type": "number"
+        },
+        "Profile": {
+          "type": "string"
+        },
+        "Type": {
+          "$ref": "#/definitions/MediaStreamType"
+        },
+        "AspectRatio": {
+          "type": "string"
+        },
+        "Index": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "IsExternal": {
+          "type": "boolean"
+        },
+        "DeliveryMethod": {
+          "$ref": "#/definitions/SubtitleDeliveryMethod"
+        },
+        "DeliveryUrl": {
+          "type": "string"
+        },
+        "DeliveryFormat": {
+          "type": "string"
+        },
+        "IsExternalUrl": {
+          "type": "boolean"
+        },
+        "IsChunkedResponse": {
+          "type": "boolean"
+        },
+        "IsTextSubtitleStream": {
+          "type": "boolean"
+        },
+        "SupportsExternalStream": {
+          "type": "boolean"
+        },
+        "Path": {
+          "type": "string"
+        },
+        "Protocol": {
+          "$ref": "#/definitions/MediaProtocol"
+        },
+        "PixelFormat": {
+          "type": "string"
+        },
+        "Level": {
+          "format": "double",
+          "type": "number"
+        },
+        "IsAnamorphic": {
+          "type": "boolean"
+        },
+        "ExtendedVideoType": {
+          "$ref": "#/definitions/ExtendedVideoTypes"
+        },
+        "ExtendedVideoSubType": {
+          "$ref": "#/definitions/ExtendedVideoSubTypes"
+        },
+        "ExtendedVideoSubTypeDescription": {
+          "type": "string"
+        },
+        "ItemId": {
+          "type": "string"
+        },
+        "ServerId": {
+          "type": "string"
+        },
+        "AttachmentSize": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "MimeType": {
+          "type": "string"
+        },
+        "SubtitleLocationType": {
+          "$ref": "#/definitions/SubtitleLocationType"
+        }
+      },
+      "x-internal-ref-name": "MediaBrowser.Model.Entities.MediaStream"
+    },
+    "MediaStreamType": {
+      "enum": [
+        "Unknown",
+        "Audio",
+        "Video",
+        "Subtitle",
+        "EmbeddedImage",
+        "Attachment",
+        "Data"
+      ],
+      "type": "string",
+      "x-internal-ref-name": "MediaBrowser.Model.Entities.MediaStreamType"
+    },
+    "StrmAssistant.Dto.EmbeddedInfo": {
+      "type": "object",
+      "properties": {
+        "Name": {
+          "type": "string"
+        },
+        "Overview": {
+          "type": "string"
+        },
+        "Track": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "Disc": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "Album": {
+          "type": "string"
+        },
+        "AlbumArtists": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "Artists": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "Composers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "Genres": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "x-internal-ref-name": "StrmAssistant.Dto.EmbeddedInfo"
+    },
+    "StrmAssistant.Dto.MediaInfoBundle": {
+      "type": "object",
+      "properties": {
+        "MediaSourceInfo": {
+          "$ref": "#/definitions/MediaSourceInfo"
+        },
+        "Chapters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ChapterInfo"
+          }
+        },
+        "ZeroFingerprintConfidence": {
+          "type": "boolean"
+        },
+        "EmbeddedImage": {
+          "type": "string"
+        },
+        "EmbeddedInfo": {
+          "$ref": "#/definitions/StrmAssistant.Dto.EmbeddedInfo"
+        }
+      },
+      "x-internal-ref-name": "StrmAssistant.Dto.MediaInfoBundle"
+    },
+    "SubtitleDeliveryMethod": {
+      "enum": [
+        "Encode",
+        "Embed",
+        "External",
+        "Hls",
+        "VideoSideData"
+      ],
+      "type": "string",
+      "x-internal-ref-name": "MediaBrowser.Model.Dlna.SubtitleDeliveryMethod"
+    },
+    "SubtitleLocationType": {
+      "enum": [
+        "InternalStream",
+        "VideoSideData"
+      ],
+      "type": "string",
+      "x-internal-ref-name": "MediaBrowser.Model.Entities.SubtitleLocationType"
+    },
+    "TransportStreamTimestamp": {
+      "enum": [
+        "None",
+        "Zero",
+        "Valid"
+      ],
+      "type": "string",
+      "x-internal-ref-name": "MediaBrowser.Model.MediaInfo.TransportStreamTimestamp"
+    },
+    "Video3DFormat": {
+      "enum": [
+        "HalfSideBySide",
+        "FullSideBySide",
+        "FullTopAndBottom",
+        "HalfTopAndBottom",
+        "MVC"
+      ],
+      "type": "string",
+      "x-internal-ref-name": "MediaBrowser.Model.Entities.Video3DFormat"
+    }
+  }
+}

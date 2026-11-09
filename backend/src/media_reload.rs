@@ -18,13 +18,28 @@ use std::{
 };
 use tokio::io::AsyncWriteExt;
 
+const METADATA_FIELDS: &[&str] = &[
+    "Name",
+    "Overview",
+    "Genres",
+    "People",
+    "ProviderIds",
+    "ImageTags",
+    "Album",
+    "Artists",
+    "AlbumArtists",
+    "Composers",
+    "IndexNumber",
+    "ParentIndexNumber",
+];
+
 fn conflict(message: impl Into<String>) -> ApiError {
     ApiError(StatusCode::CONFLICT, message.into())
 }
 
 async fn identity_details(state: &AppState, target: &SavedTarget) -> Result<Value> {
     if !Path::new(&target.path).is_absolute() {
-        return Err(conflict("重载目标不是原生绝对文件路径，未清理媒体信息"));
+        return Err(conflict("重载目标不是原生绝对文件路径，未提交媒体信息同步"));
     }
     if let Some(asset) = &target.asset {
         let current = media_edit::repair_target(state, &target.id).await?;
@@ -33,7 +48,7 @@ async fn identity_details(state: &AppState, target: &SavedTarget) -> Result<Valu
         }
     }
     let live = media_edit::details(state, &target.id,
-        "Id,Path,Type,Guid,PresentationUniqueKey,ExtraType,PartCount,Size,Chapters,MediaSources,MediaStreams,ImageTags").await?;
+        "Id,Name,Overview,Genres,People,ProviderIds,Album,Artists,AlbumArtists,Composers,IndexNumber,ParentIndexNumber,Path,Type,Guid,PresentationUniqueKey,ExtraType,PartCount,Size,RunTimeTicks,Chapters,MediaSources,MediaStreams,ImageTags").await?;
     if live["Id"] != target.id
         || live["Path"] != target.path
         || crate::media_paths::strm_target(&target.path).await != target.source
@@ -46,7 +61,7 @@ async fn identity_details(state: &AppState, target: &SavedTarget) -> Result<Valu
         live["Type"].as_str(),
         Some("Movie" | "Episode" | "Video" | "MusicVideo" | "Audio")
     ) {
-        return Err(conflict("重载目标不是单个文件媒体，未提交递归清理"));
+        return Err(conflict("重载目标不是单个文件媒体，未提交媒体信息同步"));
     }
     Ok(live)
 }
@@ -54,6 +69,74 @@ async fn identity_details(state: &AppState, target: &SavedTarget) -> Result<Valu
 fn differences(target: &SavedTarget, live: &Value) -> Vec<String> {
     let paths = [&target.path[..], target.source.as_deref().unwrap_or("")];
     let mut reasons = media_info::stream_differences(&target.info, live, &paths);
+    if let (Some(expected), Some(actual)) = (
+        media_info::container(&target.info).and_then(|source| source["MediaStreams"].as_array()),
+        media_info::item_streams(live, &paths),
+    ) {
+        if expected.len() != actual.len() {
+            reasons.push(format!(
+                "全部媒体流数量不一致（期望 {}，实际 {}）",
+                expected.len(),
+                actual.len()
+            ));
+        }
+        for (index, (expected, actual)) in expected.iter().zip(actual).enumerate() {
+            if expected["Type"] != actual["Type"] {
+                reasons.push(format!("媒体流#{} 类型或顺序不一致", index + 1));
+            }
+            for field in [
+                "Index",
+                "Profile",
+                "Level",
+                "BitRate",
+                "BitDepth",
+                "SampleRate",
+                "ChannelLayout",
+                "Width",
+                "Height",
+                "AspectRatio",
+                "AverageFrameRate",
+                "RealFrameRate",
+                "PixelFormat",
+                "TimeBase",
+                "NalLengthSize",
+                "AttachmentSize",
+                "VideoRange",
+                "ExtendedVideoType",
+                "ExtendedVideoSubType",
+                "IsAnamorphic",
+                "IsInterlaced",
+                "IsHearingImpaired",
+            ] {
+                let equal = if matches!(field, "AverageFrameRate" | "RealFrameRate") {
+                    expected[field].as_f64().map(|v| v as f32)
+                        == actual[field].as_f64().map(|v| v as f32)
+                } else {
+                    expected[field] == actual[field]
+                };
+                if !expected[field].is_null() && !equal {
+                    reasons.push(format!("媒体流#{} {field} 未一致", index + 1));
+                }
+            }
+            if expected["IsExternal"].as_bool().unwrap_or(false)
+                != actual["IsExternal"].as_bool().unwrap_or(false)
+            {
+                reasons.push(format!("媒体流#{} 外挂标记未恢复", index + 1));
+            }
+            if expected["IsExternal"] == true {
+                if expected["Path"]
+                    .as_str()
+                    .is_some_and(|path| !path.is_empty())
+                    && expected["Path"] != actual["Path"]
+                {
+                    reasons.push(format!("媒体流#{} 外挂路径未恢复", index + 1));
+                }
+                if !expected["Protocol"].is_null() && expected["Protocol"] != actual["Protocol"] {
+                    reasons.push(format!("媒体流#{} 外挂协议未恢复", index + 1));
+                }
+            }
+        }
+    }
     let expected = &media_info::object(&target.info).unwrap()["Chapters"];
     let empty = json!([]);
     let actual = if live["Type"] == "Audio" && live["Chapters"].is_null() {
@@ -61,181 +144,21 @@ fn differences(target: &SavedTarget, live: &Value) -> Vec<String> {
     } else {
         &live["Chapters"]
     };
-    if !media_info::chapters_restored(expected, actual) {
+    if !matches!((media_info::signature(expected), media_info::signature(actual)),
+        (Ok(expected), Ok(actual)) if expected == actual)
+    {
         reasons.push("章节或片头片尾标记未一致".into());
     }
     reasons
-}
-
-fn group(item: &Value) -> Result<(String, bool)> {
-    let key = string(item, "PresentationUniqueKey");
-    if key.is_empty() {
-        return Err(conflict(
-            "Emby 未返回媒体演示键，无法确认清理影响范围，未清理媒体信息",
-        ));
-    }
-    Ok((key, !string(item, "ExtraType").is_empty()))
-}
-
-// PRO 3.0.0.57 ClearMediaInfo expands PresentationUniqueKey and additional
-// parts. The REST item list has no PresentationUniqueKey filter: match it
-// locally, including every page, before allowing the first clear request.
-async fn check_scope(
-    state: &AppState,
-    targets: &[&SavedTarget],
-    groups: &BTreeSet<(String, bool)>,
-) -> Result<BTreeMap<(String, bool), BTreeSet<String>>> {
-    let ids = targets
-        .iter()
-        .map(|t| t.id.as_str())
-        .collect::<BTreeSet<_>>();
-    let mut members = BTreeMap::<(String, bool), BTreeSet<String>>::new();
-    let mut seen = BTreeSet::new();
-    let user = string(&*state.config.read().await, "emby_user_id");
-    let mut start = 0;
-    loop {
-        let response = state
-            .emby(
-                Method::GET,
-                "Items",
-                &[
-                    ("Recursive", "true".into()),
-                    (
-                        "IncludeItemTypes",
-                        "Movie,Episode,Video,MusicVideo,Audio".into(),
-                    ),
-                    ("GroupItemsIntoCollections", "false".into()),
-                    (
-                        "Fields",
-                        "Id,Path,Type,Guid,PresentationUniqueKey,ExtraType,PartCount,MediaSources"
-                            .into(),
-                    ),
-                    ("StartIndex", start.to_string()),
-                    ("Limit", "500".into()),
-                ],
-                None,
-            )
-            .await?;
-        let items = response["Items"]
-            .as_array()
-            .ok_or_else(|| conflict("Emby 未返回完整媒体列表，未清理媒体信息"))?;
-        for item in items {
-            let item_id = string(item, "Id");
-            if item_id.is_empty() || !seen.insert(item_id) {
-                return Err(conflict(
-                    "Emby 分页媒体列表缺少 ID 或返回重复项目，未清理媒体信息",
-                ));
-            }
-            let key = (
-                string(item, "PresentationUniqueKey"),
-                !string(item, "ExtraType").is_empty(),
-            );
-            if !groups.contains(&key) {
-                continue;
-            }
-            let id = string(item, "Id");
-            if !ids.contains(id.as_str()) {
-                return Err(conflict(format!(
-                    "清理还会影响未准备的关联版本 {id}，未清理媒体信息"
-                )));
-            }
-            members.entry(key.clone()).or_default().insert(id.clone());
-            for source in media_edit::list(&item["MediaSources"]) {
-                let member = string(&source, "ItemId");
-                if !member.is_empty() && !ids.contains(member.as_str()) {
-                    return Err(conflict(format!(
-                        "清理还会影响未准备的媒体源 {member}，未清理媒体信息"
-                    )));
-                }
-                if !member.is_empty() {
-                    members.entry(key.clone()).or_default().insert(member);
-                }
-            }
-            let multipart = item["PartCount"].as_u64().unwrap_or(0) > 1
-                || media_edit::list(&item["MediaSources"])
-                    .iter()
-                    .any(|s| s["PartCount"].as_u64().unwrap_or(0) > 1);
-            for part in if multipart {
-                media_edit::additional_parts(state, &id, item).await?
-            } else {
-                vec![]
-            } {
-                let member = string(&part, "Id");
-                if member.is_empty() || !ids.contains(member.as_str()) {
-                    return Err(conflict(format!(
-                        "清理还会影响未准备的额外分段 {member}，未清理媒体信息"
-                    )));
-                }
-                members.entry(key.clone()).or_default().insert(member);
-            }
-            if string(item, "ExtraType").is_empty() && item["Type"] != "Audio" {
-                let extras = state
-                    .emby(
-                        Method::GET,
-                        &format!("Users/{user}/Items/{id}/SpecialFeatures"),
-                        &[],
-                        None,
-                    )
-                    .await?;
-                let extras = extras
-                    .as_array()
-                    .ok_or_else(|| conflict("Emby 未返回有效附加内容列表，未清理媒体信息"))?;
-                for extra in extras {
-                    let kind = string(extra, "ExtraType");
-                    if ["Sample", "ThemeSong", "ThemeVideo", "Trailer"].contains(&kind.as_str()) {
-                        continue;
-                    }
-                    if ![
-                        "Clip",
-                        "BehindTheScenes",
-                        "DeletedScene",
-                        "Interview",
-                        "Scene",
-                        "AdditionalPart",
-                    ]
-                    .contains(&kind.as_str())
-                    {
-                        return Err(conflict("Emby 返回无法确认类型的附加内容，未清理媒体信息"));
-                    }
-                    let member = string(extra, "Id");
-                    if member.is_empty() || !ids.contains(member.as_str()) {
-                        return Err(conflict(format!(
-                            "清理还会影响未准备的附加内容 {member}，未清理媒体信息"
-                        )));
-                    }
-                    members.entry(key.clone()).or_default().insert(member);
-                }
-            }
-        }
-        start += items.len();
-        if let Some(total) = response["TotalRecordCount"].as_u64() {
-            if start as u64 >= total {
-                break;
-            }
-            if items.is_empty() {
-                return Err(conflict("Emby 分页提前结束，尚未完整核对清理范围"));
-            }
-        } else if items.len() < 500 {
-            break;
-        }
-    }
-    if groups.iter().any(|key| !members.contains_key(key)) {
-        return Err(conflict(
-            "Emby 媒体列表未完整返回目标关联范围，未清理媒体信息",
-        ));
-    }
-    Ok(members)
 }
 
 pub(crate) async fn validate_targets_scope(
     state: &AppState,
     targets: &[SavedTarget],
 ) -> Result<()> {
-    let mut groups = BTreeSet::new();
     for target in targets {
-        groups.insert(group(&identity_details(state, target).await?)?);
+        identity_details(state, target).await?;
     }
-    check_scope(state, &targets.iter().collect::<Vec<_>>(), &groups).await?;
     Ok(())
 }
 
@@ -258,7 +181,7 @@ async fn snapshot_file(
     };
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(conflict(format!(
-            "恢复资源不是普通文件：{}，未清理媒体信息",
+            "恢复资源不是普通文件：{}，未提交媒体信息同步",
             path.display()
         )));
     }
@@ -317,7 +240,7 @@ async fn writable_parent(path: &Path) -> Result<()> {
         .await?;
     if !access.success() {
         return Err(conflict(format!(
-            "工具没有恢复资源父目录的写入权限：{}，未清理媒体信息",
+            "工具没有恢复资源父目录的写入权限：{}，未提交媒体信息同步",
             parent.display()
         )));
     }
@@ -339,7 +262,7 @@ async fn snapshot_directory(
         };
         if metadata.file_type().is_symlink() {
             return Err(conflict(format!(
-                "目标元数据包含符号链接：{}，未清理媒体信息",
+                "目标元数据包含符号链接：{}，未提交媒体信息同步",
                 path.display()
             )));
         }
@@ -403,8 +326,14 @@ async fn restore_files(files: &BTreeMap<PathBuf, Snapshot>, ids: &BTreeSet<Strin
                 return Ok(());
             }
             tokio::fs::create_dir_all(saved.path.parent().unwrap()).await?;
-            tokio::fs::copy(&saved.backup, &saved.path).await?;
-            tokio::fs::File::open(&saved.path).await?.sync_all().await?;
+            let mut source = tokio::fs::File::open(&saved.backup).await?;
+            let mut destination = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&saved.path)
+                .await?;
+            tokio::io::copy(&mut source, &mut destination).await?;
+            destination.sync_all().await?;
             Ok::<_, ApiError>(())
         }
         .await;
@@ -432,7 +361,7 @@ fn json_path(target: &SavedTarget, settings: &Value) -> Result<PathBuf> {
     } else {
         let relative = parent
             .strip_prefix("/")
-            .map_err(|_| conflict("无法确定神医 JSON 原生绝对路径，未清理媒体信息"))?;
+            .map_err(|_| conflict("无法确定神医 JSON 原生绝对路径，未提交媒体信息同步"))?;
         Path::new(&root).join(relative)
     };
     Ok(parent.join(format!(
@@ -451,7 +380,7 @@ async fn metadata_directory(state: &AppState, root: &Path, item: &Value) -> Resu
         Some("Video") => "MediaBrowser.Controller.Entities.Video",
         Some("MusicVideo") => "MediaBrowser.Controller.Entities.MusicVideo",
         Some("Audio") => "MediaBrowser.Controller.Entities.Audio.Audio",
-        _ => return Err(conflict("无法确认目标媒体类型，未清理媒体信息")),
+        _ => return Err(conflict("无法确认目标媒体类型，未提交媒体信息同步")),
     };
     let mut candidates = vec![];
     if let Ok(guid) = uuid::Uuid::parse_str(&string(item, "Guid")) {
@@ -486,7 +415,7 @@ async fn metadata_directory(state: &AppState, root: &Path, item: &Value) -> Resu
             .await?;
         let items = response["Items"]
             .as_array()
-            .ok_or_else(|| conflict("Emby 未返回有效 GUID 查找结果，未清理媒体信息"))?;
+            .ok_or_else(|| conflict("Emby 未返回有效 GUID 查找结果，未提交媒体信息同步"))?;
         if items.is_empty() {
             continue;
         }
@@ -496,7 +425,7 @@ async fn metadata_directory(state: &AppState, root: &Path, item: &Value) -> Resu
                 .any(|key| items[0][*key] != item[*key])
         {
             return Err(conflict(
-                "目标 GUID 回读的媒体 ID、路径或类型不一致，未清理媒体信息",
+                "目标 GUID 回读的媒体 ID、路径或类型不一致，未提交媒体信息同步",
             ));
         }
         tracing::debug!(
@@ -506,12 +435,18 @@ async fn metadata_directory(state: &AppState, root: &Path, item: &Value) -> Resu
         return Ok(root.join("library").join(&guid[..2]).join(guid));
     }
     Err(conflict(
-        "目标 GUID 未能通过原生回读核对，无法确认元数据目录，未清理媒体信息",
+        "目标 GUID 未能通过原生回读核对，无法确认元数据目录，未提交媒体信息同步",
     ))
 }
 
 async fn restore_json(path: &Path, backup: &Path) -> Result<()> {
     check_ancestors(path).await?;
+    if tokio::fs::symlink_metadata(path)
+        .await
+        .is_ok_and(|m| m.file_type().is_symlink())
+    {
+        return Err(conflict("恢复 JSON 变为符号链接，已保留备份"));
+    }
     crate::media_save::commit_json_stage(backup, path).await
 }
 
@@ -537,86 +472,189 @@ async fn json_unchanged(
     Ok(current == tokio::fs::read(original.map(|f| f.backup.as_path()).unwrap_or(backup)).await?)
 }
 
-async fn wait_cleared(
-    state: &AppState,
-    targets: &[&SavedTarget],
-    context: &JobContext,
-) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let mut pending = vec![];
-        for target in targets {
-            let live = tokio::time::timeout_at(deadline, identity_details(state, target))
-                .await
-                .map_err(|_| conflict("清理结果回读超时，未提前覆盖尚未确认的媒体信息文件"))??;
-            let paths = [&target.path[..], target.source.as_deref().unwrap_or("")];
-            let empty_chapters = live["Chapters"].as_array().is_some_and(Vec::is_empty)
-                || live["Type"] == "Audio" && live["Chapters"].is_null();
-            if live["Size"].as_u64() != Some(0)
-                || !empty_chapters
-                || media_info::has_media_streams(&live, &paths)
-            {
-                pending.push(target.id.as_str());
-            }
-        }
-        if pending.is_empty() {
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(conflict(format!(
-                "目标 {} 的清理结果未确认，未提前覆盖 JSON，恢复备份已保留",
-                pending.join(",")
-            )));
-        }
-        context
-            .activity(
-                "确认目标清理",
-                &format!("等待目标 {} 的媒体流、章节和大小归零", pending.join(",")),
-            )
-            .await;
-        tokio::time::sleep(
-            Duration::from_secs(1)
-                .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
-        )
-        .await;
-    }
+fn sync_contract_supported(swagger: &Value) -> bool {
+    let operation = &swagger["paths"]["/Items/SyncMediaInfo"]["post"];
+    let parameters = media_edit::list(&operation["parameters"]);
+    let bundle_array = |schema: &Value| {
+        schema["type"] == "array"
+            && schema["items"]["$ref"] == "#/definitions/StrmAssistant.Dto.MediaInfoBundle"
+    };
+    parameters
+        .iter()
+        .any(|p| p["in"] == "query" && p["name"] == "Id" && p["type"] == "string")
+        && parameters
+            .iter()
+            .any(|p| p["in"] == "body" && bundle_array(&p["schema"]))
+        && !parameters
+            .iter()
+            .any(|p| p["name"] == "Path" && p["required"] == true)
+        && bundle_array(&operation["responses"]["200"]["schema"])
 }
 
-async fn refresh_one(
+pub(crate) fn ensure_single_bundle(info: &Value) -> Result<()> {
+    if info.as_array().is_some_and(|bundles| bundles.len() != 1) {
+        return Err(conflict(
+            "神医定点恢复只读取首个 Bundle，未同步多 Bundle 媒体信息",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_unfiltered(chapters: &Value, streams: Option<&Vec<Value>>, id: &str) -> Result<()> {
+    if media_edit::list(chapters).iter().any(|chapter| {
+        chapter["MarkerType"]
+            .as_i64()
+            .is_some_and(|value| matches!(value, 1..=3))
+            || chapter["MarkerType"].as_str().is_some_and(|value| {
+                ["IntroStart", "IntroEnd", "CreditsStart", "1", "2", "3"]
+                    .iter()
+                    .any(|marker| value.trim().eq_ignore_ascii_case(marker))
+            })
+    }) {
+        return Err(conflict(format!(
+            "{id}：神医同步会移除片头片尾标记，未提交媒体信息同步"
+        )));
+    }
+    if streams.into_iter().flatten().any(|stream| {
+        let local = stream["Protocol"].is_null()
+            || stream["Protocol"] == 0
+            || stream["Protocol"]
+                .as_str()
+                .is_some_and(|p| p == "0" || p.eq_ignore_ascii_case("File"));
+        stream["IsExternal"] == true
+            && matches!(stream["Type"].as_str(), Some("Audio" | "Subtitle"))
+            && local
+    }) {
+        return Err(conflict(format!(
+            "{id}：神医同步会移除本地外挂音轨或字幕，未提交媒体信息同步"
+        )));
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_json_unfiltered(info: &Value, id: &str) -> Result<()> {
+    ensure_single_bundle(info)?;
+    let bundle = media_info::object(info).ok_or_else(|| conflict("同步 JSON 无效"))?;
+    let source = media_info::container(info).ok_or_else(|| conflict("同步 JSON 缺少媒体源"))?;
+    ensure_unfiltered(&bundle["Chapters"], source["MediaStreams"].as_array(), id)?;
+    ensure_unfiltered(&source["Chapters"], None, id)
+}
+
+fn ensure_target_unfiltered(target: &SavedTarget, live: &Value) -> Result<()> {
+    let restoring = media_info::restore_json(&target.info)?;
+    ensure_single_bundle(&restoring)?;
+    let bundle = media_info::object(&restoring).unwrap();
+    let source = media_info::container(&restoring).unwrap();
+    media_info::signature(&bundle["Chapters"])?;
+    let streams = source["MediaStreams"]
+        .as_array()
+        .ok_or_else(|| conflict("目标 JSON 缺少有效媒体流，未提交媒体信息同步"))?;
+    ensure_unfiltered(&bundle["Chapters"], Some(streams), &target.id)?;
+    ensure_unfiltered(&source["Chapters"], None, &target.id)?;
+    let paths = [&target.path[..], target.source.as_deref().unwrap_or("")];
+    ensure_unfiltered(
+        &live["Chapters"],
+        media_info::item_streams(live, &paths),
+        &target.id,
+    )?;
+    if let Some(source) = media_info::item_source(live, &paths) {
+        ensure_unfiltered(&source["Chapters"], None, &target.id)?;
+    }
+    ensure_unfiltered(&Value::Null, live["MediaStreams"].as_array(), &target.id)
+}
+
+async fn ensure_sync_supported(state: &AppState, settings: &Value) -> Result<()> {
+    // PRO 3.0.0.57 synchronously applies only the first bundle from a nonempty
+    // request body. An empty array does not import the target's JSON file.
+    if settings["IsModSupported"] != true {
+        return Err(conflict("神医当前未支持原生章节恢复，未提交媒体信息同步"));
+    }
+    let plugins = state.emby(Method::GET, "Plugins", &[], None).await?;
+    if !media_edit::list(&plugins)
+        .iter()
+        .any(|p| p["Id"] == "63c322b7-a371-41a3-b11f-04f8418b37d8" && p["Version"] == "3.0.0.57")
+    {
+        return Err(conflict(
+            "当前神医版本尚未验证媒体信息同步协议，未提交媒体信息同步",
+        ));
+    }
+    let swagger = state.emby(Method::GET, "swagger.json", &[], None).await?;
+    if !sync_contract_supported(&swagger) {
+        return Err(conflict(
+            "Emby 未提供已验证的媒体信息同步接口，未提交媒体信息同步",
+        ));
+    }
+    Ok(())
+}
+
+async fn sync_one(
     state: &AppState,
     target: &SavedTarget,
+    payload: Value,
     context: &JobContext,
-    confirmed: &AtomicBool,
-    recovery: &Path,
+    before: &Value,
 ) -> Result<()> {
-    identity_details(state, target).await?;
-    let position = crate::media_extra::log_position(state).await?;
-    crate::emby::prepare_refresh_guard(Some((confirmed, recovery)), &target.id, Some(position))
-        .await?;
-    state
+    let live = identity_details(state, target).await?;
+    ensure_target_unfiltered(target, &live)?;
+    if METADATA_FIELDS
+        .iter()
+        .chain(["Chapters", "MediaStreams", "MediaSources"].iter())
+        .any(|key| live[*key] != before[*key])
+    {
+        return Err(conflict(
+            "媒体信息或元数据在同步前变化，已保留文件和恢复备份",
+        ));
+    }
+    ensure_single_bundle(&payload)?;
+    if !payload
+        .as_array()
+        .is_some_and(|bundles| bundles[0]["MediaSourceInfo"].is_object())
+    {
+        return Err(conflict("同步请求缺少完整 Bundle，未提交媒体信息同步"));
+    }
+    context
+        .activity(
+            "从 JSON 恢复目标媒体信息",
+            &format!("媒体ID {}：提交原生同步，等待实际恢复返回", target.id),
+        )
+        .await;
+    let restored = state
         .emby(
             Method::POST,
-            &format!("Items/{}/Refresh", target.id),
-            &[
-                ("Recursive", "false".into()),
-                ("MetadataRefreshMode", "FullRefresh".into()),
-                ("ImageRefreshMode", "ValidationOnly".into()),
-                ("ReplaceAllMetadata", "false".into()),
-                ("ReplaceAllImages", "false".into()),
-            ],
-            None,
+            "Items/SyncMediaInfo",
+            &[("Id", target.id.clone())],
+            Some(payload),
         )
         .await?;
-    crate::emby::wait_item_refresh(
-        state,
-        &target.id,
-        None,
-        Some(crate::media_extra::RefreshTrace::new(position)),
-        context,
-        "从 JSON 重载媒体信息",
-        &format!("媒体ID {}", target.id),
-    )
-    .await
+    if !restored
+        .as_array()
+        .is_some_and(|bundles| bundles.len() == 1 && bundles[0]["MediaSourceInfo"].is_object())
+    {
+        return Err(conflict("原生目标同步未返回有效恢复结果，恢复备份已保留"));
+    }
+    tracing::info!(
+        "[媒体信息重载] 媒体ID {} 原生 JSON 同步已返回，继续验收媒体流、章节和图片",
+        target.id
+    );
+    Ok(())
+}
+
+fn thumbnail_times(response: &Value) -> Result<Value> {
+    let items = response["Thumbnails"]
+        .as_array()
+        .ok_or_else(|| conflict("Emby 未返回有效 BIF 缩略图集合，恢复备份已保留"))?;
+    if items
+        .iter()
+        .any(|frame| frame["PositionTicks"].as_u64().is_none())
+    {
+        return Err(conflict("Emby 未返回有效 BIF 时间索引，恢复备份已保留"));
+    }
+    Ok(Value::Array(
+        items
+            .iter()
+            .map(|frame| frame["PositionTicks"].clone())
+            .collect(),
+    ))
 }
 
 async fn verify_reloaded(
@@ -624,7 +662,7 @@ async fn verify_reloaded(
     targets: &[&SavedTarget],
     context: &JobContext,
     before: &BTreeMap<String, Value>,
-    thumbnails: &BTreeSet<String>,
+    thumbnails: &BTreeMap<String, Value>,
 ) -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut pending = targets
@@ -638,10 +676,34 @@ async fn verify_reloaded(
             .copied()
             .collect::<Vec<_>>()
         {
-            let live = tokio::time::timeout_at(deadline, saved_details(state, target))
+            let readback = async {
+                saved_details(state, target).await?;
+                identity_details(state, target).await
+            };
+            let live = tokio::time::timeout_at(deadline, readback)
                 .await
                 .map_err(|_| conflict("重载回读超时，JSON 和恢复备份已保留"))??;
             let mut reasons = differences(target, &live);
+            for field in METADATA_FIELDS {
+                if live[*field] != before[&target.id][*field] {
+                    reasons.push(format!("当前元数据字段 {field} 在同步期间被修改"));
+                }
+            }
+            let expected = media_info::container(&target.info).unwrap();
+            let paths = [&target.path[..], target.source.as_deref().unwrap_or("")];
+            let source = media_info::item_source(&live, &paths).unwrap_or(&live);
+            for field in ["Size", "RunTimeTicks"] {
+                let actual = if source[field].is_null() {
+                    &live[field]
+                } else {
+                    &source[field]
+                };
+                if !expected[field].is_null()
+                    && crate::identity::size(&expected[field]) != crate::identity::size(actual)
+                {
+                    reasons.push(format!("媒体 {field} 未一致"));
+                }
+            }
             for chapter in media_edit::list(&before[&target.id]["Chapters"])
                 .iter()
                 .filter(|c| !string(c, "ImageTag").is_empty())
@@ -658,7 +720,7 @@ async fn verify_reloaded(
                     ));
                 }
             }
-            if thumbnails.contains(&target.id) {
+            if let Some(expected) = thumbnails.get(&target.id) {
                 let readback = tokio::time::timeout_at(
                     deadline,
                     state.emby(
@@ -670,10 +732,7 @@ async fn verify_reloaded(
                 )
                 .await
                 .map_err(|_| conflict("BIF 缩略图回读超时，恢复备份已保留"))??;
-                if !readback["Thumbnails"]
-                    .as_array()
-                    .is_some_and(|items| !items.is_empty())
-                {
+                if thumbnail_times(&readback)? != *expected {
                     reasons.push("原有 BIF 缩略图集合未恢复".into());
                 }
             }
@@ -721,56 +780,50 @@ pub(crate) async fn reload(
     recovery: &Path,
 ) -> Result<Vec<String>> {
     let mut observations = BTreeMap::new();
-    let mut groups = BTreeSet::new();
-    let mut leaders = BTreeMap::new();
-    let mut import_only = BTreeSet::new();
+    let mut affected = vec![];
     for target in targets {
         context.checkpoint().await?;
         let live = saved_details(state, target).await?;
         if !differences(target, &live).is_empty() {
             let observed = identity_details(state, target).await?;
-            let paths = [&target.path[..], target.source.as_deref().unwrap_or("")];
-            if media_info::has_media_streams(&live, &paths) {
-                let key = group(&observed)?;
-                leaders.entry(key.clone()).or_insert(target.id.clone());
-                groups.insert(key);
-            } else {
-                import_only.insert(target.id.clone());
-            }
+            ensure_target_unfiltered(target, &observed)?;
             observations.insert(target.id.clone(), observed);
+            affected.push(target);
         }
     }
-    if groups.is_empty() && import_only.is_empty() {
+    if affected.is_empty() {
         tracing::info!(
-            "[媒体信息重载] 所有 {} 个目标已一致，无需清理或重载",
+            "[媒体信息重载] 所有 {} 个目标已一致，无需同步",
             targets.len()
         );
         return Ok(vec![]);
     }
     let settings = crate::strm::config(state).await?;
     if settings["PersistMediaInfoMode"] != "Restore" {
-        return Err(conflict("神医未处于媒体信息恢复模式，未清理媒体信息"));
+        return Err(conflict("神医未处于媒体信息恢复模式，未提交媒体信息同步"));
     }
-    let all = targets.iter().collect::<Vec<_>>();
-    let scope = if groups.is_empty() {
-        BTreeMap::new()
-    } else {
-        check_scope(state, &all, &groups).await?
-    };
-    let clear_ids = scope.values().flatten().cloned().collect::<BTreeSet<_>>();
-    let affected_ids = clear_ids
-        .union(&import_only)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let affected = targets
+    ensure_sync_supported(state, &settings).await?;
+    let mut thumbnails = BTreeMap::new();
+    for target in affected
         .iter()
-        .filter(|t| affected_ids.contains(&t.id))
-        .collect::<Vec<_>>();
-    for target in &affected {
-        let live = identity_details(state, target).await?;
-        observations.insert(target.id.clone(), live);
+        .filter(|target| observations[&target.id]["Type"] != "Audio")
+    {
+        let before = state
+            .emby(
+                Method::GET,
+                &format!("Items/{}/ThumbnailSet", target.id),
+                &[("Width", "320".into())],
+                None,
+            )
+            .await?;
+        let items = before["Thumbnails"]
+            .as_array()
+            .ok_or_else(|| conflict("Emby 未返回有效缩略图集合，未提交媒体信息同步"))?;
+        if !items.is_empty() {
+            thumbnails.insert(target.id.clone(), thumbnail_times(&before)?);
+        }
     }
-    let root = if groups.is_empty()
+    let root = if thumbnails.is_empty()
         && !affected.iter().any(|target| {
             media_edit::list(&observations[&target.id]["Chapters"])
                 .iter()
@@ -786,16 +839,18 @@ pub(crate) async fn reload(
             PathBuf::from(configured)
         };
         if !root.is_absolute() {
-            return Err(conflict("未配置可访问的 Emby 元数据根目录，未清理媒体信息"));
+            return Err(conflict(
+                "未配置可访问的 Emby 元数据根目录，未提交媒体信息同步",
+            ));
         }
         let root = tokio::fs::canonicalize(&root).await.map_err(|_| {
             conflict(format!(
-                "Emby 元数据根目录未挂载或不可访问：{}，未清理媒体信息",
+                "Emby 元数据根目录未挂载或不可访问：{}，未提交媒体信息同步",
                 root.display()
             ))
         })?;
         if !root.is_dir() {
-            return Err(conflict("Emby 元数据根目录不是目录，未清理媒体信息"));
+            return Err(conflict("Emby 元数据根目录不是目录，未提交媒体信息同步"));
         }
         Some(root)
     };
@@ -803,31 +858,27 @@ pub(crate) async fn reload(
     tokio::fs::create_dir_all(recovery).await?;
     let mut files = BTreeMap::new();
     let mut json_files = vec![];
+    let mut formal_paths = BTreeSet::new();
+    let mut audio_json = vec![];
     let mut bridges = vec![];
-    let mut thumbnails = BTreeSet::new();
     for target in &affected {
         context.checkpoint().await?;
         let live = &observations[&target.id];
-        let directory =
-            if clear_ids.contains(&target.id) || live["Type"] != "Audio" && root.is_some() {
-                Some(metadata_directory(state, root.as_ref().unwrap(), live).await?)
-            } else {
-                None
-            };
-        if clear_ids.contains(&target.id) {
-            let directory = directory.as_ref().unwrap();
+        let directory = if let Some(root) = root.as_ref().filter(|_| live["Type"] != "Audio") {
+            Some(metadata_directory(state, root, live).await?)
+        } else {
+            None
+        };
+        if live["Type"] != "Audio" {
+            snapshot_local_bif(target, recovery, &mut files).await?;
+        }
+        if let Some(directory) = &directory {
             if recovery.starts_with(directory) {
                 return Err(conflict(
-                    "恢复备份目录位于被清理的目标元数据目录内，未清理媒体信息",
+                    "恢复备份目录位于目标元数据目录内，未提交媒体信息同步",
                 ));
             }
             snapshot_directory(directory, recovery, &mut files, &target.id).await?;
-            writable_parent(&directory.join(".etk-restore-check")).await?;
-            snapshot_local_bif(target, recovery, &mut files).await?;
-        }
-        if live["Type"] != "Audio"
-            && let Some(directory) = &directory
-        {
             let bridge = tokio::select! {
                 _=context.cancelled()=>{context.checkpoint().await?;unreachable!()},
                 result=crate::chapter_bif::prepare(state,target,live,directory,recovery)=>result?,
@@ -837,32 +888,13 @@ pub(crate) async fn reload(
                 snapshot_file(&bridge.destination, recovery, &mut files, &target.id).await?;
                 bridges.push((target.id.clone(), bridge));
             }
-            let before = state
-                .emby(
-                    Method::GET,
-                    &format!("Items/{}/ThumbnailSet", target.id),
-                    &[("Width", "320".into())],
-                    None,
-                )
-                .await?;
-            let items = before["Thumbnails"]
-                .as_array()
-                .ok_or_else(|| conflict("Emby 未返回有效缩略图集合，未清理媒体信息"))?;
-            if !items.is_empty() {
-                thumbnails.insert(target.id.clone());
-            }
         }
         let path = json_path(target, &settings)?;
         writable_parent(&path).await?;
-        if clear_ids.contains(&target.id) {
-            let bytes = tokio::fs::read(&path).await.map_err(|_| {
-                conflict(format!(
-                    "{}：正式媒体信息 JSON 不存在或尚未共享到工具，未清理媒体信息",
-                    path.display()
-                ))
-            })?;
+        if let Ok(bytes) = tokio::fs::read(&path).await {
             let original: Value = serde_json::from_slice(&bytes)
-                .map_err(|_| conflict("正式媒体信息 JSON 无效，未清理媒体信息"))?;
+                .map_err(|_| conflict("正式媒体信息 JSON 无效，未提交媒体信息同步"))?;
+            ensure_single_bundle(&original)?;
             if !media_info::recoverable(&original)
                 || !crate::media_paths::matches_container(
                     &original,
@@ -870,7 +902,7 @@ pub(crate) async fn reload(
                 )
             {
                 return Err(conflict(
-                    "正式媒体信息 JSON 无法验证当前媒体格式，未清理媒体信息",
+                    "正式媒体信息 JSON 无法验证当前媒体格式，未提交媒体信息同步",
                 ));
             }
             crate::identity::verify(
@@ -882,6 +914,9 @@ pub(crate) async fn reload(
             }
         }
         snapshot_file(&path, recovery, &mut files, &target.id).await?;
+        if let Ok(path) = tokio::fs::canonicalize(&path).await {
+            formal_paths.insert(path);
+        }
         let backup = recovery.join(format!("requested-{}.json", target.id));
         let mut file = tokio::fs::OpenOptions::new()
             .write(true)
@@ -889,9 +924,26 @@ pub(crate) async fn reload(
             .open(&backup)
             .await?;
         let mut restoring = media_info::restore_json(&target.info)?;
-        if live["Type"] == "Audio" && !string(&live["ImageTags"], "Primary").is_empty() {
+        let complete_info = restoring.clone();
+        if live["Type"] == "Audio" {
             for entry in restoring.as_array_mut().unwrap() {
-                entry.as_object_mut().unwrap().remove("EmbeddedImage");
+                let entry = entry.as_object_mut().unwrap();
+                // Audio apply can overwrite current tags and artwork. Isolate
+                // these fields only for this import, preserving the full JSON.
+                entry.remove("EmbeddedInfo");
+                entry.remove("EmbeddedImage");
+            }
+            if restoring != complete_info {
+                let complete = recovery.join(format!("complete-audio-{}.json", target.id));
+                let mut full = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&complete)
+                    .await?;
+                full.write_all(&serde_json::to_vec(&complete_info).unwrap())
+                    .await?;
+                full.sync_all().await?;
+                audio_json.push((target.id.clone(), path.clone(), backup.clone(), complete));
             }
         }
         file.write_all(&serde_json::to_vec(&restoring).unwrap())
@@ -903,28 +955,31 @@ pub(crate) async fn reload(
         saved_details(state, target).await?;
         let current = identity_details(state, target).await?;
         let before = &observations[&target.id];
-        if [
-            "Guid",
-            "PresentationUniqueKey",
-            "ExtraType",
-            "Chapters",
-            "MediaStreams",
-            "MediaSources",
-            "ImageTags",
-        ]
-        .iter()
-        .any(|key| current[*key] != before[*key])
+        ensure_target_unfiltered(target, &current)?;
+        if METADATA_FIELDS
+            .iter()
+            .chain(
+                [
+                    "Guid",
+                    "PresentationUniqueKey",
+                    "ExtraType",
+                    "Chapters",
+                    "MediaStreams",
+                    "MediaSources",
+                ]
+                .iter(),
+            )
+            .any(|key| current[*key] != before[*key])
         {
-            return Err(conflict("媒体关联范围在准备重载期间变化，未清理媒体信息"));
+            return Err(conflict(
+                "媒体信息或元数据在准备同步期间变化，未提交媒体信息同步",
+            ));
         }
-    }
-    if !groups.is_empty() && check_scope(state, &all, &groups).await? != scope {
-        return Err(conflict("媒体关联范围在准备重载期间变化，未清理媒体信息"));
     }
     for saved in files.values() {
         writable_parent(&saved.path).await?;
         if tokio::fs::read(&saved.path).await? != tokio::fs::read(&saved.backup).await? {
-            return Err(conflict("目标恢复资源在准备期间变化，未清理媒体信息"));
+            return Err(conflict("目标恢复资源在准备期间变化，未提交媒体信息同步"));
         }
     }
     context.checkpoint().await?;
@@ -933,72 +988,53 @@ pub(crate) async fn reload(
         "target_ids":affected.iter().map(|t|&t.id).collect::<Vec<_>>(),
         "files":files.values().map(|f|json!({"path":f.path,"backup":f.backup,"owner_ids":f.owners})).collect::<Vec<_>>(),
         "json":json_files.iter().map(|(id,path,backup)|json!({"item_id":id,"path":path,"backup":backup})).collect::<Vec<_>>(),
+        "audio_complete":audio_json.iter().map(|(id,path,import,complete)|json!({"item_id":id,"path":path,"import":import,"complete":complete})).collect::<Vec<_>>(),
         "bridges":bridges.iter().map(|(id,b)|json!({"item_id":id,"source":b.source,"destination":b.destination})).collect::<Vec<_>>()
     })).unwrap()).await?;
+    tokio::fs::File::open(&marker).await?.sync_all().await?;
+    tokio::fs::File::open(recovery).await?.sync_all().await?;
     confirmed.store(false, Ordering::Release);
     let recovery_context = JobContext::for_recovery(Some(context)).await;
     let outcome = async {
         let mut failures = vec![];
         let mut cache_warnings = vec![];
-        let mut attempted = vec![];
-        for (key, id) in &leaders {
-            recovery_context
-                .activity(
-                    "清理目标旧媒体信息",
-                    &format!("已备份关联资源，仅清理目标组 {id} 后从 JSON 重载"),
-                )
-                .await;
-            attempted.push(key);
-            if let Err(error) = state
-                .emby(
-                    Method::POST,
-                    &format!("Items/{id}/ClearMediaInfo"),
-                    &[],
-                    None,
-                )
-                .await
-            {
-                failures.push(format!("{id}：清理请求未完整成功：{}", error.1));
-                break;
-            }
-        }
-        // The matching PRO API is synchronous. Require the persisted empty
-        // state for every expanded member before replacing any deleted file.
-        let mut restore_ids = import_only.clone();
-        for key in attempted {
-            let members = affected
-                .iter()
-                .filter(|t| scope[key].contains(&t.id))
-                .copied()
-                .collect::<Vec<_>>();
-            match wait_cleared(state, &members, &recovery_context).await {
-                Ok(()) => restore_ids.extend(scope[key].iter().cloned()),
-                Err(error) => failures.push(error.1),
-            }
-        }
-        if let Err(error) = restore_files(&files, &restore_ids).await {
-            failures.push(error.1);
-        }
-        for (id, bridge) in bridges.iter().filter(|(id, _)| restore_ids.contains(id)) {
+        let mut blocked = BTreeSet::new();
+        for (id, bridge) in &bridges {
             let restored = async {
                 if !json_unchanged(&bridge.destination, &bridge.source, &files).await? {
-                    return Err(conflict(
-                        "BIF 旁车在重载期间被修改，保留用户新文件及恢复备份",
-                    ));
+                    return Err(conflict("BIF 旁车在同步前被修改，保留用户新文件及恢复备份"));
                 }
                 check_ancestors(&bridge.destination).await?;
-                crate::media_save::commit_json_stage(&bridge.source, &bridge.destination).await
+                let bytes = tokio::fs::read(&bridge.source).await?;
+                match tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&bridge.destination)
+                    .await
+                {
+                    Ok(mut file) => {
+                        file.write_all(&bytes).await?;
+                        file.sync_all().await?;
+                        Ok(())
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        if tokio::fs::read(&bridge.destination).await? == bytes {
+                            Ok(())
+                        } else {
+                            Err(conflict("BIF 旁车已由其它操作创建，保留用户文件及恢复备份"))
+                        }
+                    }
+                    Err(error) => Err(error.into()),
+                }
             }
             .await;
             if let Err(error) = restored {
-                failures.push(format!("{id}：原章节图片的 BIF 桥接恢复失败：{}", error.1));
+                blocked.insert(id.clone());
+                failures.push(format!("{id}：原章节图片的 BIF 桥接准备失败：{}", error.1));
             }
         }
         let mut ready = BTreeSet::new();
-        for (id, path, backup) in json_files
-            .iter()
-            .filter(|(id, _, _)| restore_ids.contains(id))
-        {
+        for (id, path, backup) in json_files.iter().filter(|(id, _, _)| !blocked.contains(id)) {
             match json_unchanged(path, backup, &files).await {
                 Ok(true) => (),
                 Ok(false) => {
@@ -1032,29 +1068,112 @@ pub(crate) async fn reload(
             .filter(|t| ready.contains(&t.id))
             .copied()
             .collect::<Vec<_>>();
+        let mut synchronized = BTreeSet::new();
         for target in &ready {
-            if let Err(error) =
-                refresh_one(state, target, &recovery_context, confirmed, recovery).await
-            {
+            let synced = async {
+                let (_, path, backup) = json_files
+                    .iter()
+                    .find(|(id, _, _)| *id == target.id)
+                    .unwrap();
+                check_ancestors(path).await?;
+                let bytes = tokio::fs::read(backup).await?;
+                if tokio::fs::read(path).await? != bytes {
+                    return Err(conflict("JSON 在同步前被修改，保留用户新文件及恢复备份"));
+                }
+                for (_, bridge) in bridges.iter().filter(|(id, _)| *id == target.id) {
+                    if tokio::fs::read(&bridge.destination).await?
+                        != tokio::fs::read(&bridge.source).await?
+                    {
+                        return Err(conflict("BIF 桥接在同步前变化，保留用户新文件及恢复备份"));
+                    }
+                }
+                let payload: Value = serde_json::from_slice(&bytes)
+                    .map_err(|_| conflict("已保护的同步 JSON 无效，恢复备份已保留"))?;
+                sync_one(
+                    state,
+                    target,
+                    payload,
+                    &recovery_context,
+                    &observations[&target.id],
+                )
+                .await
+            }
+            .await;
+            if let Err(error) = synced {
                 failures.push(format!(
-                    "{}：从 JSON 重载请求或刷新未确认：{}",
+                    "{}：原生目标 JSON 同步未确认：{}",
                     target.id, error.1
                 ));
+            } else {
+                synchronized.insert(target.id.clone());
             }
         }
-        if let Err(error) =
-            verify_reloaded(state, &ready, &recovery_context, &observations, &thumbnails).await
-        {
+        let resource_files = files
+            .into_iter()
+            .filter(|(path, _)| !formal_paths.contains(path))
+            .collect::<BTreeMap<_, _>>();
+        if let Err(error) = restore_files(&resource_files, &synchronized).await {
             failures.push(error.1);
         }
+        let verified =
+            verify_reloaded(state, &ready, &recovery_context, &observations, &thumbnails).await;
+        let verified_ok = verified.is_ok();
+        if let Err(error) = verified {
+            failures.push(error.1);
+        }
+        for (id, path, import, complete) in audio_json
+            .iter()
+            .filter(|(id, _, _, _)| ready.iter().any(|target| target.id == *id))
+        {
+            if !verified_ok
+                || !synchronized.contains(id)
+                || json_files
+                    .iter()
+                    .any(|(owner, shared, _)| shared == path && !synchronized.contains(owner))
+            {
+                failures.push(format!(
+                    "{id}：目标同步或回读尚未确认，暂不恢复音乐嵌入字段；完整 JSON 备份：{}",
+                    complete.display()
+                ));
+                continue;
+            }
+            let restored = async {
+                if tokio::fs::read(path).await? != tokio::fs::read(import).await? {
+                    return Err(conflict(
+                        "音乐 JSON 在同步期间变化，保留用户文件及完整恢复备份",
+                    ));
+                }
+                restore_json(path, complete).await
+            }
+            .await;
+            if let Err(error) = restored {
+                failures.push(format!("{id}：完整音乐 JSON 恢复失败：{}", error.1));
+            }
+        }
         if ready.len() != affected.len() {
-            failures.push("部分目标尚未完成清理或重载，原资源备份已保留".into());
+            failures.push("部分目标尚未完成同步，原资源备份已保留".into());
         }
         if !failures.is_empty() {
             failures.extend(cache_warnings);
             return Err(conflict(failures.join("；")));
         }
+        // Preserve the completed synchronous operation across a later failure
+        // to restore plugin settings. This is not a pending scanner request.
+        tokio::fs::write(
+            recovery.join("pending-scan.json"),
+            serde_json::to_vec(&json!({
+                "kind":"native-sync", "verified":true,
+                "ids":ready.iter().map(|target| &target.id).collect::<Vec<_>>()
+            }))
+            .unwrap(),
+        )
+        .await?;
+        tokio::fs::File::open(recovery.join("pending-scan.json"))
+            .await?
+            .sync_all()
+            .await?;
         tokio::fs::remove_file(&marker).await?;
+        tokio::fs::File::open(recovery).await?.sync_all().await?;
         Ok(cache_warnings)
     }
     .await;

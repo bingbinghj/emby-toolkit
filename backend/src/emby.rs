@@ -815,6 +815,14 @@ async fn finalize_refresh_inner(
         })?;
     tracing::info!("[入库刷新] {label}：首次刷新请求已接收，等待实际完成");
     tracing::debug!("[入库刷新参数] 媒体ID {id}：递归 {series}，元数据/图片完整刷新，全部替换否");
+    // Once a guarded refresh is accepted, finish its verification and required
+    // NFO follow-up before releasing temporary settings, even after cancellation.
+    let finishing = if guard.is_some() {
+        Some(JobContext::for_recovery(Some(context)).await)
+    } else {
+        None
+    };
+    let context = finishing.as_ref().unwrap_or(context);
     wait_item_refresh(
         state,
         &id,

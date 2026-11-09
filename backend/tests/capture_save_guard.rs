@@ -83,6 +83,16 @@ async fn api(State(host): State<Host>, request: Request<Body>) -> Response {
             .into_owned()
             .collect();
     if request.method() == axum::http::Method::GET {
+        if path == "/Plugins" {
+            return Json(json!([{"Id":"63c322b7-a371-41a3-b11f-04f8418b37d8","Name":"Strm Assistant PRO","Version":"3.0.0.57"}])).into_response();
+        }
+        if path == "/swagger.json" {
+            return Json(
+                serde_json::from_str::<Value>(include_str!("fixtures/pro_sync_contract.json"))
+                    .unwrap(),
+            )
+            .into_response();
+        }
         if path == "/Items/e1/Images/Primary" {
             return (
                 [("Content-Type", "image/jpeg")],
@@ -192,6 +202,73 @@ async fn api(State(host): State<Host>, request: Request<Body>) -> Response {
             *host.settings.lock().await = desired;
             return StatusCode::NO_CONTENT.into_response();
         }
+        if path == "/Items/SyncMediaInfo" {
+            assert_eq!(query.get("Id").map(String::as_str), Some("e1"));
+            assert!(!query.contains_key("Path") && !query.contains_key("Ids"));
+            let bytes = to_bytes(request.into_body(), 1024 * 1024).await.unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            if body.as_array().is_some_and(Vec::is_empty) {
+                // Empty input is a successful no-op in the real SDK.
+                return Json(json!([])).into_response();
+            }
+            if body
+                .as_array()
+                .is_some_and(|bundles| bundles.iter().any(Value::is_null))
+            {
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+            if body.as_array().is_none_or(|bundles| bundles.len() != 1)
+                || !body[0]["MediaSourceInfo"]["MediaStreams"].is_array()
+            {
+                return Json(json!([])).into_response();
+            }
+            {
+                let settings = host.settings.lock().await;
+                assert_eq!(settings["PersistMediaInfoMode"], "Restore");
+                assert_eq!(settings["IsModSupported"], true);
+            }
+            let formal: Value = serde_json::from_slice(
+                &tokio::fs::read(host.root.join("e1-mediainfo.json"))
+                    .await
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(body, formal, "send the full prepared native snapshot");
+            let mut info = body;
+            info[0]["MediaSourceInfo"]["MediaStreams"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|stream| {
+                    let local = stream["Protocol"].is_null()
+                        || stream["Protocol"] == 0
+                        || stream["Protocol"]
+                            .as_str()
+                            .is_some_and(|protocol| protocol.eq_ignore_ascii_case("File"));
+                    !(stream["IsExternal"] == true
+                        && local
+                        && matches!(stream["Type"].as_str(), Some("Audio" | "Subtitle")))
+                });
+            info[0]["Chapters"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|chapter| {
+                    !matches!(
+                        chapter["MarkerType"].as_str(),
+                        Some("IntroStart" | "IntroEnd" | "CreditsStart")
+                    )
+                });
+            host.events.lock().await.push("restore:e1".into());
+            let mut item = host.item.lock().await;
+            item["MediaStreams"] = info[0]["MediaSourceInfo"]["MediaStreams"].clone();
+            item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
+            item["Chapters"] = info[0]["Chapters"].clone();
+            item["Size"] = info[0]["MediaSourceInfo"]["Size"].clone();
+            item["RunTimeTicks"] = info[0]["MediaSourceInfo"]["RunTimeTicks"].clone();
+            item["MediaSources"][0]["Size"] = info[0]["MediaSourceInfo"]["Size"].clone();
+            item["MediaSources"][0]["RunTimeTicks"] =
+                info[0]["MediaSourceInfo"]["RunTimeTicks"].clone();
+            return Json(info).into_response();
+        }
         if path == "/Items/e1/ClearMediaInfo" {
             assert_eq!(
                 host.settings.lock().await["PersistMediaInfoMode"],
@@ -239,18 +316,6 @@ async fn api(State(host): State<Host>, request: Request<Body>) -> Response {
                     host.settings.lock().await["PersistMediaInfoMode"],
                     "Restore"
                 );
-                host.events.lock().await.push("restore:e1".into());
-                let info: Value = serde_json::from_slice(
-                    &tokio::fs::read(host.root.join("e1-mediainfo.json"))
-                        .await
-                        .unwrap(),
-                )
-                .unwrap();
-                let mut item = host.item.lock().await;
-                item["MediaStreams"] = info[0]["MediaSourceInfo"]["MediaStreams"].clone();
-                item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
-                item["Chapters"] = info[0]["Chapters"].clone();
-                item["Size"] = info[0]["MediaSourceInfo"]["Size"].clone();
                 host.logs
                     .lock()
                     .await
@@ -299,7 +364,7 @@ impl Fixture {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("e1.strm");
         tokio::fs::write(&path, "/cloud/e1.mkv").await.unwrap();
-        let original = json!([{"MediaSourceInfo":{"Container":"mkv","Size":1000,"RunTimeTicks":6000000000_u64,"MediaStreams":[{"Type":"Video","Codec":"h264","Index":0},{"Type":"Audio","Codec":"aac","Index":1,"Language":"jpn","Title":"Native 用户标题","Channels":2}]},"Chapters":[{"Name":"原片头","StartPositionTicks":0,"MarkerType":"IntroStart"}]}]);
+        let original = json!([{"MediaSourceInfo":{"Container":"mkv","Size":1000,"RunTimeTicks":6000000000_u64,"MediaStreams":[{"Type":"Video","Codec":"h264","Index":0},{"Type":"Audio","Codec":"aac","Index":1,"Language":"jpn","Title":"Native 用户标题","Channels":2}]},"Chapters":[{"Name":"原普通章节","StartPositionTicks":0,"MarkerType":"Chapter"}]}]);
         let mut local = original.clone();
         local[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("cache 旧标题");
         tokio::fs::write(
@@ -319,7 +384,7 @@ impl Fixture {
             .await
             .unwrap();
         let streams = original[0]["MediaSourceInfo"]["MediaStreams"].clone();
-        let original_settings = json!({"ExclusiveControlFeatures":"CatchAllBlock,ExtractOnFileChange,Custom","EnableImageCapture":false,"PersistMediaInfoMode":"Default","LibraryScope":"library","MediaInfoJsonRootFolder":"","MediaInfoExtractionTimeoutMs":1000,"ImageExtractionTimeoutMultiplier":1});
+        let original_settings = json!({"ExclusiveControlFeatures":"CatchAllBlock,ExtractOnFileChange,Custom","EnableImageCapture":false,"PersistMediaInfoMode":"Default","LibraryScope":"library","MediaInfoJsonRootFolder":"","MediaInfoExtractionTimeoutMs":1000,"ImageExtractionTimeoutMultiplier":1,"IsModSupported":true});
         let host = Host {
             item: Arc::new(Mutex::new(
                 json!({"Id":"e1","Guid":native_guid(&path),"PresentationUniqueKey":"episode-e1","Type":"Episode","Name":"分集","IndexNumber":1,"ParentIndexNumber":1,"Path":path,"Size":1000,"PartCount":1,"MediaStreams":streams,"MediaSources":[{"Id":"mediasource_e1","ItemId":"e1","Path":"/cloud/e1.mkv","MediaStreams":streams}],"Chapters":original[0]["Chapters"],"ImageTags":{"Primary":"old-picture"}}),
@@ -378,6 +443,7 @@ impl Fixture {
         self.state.data_dir.join("backups/media-info-reload")
     }
     async fn close(self) {
+        let events = self.host.events.lock().await.clone();
         self.state.jobs.shutdown().await;
         self.server.abort();
         self.state.db.close().await;
@@ -387,6 +453,10 @@ impl Fixture {
             .unwrap();
         self.admin.close().await;
         drop(self.temp);
+        assert!(
+            !events.iter().any(|event| event.starts_with("clear:")),
+            "capture recovery must never clear native media info"
+        );
     }
 }
 
@@ -400,6 +470,7 @@ async fn capture_enables_images_then_restores_native_info_and_settings() {
         let item = f.host.item.lock().await.clone();
         let settings = f.host.settings.lock().await.clone();
         let expected = f.original_settings.clone();
+        let original_chapters = f.host.original[0]["Chapters"].clone();
         let events = f.host.events.lock().await.clone();
         let clean = std::fs::read_dir(f.backup_root()).unwrap().next().is_none();
         let saved: Value = serde_json::from_slice(
@@ -416,6 +487,8 @@ async fn capture_enables_images_then_restores_native_info_and_settings() {
             "Native 用户标题"
         );
         assert_eq!(item["ImageTags"]["Primary"], "new-picture");
+        assert_eq!(item["Chapters"], original_chapters);
+        assert_eq!(saved[0]["Chapters"], original_chapters);
         assert_eq!(settings, expected);
         assert!(clean);
         assert!(events.contains(&"read-in-restore".into()));
@@ -476,10 +549,12 @@ async fn cancellation_after_capture_acceptance_finishes_media_restore_before_cle
     let item = f.host.item.lock().await.clone();
     let settings = f.host.settings.lock().await.clone();
     let expected = f.original_settings.clone();
+    let original_chapters = f.host.original[0]["Chapters"].clone();
     let clean = std::fs::read_dir(f.backup_root()).unwrap().next().is_none();
     f.close().await;
     assert_eq!(result["state"], "cancelled", "{result}");
     assert_eq!(item["MediaStreams"][1]["Title"], "Native 用户标题");
+    assert_eq!(item["Chapters"], original_chapters);
     assert_eq!(settings, expected);
     assert!(clean);
 }
