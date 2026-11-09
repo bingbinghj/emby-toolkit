@@ -217,7 +217,8 @@ onBeforeUnmount(() => { window.removeEventListener('scroll', updateScroll); canc
 .theme-horizontal-nav { display: flex; align-items: center; gap: 4px; padding-block-end: 8px; }
 .theme-horizontal-nav__item { letter-spacing: 0; padding-inline: 12px !important; }
 .theme-horizontal-nav__menu { border: 1px solid rgba(var(--v-theme-on-surface), .08); }
-.layout-page-content { inline-size: 100%; max-inline-size: 1440px; margin-inline: auto; padding: 24px; }
+// VMain already reserves the registered navbar; override the upstream raw-shell padding calculation.
+.layout-page-content { inline-size: 100%; max-inline-size: 1440px; margin-inline: auto; padding: 24px; padding-block-start: 24px !important; }
 .main-content-wrapper { inline-size: 100%; min-inline-size: 0; }
 .main-content-wrapper :deep(> div:first-child) { inline-size: 100% !important; min-inline-size: 0; }
 .layout-app-shell .layout-page-content { padding-block-end: calc(96px + env(safe-area-inset-bottom)); }
@@ -228,6 +229,6 @@ onBeforeUnmount(() => { window.removeEventListener('scroll', updateScroll); canc
 .btn-content { display: flex; flex-direction: column; align-items: center; gap: 2px; }
 .btn-content span { font-size: 10px; max-inline-size: 76px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 :global(html[data-theme-customizer-open='true'] .footer-nav-container) { visibility: hidden; pointer-events: none; }
-@media (width <= 1280px) { .layout-page-content { padding: 16px 12px; } .navbar-content-container { padding-inline: 12px; } }
+@media (width <= 1280px) { .layout-page-content { padding: 16px 12px; padding-block-start: 16px !important; } .navbar-content-container { padding-inline: 12px; } }
 @media (prefers-reduced-motion: reduce) { .layout-navbar--horizontal { transform: none; } }
 </style>
