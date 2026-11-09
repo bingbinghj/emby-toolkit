@@ -117,7 +117,14 @@ async fn logs_and_status_preserve_real_activity_counts_and_task_outcome() {
     assert_eq!(status["phase"], "回写115缓存");
     release.add_permits(1);
     let failed = wait_for(&manager, "failed").await;
-    assert_eq!(failed["result"]["failed"], 1);
+    assert!(failed.get("result").is_none());
+    assert_eq!(
+        manager
+            .result(failed["task_id"].as_str().unwrap())
+            .await
+            .unwrap()["result"]["failed"],
+        1
+    );
     let logs = String::from_utf8(output.lock().unwrap().clone()).unwrap();
     assert!(logs.contains("补齐115指纹验收 · 补齐115指纹 · 1/4 · 25%"));
     let ended = logs

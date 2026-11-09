@@ -1,11 +1,12 @@
 use axum::{
     Json, Router,
+    body::{Body, to_bytes},
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{Request, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use emby_toolkit::{AppState, media_manual, persons, tasks};
+use emby_toolkit::{AppState, media_extra, media_manual, persons, tasks};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -16,6 +17,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::Mutex;
+use tower::ServiceExt;
 
 #[derive(Clone)]
 struct Host {
@@ -25,6 +27,8 @@ struct Host {
     writes: Arc<AtomicUsize>,
     refreshes: Arc<AtomicUsize>,
     refresh_logs: Arc<Mutex<Vec<String>>>,
+    provider_reads: Arc<AtomicUsize>,
+    provider_queries: Arc<Mutex<Vec<String>>>,
 }
 async fn read(State(host): State<Host>, Path(id): Path<String>) -> Response {
     if host.mode == 3 && host.writes.load(Ordering::SeqCst) > 0 {
@@ -36,6 +40,9 @@ async fn read(State(host): State<Host>, Path(id): Path<String>) -> Response {
         for person in media["People"].as_array_mut().unwrap() {
             if let Some(live) = people.get(person["Id"].as_str().unwrap_or("")) {
                 person["Name"] = live["Name"].clone();
+            }
+            if host.mode >= 9 {
+                person.as_object_mut().unwrap().remove("ProviderIds");
             }
         }
         return Json(media).into_response();
@@ -65,10 +72,22 @@ async fn write(
     }
     StatusCode::NO_CONTENT
 }
-async fn items(
-    State(host): State<Host>,
-    Query(query): Query<HashMap<String, String>>,
-) -> Json<Value> {
+async fn items(State(host): State<Host>, Query(query): Query<HashMap<String, String>>) -> Response {
+    if query.contains_key("Ids") {
+        host.provider_queries
+            .lock()
+            .await
+            .push(query["Ids"].clone());
+        if query
+            .get("Fields")
+            .is_some_and(|fields| fields.contains("ProviderIds"))
+        {
+            host.provider_reads.fetch_add(1, Ordering::SeqCst);
+        }
+        if host.mode == 11 && host.refreshes.load(Ordering::SeqCst) > 0 {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+    }
     let items = if query
         .get("IncludeItemTypes")
         .is_some_and(|kind| kind == "Person")
@@ -77,17 +96,23 @@ async fn items(
             .lock()
             .await
             .values()
+            .filter(|person| {
+                query
+                    .get("Ids")
+                    .is_none_or(|ids| ids.split(',').any(|id| person["Id"] == id))
+            })
             .cloned()
             .collect::<Vec<_>>()
     } else if let Some(ids) = query.get("Ids") {
         let people = host.people.lock().await;
         ids.split(',')
+            .filter(|_| host.mode < 9)
             .filter_map(|id| people.get(id).cloned())
             .collect()
     } else {
         vec![host.media.lock().await.clone()]
     };
-    Json(json!({"TotalRecordCount":items.len(),"Items":items}))
+    Json(json!({"TotalRecordCount":items.len(),"Items":items})).into_response()
 }
 async fn refresh(State(host): State<Host>) -> StatusCode {
     host.refreshes.fetch_add(1, Ordering::SeqCst);
@@ -101,6 +126,9 @@ async fn refresh(State(host): State<Host>) -> StatusCode {
     if host.mode == 8 {
         host.media.lock().await["People"][0]["Id"] = json!("other-person");
         host.media.lock().await["People"][0]["ProviderIds"]["Tmdb"] = json!("999");
+    }
+    if host.mode == 10 {
+        host.people.lock().await.get_mut("p1").unwrap()["ProviderIds"]["Tmdb"] = json!("999");
     }
     host.refresh_logs
         .lock()
@@ -157,7 +185,7 @@ impl Fixture {
         let people = BTreeMap::from([
             (
                 "p1".into(),
-                json!({"Id":"p1","Type":"Person","Name":"Alice","ProviderIds":{"Tmdb":"1"}}),
+                json!({"Id":"p1","Type":"Person","Name":if mode>=9 {"旧演员"}else{"Alice"},"ProviderIds":{"Tmdb":"1"}}),
             ),
             (
                 "p2".into(),
@@ -173,6 +201,8 @@ impl Fixture {
             writes: Arc::default(),
             refreshes: Arc::default(),
             refresh_logs: Arc::default(),
+            provider_reads: Arc::default(),
+            provider_queries: Arc::default(),
         };
         let app = Router::new()
             .route("/Users/user/Items/{id}", get(read))
@@ -348,6 +378,259 @@ async fn manual_actor_save_records_confirmed_names_and_roles() {
     f.close().await;
     assert_eq!(result["state"], "completed", "{result}");
     assert_eq!(processed, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn manual_actor_save_enriches_omitted_provider_ids_for_chinese_names() {
+    let f = Fixture::new(9).await;
+    let result = f.manual().await;
+    let processed: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM processed_log WHERE item_id='movie'")
+            .fetch_one(&f.state.db)
+            .await
+            .unwrap();
+    let provider_reads = f.host.provider_reads.load(Ordering::SeqCst);
+    let name = f.host.people.lock().await["p1"]["Name"].clone();
+    f.close().await;
+    assert_eq!(result["state"], "completed", "{result}");
+    assert_eq!(processed, 1);
+    assert_eq!(name, "新演员");
+    assert!(
+        provider_reads >= 2,
+        "both initial and refreshed Chinese cast must resolve native person IDs"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn actor_editor_resolves_native_people_without_cached_cast_or_provider_ids() {
+    let f = Fixture::new(9).await;
+    sqlx::query("UPDATE media_metadata SET actors_json='[]'::jsonb WHERE tmdb_id='42'")
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    let response = media_manual::router()
+        .with_state(f.state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/media_for_editing/movie")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let result: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+            .unwrap();
+    let provider_reads = f.host.provider_reads.load(Ordering::SeqCst);
+    f.close().await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    let actors = result["current_emby_cast"].as_array().unwrap();
+    assert_eq!(actors.len(), 2, "{result}");
+    assert_eq!(actors[0]["tmdbId"], 1);
+    assert_eq!(actors[0]["emby_person_id"], "p1");
+    assert_eq!(actors[1]["tmdbId"], 2);
+    assert_eq!(actors[1]["emby_person_id"], "p2");
+    assert_eq!(provider_reads, 1);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn actor_preview_falls_back_to_native_people_without_persisting_changes() {
+    let f = Fixture::new(9).await;
+    sqlx::query("UPDATE media_metadata SET actors_json='[]'::jsonb WHERE tmdb_id='42'")
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    f.state
+        .save_config(&json!({"ai_translate_actor_role":false}))
+        .await
+        .unwrap();
+    let snapshot = "SELECT jsonb_build_object('media',(SELECT jsonb_agg(to_jsonb(m)) FROM media_metadata m),'people',(SELECT jsonb_agg(to_jsonb(p)) FROM person_metadata p),'translations',(SELECT jsonb_agg(to_jsonb(t)) FROM translation_cache t),'processed',(SELECT jsonb_agg(to_jsonb(p)) FROM processed_log p))";
+    let before: Value = sqlx::query_scalar(snapshot)
+        .fetch_one(&f.state.db)
+        .await
+        .unwrap();
+    let state = f.state.clone();
+    let task = f
+        .state
+        .jobs
+        .submit("演员预览验证", move |context| async move {
+            media_extra::preview_cast(&state, "movie", &context).await
+        })
+        .await
+        .unwrap();
+    let result = f.wait(&task).await;
+    let after: Value = sqlx::query_scalar(snapshot)
+        .fetch_one(&f.state.db)
+        .await
+        .unwrap();
+    let writes = f.host.writes.load(Ordering::SeqCst);
+    let refreshes = f.host.refreshes.load(Ordering::SeqCst);
+    let provider_reads = f.host.provider_reads.load(Ordering::SeqCst);
+    let nfo = f.directory.path().join("movie.nfo").exists();
+    f.close().await;
+    assert_eq!(result["state"], "completed", "{result}");
+    let actors = result["result"].as_array().unwrap();
+    assert_eq!(actors.len(), 2, "{result}");
+    assert_eq!(actors[0]["tmdbId"], 1);
+    assert_eq!(actors[0]["embyPersonId"], "p1");
+    assert_eq!(actors[1]["tmdbId"], 2);
+    assert_eq!(actors[1]["embyPersonId"], "p2");
+    assert_eq!(
+        before, after,
+        "preview must preserve media, people and translation caches"
+    );
+    assert_eq!((writes, refreshes, provider_reads), (0, 0, 1));
+    assert!(!nfo);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn cached_foreign_cast_matches_native_chinese_people_without_reverse_translation_cache() {
+    let f = Fixture::new(9).await;
+    f.host.people.lock().await.get_mut("p1").unwrap()["Name"] = json!("原生中文名");
+    sqlx::query("UPDATE person_metadata SET primary_name='Foreign Alice',original_name='Foreign Alice' WHERE tmdb_person_id=1")
+        .execute(&f.state.db).await.unwrap();
+    f.state
+        .save_config(&json!({"ai_translate_actor_role":false}))
+        .await
+        .unwrap();
+    let translation_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM translation_cache")
+        .fetch_one(&f.state.db)
+        .await
+        .unwrap();
+    let state = f.state.clone();
+    let task = f
+        .state
+        .jobs
+        .submit("缓存演员预览验证", move |context| async move {
+            media_extra::preview_cast(&state, "movie", &context).await
+        })
+        .await
+        .unwrap();
+    let result = f.wait(&task).await;
+    let provider_reads = f.host.provider_reads.load(Ordering::SeqCst);
+    let writes = f.host.writes.load(Ordering::SeqCst);
+    let cached_name: String =
+        sqlx::query_scalar("SELECT primary_name FROM person_metadata WHERE tmdb_person_id=1")
+            .fetch_one(&f.state.db)
+            .await
+            .unwrap();
+    f.close().await;
+    assert_eq!(translation_count, 0);
+    assert_eq!(result["state"], "completed", "{result}");
+    let actors = result["result"].as_array().unwrap();
+    assert_eq!(actors.len(), 1, "{result}");
+    assert_eq!(actors[0]["tmdbId"], 1);
+    assert_eq!(actors[0]["embyPersonId"], "p1");
+    assert_eq!(actors[0]["name"], "原生中文名");
+    assert_eq!(cached_name, "Foreign Alice");
+    assert_eq!((provider_reads, writes), (1, 0));
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn ingest_provider_enrichment_preserves_chinese_skip_and_propagates_lookup_failure() {
+    for mode in [9, 11] {
+        let f = Fixture::new(mode).await;
+        f.host.people.lock().await.get_mut("p2").unwrap()["ProviderIds"]["Imdb"] = json!("nm2");
+        if mode == 11 {
+            f.host.refreshes.store(1, Ordering::SeqCst);
+        }
+        let people = vec![
+            json!({"Id":"p1","Type":"Actor","Name":"中文演员","Role":"原角色"}),
+            json!({"Id":"p2","Type":"Actor","Name":"Bob","Role":"先前角色"}),
+            json!({"Id":"p2","Type":"Actor","Name":"Bob","Role":"最后角色"}),
+            json!({"Id":"known","Type":"Actor","Name":"Known Actor","ProviderIds":{"Tmdb":"777"}}),
+            json!({"Id":"director","Type":"Director","Name":"Director"}),
+            json!({"Type":"Actor","Name":"No ID"}),
+        ];
+        let state = f.state.clone();
+        let task = f
+            .state
+            .jobs
+            .submit("入库人物ID补齐验证", move |context| async move {
+                Ok(json!(
+                    persons::enrich_provider_ids(&state, &people, &context).await?
+                ))
+            })
+            .await
+            .unwrap();
+        let result = f.wait(&task).await;
+        let queries = f.host.provider_queries.lock().await.clone();
+        let writes = f.host.writes.load(Ordering::SeqCst);
+        f.close().await;
+        assert_eq!(
+            queries,
+            vec!["p2"],
+            "only the original pending foreign actor subset may be queried"
+        );
+        assert_eq!(writes, 0);
+        if mode == 11 {
+            assert_eq!(result["state"], "failed", "{result}");
+            let message = result["message"].as_str().unwrap();
+            assert!(
+                message.contains("p2") && message.contains("GET /Items") && message.contains("403"),
+                "{result}"
+            );
+        } else {
+            assert_eq!(result["state"], "completed", "{result}");
+            let actors = result["result"].as_array().unwrap();
+            assert_eq!(actors.len(), 3);
+            assert_eq!(actors[0]["ProviderIds"], Value::Null);
+            assert_eq!(actors[0]["Role"], "原角色");
+            assert_eq!(actors[1]["ProviderIds"], json!({"Tmdb":"2","Imdb":"nm2"}));
+            assert_eq!(actors[1]["Role"], "最后角色");
+            assert_eq!(actors[2]["ProviderIds"]["Tmdb"], "777");
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn enriched_actor_with_wrong_tmdb_never_records_success() {
+    let f = Fixture::new(10).await;
+    let result = f.manual().await;
+    let processed: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM processed_log WHERE item_id='movie'")
+            .fetch_one(&f.state.db)
+            .await
+            .unwrap();
+    let provider_reads = f.host.provider_reads.load(Ordering::SeqCst);
+    f.close().await;
+    assert_eq!(result["state"], "failed", "{result}");
+    assert_eq!(processed, 0);
+    assert!(provider_reads >= 2);
+    assert!(
+        result["message"]
+            .as_str()
+            .unwrap()
+            .contains("人物关联未一致"),
+        "{result}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn actor_provider_lookup_failure_reports_upstream_and_never_records_success() {
+    let f = Fixture::new(11).await;
+    let result = f.manual().await;
+    let processed: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM processed_log WHERE item_id='movie'")
+            .fetch_one(&f.state.db)
+            .await
+            .unwrap();
+    f.close().await;
+    assert_eq!(result["state"], "failed", "{result}");
+    assert_eq!(processed, 0);
+    let message = result["message"].as_str().unwrap();
+    assert!(
+        message.contains("movie") && message.contains("GET /Items") && message.contains("403"),
+        "{result}"
+    );
 }
 
 #[tokio::test]

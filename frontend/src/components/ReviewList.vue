@@ -98,6 +98,9 @@
         </n-popconfirm>
       </div>
 
+      <n-alert v-if="reprocessFeedback" :type="reprocessFeedback.type" :title="reprocessFeedback.message" style="margin-bottom: 16px;" closable @close="reprocessFeedback = null">
+        <div v-for="detail in reprocessFeedback.details" :key="detail">{{ detail }}</div>
+      </n-alert>
       <n-spin :show="loading">
         <div v-if="error" class="error-message">
           <n-alert title="加载错误" type="error">{{ error }}</n-alert>
@@ -168,6 +171,7 @@ const message = useMessage();
 const tableData = ref([]);
 const loading = ref(true);
 const error = ref(null);
+const reprocessFeedback = ref(null);
 const totalItems = ref(0);
 const currentPage = ref(1);
 const itemsPerPage = ref(15);
@@ -464,6 +468,19 @@ const searchEmbyLibrary = async () => {
   }
 };
 
+const showReprocessResult = (response, fallback, failed = false) => {
+  const result = response?.data || {};
+  const details = [...new Set([
+    ...(Array.isArray(result.failures) ? result.failures : []),
+    ...(Array.isArray(result.warning_details) ? result.warning_details : []),
+  ].map(detail => typeof detail === 'string' ? detail : [detail?.item_id, detail?.reason || detail?.error].filter(Boolean).join('：')).filter(Boolean))];
+  const summary = result.error || result.message || fallback;
+  const hasFailures = failed || Number(result.failed) > 0 || (Array.isArray(result.failures) && result.failures.length > 0);
+  const type = hasFailures ? 'error' : response?.status === 207 || Number(result.warnings) > 0 || details.length ? 'warning' : 'success';
+  reprocessFeedback.value = type === 'success' ? null : { type, message: summary, details };
+  message[type]([summary, ...details].join('；'), { duration: type === 'success' ? 3000 : 8000 });
+};
+
 const handleReprocessItem = async (row) => {
   currentRowId.value = row.item_id;
   loadingAction.value[row.item_id] = true;
@@ -471,13 +488,13 @@ const handleReprocessItem = async (row) => {
     const response = await axios.post(`/api/actions/reprocess_item/${row.item_id}`, {
         reason: row.reason
     });
-    message.success(response.data.message || `项目 "${row.item_name}" 的重新处理任务已提交。`);
+    showReprocessResult(response, `项目 "${row.item_name}" 的重新处理任务已提交。`);
     if (!isShowingSearchResults.value) {
         await fetchReviewItems();
     }
   } catch (err) {
     console.error("重新处理失败:", err);
-    message.error(`操作失败: ${err.response?.data?.error || err.message}`);
+    showReprocessResult(err.response || { data: { error: err.message } }, '重新处理失败', true);
   } finally {
     loadingAction.value[row.item_id] = false;
     currentRowId.value = null;
@@ -490,10 +507,10 @@ const reprocessAllReviewItems = async () => {
     const response = await axios.post('/api/actions/reprocess_all_review_items', {
       media_type: selectedMediaType.value || ''
     });
-    message.success(response.data.message || '重新处理任务已成功提交！');
+    showReprocessResult(response, '重新处理任务已成功提交！');
   } catch (err) {
     console.error("提交重新处理任务失败:", err);
-    message.error(`操作失败: ${err.response?.data?.error || err.message}`);
+    showReprocessResult(err.response || { data: { error: err.message } }, '批量重新处理失败', true);
   }
 };
 

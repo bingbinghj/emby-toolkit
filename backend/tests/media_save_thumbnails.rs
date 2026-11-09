@@ -40,6 +40,8 @@ mod native {
         video_reads: Arc<AtomicUsize>,
         mutate_unselected_once: Arc<AtomicBool>,
         reject_features: Arc<AtomicBool>,
+        guid_lookup_fault: Arc<Mutex<String>>,
+        guid_lookups: Arc<AtomicUsize>,
     }
 
     impl Proxy {
@@ -148,6 +150,7 @@ mod native {
         ))
     }
     fn requested_fields(mut item: Value, query: &HashMap<String, String>) -> Value {
+        item.as_object_mut().unwrap().remove("Guid");
         let fields = query.get("Fields").map(String::as_str).unwrap_or("");
         if !fields.split(',').any(|field| field == "MediaStreams") {
             item.as_object_mut().unwrap().remove("MediaStreams");
@@ -346,16 +349,37 @@ mod native {
                     }
                 }
                 let items = proxy.items().await;
-                let found = items
+                let mut found = items
                     .into_iter()
                     .filter(|item| {
                         (!query.contains_key("Path") && !query.contains_key("Ids"))
                             || query.get("Path").is_some_and(|path| item["Path"] == *path)
-                            || query
-                                .get("Ids")
-                                .is_some_and(|ids| ids.split(',').any(|id| item["Id"] == id))
+                            || query.get("Ids").is_some_and(|ids| {
+                                ids.split(',').any(|id| native_item_id_matches(item, id))
+                            })
                     })
                     .collect::<Vec<_>>();
+                if query
+                    .get("Ids")
+                    .is_some_and(|ids| uuid::Uuid::parse_str(ids).is_ok())
+                {
+                    proxy.guid_lookups.fetch_add(1, Ordering::SeqCst);
+                    match proxy.guid_lookup_fault.lock().await.as_str() {
+                        "missing" => found.clear(),
+                        "wrong-id" => {
+                            for item in &mut found {
+                                item["Id"] = json!("other-item");
+                            }
+                        }
+                        "wrong-path" => {
+                            for item in &mut found {
+                                item["Path"] = json!(proxy.host.directory.join("changed.strm"));
+                            }
+                        }
+                        "duplicate" if !found.is_empty() => found.push(found[0].clone()),
+                        _ => {}
+                    }
+                }
                 let total = found.len();
                 let start = query
                     .get("StartIndex")
@@ -370,6 +394,7 @@ mod native {
                     .into_iter()
                     .skip(start)
                     .take(limit)
+                    .map(|item| requested_fields(item, &query))
                     .collect::<Vec<_>>();
                 return Json(json!({"Items":page,"TotalRecordCount":total})).into_response();
             }
@@ -615,6 +640,8 @@ mod native {
                 video_reads: Arc::default(),
                 mutate_unselected_once: Arc::default(),
                 reject_features: Arc::default(),
+                guid_lookup_fault: Arc::default(),
+                guid_lookups: Arc::default(),
             };
             let app = Router::new()
                 .fallback(self::proxy)
@@ -688,10 +715,10 @@ mod native {
             .unwrap();
             let mut item = self.native.host.item.lock().await.clone();
             item["Id"] = json!(id);
-            item["Guid"] = json!("00000000-0000-0000-0000-00000000f0b1");
             item["PresentationUniqueKey"] = json!(format!("fixture-key-{id}"));
             item["Type"] = json!("Episode");
             item["Path"] = json!(path);
+            item["Guid"] = json!(native_guid(&path, "Episode"));
             item["MediaSources"][0]["Id"] = json!(format!("mediasource_{id}"));
             item["MediaSources"][0]["ItemId"] = json!(id);
             item["MediaSources"][0]["Path"] = json!(source);
@@ -807,9 +834,14 @@ mod native {
                 )
                 .unwrap();
                 if id == "61616" {
-                    self.native.host.item.lock().await["Path"] = json!(path);
+                    let mut item = self.native.host.item.lock().await;
+                    item["Path"] = json!(path);
+                    update_native_guid(&self.native.host, &mut item).await;
                 } else {
-                    self.proxy.extra.lock().await.get_mut(id).unwrap()["Path"] = json!(path);
+                    let mut extra = self.proxy.extra.lock().await;
+                    let item = extra.get_mut(id).unwrap();
+                    item["Path"] = json!(path);
+                    update_native_guid(&self.native.host, item).await;
                 }
                 sqlx::query("UPDATE media_metadata SET asset_details_json=jsonb_set(asset_details_json,'{0,path}',$1) WHERE emby_item_ids_json @> $2").bind(json!(path)).bind(json!([id])).execute(&self.native.state.db).await.unwrap();
             }
@@ -989,6 +1021,7 @@ mod native {
         {
             let mut item = f.native.host.item.lock().await;
             item["Type"] = json!("Audio");
+            update_native_guid(&f.native.host, &mut item).await;
             item["MediaStreams"] = json!(streams);
             item["MediaSources"][0]["MediaStreams"] = json!(streams);
         }
@@ -1037,6 +1070,7 @@ mod native {
         {
             let mut item = f.native.host.item.lock().await;
             item["Type"] = json!("Audio");
+            update_native_guid(&f.native.host, &mut item).await;
             item["Chapters"] = json!([]);
             item["ImageTags"] = json!({"Primary":"native-user-new-cover"});
             item["MediaStreams"] = info[0]["MediaSourceInfo"]["MediaStreams"].clone();
@@ -1384,6 +1418,15 @@ mod native {
             json!(["61616"])
         );
         assert!(result["result"]["warnings"].as_u64().unwrap() > 0);
+        let reason = result["result"]["metadata_refresh"]["failures"][0]["reason"]
+            .as_str()
+            .unwrap();
+        assert!(
+            reason.contains("目标重载未通过回读")
+                && reason.contains("61616")
+                && reason.contains("恢复说明"),
+            "{reason}"
+        );
         assert_ne!(
             f.native.host.item.lock().await["MediaStreams"][1]["Title"],
             "仅本地保存的标题"
@@ -1825,6 +1868,90 @@ mod native {
 
     #[tokio::test]
     #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn missing_guid_uses_the_verified_case_insensitive_native_directory() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        let mut item = f.native.host.item.lock().await;
+        let original = item.clone();
+        let mixed_path = f.native.directory.path().join("MiXeD.strm");
+        tokio::fs::rename(item["Path"].as_str().unwrap(), &mixed_path)
+            .await
+            .unwrap();
+        tokio::fs::rename(
+            info_path(&item),
+            mixed_path.with_file_name("MiXeD-mediainfo.json"),
+        )
+        .await
+        .unwrap();
+        tokio::fs::rename(
+            local_bif(&item),
+            mixed_path.with_file_name("MiXeD-320-1.bif"),
+        )
+        .await
+        .unwrap();
+        item["Path"] = json!(mixed_path);
+        let guid = native_guid(
+            std::path::Path::new(&mixed_path.to_string_lossy().to_lowercase()),
+            "Movie",
+        );
+        assert_ne!(guid, native_guid(&mixed_path, "Movie"));
+        rekey_metadata(&f.native.host, &mut item, guid).await;
+        let metadata = item_metadata_directory(&f.native.host, &item);
+        let chapter = chapter_image(&f.native.host, &item, &item["Chapters"][0]);
+        let chapter_bytes = tokio::fs::read(&chapter).await.unwrap();
+        drop(item);
+        sqlx::query("UPDATE media_metadata SET asset_details_json=jsonb_set(asset_details_json,'{0,path}',$1) WHERE emby_item_ids_json @> $2").bind(json!(mixed_path)).bind(json!(["61616"])).execute(&f.native.state.db).await.unwrap();
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] =
+            json!("大小写不敏感目录中的新标题");
+        let result = f.save(json!({"mediainfo":edited}), false).await;
+        assert_eq!(
+            result["result"]["metadata_refresh"]["state"], "verified",
+            "{result}"
+        );
+        assert!(f.proxy.guid_lookups.load(Ordering::SeqCst) >= 2);
+        assert_eq!(
+            f.native.host.item.lock().await["MediaStreams"][1]["Title"],
+            "大小写不敏感目录中的新标题"
+        );
+        assert!(metadata.is_dir());
+        assert_eq!(tokio::fs::read(chapter).await.unwrap(), chapter_bytes);
+        assert_eq!(
+            f.native.host.item.lock().await["Chapters"],
+            original["Chapters"]
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn missing_guid_rejects_unverified_or_changed_native_identity_before_clear() {
+        for fault in ["missing", "wrong-id", "wrong-path", "duplicate"] {
+            let f = ThumbnailFixture::with_flag(Some(false)).await;
+            *f.proxy.guid_lookup_fault.lock().await = fault.into();
+            let original = f.native.host.item.lock().await.clone();
+            let chapter = chapter_image(&f.native.host, &original, &original["Chapters"][0]);
+            let chapter_bytes = tokio::fs::read(&chapter).await.unwrap();
+            let mut edited = f.native.original.clone();
+            edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("不能写入未确认目录");
+            let result = f.save(json!({"mediainfo":edited}), false).await;
+            assert_eq!(
+                result["result"]["metadata_refresh"]["state"], "failed",
+                "{fault}: {result}"
+            );
+            assert!(f.proxy.guid_lookups.load(Ordering::SeqCst) > 0, "{fault}");
+            assert_eq!(f.native.host.clears.load(Ordering::SeqCst), 0, "{fault}");
+            assert_eq!(*f.native.host.item.lock().await, original, "{fault}");
+            assert_eq!(
+                tokio::fs::read(chapter).await.unwrap(),
+                chapter_bytes,
+                "{fault}"
+            );
+            f.close().await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
     async fn manual_save_overwrites_existing_languages_and_preserves_chapters_images_and_bif() {
         let f = ThumbnailFixture::with_flag(Some(false)).await;
         {
@@ -1898,9 +2025,12 @@ mod native {
         f.proxy.extra.lock().await.get_mut("61617").unwrap()["PresentationUniqueKey"] = key;
         let mut unrelated = f.native.host.item.lock().await.clone();
         unrelated["Id"] = json!("61618");
-        unrelated["Guid"] = json!("00000000-0000-0000-0000-00000000f0b2");
         unrelated["PresentationUniqueKey"] = json!("unrelated-key");
         unrelated["Path"] = json!(f.native.directory.path().join("61618.strm"));
+        unrelated["Guid"] = json!(native_guid(
+            std::path::Path::new(unrelated["Path"].as_str().unwrap()),
+            "Movie"
+        ));
         unrelated["MediaSources"][0]["ItemId"] = json!("61618");
         unrelated["MediaSources"][0]["Id"] = json!("mediasource_61618");
         unrelated["MediaSources"][0]["Path"] = json!("/cd2/61618.mkv");
@@ -2080,6 +2210,7 @@ mod native {
             let mut extra = f.proxy.extra.lock().await;
             let item = extra.get_mut("61617").unwrap();
             item["Type"] = json!("Movie");
+            update_native_guid(&f.native.host, item).await;
             item["PresentationUniqueKey"] = primary["PresentationUniqueKey"].clone();
             item["MediaStreams"][1]["Title"] = json!("V2 现场用户标题");
             item["MediaStreams"][1]["Language"] = json!("yue");

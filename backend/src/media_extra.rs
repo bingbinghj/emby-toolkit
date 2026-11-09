@@ -64,7 +64,7 @@ async fn submit_images(
 }
 pub async fn preview_cast(state: &AppState, id: &str, context: &JobContext) -> Result<Value> {
     context.checkpoint().await?;
-    let item = details(state, id, "Id,Name,Type,People,ProviderIds,Genres,ProductionYear,SeriesId,ParentId,ParentIndexNumber,IndexNumber").await?;
+    let mut item = details(state, id, "Id,Name,Type,People,ProviderIds,Genres,ProductionYear,SeriesId,ParentId,ParentIndexNumber,IndexNumber").await?;
     let kind = string(&item, "Type");
     if !matches!(kind.as_str(), "Movie" | "Series" | "Season" | "Episode") {
         return Err(ApiError::bad("仅支持影视演员预览"));
@@ -103,6 +103,9 @@ pub async fn preview_cast(state: &AppState, id: &str, context: &JobContext) -> R
     } else {
         vec![]
     };
+    item["People"] = json!(
+        crate::persons::complete_provider_ids(state, &list(&item["People"]), Some(context)).await?
+    );
     if raw.is_empty() {
         for (i, person) in list(&item["People"])
             .iter()

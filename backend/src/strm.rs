@@ -666,7 +666,12 @@ where
         return Err(ApiError(
             axum::http::StatusCode::CONFLICT,
             format!(
-                "尚未确认媒体刷新结束；当前临时配置仍保留，恢复说明：{}",
+                "{}尚未确认媒体刷新结束；当前临时配置仍保留，恢复说明：{}",
+                outcome
+                    .as_ref()
+                    .err()
+                    .map(|error| format!("{}；", error.1))
+                    .unwrap_or_default(),
                 recovery.display()
             ),
         ));

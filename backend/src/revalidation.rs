@@ -346,8 +346,7 @@ async fn locate(
         let last = index + 1 == parts.len();
         // Reuse complete intermediate directories only within this batch. File
         // listings stay fresh so a later Item cannot inherit an older PC/SHA1.
-        let all = match if resolver.allow_search
-            && resolver.audit.is_none()
+        let all = match if resolver.audit.is_none()
             && !last
             && resolver.directories.contains_key(&parent)
         {
@@ -366,7 +365,7 @@ async fn locate(
                 return Err(error);
             }
         };
-        if resolver.allow_search && resolver.audit.is_none() && !last {
+        if resolver.audit.is_none() && !last {
             resolver
                 .directories
                 .entry(parent.clone())

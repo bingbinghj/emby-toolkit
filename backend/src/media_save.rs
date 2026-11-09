@@ -416,7 +416,7 @@ where
         .data_dir
         .join("backups/media-info-reload")
         .join(format!("saved-{}", uuid::Uuid::new_v4()));
-    let mut report = json!({"state":"not_requested","requested_ids":[],"verified_ids":[],"failed_ids":[],"failures":[]});
+    let mut report = json!({"state":"not_requested","requested_ids":[],"verified_ids":[],"failed_ids":[],"failures":[],"warning_details":[]});
     let mut targets = vec![];
     let outcome = crate::strm::with_settings_guarded(state, "restore_media_info", || async {
         targets = prepare().await?;
@@ -500,8 +500,11 @@ where
             error.1
         );
         if context.is_cancelled() {
-            if confirmed.load(Ordering::Acquire) && !keep_recovery {
-                let _ = tokio::fs::remove_dir_all(&recovery).await;
+            if confirmed.load(Ordering::Acquire)
+                && !keep_recovery
+                && let Some(warning) = cleanup_recovery(&recovery, &mut report).await
+            {
+                return Err(ApiError(error.0, format!("{}；{warning}", error.1)));
             }
             return Err(error);
         }
@@ -530,9 +533,27 @@ where
         }
     }
     if confirmed.load(Ordering::Acquire) && !keep_recovery {
-        let _ = tokio::fs::remove_dir_all(&recovery).await;
+        let _ = cleanup_recovery(&recovery, &mut report).await;
     }
     Ok(report)
+}
+async fn cleanup_recovery(recovery: &std::path::Path, report: &mut Value) -> Option<String> {
+    match tokio::fs::remove_dir_all(recovery).await {
+        Ok(()) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            let warning = format!(
+                "ETK 恢复暂存文件清理失败：{error}；仍保留：{}",
+                recovery.display()
+            );
+            tracing::warn!("[媒体信息保存收尾] {warning}");
+            report["warning_details"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!(warning));
+            Some(warning)
+        }
+    }
 }
 async fn cleanup_stages(prepared: &BTreeMap<String, Prepared>) {
     for item in prepared.values() {
@@ -1373,4 +1394,46 @@ async fn thumbnails_after_save(
 }
 fn text(value: &Value) -> String {
     value.as_str().unwrap_or("").to_string()
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn verified_reload_keeps_verification_and_reports_real_cleanup_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let recovery = directory.path().join("saved-recovery");
+        tokio::fs::write(&recovery, b"retained recovery record")
+            .await
+            .unwrap();
+        let mut report =
+            json!({"state":"verified","verified_ids":["61616"],"failures":[],"warning_details":[]});
+        let warning = cleanup_recovery(&recovery, &mut report).await.unwrap();
+        assert_eq!(report["state"], "verified");
+        assert_eq!(report["verified_ids"], json!(["61616"]));
+        assert_eq!(report["failures"], json!([]));
+        assert_eq!(report["warning_details"], json!([warning]));
+        assert!(warning.contains("清理失败") && warning.contains(recovery.to_str().unwrap()));
+        assert_eq!(
+            tokio::fs::read(&recovery).await.unwrap(),
+            b"retained recovery record"
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_recovery_is_removed_without_false_warning() {
+        let directory = tempfile::tempdir().unwrap();
+        let recovery = directory.path().join("saved-recovery");
+        tokio::fs::create_dir(&recovery).await.unwrap();
+        tokio::fs::write(recovery.join("original-settings.json"), b"{}")
+            .await
+            .unwrap();
+        let mut report = json!({"state":"verified","warning_details":[]});
+        assert!(cleanup_recovery(&recovery, &mut report).await.is_none());
+        assert!(!recovery.exists());
+        assert!(cleanup_recovery(&recovery, &mut report).await.is_none());
+        assert_eq!(report["state"], "verified");
+        assert_eq!(report["warning_details"], json!([]));
+    }
 }

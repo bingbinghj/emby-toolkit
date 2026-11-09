@@ -23,17 +23,30 @@ pub async fn upsert(
     records: &mut [Value],
     preserve_top_title: bool,
 ) -> Result<()> {
-    write(state, records, preserve_top_title, false).await
+    write(state, records, preserve_top_title, false)
+        .await
+        .map(|_| ())
 }
 pub async fn ingest(state: &AppState, records: &mut [Value], replace_children: bool) -> Result<()> {
-    write(state, records, false, replace_children).await
+    write(state, records, false, replace_children)
+        .await
+        .map(|_| ())
+}
+
+pub(crate) struct WriteReport {
+    pub written: usize,
+    pub failures: Vec<String>,
+}
+
+pub(crate) async fn sync_upsert(state: &AppState, records: &mut [Value]) -> Result<WriteReport> {
+    write(state, records, true, false).await
 }
 async fn write(
     state: &AppState,
     records: &mut [Value],
     preserve_top_title: bool,
     replace_children: bool,
-) -> Result<()> {
+) -> Result<WriteReport> {
     tracing::info!(
         "元数据库写入开始：记录 {} 条，顶层标题处理 {}，子项绑定处理 {}",
         records.len(),
@@ -50,6 +63,7 @@ async fn write(
     );
     let record_count = records.len();
     let mut written_records = 0;
+    let mut failures = vec![];
     let mut transaction = state.db.begin().await?;
     let columns = sqlx::query("SELECT column_name,data_type FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='media_metadata'").fetch_all(&mut *transaction).await?;
     let allowed = columns
@@ -227,9 +241,16 @@ async fn write(
             sqlx::query("ROLLBACK TO SAVEPOINT sync_record")
                 .execute(&mut *transaction)
                 .await?;
-            tracing::error!(
-                "元数据库写入失败：《{media_name}》，类型 {type_label}，TMDb {id}：{error}，继续本批其他媒体项。"
+            let code = error
+                .as_database_error()
+                .and_then(|error| error.code())
+                .map(|code| code.into_owned())
+                .unwrap_or_else(|| "未知".into());
+            let reason = format!(
+                "类型 {kind}，TMDb {id}：元数据库写入失败（数据库错误代码 {code}），已保留原记录"
             );
+            tracing::error!("{reason}，继续本批其他媒体项。");
+            failures.push(reason);
         }
         if preserve_top_title {
             sqlx::query("RELEASE SAVEPOINT sync_record")
@@ -251,7 +272,10 @@ async fn write(
         "元数据库写入结束：本批 {record_count} 条，已提交 {written_records} 条，未写入 {} 条",
         record_count - written_records
     );
-    Ok(())
+    Ok(WriteReport {
+        written: written_records,
+        failures,
+    })
 }
 
 // An episode-group change moves only the incoming Emby versions between metadata keys.

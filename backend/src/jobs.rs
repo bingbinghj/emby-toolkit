@@ -283,16 +283,55 @@ impl JobManager {
             state["is_running"] = json!(false);
             state["pause_requested"] = json!(false);
             state["stop_requested"] = json!(false);
+            let failed = result.as_ref().is_ok_and(|(status, value)| {
+                *status >= 400
+                    || value["success"] == false
+                    || value["failed"].as_u64().unwrap_or(0) > 0
+                    || value["failures"]
+                        .as_array()
+                        .is_some_and(|items| !items.is_empty())
+            });
+            let warnings = result
+                .as_ref()
+                .is_ok_and(|(_, value)| value["warnings"].as_u64().unwrap_or(0) > 0);
+            let mut cancellation_warning = false;
             if context.cancel.is_cancelled() {
                 state["state"] = json!("cancelled");
                 state["message"] = json!("任务已取消");
+                match result {
+                    Ok((status, value)) => {
+                        cancellation_warning = failed
+                            || warnings
+                            || status == 207
+                            || value["warning_details"]
+                                .as_array()
+                                .is_some_and(|items| !items.is_empty())
+                            || value["error"]
+                                .as_str()
+                                .is_some_and(|error| !error.is_empty());
+                        if cancellation_warning {
+                            let message = value["error"]
+                                .as_str()
+                                .or_else(|| value["message"].as_str())
+                                .unwrap_or("请查看任务结果中的失败或提醒详情");
+                            state["message"] =
+                                json!(format!("任务已取消，收尾处理有提醒：{message}"));
+                        }
+                        state["result_status"] = json!(status);
+                        state["result"] = value;
+                    }
+                    Err(error) if error.1 != "任务已取消" => {
+                        cancellation_warning = true;
+                        state["message"] =
+                            json!(format!("任务已取消，收尾处理有提醒：{}", error.1));
+                        state["result_status"] = json!(error.0.as_u16());
+                        state["result"] = json!({"error":error.1});
+                    }
+                    Err(_) => (),
+                }
             } else {
                 match result {
                     Ok((status, value)) => {
-                        let failed = status >= 400
-                            || value["failed"].as_u64().unwrap_or(0) > 0
-                            || value["failures"].as_array().is_some_and(|v| !v.is_empty());
-                        let warnings = value["warnings"].as_u64().unwrap_or(0) > 0;
                         state["state"] = json!(if failed {
                             "failed"
                         } else if warnings {
@@ -342,6 +381,9 @@ impl JobManager {
                 }
                 Some("completed_with_warnings") => {
                     tracing::warn!(task_id=%context.id,"[任务结束] {name} · 完成，有提醒 · 耗时 {elapsed} 秒 · {message}")
+                }
+                Some("cancelled") if cancellation_warning => {
+                    tracing::warn!(task_id=%context.id,"[任务结束] {name} · 已停止，有提醒 · 耗时 {elapsed} 秒 · {message}")
                 }
                 Some("cancelled") => {
                     tracing::info!(task_id=%context.id,"[任务结束] {name} · 已停止 · 耗时 {elapsed} 秒 · {message}")

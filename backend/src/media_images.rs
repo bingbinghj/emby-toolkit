@@ -276,20 +276,26 @@ async fn submit(
             let item = details(&work, &id, "Type,Path,IndexNumber").await?;
             let (path, image_type) = destination(&item, &kind)?;
             if bytes.is_empty() {
-                let response = work
-                    .http
-                    .get(url)
-                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-                    .send()
-                    .await?
-                    .error_for_status()?;
-                content_type = response
-                    .headers()
-                    .get(header::CONTENT_TYPE)
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("")
-                    .into();
-                bytes = response.bytes().await?.to_vec();
+                let download = async {
+                    let response = work
+                        .http
+                        .get(url)
+                        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+                        .send()
+                        .await?
+                        .error_for_status()?;
+                    let kind = response
+                        .headers()
+                        .get(header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    Ok::<_, ApiError>((kind, response.bytes().await?.to_vec()))
+                };
+                (content_type, bytes) = tokio::select! {
+                    _=context.cancelled()=>{context.checkpoint().await?;unreachable!()},
+                    result=download=>result?,
+                };
             }
             if content_type.is_empty() {
                 content_type = if path.extension().is_some_and(|s| s == "png") {
@@ -301,6 +307,8 @@ async fn submit(
             }
             let stage =
                 path.with_file_name(format!(".etk-image-{}", uuid::Uuid::new_v4().simple()));
+            let finishing = crate::jobs::JobContext::for_recovery(Some(&context)).await;
+            context.checkpoint().await?;
             tokio::fs::write(&stage, &bytes).await?;
             tokio::fs::rename(stage, &path).await?;
             let config = work.config.read().await.clone();
@@ -311,24 +319,39 @@ async fn submit(
             let key = string(&config, "emby_api_key");
             let _ = crate::emby::send(work.http.delete(&url).header("X-Emby-Token", &key)).await;
             let mut success = false;
+            let mut failures = vec![];
             for body in [bytes.clone(), STANDARD.encode(bytes).into_bytes()] {
-                let response = crate::emby::send(
+                match crate::emby::send(
                     work.http
                         .post(&url)
                         .header("X-Emby-Token", &key)
                         .header(header::CONTENT_TYPE, &content_type)
                         .body(body),
                 )
-                .await?;
-                if response.status().is_success() {
-                    success = true;
-                    break;
+                .await {
+                    Ok(response) if response.status().is_success() => {
+                        success = true;
+                        break;
+                    }
+                    Ok(response) => failures.push(format!("上传请求返回 HTTP {}", response.status())),
+                    Err(error) => {
+                        let status = error.status();
+                        tracing::warn!(error=%error.without_url(), "图片上传请求未成功，继续备用上传及刷新收尾");
+                        failures.push(status.map_or_else(
+                            || "图片上传请求失败，无法访问上游服务".into(),
+                            |status| format!("上传请求失败：HTTP {status}"),
+                        ));
+                    }
                 }
             }
-            crate::emby::refresh_item(&work, &id, false, &context).await?;
+            let refreshed = crate::emby::refresh_item(&work, &id, false, &finishing).await;
             if !success {
-                return Err(ApiError::bad("图片已保存，但上传Emby失败"));
+                if let Err(error) = refreshed {
+                    failures.push(format!("本地图片刷新未确认：{}", error.1));
+                }
+                return Err(ApiError::bad(format!("图片已保存，但上传Emby失败：{}", failures.join("；"))));
             }
+            refreshed?;
             Ok(json!({"message":format!("{kind} 替换成功！")}))
         })
         .await?;

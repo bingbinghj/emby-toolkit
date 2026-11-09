@@ -17,6 +17,34 @@ use std::{
 };
 use tokio::sync::Mutex;
 
+// The native library generates GUIDs from UTF-16LE type name + filesystem path.
+fn native_guid(path: &std::path::Path, item_type: &str) -> String {
+    use md5::{Digest, Md5};
+    let item_type = match item_type {
+        "Movie" => "MediaBrowser.Controller.Entities.Movies.Movie",
+        "Episode" => "MediaBrowser.Controller.Entities.TV.Episode",
+        "Audio" => "MediaBrowser.Controller.Entities.Audio.Audio",
+        other => panic!("unsupported fixture type {other}"),
+    };
+    let bytes = format!("{item_type}{}", path.display())
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    uuid::Uuid::from_bytes_le(Md5::digest(bytes).into()).to_string()
+}
+
+fn native_item_id_matches(item: &Value, id: &str) -> bool {
+    item["Id"] == id
+        || uuid::Uuid::parse_str(id)
+            .is_ok_and(|guid| uuid::Uuid::parse_str(item["Guid"].as_str().unwrap()) == Ok(guid))
+}
+
+fn api_item(mut item: Value) -> Value {
+    // Emby 4.10.2 no longer includes Guid in movie/episode DTOs, even when requested.
+    item.as_object_mut().unwrap().remove("Guid");
+    item
+}
+
 #[derive(Clone)]
 struct Host {
     directory: PathBuf,
@@ -43,12 +71,35 @@ fn item_metadata_directory(host: &Host, item: &Value) -> PathBuf {
         .join(guid)
 }
 
+#[allow(dead_code)]
+async fn rekey_metadata(host: &Host, item: &mut Value, guid: String) {
+    let original = item_metadata_directory(host, item);
+    item["Guid"] = json!(guid);
+    let updated = item_metadata_directory(host, item);
+    if original != updated && original.is_dir() {
+        tokio::fs::create_dir_all(updated.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::rename(original, updated).await.unwrap();
+    }
+}
+
+#[allow(dead_code)]
+async fn update_native_guid(host: &Host, item: &mut Value) {
+    let guid = native_guid(
+        std::path::Path::new(item["Path"].as_str().unwrap()),
+        item["Type"].as_str().unwrap(),
+    );
+    rekey_metadata(host, item, guid).await;
+}
+
 fn chapter_image(host: &Host, item: &Value, chapter: &Value) -> PathBuf {
     item_metadata_directory(host, item)
         .join("chapters")
         .join(format!("{}.jpg", chapter["StartPositionTicks"]))
 }
 
+#[allow(dead_code)]
 fn local_bif(item: &Value) -> PathBuf {
     let path = std::path::Path::new(item["Path"].as_str().unwrap());
     path.parent().unwrap().join(format!(
@@ -57,6 +108,7 @@ fn local_bif(item: &Value) -> PathBuf {
     ))
 }
 
+#[allow(dead_code)]
 async fn seed_standard_bif(host: &Host, item: &Value) {
     // Independent golden writer for the native 64-byte BIF header and N+1 index.
     let frames = item["Chapters"]
@@ -249,7 +301,7 @@ async fn details(
         item["MediaStreams"][1]["Language"] = json!("chi");
         item["MediaSources"][0]["MediaStreams"][1]["Language"] = json!("chi");
     }
-    Json(item)
+    Json(api_item(item))
 }
 
 async fn clear(State(host): State<Host>) -> StatusCode {
@@ -405,7 +457,7 @@ impl Fixture {
             directory: directory.path().into(),
             metadata_root: directory.path().join("metadata"),
             item: Arc::new(Mutex::new(
-                json!({"Id":"61616","Guid":"00000000-0000-0000-0000-00000000f0b0","PresentationUniqueKey":"fixture-key-61616","Type":"Movie","Name":"迪迦奥特曼：最终圣战","Path":path,"Size":original[0]["MediaSourceInfo"]["Size"],"PartCount":1,"MediaStreams":streams,"MediaSources":[{"Id":"mediasource_61616","ItemId":"61616","Path":"/cd2/61616.mkv","MediaStreams":streams}],"Chapters":original[0]["Chapters"]}),
+                json!({"Id":"61616","Guid":native_guid(&path,"Movie"),"PresentationUniqueKey":"fixture-key-61616","Type":"Movie","Name":"迪迦奥特曼：最终圣战","Path":path,"Size":original[0]["MediaSourceInfo"]["Size"],"PartCount":1,"MediaStreams":streams,"MediaSources":[{"Id":"mediasource_61616","ItemId":"61616","Path":"/cd2/61616.mkv","MediaStreams":streams}],"Chapters":original[0]["Chapters"]}),
             )),
             settings: Arc::new(Mutex::new(original_settings.clone())),
             starts: Arc::default(),
@@ -425,9 +477,12 @@ impl Fixture {
         let api = Router::new()
             .route("/Users/user/Items/61616", get(details))
             .route("/Items", get(|State(host):State<Host>,Query(query):Query<HashMap<String,String>>|async move {
-                let items = if query.get("Path").is_some_and(|path| PathBuf::from(path) == host.directory) {
+                let items = if query.get("Path").is_some_and(|path| std::path::Path::new(path) == host.directory) {
                     vec![json!({"Id":"directory","IsFolder":true,"Path":host.directory})]
-                } else { vec![host.item.lock().await.clone()] };
+                } else {
+                    let item=host.item.lock().await.clone();
+                    if query.get("Ids").is_none_or(|ids| ids.split(',').any(|id| native_item_id_matches(&item,id))) { vec![api_item(item)] } else {vec![]}
+                };
                 Json(json!({"Items":items,"TotalRecordCount":items.len()}))
             }))
             .route("/Items/directory/Refresh", post(file_refresh))

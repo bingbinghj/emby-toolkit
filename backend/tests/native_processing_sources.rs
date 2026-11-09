@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     routing::{get, post},
 };
@@ -43,6 +43,8 @@ struct Host {
     items: Arc<Mutex<HashMap<String, Value>>>,
     reads: Arc<Mutex<Vec<String>>>,
     refreshes: Arc<Mutex<Vec<String>>>,
+    logs: Arc<Mutex<Vec<String>>>,
+    log_reads: Arc<Mutex<usize>>,
 }
 
 async fn run_audio(state: &AppState, ids: Option<Vec<String>>) -> Value {
@@ -109,7 +111,7 @@ async fn audio_scan_processes_each_legacy_native_version_without_modifying_files
         tokio::fs::write(&path, &playback).await.unwrap();
         let streams = json!([{"Type":"Video","Codec":"hevc"},{"Type":"Audio","Codec":"aac"}]);
         let source = json!({"Id":format!("mediasource_{id}"),"Path":playback,"Size":1000,"MediaStreams":streams});
-        items.insert(id.into(), json!({"Id":id,"Name":id,"Type":"Movie","Path":path,"Size":1000,"PartCount":1,"MediaStreams":streams,"DateLastRefreshed":"2026-11-08T00:00:00Z"}));
+        items.insert(id.into(), json!({"Id":id,"Name":id,"Type":"Movie","Path":path,"Size":1000,"PartCount":1,"MediaStreams":streams}));
         assets.push(json!({"emby_item_id":id,"path":path,"size_bytes":1000}));
         sources.push(source.clone());
         let info = json!([{"MediaSourceInfo":{"Path":playback,"Size":1000,"Container":"mkv","RunTimeTicks":600000000_u64,"MediaStreams":streams},"Chapters":[]}]);
@@ -128,6 +130,8 @@ async fn audio_scan_processes_each_legacy_native_version_without_modifying_files
         items: Arc::new(Mutex::new(items)),
         reads: Arc::default(),
         refreshes: Arc::default(),
+        logs: Arc::default(),
+        log_reads: Arc::default(),
     };
     let mock = Router::new()
         .route(
@@ -143,6 +147,19 @@ async fn audio_scan_processes_each_legacy_native_version_without_modifying_files
         )
         .route("/Library/VirtualFolders", get(|| async { Json(json!([])) }))
         .route(
+            "/System/Logs/embyserver.txt/Lines",
+            get(|State(host): State<Host>, Query(query): Query<HashMap<String, String>>| async move {
+                *host.log_reads.lock().await += 1;
+                let logs = host.logs.lock().await;
+                let items = if query.get("Limit").is_some_and(|limit| limit == "0") {
+                    vec![]
+                } else {
+                    logs.iter().rev().cloned().collect::<Vec<_>>()
+                };
+                Json(json!({"TotalRecordCount":logs.len(),"Items":items}))
+            }),
+        )
+        .route(
             "/ScheduledTasks",
             get(|| async {
                 Json(json!([{"Id":"scan","Name":"Scan media library","State":"Idle"}]))
@@ -153,8 +170,10 @@ async fn audio_scan_processes_each_legacy_native_version_without_modifying_files
             post(
                 |State(host): State<Host>, Path(id): Path<String>| async move {
                     host.refreshes.lock().await.push(id.clone());
-                    host.items.lock().await.get_mut(&id).unwrap()["DateLastRefreshed"] =
-                        json!("2026-11-08T00:00:01Z");
+                    host.logs.lock().await.extend([
+                        format!("Info ProviderManager: RefreshItem Start: {id} Movie"),
+                        format!("Info ProviderManager: RefreshItem Complete: {id} Movie"),
+                    ]);
                     StatusCode::NO_CONTENT
                 },
             ),
@@ -238,4 +257,15 @@ async fn audio_scan_processes_each_legacy_native_version_without_modifying_files
         "{reads:?}"
     );
     assert!(unchanged, "普通 AAC 音轨不得触发 JSON 修改");
+    assert!(
+        *host.log_reads.lock().await >= 2,
+        "刷新必须读取基线和完成日志"
+    );
+    assert!(
+        host.items
+            .lock()
+            .await
+            .values()
+            .all(|item| item.get("DateLastRefreshed").is_none())
+    );
 }

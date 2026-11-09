@@ -1,6 +1,6 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Request, State},
     http::StatusCode,
     routing::get,
 };
@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 struct NativeItems {
     items: Arc<Mutex<HashMap<String, Value>>>,
     reads: Arc<Mutex<Vec<String>>>,
+    unexpected: Arc<Mutex<Vec<String>>>,
 }
 
 struct Fixture {
@@ -60,6 +61,16 @@ impl Fixture {
                         }
                     },
                 ),
+            )
+            .fallback(
+                |State(host): State<NativeItems>, request: Request| async move {
+                    host.unexpected.lock().await.push(format!(
+                        "{} {}",
+                        request.method(),
+                        request.uri().path()
+                    ));
+                    StatusCode::NOT_FOUND
+                },
             )
             .with_state(host.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -150,6 +161,10 @@ async fn movie_local_playback_path_keeps_native_strm_and_titles_pass_readback() 
     assert_eq!(result["failed"], 0, "{result}");
     assert_eq!(result["verified_streams"], 1, "{result}");
     assert_eq!(result["pending"], json!([]), "{result}");
+    assert!(
+        f.host.unexpected.lock().await.is_empty(),
+        "matching titles require no plugin requests"
+    );
     f.close().await;
 }
 
@@ -202,6 +217,10 @@ async fn title_readback_accepts_empty_owner_but_never_another_legacy_version() {
             assert_eq!(refused["failed"], 1, "{refused}");
         }
     }
+    assert!(
+        f.host.unexpected.lock().await.is_empty(),
+        "matching or unsafe native sources require no plugin requests"
+    );
     f.close().await;
 }
 

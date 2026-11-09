@@ -163,15 +163,15 @@ pub async fn reprocess(
     if missing {
         return crate::ingest::feedback(state, id, &ids, true, context).await;
     }
+    let mut rebuild_warnings = 0_u64;
+    let mut rebuild_warning_details = vec![];
     if let Some(first) = rebuilt.keys().next() {
         let body = json!({"mediainfo":rebuilt[first],"target_item_ids":ids,"stream_patches":[]});
         let (status, result) =
             crate::media_save::save_with_rebuilt(state, first, &body, &rebuilt, context).await?;
-        if status >= 400 {
-            return Err(ApiError::bad(
-                result["error"].as_str().unwrap_or("重建媒体信息失败"),
-            ));
-        }
+        ensure_rebuild_completed(status, &result)?;
+        rebuild_warnings = result["warnings"].as_u64().unwrap_or(0);
+        rebuild_warning_details = crate::media_edit::list(&result["warning_details"]);
     }
     let item = series_parent(state, requested).await?;
     let episodes = if item["Type"] == "Series" {
@@ -179,8 +179,61 @@ pub async fn reprocess(
     } else {
         vec![]
     };
-    crate::ingest::scrape(state, &item, &episodes, None, context).await
+    let mut result = crate::ingest::scrape(state, &item, &episodes, None, context).await?;
+    if rebuild_warnings > 0 || !rebuild_warning_details.is_empty() {
+        result["warnings"] = json!(result["warnings"].as_u64().unwrap_or(0) + rebuild_warnings);
+        let mut details = crate::media_edit::list(&result["warning_details"]);
+        details.extend(rebuild_warning_details);
+        result["warning_details"] = json!(details);
+        result["message"] = json!(format!(
+            "{}；重建媒体信息有提醒，请查看处理详情",
+            string(&result, "message")
+        ));
+    }
+    Ok(result)
 }
+
+fn ensure_rebuild_completed(status: u16, result: &Value) -> Result<()> {
+    let mut failures = crate::media_edit::list(&result["failures"]);
+    let unconfirmed = matches!(
+        result["metadata_refresh"]["state"].as_str(),
+        Some("failed" | "unverified")
+    );
+    if status >= 400 || status == 207 || !failures.is_empty() || unconfirmed {
+        failures.extend(crate::media_edit::list(&result["warning_details"]));
+        failures.extend(crate::media_edit::list(
+            &result["metadata_refresh"]["failures"],
+        ));
+        let reason = if failures.is_empty() {
+            result["error"]
+                .as_str()
+                .or_else(|| result["message"].as_str())
+                .unwrap_or("请查看媒体信息恢复结果")
+                .to_string()
+        } else {
+            failures
+                .iter()
+                .map(|failure| {
+                    failure
+                        .as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| failure.to_string())
+                })
+                .collect::<Vec<_>>()
+                .join("；")
+        };
+        return Err(ApiError::bad(format!(
+            "重建媒体信息未全部完成（HTTP {status}）：{reason}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../tests/fixtures/action_reprocess_result.rs"]
+mod reprocess_regression;
+
 async fn series_parent(state: &AppState, mut item: Value) -> Result<Value> {
     for _ in 0..2 {
         if !matches!(item["Type"].as_str(), Some("Season" | "Episode")) {

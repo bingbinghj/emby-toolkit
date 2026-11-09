@@ -66,10 +66,14 @@ pub(crate) async fn verify_readback(
         if tokio::time::Instant::now() >= deadline {
             break;
         }
-        let read = tokio::time::timeout_at(
-            deadline,
-            crate::media_edit::details(state, id, "Id,Name,People"),
-        );
+        let read = tokio::time::timeout_at(deadline, async {
+            let mut live = crate::media_edit::details(state, id, "Id,Name,People").await?;
+            if expected.get("People").is_some() {
+                live["People"] =
+                    json!(complete_provider_ids(state, &list(&live["People"]), None).await?);
+            }
+            Ok::<_, ApiError>(live)
+        });
         let live = if let Some(context) = context {
             tokio::select! { _=context.cancelled()=>{context.checkpoint().await?;unreachable!()}, value=read=>value }
         } else {
@@ -286,13 +290,95 @@ pub async fn enrich_provider_ids(
             "[演员数据管家] 正在批量获取 {} 位演员的外部 ID...",
             pending.len()
         );
-        for person in crate::emby::by_ids(state, &pending, "ProviderIds", Some(context)).await? {
+        let missing = actors
+            .iter()
+            .filter(|person| pending.contains(&string(person, "Id")))
+            .cloned()
+            .collect::<Vec<_>>();
+        for person in complete_provider_ids(state, &missing, Some(context)).await? {
             if let Some(position) = positions.get(&string(&person, "Id")) {
                 actors[*position]["ProviderIds"] = person["ProviderIds"].clone();
             }
         }
     }
     Ok(actors)
+}
+
+// Media People entries omit ProviderIds; resolve native Person records without
+// changing names, roles, duplicate associations, or an already returned TMDb ID.
+pub(crate) async fn complete_provider_ids(
+    state: &AppState,
+    people: &[Value],
+    context: Option<&crate::jobs::JobContext>,
+) -> Result<Vec<Value>> {
+    let mut people = people.to_vec();
+    let ids = people
+        .iter()
+        .filter(|person| {
+            person["Type"] == "Actor" && string(&person["ProviderIds"], "Tmdb").is_empty()
+        })
+        .map(|person| string(person, "Id"))
+        .filter(|id| !id.is_empty())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    for batch in ids.chunks(100) {
+        if let Some(context) = context {
+            context.checkpoint().await?;
+        }
+        let query = [
+            ("Ids", batch.join(",")),
+            ("Fields", "Id,Type,ProviderIds".into()),
+            ("IncludeItemTypes", "Person".into()),
+        ];
+        let read = state.emby(reqwest::Method::GET, "Items", &query, None);
+        let response = if let Some(context) = context {
+            tokio::select! {
+                _=context.cancelled()=>{context.checkpoint().await?;unreachable!()},
+                result=read=>result,
+            }
+        } else {
+            read.await
+        }
+        .map_err(|error| {
+            ApiError(
+                error.0,
+                format!("演员 {} 的人物元数据回读失败：{}", batch.join(","), error.1),
+            )
+        })?;
+        let returned = response["Items"]
+            .as_array()
+            .ok_or_else(|| ApiError::bad("Emby 未返回有效人物列表，无法确认演员关联"))?;
+        for id in batch {
+            let matching = returned
+                .iter()
+                .filter(|person| person["Id"] == *id && person["Type"] == "Person")
+                .collect::<Vec<_>>();
+            if matching.len() != 1 {
+                return Err(ApiError::bad(format!(
+                    "Emby 未返回演员 {id} 的唯一人物记录，无法确认演员关联"
+                )));
+            }
+            if let Some(tmdb) = matching[0]["ProviderIds"]["Tmdb"]
+                .as_str()
+                .filter(|tmdb| !tmdb.is_empty())
+            {
+                for person in people.iter_mut().filter(|person| {
+                    person["Id"] == *id && string(&person["ProviderIds"], "Tmdb").is_empty()
+                }) {
+                    if person["ProviderIds"]
+                        .as_object()
+                        .is_none_or(|ids| ids.is_empty())
+                    {
+                        person["ProviderIds"] = matching[0]["ProviderIds"].clone();
+                    } else {
+                        person["ProviderIds"]["Tmdb"] = json!(tmdb);
+                    }
+                }
+            }
+        }
+    }
+    Ok(people)
 }
 async fn process_inner(
     state: &AppState,

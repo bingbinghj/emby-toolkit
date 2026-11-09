@@ -41,18 +41,12 @@ export default defineConfig({
         maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2,ttf,otf}'],
         navigateFallback: '/index.html',
+        importScripts: ['cleanup-api-cache.js'],
         runtimeCaching: [
           {
             urlPattern: /^https?:\/\/.*\/api\/.*/i,
-            handler: 'NetworkFirst',
-            options: {
-              cacheName: 'api-cache',
-              expiration: {
-                maxEntries: 50,
-                maxAgeSeconds: 60 * 60
-              },
-              networkTimeoutSeconds: 5
-            }
+            handler: 'NetworkOnly',
+            options: { fetchOptions: { cache: 'no-store' } },
           }
         ]
       }

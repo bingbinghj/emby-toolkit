@@ -208,7 +208,7 @@ const triggerRestart = async () => {
     if (error.response) {
       message.error(error.response.data.error || '发送重启请求失败，请查看日志。');
     } else {
-      message.success('重启指令已发送，应用正在后台重启。请稍后手动刷新页面。', { duration: 10000 });
+      message.warning('连接已中断，重启结果尚未确认。请稍后刷新页面检查。', { duration: 10000 });
     }
   }
 };

@@ -77,6 +77,10 @@ async fn verify_saved_target(state: &AppState, id: &str, snapshot: &Value) -> Re
     }
     Ok(live)
 }
+fn file_io_failure(error: &ApiError) -> bool {
+    error.0 == axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        && error.1 == "文件操作失败，请查看日志"
+}
 
 async fn title_readback_before_deadline<T>(
     deadline: tokio::time::Instant,
@@ -341,44 +345,63 @@ async fn fill_guarded(
         .join("backups/media-info-reload")
         .join(format!("titles-{}", uuid::Uuid::new_v4()));
     let mut warnings = vec![];
-    let outcome = crate::strm::with_settings_guarded(
+    let outcome = fill_inner(
         state,
-        "restore_media_info",
-        || {
-            fill_inner(
+        ids,
+        skip_chinese,
+        Some(context),
+        Some(async {
+            warnings = crate::media_save::reload_filled_titles(
                 state,
                 ids,
                 skip_chinese,
-                Some(context),
-                Some(async {
-                    warnings = crate::media_save::reload_filled_titles(
-                        state,
-                        ids,
-                        skip_chinese,
-                        context,
-                        &confirmed,
-                        &recovery,
-                    )
-                    .await?;
-                    Ok(())
-                }),
-                false,
+                context,
+                &confirmed,
+                &recovery,
             )
-        },
-        &confirmed,
-        &recovery,
+            .await?;
+            Ok(())
+        }),
+        Some((&confirmed, &recovery)),
     )
     .await;
+    let mut cleanup_warning = None;
     if confirmed.load(Ordering::Acquire)
         && !outcome.as_ref().is_err_and(|error| {
             error.0 == axum::http::StatusCode::CONFLICT && error.1 != "任务已取消"
         })
     {
-        let _ = tokio::fs::remove_dir_all(&recovery).await;
+        match tokio::fs::remove_dir_all(&recovery).await {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => {
+                let warning = format!(
+                    "ETK 标题恢复暂存文件清理失败：{error}；仍保留：{}",
+                    recovery.display()
+                );
+                tracing::warn!("[语言标题收尾] {warning}");
+                cleanup_warning = Some(warning);
+            }
+        }
     }
-    let mut report = outcome?;
+    warnings.extend(cleanup_warning);
+    let mut report = outcome.map_err(|error| {
+        let mut reason = error.1;
+        if !warnings.is_empty() {
+            reason.push_str(&format!("；{}", warnings.join("；")));
+        }
+        if context.is_cancelled() && !confirmed.load(Ordering::Acquire) {
+            reason.push_str(&format!("；恢复备份仍保留：{}", recovery.display()));
+        }
+        ApiError(error.0, reason)
+    })?;
     if !warnings.is_empty() {
         report["completed"] = json!(false);
+        report["warnings"] =
+            json!(report["warnings"].as_u64().unwrap_or(0) + warnings.len() as u64);
+        let mut details = list(&report["warning_details"]);
+        details.extend(warnings.iter().map(|warning| json!(warning)));
+        report["warning_details"] = json!(details);
         report["pending"]
             .as_array_mut()
             .unwrap()
@@ -393,7 +416,9 @@ pub async fn fill_in_job_with_refresh(
     context: &JobContext,
     refresh: impl std::future::Future<Output = Result<()>>,
 ) -> Result<Value> {
-    fill_inner(state, ids, skip_chinese, Some(context), Some(refresh), true).await
+    // The webhook caller already holds the protection guard and must refresh
+    // even when every local title is unchanged.
+    fill_inner(state, ids, skip_chinese, Some(context), Some(refresh), None).await
 }
 async fn fill_inner(
     state: &AppState,
@@ -401,8 +426,9 @@ async fn fill_inner(
     skip_chinese: bool,
     context: Option<&JobContext>,
     refresh: Option<impl std::future::Future<Output = Result<()>>>,
-    final_refresh: bool,
+    guard: Option<(&std::sync::atomic::AtomicBool, &Path)>,
 ) -> Result<Value> {
+    let final_refresh = guard.is_none();
     let config = state.config.read().await.clone();
     let root = tokio::fs::canonicalize(string(&config, "local_strm_root"))
         .await
@@ -416,7 +442,7 @@ async fn fill_inner(
                 .map(|id| json!({"item_id":id,"reason":"媒体信息目录不可读写"}))
                 .collect::<Vec<_>>()
         );
-        if let Some(refresh) = refresh {
+        if final_refresh && let Some(refresh) = refresh {
             refresh.await?;
         }
         log_report(&result);
@@ -425,7 +451,7 @@ async fn fill_inner(
     let mappings = match crate::db::setting(&state.db, "language_mapping").await {
         Ok(mappings) => mappings.unwrap_or(json!([])),
         Err(error) => {
-            if let Some(refresh) = refresh {
+            if final_refresh && let Some(refresh) = refresh {
                 result["failed"] = json!(1);
                 result["pending"] = json!([{"reason":error.1}]);
                 refresh.await?;
@@ -439,6 +465,7 @@ async fn fill_inner(
     let mut processed = HashSet::new();
     let mut queued = BTreeMap::new();
     let mut snapshots = BTreeMap::new();
+    let mut writes = BTreeMap::new();
     let mut safety_error = None;
     for id in ids.iter().collect::<BTreeSet<_>>() {
         checkpoint(context).await?;
@@ -449,8 +476,6 @@ async fn fill_inner(
         }
         result["scanned"] = json!(result["scanned"].as_u64().unwrap() + 1);
         let mut pending = vec![];
-        let mut changed = 0;
-        let mut changed_languages = 0;
         let mut unsafe_target = false;
         let mut label = format!("媒体ID：{id}");
         let outcome = async {
@@ -509,19 +534,7 @@ async fn fill_inner(
                     preserve_skipped_titles(&mut updated, &item, &source_paths, &skipped).inspect_err(|_| unsafe_target = true)?;
                 }
                 if updated != original {
-                    if let Some(context) = context {
-                        context.activity("保存语言和标题", &format!("正在保存 {label} 的本地媒体信息，本次规范化 {count} 条轨道语言和标题")).await;
-                    }
-                    verify_saved_target(state, id, &snapshot).await.inspect_err(|_| unsafe_target = true)?;
-                    atomic(state, &path, &updated).await?;
-                    changed = count;
-                    changed_languages = report["changed_languages"].as_u64().unwrap_or(0);
-                    if let Some(sha) = &target.sha
-                        && let Err(error) = sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2) ON CONFLICT(sha1) DO UPDATE SET mediainfo_json=EXCLUDED.mediainfo_json")
-                            .bind(sha.to_uppercase()).bind(&updated).execute(&state.db).await {
-                            tracing::warn!("[语言标题] {label} 本地 JSON 已保存，缓存同步失败：{error}");
-                            pending.push(annotate(json!({"reason":"本地 JSON 已保存，媒体信息缓存同步失败，请查看日志"})));
-                    }
+                    writes.insert(id.clone(), json!({"info":updated,"changed":count,"changed_languages":report["changed_languages"],"label":label}));
                 }
                 expected = Some(titles);
                 break;
@@ -540,11 +553,6 @@ async fn fill_inner(
             queued.insert(id.clone(), json!({"media_path":target.path,"strm_source":strm_source,"expected":expected.into_iter().map(annotate).collect::<Vec<_>>(),"label":label}));
             Ok((false, 0))
         }.await;
-        result["changed_items"] =
-            json!(result["changed_items"].as_u64().unwrap() + u64::from(changed > 0));
-        result["changed_streams"] = json!(result["changed_streams"].as_u64().unwrap() + changed);
-        result["changed_languages"] =
-            json!(result["changed_languages"].as_u64().unwrap() + changed_languages);
         match outcome {
             Ok((skipped, verified)) => {
                 result["skipped"] = json!(result["skipped"].as_u64().unwrap() + u64::from(skipped));
@@ -571,37 +579,132 @@ async fn fill_inner(
         result["pending"].as_array_mut().unwrap().extend(pending);
         checkpoint(context).await?;
     }
-    if final_refresh && let Some(error) = safety_error {
-        log_report(&result);
-        return Err(error);
-    }
-    if !queued.is_empty() || final_refresh {
-        checkpoint(context).await?;
-        if let Some(context) = context {
-            context
-                .activity(
-                    "提交媒体信息文件刷新",
-                    &format!(
-                        "汇总 {} 个媒体项目的文件变更并通知 Emby 重新读取",
-                        queued.len()
-                    ),
-                )
-                .await;
+    if let Some(error) = safety_error {
+        if final_refresh {
+            log_report(&result);
+            return Err(error);
         }
-        let paths = queued
-            .values()
-            .map(|input| string(input, "media_path"))
-            .collect::<Vec<_>>();
-        let directories = paths
-            .iter()
-            .filter_map(|path| Path::new(path).parent())
-            .collect::<BTreeSet<_>>();
-        let notified = async {
+        writes.clear();
+        queued.clear();
+        result["refresh_state"] = json!("failed");
+    }
+    // Analysis is read-only. Validate the complete batch before requesting
+    // plugin protection or committing its first JSON.
+    if !writes.is_empty() || !queued.is_empty() {
+        for (id, snapshot) in &snapshots {
+            checkpoint(context).await?;
+            let checked = async {
+                verify_saved_target(state, id, snapshot).await?;
+                let path = Path::new(snapshot["json_path"].as_str().unwrap());
+                let current: Value = serde_json::from_slice(&tokio::fs::read(path).await?)
+                    .map_err(|_| ApiError::bad("媒体信息 JSON 无效"))?;
+                if current != snapshot["info"] {
+                    return Err(ApiError::bad(
+                        "本地媒体信息 JSON 在准备期间变化，未保存或刷新",
+                    ));
+                }
+                Ok::<_, ApiError>(())
+            }
+            .await;
+            if let Err(error) = checked {
+                // The externally guarded webhook still owes its final refresh
+                // after ordinary file I/O errors, but never after identity drift.
+                if final_refresh && file_io_failure(&error) {
+                    continue;
+                }
+                result["failed"] = json!(result["failed"].as_u64().unwrap() + 1);
+                result["pending"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"item_id":id,"reason":error.1}));
+                if final_refresh {
+                    return Err(error);
+                }
+                writes.clear();
+                queued.clear();
+                result["refresh_state"] = json!("failed");
+                break;
+            }
+        }
+    }
+    let needs_guard = !writes.is_empty() || !queued.is_empty();
+    let finish = Box::pin(async {
+        let mut failed_writes = BTreeSet::new();
+        for (id, write) in writes {
+            checkpoint(context).await?;
+            let snapshot = &snapshots[&id];
+            let mut unsafe_write = false;
+            let committed = async {
+            let live = verify_saved_target(state, &id, snapshot).await.inspect_err(|error| unsafe_write = !file_io_failure(error))?;
+            let path = Path::new(snapshot["json_path"].as_str().unwrap());
+            let original: Value = serde_json::from_slice(&tokio::fs::read(path).await?)
+                .map_err(|_| ApiError::bad("媒体信息 JSON 无效"))?;
+            if original != snapshot["info"] {
+                unsafe_write = true;
+                return Err(ApiError::bad("本地媒体信息 JSON 在提交前变化，未覆盖用户新文件"));
+            }
+            let mut updated = write["info"].clone();
+            if queued.contains_key(&id) {
+                let paths = [snapshot["media_path"].as_str().unwrap_or(""), snapshot["source"].as_str().unwrap_or("")];
+                preserve_skipped_titles(&mut updated, &live, &paths, &list(&snapshot["skipped"]))
+                    .inspect_err(|_| unsafe_write = true)?;
+            }
+            if let Some(context) = context {
+                context.activity("保存语言和标题", &format!("正在保存 {} 的本地媒体信息，本次规范化 {} 条轨道语言和标题", string(&write, "label"), write["changed"])).await;
+            }
+            atomic(state, path, &updated).await?;
+            result["changed_items"] = json!(result["changed_items"].as_u64().unwrap() + u64::from(write["changed"].as_u64().unwrap_or(0) > 0));
+            result["changed_streams"] = json!(result["changed_streams"].as_u64().unwrap() + write["changed"].as_u64().unwrap_or(0));
+            result["changed_languages"] = json!(result["changed_languages"].as_u64().unwrap() + write["changed_languages"].as_u64().unwrap_or(0));
+            if let Some(sha) = snapshot["sha1"].as_str()
+                && let Err(error) = sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2) ON CONFLICT(sha1) DO UPDATE SET mediainfo_json=EXCLUDED.mediainfo_json")
+                    .bind(sha.to_uppercase()).bind(&updated).execute(&state.db).await {
+                tracing::warn!("[语言标题] 本地 JSON 已保存，缓存同步失败：{error}");
+                result["pending"].as_array_mut().unwrap().push(json!({"item_id":id,"reason":"本地 JSON 已保存，媒体信息缓存同步失败，请查看日志"}));
+            }
+            Ok::<_, ApiError>(())
+        }.await;
+            if let Err(error) = committed {
+                failed_writes.insert(id.clone());
+                result["failed"] = json!(result["failed"].as_u64().unwrap() + 1);
+                result["pending"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"item_id":id,"reason":format!("标题填充失败: {}", error.1)}));
+                queued.remove(&id);
+                if final_refresh && unsafe_write {
+                    return Err(error);
+                }
+            }
+        }
+        if !queued.is_empty() || final_refresh {
+            checkpoint(context).await?;
+            if let Some(context) = context {
+                context
+                    .activity(
+                        "提交媒体信息文件刷新",
+                        &format!(
+                            "汇总 {} 个媒体项目的文件变更并通知 Emby 重新读取",
+                            queued.len()
+                        ),
+                    )
+                    .await;
+            }
+            let paths = queued
+                .values()
+                .map(|input| string(input, "media_path"))
+                .collect::<Vec<_>>();
+            let directories = paths
+                .iter()
+                .filter_map(|path| Path::new(path).parent())
+                .collect::<BTreeSet<_>>();
+            let notified = async {
             if !final_refresh && result["failed"].as_u64().unwrap_or(0) > 0 {
                 return Err(ApiError::bad("批次存在未能安全保存的目标，已停止通知Emby"));
             }
             for (id, snapshot) in &snapshots {
                 checkpoint(context).await?;
+                if failed_writes.contains(id) { continue; }
                 let live = verify_saved_target(state, id, snapshot).await?;
                 if !final_refresh && !Path::new(snapshot["media_path"].as_str().unwrap_or("")).parent().is_some_and(|parent| directories.contains(parent)) {
                     continue;
@@ -628,7 +731,10 @@ async fn fill_inner(
             // A later target can change an earlier target while the batch is prepared.
             for (id, snapshot) in &snapshots {
                 checkpoint(context).await?;
-                verify_saved_target(state, id, snapshot).await?;
+                match verify_saved_target(state, id, snapshot).await {
+                    Err(error) if final_refresh && failed_writes.contains(id) && file_io_failure(&error) => (),
+                    outcome => { outcome?; },
+                }
             }
             // The ingest refresh must read the already updated JSON, just like
             // the Python workflow. Confirm live titles only after it completes.
@@ -638,140 +744,154 @@ async fn fill_inner(
                 crate::media_save::refresh(state, &paths).await
             }
         }.await;
-        let notified = match notified {
-            Err(error) if final_refresh => return Err(error),
-            outcome => outcome,
-        };
-        checkpoint(context).await?;
-        let refresh_error = match notified {
-            Ok(()) => {
-                result["refresh_state"] = json!("submitted");
-                None
-            }
-            Err(error) => {
-                result["refresh_state"] = json!("failed");
-                Some(error.1)
-            }
-        };
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-        let mut remaining = queued.keys().cloned().collect::<BTreeSet<_>>();
-        let mut outcomes = BTreeMap::new();
-        if refresh_error.is_none() {
-            while !remaining.is_empty() && tokio::time::Instant::now() < deadline {
-                for id in remaining.clone() {
-                    if tokio::time::Instant::now() >= deadline {
+            let notified = match notified {
+                Err(error) if final_refresh => return Err(error),
+                outcome => outcome,
+            };
+            checkpoint(context).await?;
+            let refresh_error = match notified {
+                Ok(()) => {
+                    result["refresh_state"] = json!("submitted");
+                    None
+                }
+                Err(error) => {
+                    result["refresh_state"] = json!("failed");
+                    Some(error.1)
+                }
+            };
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            let mut remaining = queued.keys().cloned().collect::<BTreeSet<_>>();
+            let mut outcomes = BTreeMap::new();
+            if refresh_error.is_none() {
+                while !remaining.is_empty() && tokio::time::Instant::now() < deadline {
+                    for id in remaining.clone() {
+                        if tokio::time::Instant::now() >= deadline {
+                            break;
+                        }
+                        let input = &queued[&id];
+                        let expected = list(&input["expected"]);
+                        let source_paths = [
+                            input["media_path"].as_str().unwrap_or(""),
+                            input["strm_source"].as_str().unwrap_or(""),
+                        ];
+                        if let Some(context) = context {
+                            context
+                                .activity(
+                                    "语言和标题回读验收",
+                                    &format!(
+                                        "正在核对 {} 的实际音轨和字幕语言及标题",
+                                        string(input, "label")
+                                    ),
+                                )
+                                .await;
+                        }
+                        checkpoint(context).await?;
+                        let current = title_readback_before_deadline(
+                            deadline,
+                            verify_saved_target(state, &id, &snapshots[&id]),
+                        )
+                        .await
+                        .map(|live| mismatches(&expected, &live, &source_paths, &mappings));
+                        if current.as_ref().map_or(true, Vec::is_empty) {
+                            remaining.remove(&id);
+                        }
+                        outcomes.insert(id, current);
+                    }
+                    if remaining.is_empty() {
                         break;
                     }
-                    let input = &queued[&id];
-                    let expected = list(&input["expected"]);
-                    let source_paths = [
-                        input["media_path"].as_str().unwrap_or(""),
-                        input["strm_source"].as_str().unwrap_or(""),
-                    ];
+                    let delay = std::time::Duration::from_secs(1)
+                        .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
                     if let Some(context) = context {
-                        context
-                            .activity(
-                                "语言和标题回读验收",
-                                &format!(
-                                    "正在核对 {} 的实际音轨和字幕语言及标题",
-                                    string(input, "label")
-                                ),
-                            )
-                            .await;
+                        context.sleep(delay).await?;
+                    } else {
+                        tokio::time::sleep(delay).await;
                     }
-                    checkpoint(context).await?;
-                    let current = title_readback_before_deadline(
-                        deadline,
-                        verify_saved_target(state, &id, &snapshots[&id]),
-                    )
-                    .await
-                    .map(|live| mismatches(&expected, &live, &source_paths, &mappings));
-                    if current.as_ref().map_or(true, Vec::is_empty) {
-                        remaining.remove(&id);
-                    }
-                    outcomes.insert(id, current);
-                }
-                if remaining.is_empty() {
-                    break;
-                }
-                let delay = std::time::Duration::from_secs(1)
-                    .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
-                if let Some(context) = context {
-                    context.sleep(delay).await?;
-                } else {
-                    tokio::time::sleep(delay).await;
                 }
             }
-        }
-        for (id, input) in &queued {
-            let expected = list(&input["expected"]);
-            let readback = outcomes.remove(id).unwrap_or_else(|| {
-                Err(ApiError::bad(refresh_error.clone().unwrap_or_else(|| {
-                    "共享30秒标题回读期限已耗尽，该目标未完成回读，未继续请求Emby".into()
-                })))
-            });
-            match readback {
-                Ok(missing) if missing.is_empty() && refresh_error.is_none() => {
-                    result["verified_items"] =
-                        json!(result["verified_items"].as_u64().unwrap() + 1);
-                    result["verified_streams"] =
-                        json!(result["verified_streams"].as_u64().unwrap() + expected.len() as u64);
-                    if let Some(context) = context {
-                        context
-                            .activity(
-                                "语言和标题回读完成",
-                                &format!(
-                                    "{} 的 {} 条音轨和字幕已通过 Emby 语言和标题回读验收",
-                                    string(input, "label"),
-                                    expected.len()
-                                ),
-                            )
-                            .await;
-                    }
-                }
-                outcome => {
-                    result["failed"] = json!(result["failed"].as_u64().unwrap() + 1);
-                    let reason = match outcome {
-                        Ok(missing) if !missing.is_empty() => {
-                            result["pending"].as_array_mut().unwrap().extend(
-                                missing.into_iter().map(|mut entry| {
-                                    entry["reason"] = json!(format!(
-                                        "本地标题已保存，{}Emby 回读标题未一致：{}",
-                                        refresh_error
-                                            .as_ref()
-                                            .map(|error| format!(
-                                                "通知 Emby 重新读取失败（{error}）；"
-                                            ))
-                                            .unwrap_or_default(),
-                                        string(&entry, "reason")
-                                    ));
-                                    entry
-                                }),
-                            );
-                            None
+            for (id, input) in &queued {
+                let expected = list(&input["expected"]);
+                let readback = outcomes.remove(id).unwrap_or_else(|| {
+                    Err(ApiError::bad(refresh_error.clone().unwrap_or_else(|| {
+                        "共享30秒标题回读期限已耗尽，该目标未完成回读，未继续请求Emby".into()
+                    })))
+                });
+                match readback {
+                    Ok(missing) if missing.is_empty() && refresh_error.is_none() => {
+                        result["verified_items"] =
+                            json!(result["verified_items"].as_u64().unwrap() + 1);
+                        result["verified_streams"] = json!(
+                            result["verified_streams"].as_u64().unwrap() + expected.len() as u64
+                        );
+                        if let Some(context) = context {
+                            context
+                                .activity(
+                                    "语言和标题回读完成",
+                                    &format!(
+                                        "{} 的 {} 条音轨和字幕已通过 Emby 语言和标题回读验收",
+                                        string(input, "label"),
+                                        expected.len()
+                                    ),
+                                )
+                                .await;
                         }
-                        Err(error) => Some(format!(
-                            "本地标题已保存，文件刷新后回读验收失败：{}",
-                            error.1
-                        )),
-                        _ => refresh_error.clone().map(|error| {
-                            format!("本地标题已保存，但通知 Emby 重新读取失败：{error}")
-                        }),
-                    };
-                    if let Some(reason) = reason {
-                        result["pending"].as_array_mut().unwrap().push(json!({"item_id":id,"name":expected[0]["name"],"season":expected[0]["season"],"episode":expected[0]["episode"],"reason":reason}));
+                    }
+                    outcome => {
+                        result["failed"] = json!(result["failed"].as_u64().unwrap() + 1);
+                        let reason = match outcome {
+                            Ok(missing) if !missing.is_empty() => {
+                                result["pending"].as_array_mut().unwrap().extend(
+                                    missing.into_iter().map(|mut entry| {
+                                        entry["reason"] = json!(format!(
+                                            "本地标题已保存，{}Emby 回读标题未一致：{}",
+                                            refresh_error
+                                                .as_ref()
+                                                .map(|error| format!(
+                                                    "通知 Emby 重新读取失败（{error}）；"
+                                                ))
+                                                .unwrap_or_default(),
+                                            string(&entry, "reason")
+                                        ));
+                                        entry
+                                    }),
+                                );
+                                None
+                            }
+                            Err(error) => Some(format!(
+                                "本地标题已保存，文件刷新后回读验收失败：{}",
+                                error.1
+                            )),
+                            _ => refresh_error.clone().map(|error| {
+                                format!("本地标题已保存，但通知 Emby 重新读取失败：{error}")
+                            }),
+                        };
+                        if let Some(reason) = reason {
+                            result["pending"].as_array_mut().unwrap().push(json!({"item_id":id,"name":expected[0]["name"],"season":expected[0]["season"],"episode":expected[0]["episode"],"reason":reason}));
+                        }
                     }
                 }
             }
         }
+        result["completed"] = json!(
+            result["scanned"].as_u64().unwrap_or(0) > 0
+                && result["failed"].as_u64().unwrap_or(0) == 0
+                && list(&result["pending"]).is_empty()
+        );
+        log_report(&result);
+        Ok(result)
+    });
+    if let Some((confirmed, recovery)) = guard.filter(|_| needs_guard) {
+        crate::strm::with_settings_guarded(
+            state,
+            "restore_media_info",
+            || finish,
+            confirmed,
+            recovery,
+        )
+        .await
+    } else {
+        finish.await
     }
-    result["completed"] = json!(
-        result["scanned"].as_u64().unwrap_or(0) > 0
-            && result["failed"].as_u64().unwrap_or(0) == 0
-            && list(&result["pending"]).is_empty()
-    );
-    log_report(&result);
-    Ok(result)
 }
 fn log_report(report: &Value) {
     for entry in list(&report["pending"]) {

@@ -38,7 +38,14 @@ async fn record(state: &AppState, id: &str, item: &Value) -> Result<Value> {
     .await?
     .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "未找到媒体元数据缓存".into()))
 }
-async fn cast(state: &AppState, row: &Value, item: &Value) -> Result<Vec<Value>> {
+async fn cast(
+    state: &AppState,
+    row: &Value,
+    item: &mut Value,
+    context: Option<&JobContext>,
+) -> Result<Vec<Value>> {
+    item["People"] =
+        json!(crate::persons::complete_provider_ids(state, &list(&item["People"]), context).await?);
     let mut links = list(&row["actors_json"]);
     if links.is_empty() && row["item_type"] == "Season" {
         let rows:Vec<Value>=sqlx::query_scalar("SELECT actors_json FROM media_metadata WHERE parent_series_tmdb_id=$1 AND item_type='Episode' AND season_number=$2 AND actors_json IS NOT NULL ORDER BY episode_number").bind(string(row,"parent_series_tmdb_id")).bind(row["season_number"].as_i64().map(|n|n as i32)).fetch_all(&state.db).await?;
@@ -128,14 +135,14 @@ async fn edit_data(state: &AppState, id: &str) -> Result<Json<Value>> {
     let resolved = crate::orphans::current_id(state, id).await?;
     let original_id = id;
     let id = resolved.as_str();
-    let item = details(
+    let mut item = details(
         state,
         id,
         "Name,Type,ProviderIds,People,ImageTags,ProductionYear",
     )
     .await?;
     let row = record(state, id, &item).await?;
-    let actors = cast(state, &row, &item).await?;
+    let actors = cast(state, &row, &mut item, None).await?;
     let review: Option<Value> =
         sqlx::query_scalar("SELECT to_jsonb(f) FROM failed_log f WHERE item_id=$1")
             .bind(id)
@@ -181,7 +188,7 @@ async fn submit(
 }
 pub async fn save(state: &AppState, id: &str, body: &Value, context: &JobContext) -> Result<Value> {
     context.checkpoint().await?;
-    let item=details(state,id,"Id,Type,Name,Path,People,ProviderIds,Genres,ParentId,ParentIndexNumber,IndexNumber,SeriesId").await?;
+    let mut item=details(state,id,"Id,Type,Name,Path,People,ProviderIds,Genres,ParentId,ParentIndexNumber,IndexNumber,SeriesId").await?;
     let media_name = string(&item, "Name");
     tracing::info!(
         item_id = id,
@@ -191,7 +198,7 @@ pub async fn save(state: &AppState, id: &str, body: &Value, context: &JobContext
     let row = record(state, id, &item).await?;
     let kind = string(&row, "item_type");
     let tmdb = string(&row, "tmdb_id");
-    let original = cast(state, &row, &item).await?;
+    let original = cast(state, &row, &mut item, Some(context)).await?;
     let (payload, _) = crate::metadata::reconstruct_full(state, &tmdb, &kind, true)
         .await?
         .ok_or_else(|| ApiError::bad("缺失元数据缓存"))?;

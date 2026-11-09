@@ -7,6 +7,7 @@ use crate::{
     state::string,
 };
 use axum::http::StatusCode;
+use md5::{Digest, Md5};
 use reqwest::Method;
 use serde_json::{Value, json};
 use std::{
@@ -440,13 +441,73 @@ fn json_path(target: &SavedTarget, settings: &Value) -> Result<PathBuf> {
     )))
 }
 
-// Emby 4.10.2.0 BaseItem.GetInternalMetadataPath uses IdString = Guid.ToString("N").
-fn metadata_directory(root: &Path, item: &Value) -> Result<PathBuf> {
-    let guid = uuid::Uuid::parse_str(&string(item, "Guid"))
-        .map_err(|_| conflict("Emby 未返回有效 GUID，无法确认目标元数据目录，未清理媒体信息"))?
-        .simple()
-        .to_string();
-    Ok(root.join("library").join(&guid[..2]).join(guid))
+async fn metadata_directory(state: &AppState, root: &Path, item: &Value) -> Result<PathBuf> {
+    // 4.10.2 only exposes Guid for collection types. GetNewItemId hashes
+    // Type.FullName + Path as UTF-16LE, with optional case folding. A hash is
+    // only a candidate: resolve it through Emby before trusting its directory.
+    let type_name = match item["Type"].as_str() {
+        Some("Movie") => "MediaBrowser.Controller.Entities.Movies.Movie",
+        Some("Episode") => "MediaBrowser.Controller.Entities.TV.Episode",
+        Some("Video") => "MediaBrowser.Controller.Entities.Video",
+        Some("MusicVideo") => "MediaBrowser.Controller.Entities.MusicVideo",
+        Some("Audio") => "MediaBrowser.Controller.Entities.Audio.Audio",
+        _ => return Err(conflict("无法确认目标媒体类型，未清理媒体信息")),
+    };
+    let mut candidates = vec![];
+    if let Ok(guid) = uuid::Uuid::parse_str(&string(item, "Guid")) {
+        candidates.push(guid);
+    }
+    let path = string(item, "Path");
+    for path in [path.clone(), path.to_lowercase()] {
+        let key = format!("{type_name}{path}");
+        let bytes = key
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>();
+        let guid = uuid::Uuid::from_bytes_le(Md5::digest(bytes).into());
+        if !candidates.contains(&guid) {
+            candidates.push(guid);
+        }
+    }
+    let user = string(&*state.config.read().await, "emby_user_id");
+    for guid in candidates {
+        let guid = guid.simple().to_string();
+        let response = state
+            .emby(
+                Method::GET,
+                "Items",
+                &[
+                    ("Ids", guid.clone()),
+                    ("UserId", user.clone()),
+                    ("Fields", "Path".into()),
+                ],
+                None,
+            )
+            .await?;
+        let items = response["Items"]
+            .as_array()
+            .ok_or_else(|| conflict("Emby 未返回有效 GUID 查找结果，未清理媒体信息"))?;
+        if items.is_empty() {
+            continue;
+        }
+        if items.len() != 1
+            || ["Id", "Path", "Type"]
+                .iter()
+                .any(|key| items[0][*key] != item[*key])
+        {
+            return Err(conflict(
+                "目标 GUID 回读的媒体 ID、路径或类型不一致，未清理媒体信息",
+            ));
+        }
+        tracing::debug!(
+            "[媒体信息重载] 媒体ID {} 的元数据 GUID 已通过原生回读核对",
+            item["Id"]
+        );
+        return Ok(root.join("library").join(&guid[..2]).join(guid));
+    }
+    Err(conflict(
+        "目标 GUID 未能通过原生回读核对，无法确认元数据目录，未清理媒体信息",
+    ))
 }
 
 async fn restore_json(path: &Path, backup: &Path) -> Result<()> {
@@ -747,24 +808,29 @@ pub(crate) async fn reload(
     for target in &affected {
         context.checkpoint().await?;
         let live = &observations[&target.id];
+        let directory =
+            if clear_ids.contains(&target.id) || live["Type"] != "Audio" && root.is_some() {
+                Some(metadata_directory(state, root.as_ref().unwrap(), live).await?)
+            } else {
+                None
+            };
         if clear_ids.contains(&target.id) {
-            let directory = metadata_directory(root.as_ref().unwrap(), live)?;
-            if recovery.starts_with(&directory) {
+            let directory = directory.as_ref().unwrap();
+            if recovery.starts_with(directory) {
                 return Err(conflict(
                     "恢复备份目录位于被清理的目标元数据目录内，未清理媒体信息",
                 ));
             }
-            snapshot_directory(&directory, recovery, &mut files, &target.id).await?;
+            snapshot_directory(directory, recovery, &mut files, &target.id).await?;
             writable_parent(&directory.join(".etk-restore-check")).await?;
             snapshot_local_bif(target, recovery, &mut files).await?;
         }
         if live["Type"] != "Audio"
-            && let Some(root) = &root
+            && let Some(directory) = &directory
         {
-            let directory = metadata_directory(root, live)?;
             let bridge = tokio::select! {
                 _=context.cancelled()=>{context.checkpoint().await?;unreachable!()},
-                result=crate::chapter_bif::prepare(state,target,live,&directory,recovery)=>result?,
+                result=crate::chapter_bif::prepare(state,target,live,directory,recovery)=>result?,
             };
             if let Some(bridge) = bridge {
                 writable_parent(&bridge.destination).await?;

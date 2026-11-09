@@ -241,6 +241,9 @@
                             </n-form-item>
                           </div>
                         </div>
+                        <n-alert v-if="actor.matchStatus === '翻译未完成' || actor.translationWarning" type="warning" title="翻译未完成" style="margin-top: 12px;">
+                          {{ actor.translationWarning || '姓名或角色尚未翻译完成，请检查后再保存。' }}
+                        </n-alert>
                       </n-card>
                     </div>
                   </template>
@@ -2335,6 +2338,11 @@ const selectActor = (actor) => {
 };
 
 const translateAllFields = async () => {
+  if (isTranslating.value) return;
+  const targetId = String(itemId.value || '');
+  const requestedItem = itemDetails.value;
+  const castSnapshot = JSON.stringify(editableCast.value);
+  isTranslating.value = true;
   try {
     const payload = {
       cast: editableCast.value,
@@ -2344,6 +2352,11 @@ const translateAllFields = async () => {
     };
 
     const response = await axios.post('/api/actions/translate_cast_sa', payload);
+    if (targetId !== String(itemId.value || '') || requestedItem !== itemDetails.value) return;
+    if (castSnapshot !== JSON.stringify(editableCast.value)) {
+      message.warning('翻译期间演员列表已修改，已保留当前草稿，请确认后重新翻译。');
+      return;
+    }
     const translatedList = response.data;
 
     editableCast.value = translatedList.map((actor, index) => ({
@@ -2351,7 +2364,15 @@ const translateAllFields = async () => {
       _temp_id: `translated-actor-${Date.now()}-${index}`
     }));
 
-    message.success("智能翻译完成！");
+    const incomplete = editableCast.value.filter(actor => actor.matchStatus === '翻译未完成' || actor.translationWarning);
+    if (editableCast.value.some(actor => actor.matchStatus === 'AI未启用')) {
+      message.warning('AI 翻译未启用，已保留原演员数据，请先开启 AI 翻译。');
+    } else if (incomplete.length) {
+      const reasons = [...new Set(incomplete.map(actor => actor.translationWarning).filter(Boolean))];
+      message.warning([`${incomplete.length} 位演员的姓名或角色翻译未完成，已保留取得的译文`, ...reasons].join('；'), { duration: 8000 });
+    } else {
+      message.success("智能翻译完成！");
+    }
 
   } catch (error) {
     console.error("一键翻译失败:", error);

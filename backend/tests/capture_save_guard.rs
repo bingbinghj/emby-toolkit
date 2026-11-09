@@ -18,6 +18,22 @@ use std::{
 };
 use tokio::sync::{Mutex, Notify};
 
+fn native_guid(path: &std::path::Path) -> String {
+    use md5::{Digest, Md5};
+    let bytes = format!(
+        "MediaBrowser.Controller.Entities.TV.Episode{}",
+        path.display()
+    )
+    .encode_utf16()
+    .flat_map(u16::to_le_bytes)
+    .collect::<Vec<_>>();
+    uuid::Uuid::from_bytes_le(Md5::digest(bytes).into()).to_string()
+}
+fn api_item(mut item: Value) -> Value {
+    item.as_object_mut().unwrap().remove("Guid");
+    item
+}
+
 #[derive(Clone)]
 struct Host {
     item: Arc<Mutex<Value>>,
@@ -88,11 +104,24 @@ async fn api(State(host): State<Host>, request: Request<Body>) -> Response {
                     return StatusCode::BAD_REQUEST.into_response();
                 }
             }
-            return Json(host.item.lock().await.clone()).into_response();
+            return Json(api_item(host.item.lock().await.clone())).into_response();
         }
         if path == "/Items" {
-            return Json(json!({"Items":[host.item.lock().await.clone()],"TotalRecordCount":1}))
-                .into_response();
+            let item = host.item.lock().await.clone();
+            let matches = query.get("Ids").is_none_or(|ids| {
+                ids.split(',').any(|id| {
+                    item["Id"] == id
+                        || uuid::Uuid::parse_str(id).is_ok_and(|guid| {
+                            uuid::Uuid::parse_str(item["Guid"].as_str().unwrap()) == Ok(guid)
+                        })
+                })
+            });
+            let items = if matches {
+                vec![api_item(item)]
+            } else {
+                vec![]
+            };
+            return Json(json!({"Items":items,"TotalRecordCount":items.len()})).into_response();
         }
         if path == "/Items/e1/ThumbnailSet" {
             return Json(json!({"Thumbnails":[]})).into_response();
@@ -293,7 +322,7 @@ impl Fixture {
         let original_settings = json!({"ExclusiveControlFeatures":"CatchAllBlock,ExtractOnFileChange,Custom","EnableImageCapture":false,"PersistMediaInfoMode":"Default","LibraryScope":"library","MediaInfoJsonRootFolder":"","MediaInfoExtractionTimeoutMs":1000,"ImageExtractionTimeoutMultiplier":1});
         let host = Host {
             item: Arc::new(Mutex::new(
-                json!({"Id":"e1","Guid":uuid::Uuid::from_u128(1).to_string(),"PresentationUniqueKey":"episode-e1","Type":"Episode","Name":"分集","IndexNumber":1,"ParentIndexNumber":1,"Path":path,"Size":1000,"PartCount":1,"MediaStreams":streams,"MediaSources":[{"Id":"mediasource_e1","ItemId":"e1","Path":"/cloud/e1.mkv","MediaStreams":streams}],"Chapters":original[0]["Chapters"],"ImageTags":{"Primary":"old-picture"}}),
+                json!({"Id":"e1","Guid":native_guid(&path),"PresentationUniqueKey":"episode-e1","Type":"Episode","Name":"分集","IndexNumber":1,"ParentIndexNumber":1,"Path":path,"Size":1000,"PartCount":1,"MediaStreams":streams,"MediaSources":[{"Id":"mediasource_e1","ItemId":"e1","Path":"/cloud/e1.mkv","MediaStreams":streams}],"Chapters":original[0]["Chapters"],"ImageTags":{"Primary":"old-picture"}}),
             )),
             settings: Arc::new(Mutex::new(original_settings.clone())),
             writes: Arc::default(),
@@ -483,6 +512,13 @@ async fn restoration_readback_failure_keeps_restore_guard_and_backups() {
             .contains("IgnoreFileChange")
     );
     assert!(media_pending && capture_backup);
+    let reason = result["result"]["error"].as_str().unwrap();
+    assert!(
+        reason.contains("HTTP 400")
+            && reason.contains("/Users/user/Items/e1")
+            && reason.contains("恢复说明"),
+        "{reason}"
+    );
 }
 
 #[tokio::test]

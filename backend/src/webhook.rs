@@ -940,6 +940,7 @@ fn title_warning_detail(report: &Value) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod warning_tests {
     use super::*;
 

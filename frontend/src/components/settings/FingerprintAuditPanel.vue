@@ -18,6 +18,9 @@
           <div><dt>无法确认</dt><dd>{{ progress.counts.unknown }}</dd></div>
         </dl>
       </div>
+      <n-alert v-if="runFeedback" :type="runFeedback.type" :title="runFeedback.message">
+        <div v-for="detail in runFeedback.details" :key="detail">{{ detail }}</div>
+      </n-alert>
       <n-text v-if="progress?.report_error" type="error">{{ progress.report_error }}</n-text>
       <n-text depth="3">报告保存在 /config/fingerprint-scan-latest.json，只保留最新一份；可在 Web 查看原因分析、更新明细并再次补齐未确认项。后台任务支持暂停、继续和停止；停止或重启后可从保存的位置继续。</n-text>
     </n-space>
@@ -28,7 +31,7 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
-import { NButton, NCard, NSpace, NText, NProgress, useMessage } from 'naive-ui';
+import { NAlert, NButton, NCard, NSpace, NText, NProgress, useMessage } from 'naive-ui';
 import axios from 'axios';
 import FingerprintReport from './FingerprintReport.vue';
 
@@ -36,6 +39,7 @@ const props = defineProps({ running: Boolean, taskState: String });
 const message = useMessage();
 const progress = ref(null), loading = ref(false), busy = ref(false);
 const reportAvailable = ref(false), reportVisible = ref(false);
+const runFeedback = ref(null);
 let timer, sequence = 0;
 const stateLabel = computed(() => {
   if (progress.value?.state === 'running') {
@@ -62,9 +66,29 @@ async function run(mode, runId = progress.value?.run_id) {
   busy.value = true;
   try {
     const response = await axios.post('/api/tasks/fingerprint-scan', { mode, run_id: runId });
-    message.success(response.data.message);
+    const result = response.data || {};
+    const details = [...new Set([
+      ...(Array.isArray(result.failures) ? result.failures : []),
+      ...(Array.isArray(result.warning_details) ? result.warning_details : []),
+    ].map(detail => typeof detail === 'string' ? detail : [detail?.item_id, detail?.reason || detail?.error].filter(Boolean).join('：')).filter(Boolean))];
+    const unknown = Number(result.counts?.unknown || 0);
+    const failed = Number(result.failed) > 0 || (Array.isArray(result.failures) && result.failures.length > 0);
+    if (failed || response.status === 207 || Number(result.warnings) > 0 || unknown > 0 || details.length) {
+      if (!details.length) details.push(unknown > 0 ? `有 ${unknown} 项未确认，请查看扫描报告中的原因。` : '处理结果有提醒，请查看扫描报告。');
+      runFeedback.value = { type: failed ? 'error' : 'warning', message: result.error || result.message || '指纹扫描有未确认项', details };
+      message[runFeedback.value.type]([runFeedback.value.message, ...details].join('；'), { duration: 8000 });
+    } else {
+      runFeedback.value = null;
+      message.success(result.message || '指纹扫描已完成');
+    }
     await load();
-  } catch (error) { message.error(error.response?.data?.error || '提交扫描任务失败'); }
+  } catch (error) {
+    const result = error.response?.data || {};
+    const reason = result.error || '提交扫描任务失败';
+    const details = (Array.isArray(result.failures) ? result.failures : []).map(detail => typeof detail === 'string' ? detail : [detail?.item_id, detail?.reason || detail?.error].filter(Boolean).join('：')).filter(Boolean);
+    runFeedback.value = { type: 'error', message: reason, details };
+    message.error([reason, ...details].join('；'));
+  }
   finally { busy.value = false; }
 }
 watch(() => props.running, load);

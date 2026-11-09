@@ -1,5 +1,5 @@
 use crate::{
-    AppState, emby,
+    AppState,
     error::{ApiError, Result},
     media_edit, media_info, media_paths,
     state::string,
@@ -33,6 +33,64 @@ pub fn asset_structure(asset: &Value) -> Option<Value> {
     let audio=asset["audio_tracks"].as_array()?.iter().map(|t|json!({"codec":t["codec"].as_str().filter(|s|!s.is_empty()).unwrap_or("未知编码").trim().to_lowercase(),"channels":t["channels"].as_i64().map(|n|n.to_string()).unwrap_or("未知声道".into()),"language":string(t,"language").trim().to_lowercase(),"title":string(t,"display_title").trim()})).collect::<Vec<_>>();
     let subtitles=asset["subtitles"].as_array()?.iter().map(|t|json!({"codec":t["format"].as_str().or_else(||t["codec"].as_str()).filter(|s|!s.is_empty()).unwrap_or("未知编码").trim().to_lowercase(),"external":null,"language":string(t,"language").trim().to_lowercase(),"title":string(t,"display_title").trim()})).collect::<Vec<_>>();
     Some(json!({"audio":audio,"subtitles":subtitles}))
+}
+async fn native_details(state: &AppState, ids: &[String]) -> Result<Vec<Value>> {
+    let mut native = vec![];
+    for batch in ids.chunks(100) {
+        let response = state
+            .emby(
+                reqwest::Method::GET,
+                "Items",
+                &[
+                    ("Ids", batch.join(",")),
+                    ("Fields", "Path,MediaSources".into()),
+                ],
+                None,
+            )
+            .await
+            .map_err(|error| {
+                ApiError(
+                    error.0,
+                    format!(
+                        "分集版本顺序回读失败（媒体 ID {}）：{}",
+                        batch.join(","),
+                        error.1
+                    ),
+                )
+            })?;
+        let items = response["Items"].as_array().ok_or_else(|| {
+            ApiError(
+                StatusCode::BAD_GATEWAY,
+                "分集版本顺序回读失败：Emby 未返回有效 Items 数组".into(),
+            )
+        })?;
+        let mut seen = HashSet::new();
+        for item in items {
+            let id = string(item, "Id");
+            if !batch.contains(&id) || !seen.insert(id) {
+                return Err(ApiError(
+                    StatusCode::BAD_GATEWAY,
+                    "分集版本顺序回读失败：Emby 返回未请求或重复的媒体 ID".into(),
+                ));
+            }
+        }
+        let missing = batch
+            .iter()
+            .filter(|id| !seen.contains(*id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(ApiError(
+                StatusCode::BAD_GATEWAY,
+                format!(
+                    "分集版本顺序回读失败：Emby 未返回媒体 ID {}",
+                    missing.join(",")
+                ),
+            ));
+        }
+        native.extend(items.iter().cloned());
+    }
+    Ok(native)
 }
 async fn native_orders(items: &[Value], native: &[Value]) -> HashMap<(i64, i64), Vec<String>> {
     let native = native
@@ -353,7 +411,7 @@ async fn get_episodes(
         .iter()
         .map(|item| string(item, "emby_id"))
         .collect::<Vec<_>>();
-    let native = emby::by_ids(&state, &ids, "Path,MediaSources", None).await?;
+    let native = native_details(&state, &ids).await?;
     let orders = native_orders(&result, &native).await;
     lanes(&mut result, &orders);
     annotate(&mut result);

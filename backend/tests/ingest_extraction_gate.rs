@@ -67,11 +67,6 @@ async fn refresh(State(host): State<Host>, Path(id): Path<String>) -> StatusCode
         format!("Info fixture: RefreshItem Start: {id} metadata"),
         format!("Info fixture: RefreshItem Complete: {id} metadata"),
     ]);
-    if let Some(item) = host.items.lock().await.get_mut(&id) {
-        let revision = item["_refresh"].as_u64().unwrap_or(0) + 1;
-        item["_refresh"] = json!(revision);
-        item["DateLastRefreshed"] = json!(format!("refresh-{revision}"));
-    }
     StatusCode::NO_CONTENT
 }
 async fn logs(
@@ -178,7 +173,7 @@ impl Fixture {
             if *mode == "failed" {
                 host.title_failures.lock().await.push(id.clone());
             }
-            let item = json!({"Id":id,"Type":"Movie","Name":format!("电影{id}"),"Path":path,"PartCount":1,"Size":1000,"Chapters":[],"ProviderIds":{"Tmdb":id},"People":[],"Genres":[],"DateLastRefreshed":"previous","MediaStreams":streams,"MediaSources":[{"Id":format!("mediasource_{id}"),"ItemId":id,"Path":playback,"Size":1000,"Container":"mkv","MediaStreams":streams}]});
+            let item = json!({"Id":id,"Type":"Movie","Name":format!("电影{id}"),"Path":path,"PartCount":1,"Size":1000,"Chapters":[],"ProviderIds":{"Tmdb":id},"People":[],"Genres":[],"MediaStreams":streams,"MediaSources":[{"Id":format!("mediasource_{id}"),"ItemId":id,"Path":playback,"Size":1000,"Container":"mkv","MediaStreams":streams}]});
             host.items.lock().await.insert(id.clone(), item);
             let info = json!([{"MediaSourceInfo":{"Path":playback,"Size":1000,"Container":"mkv","RunTimeTicks":600000000_u64,"MediaStreams":streams},"Chapters":[]}]);
             std::fs::write(
@@ -295,8 +290,7 @@ impl TelegramCapture {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let api_base = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        let mut service = emby_toolkit::notifications::Service::default();
-        service.api_base = api_base;
+        let service = emby_toolkit::notifications::Service { api_base };
         fixture.state.notifications = Arc::new(service);
         fixture
             .state

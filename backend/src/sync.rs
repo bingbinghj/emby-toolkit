@@ -6,7 +6,7 @@ use reqwest::Method;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-const FIELDS: &str = "ProviderIds,Type,DateCreated,Name,OriginalTitle,PremiereDate,CommunityRating,Genres,Studios,Tags,TagItems,DateModified,OfficialRating,ProductionYear,Path,PrimaryImageAspectRatio,Overview,MediaStreams,Container,Size,SeriesId,ParentIndexNumber,IndexNumber,ParentId,RunTimeTicks,_SourceLibraryId";
+const FIELDS: &str = "ProviderIds,Type,DateCreated,Name,OriginalTitle,PremiereDate,CommunityRating,Genres,Studios,Tags,TagItems,DateModified,OfficialRating,CustomRating,ProductionYear,Path,PrimaryImageAspectRatio,Overview,MediaStreams,Container,Size,SeriesId,ParentIndexNumber,IndexNumber,ParentId,RunTimeTicks,_SourceLibraryId";
 fn key(item: &Value) -> Option<(String, String)> {
     let id = item["ProviderIds"]["Tmdb"].as_str()?;
     (!id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) && id.bytes().any(|b| b != b'0'))
@@ -518,8 +518,11 @@ pub async fn cache_with_batch(
             .map(|row| string(row, "tmdb_id"))
             .collect::<Vec<_>>();
         if !batch_records.is_empty() {
-            match metadata::upsert(state, &mut batch_records, true).await {
-                Ok(()) => updated += batch_records.len(),
+            match metadata::sync_upsert(state, &mut batch_records).await {
+                Ok(report) => {
+                    updated += report.written;
+                    failures.extend(report.failures);
+                }
                 Err(error) => {
                     tracing::warn!("[同步媒体] 本批写入失败：{}", error.1);
                     failures.push(error.1);
@@ -672,9 +675,6 @@ pub async fn records(
                 .collect::<Vec<_>>()
         );
     }
-    if details.as_object().is_none_or(|v| v.is_empty()) {
-        top.as_object_mut().unwrap().remove("overview");
-    }
     if !movie && details.as_object().is_some_and(|v| !v.is_empty()) {
         top["total_episodes"] = details
             .get("number_of_episodes")
@@ -716,6 +716,20 @@ pub async fn records(
             .map(|i| json!({"id":i["id"],"name":i["name"]}))
             .collect::<Vec<_>>()
     );
+    if details.as_object().is_none_or(|v| v.is_empty()) {
+        // A failed TMDb read cannot confirm empty collections or country ratings.
+        for field in [
+            "overview",
+            "production_companies_json",
+            "networks_json",
+            "directors_json",
+            "countries_json",
+            "keywords_json",
+            "official_rating_json",
+        ] {
+            top.as_object_mut().unwrap().remove(field);
+        }
+    }
     for key in ["release_date", "last_air_date"] {
         if top[key] == "" {
             top[key] = Value::Null;

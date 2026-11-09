@@ -18,6 +18,34 @@ use std::{
 };
 use tokio::sync::{Mutex, Notify};
 
+type RefreshRequest = (String, HashMap<String, String>);
+
+fn native_guid(path: &Path, item_type: &str) -> String {
+    use md5::{Digest, Md5};
+    let item_type = match item_type {
+        "Movie" => "MediaBrowser.Controller.Entities.Movies.Movie",
+        "Episode" => "MediaBrowser.Controller.Entities.TV.Episode",
+        other => panic!("unsupported fixture type {other}"),
+    };
+    let bytes = format!("{item_type}{}", path.display())
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    uuid::Uuid::from_bytes_le(Md5::digest(bytes).into()).to_string()
+}
+fn api_item(mut item: Value) -> Value {
+    item.as_object_mut().unwrap().remove("Guid");
+    item
+}
+fn native_item_id_matches(item: &Value, id: &str) -> bool {
+    item["Id"] == id
+        || uuid::Uuid::parse_str(id).is_ok_and(|guid| {
+            item["Guid"]
+                .as_str()
+                .is_some_and(|value| uuid::Uuid::parse_str(value) == Ok(guid))
+        })
+}
+
 #[derive(Clone)]
 struct Host {
     root: PathBuf,
@@ -26,7 +54,7 @@ struct Host {
     clears: Arc<AtomicUsize>,
     native_starts: Arc<AtomicUsize>,
     config_writes: Arc<AtomicUsize>,
-    refreshes: Arc<Mutex<Vec<(String, HashMap<String, String>)>>>,
+    refreshes: Arc<Mutex<Vec<RefreshRequest>>>,
     fault: Arc<Mutex<String>>,
     drift: Arc<Mutex<String>>,
     file_watcher: Arc<AtomicBool>,
@@ -260,6 +288,7 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
                 .await
                 .get(id)
                 .cloned()
+                .map(api_item)
                 .map(Json)
                 .map(IntoResponse::into_response)
                 .unwrap_or_else(|| StatusCode::NOT_FOUND.into_response());
@@ -276,12 +305,13 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
                         (!query.contains_key("Ids")
                             && !query.contains_key("Path")
                             && !item["IsFolder"].as_bool().unwrap_or(false))
-                            || query
-                                .get("Ids")
-                                .is_some_and(|ids| ids.split(',').any(|id| item["Id"] == id))
+                            || query.get("Ids").is_some_and(|ids| {
+                                ids.split(',').any(|id| native_item_id_matches(item, id))
+                            })
                             || query.get("Path").is_some_and(|p| item["Path"] == *p)
                     })
                     .cloned()
+                    .map(api_item)
                     .collect()
             };
             return Json(json!({"Items":items,"TotalRecordCount":items.len()})).into_response();
@@ -464,7 +494,7 @@ fn info(index: usize, unknown: bool) -> Value {
         _ => ("flac", "chi", "FLAC.东和台配"),
     };
     json!([{"MediaSourceInfo":{"Container":"mkv","Size":1000+index,"RunTimeTicks":6000000000_u64+index as u64,"MediaStreams":[
-        {"Type":"Video","Codec":if index%2==0{"h264"}else{"hevc"},"Index":0},
+        {"Type":"Video","Codec":if index.is_multiple_of(2){"h264"}else{"hevc"},"Index":0},
         {"Type":"Audio","Codec":codec,"Channels":index%3+2,"Index":1,"Language":if unknown{"und"}else{language},"Title":if unknown{"unidentified track"}else{title}},
         {"Type":"Subtitle","Codec":"subrip","Index":2,"Language":"chi","Title":format!("原视频字幕{index}")}
     ]},"Chapters":[{"MarkerType":"Chapter","Name":format!("第{index}集章节"),"StartPositionTicks":index as u64*1000000}],"EpisodeProof":index}])
@@ -589,7 +619,7 @@ impl Fixture {
                 serde_json::to_vec(&backup).unwrap(),
             )
             .unwrap();
-            host.items.lock().await.insert(id.clone(),json!({"Id":id,"Guid":uuid::Uuid::from_u128(10001+index as u128).to_string(),"PresentationUniqueKey":format!("episode-{id}"),"Type":"Episode","SeriesId":"series","Name":format!("episode{index}"),"IndexNumber":index+1,"ParentIndexNumber":1,"Path":path,"Size":1000+index,"PartCount":1,"MediaStreams":streams,"MediaSources":[{"Id":format!("mediasource_{id}"),"ItemId":id,"Path":playback,"MediaStreams":streams}],"Chapters":chapters}));
+            host.items.lock().await.insert(id.clone(),json!({"Id":id,"Guid":native_guid(&path,"Episode"),"PresentationUniqueKey":format!("episode-{id}"),"Type":"Episode","SeriesId":"series","Name":format!("episode{index}"),"IndexNumber":index+1,"ParentIndexNumber":1,"Path":path,"Size":1000+index,"PartCount":1,"MediaStreams":streams,"MediaSources":[{"Id":format!("mediasource_{id}"),"ItemId":id,"Path":playback,"MediaStreams":streams}],"Chapters":chapters}));
             sqlx::query("INSERT INTO media_metadata(tmdb_id,item_type,emby_item_ids_json,asset_details_json,file_sha1_json,file_pickcode_json) VALUES($1,'Episode',$2,$3,$4,$5)").bind(format!("fixture-{index}")).bind(json!([id])).bind(json!([{"emby_item_id":id,"path":path,"size_bytes":1000+index}])).bind(json!([format!("{:040X}",index+1)])).bind(json!([null])).execute(&state.db).await.unwrap();
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -742,6 +772,10 @@ impl Fixture {
             let mut items = self.host.items.lock().await;
             let item = items.get_mut("10001").unwrap();
             item["Type"] = json!("Movie");
+            item["Guid"] = json!(native_guid(
+                Path::new(item["Path"].as_str().unwrap()),
+                "Movie"
+            ));
             item["ProductionYear"] = json!(1998);
             item["ProviderIds"] = json!({"Tmdb":"gaia-movie-fixture"});
         }
@@ -1287,7 +1321,7 @@ async fn real_series_webhook_saves_titles_before_full_refresh_and_verifies_after
             json!({
                 "Id":"series","Type":"Series","Name":"盖亚奥特曼","Path":f.directory.path(),
                 "ProductionYear":2004,"EndDate":"2004-12-01","Status":"Continuing",
-                "ProviderIds":{"Tmdb":"4426"},"DateLastRefreshed":"old"
+                "ProviderIds":{"Tmdb":"4426"}
             }),
         );
     }
@@ -1355,19 +1389,19 @@ async fn real_series_webhook_saves_titles_before_full_refresh_and_verifies_after
     assert_eq!(live["series"]["ProductionYear"], 1998);
     assert_eq!(live["series"]["EndDate"], Value::Null);
     assert_eq!(live["series"]["Status"], "Continuing");
-    for index in 0..2 {
+    for (index, file) in files.iter().take(2).enumerate() {
         let id = (10001 + index).to_string();
         assert_eq!(
-            files[index][0]["MediaSourceInfo"]["MediaStreams"][1]["Title"],
+            file[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"],
             "日语"
         );
         assert_eq!(
-            files[index][0]["MediaSourceInfo"]["MediaStreams"][2]["Title"],
+            file[0]["MediaSourceInfo"]["MediaStreams"][2]["Title"],
             "国语"
         );
         assert_eq!(
             live[&id]["MediaStreams"],
-            files[index][0]["MediaSourceInfo"]["MediaStreams"]
+            file[0]["MediaSourceInfo"]["MediaStreams"]
         );
     }
     assert_eq!(live["10003"], other_before);
@@ -1559,6 +1593,7 @@ async fn shared_directory_refresh_preserves_subtitles_of_matching_and_unchanged_
 async fn source_sha_and_path_drift_stop_batch_notification_before_reading_new_targets() {
     for drift in ["source", "sha", "path"] {
         let f = Fixture::new(&["raw", "raw"]).await;
+        let original_files = f.files();
         *f.host.drift.lock().await = drift.into();
         let report = f.run_with_file_watcher().await;
         let refreshes = f.host.refreshes.lock().await.len();
@@ -1574,6 +1609,7 @@ async fn source_sha_and_path_drift_stop_batch_notification_before_reading_new_ta
                 .fetch_one(&f.state.db)
                 .await
                 .unwrap();
+        let unchanged_files = f.files();
         f.close().await;
         assert_eq!(report["completed"], false, "{drift}: {report}");
         assert_eq!(report["refresh_state"], "failed", "{drift}: {report}");
@@ -1583,10 +1619,13 @@ async fn source_sha_and_path_drift_stop_batch_notification_before_reading_new_ta
             new_cache, 0,
             "drift must not associate old JSON with a new SHA"
         );
+        assert!(
+            old_cache.is_none(),
+            "batch drift must stop cache writes: {drift}"
+        );
         assert_eq!(
-            old_cache.unwrap()[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"],
-            "日语",
-            "the original target was saved before {drift} drift"
+            unchanged_files, original_files,
+            "batch drift must stop JSON writes: {drift}"
         );
         assert!(
             report["pending"].as_array().unwrap().iter().any(|entry| {
