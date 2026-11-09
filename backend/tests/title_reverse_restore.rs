@@ -24,6 +24,8 @@ struct Host {
     settings: Arc<Mutex<Value>>,
     starts: Arc<AtomicUsize>,
     clears: Arc<AtomicUsize>,
+    refreshes: Arc<AtomicUsize>,
+    config_writes: Arc<AtomicUsize>,
     wrong_final_language: Arc<AtomicBool>,
 }
 
@@ -34,7 +36,7 @@ async fn details(
     let mut item = host.item.lock().await.clone();
     let fields = query.get("Fields").map(String::as_str).unwrap_or("");
     if host.wrong_final_language.load(Ordering::SeqCst)
-        && host.starts.load(Ordering::SeqCst) > 0
+        && (host.starts.load(Ordering::SeqCst) > 0 || host.refreshes.load(Ordering::SeqCst) > 0)
         && fields.contains("MediaStreams")
         && !fields.contains("Chapters")
         && !fields.contains("PartCount")
@@ -76,6 +78,26 @@ async fn native_start(State(host): State<Host>) -> StatusCode {
     item["MediaSources"][0]["MediaStreams"] = source["MediaStreams"].clone();
     item["Chapters"] = data[0]["Chapters"].clone();
     host.starts.fetch_add(1, Ordering::SeqCst);
+    StatusCode::NO_CONTENT
+}
+
+async fn file_refresh(
+    State(host): State<Host>,
+    Query(query): Query<HashMap<String, String>>,
+) -> StatusCode {
+    assert_eq!(query["Recursive"], "true");
+    assert_eq!(query["ReplaceAllMetadata"], "false");
+    assert_eq!(query["ReplaceAllImages"], "false");
+    let data: Value = serde_json::from_slice(
+        &tokio::fs::read(host.directory.join("61616-mediainfo.json"))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let mut item = host.item.lock().await;
+    item["MediaStreams"] = data[0]["MediaSourceInfo"]["MediaStreams"].clone();
+    item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
+    host.refreshes.fetch_add(1, Ordering::SeqCst);
     StatusCode::NO_CONTENT
 }
 
@@ -140,10 +162,19 @@ impl Fixture {
             settings: Arc::new(Mutex::new(original_settings.clone())),
             starts: Arc::default(),
             clears: Arc::default(),
+            refreshes: Arc::default(),
+            config_writes: Arc::default(),
             wrong_final_language: Arc::new(AtomicBool::new(wrong_final_language)),
         };
         let api = Router::new()
             .route("/Users/user/Items/61616", get(details))
+            .route("/Items", get(|State(host):State<Host>,Query(query):Query<HashMap<String,String>>|async move {
+                let items = if query.get("Path").is_some_and(|path| PathBuf::from(path) == host.directory) {
+                    vec![json!({"Id":"directory","IsFolder":true,"Path":host.directory})]
+                } else { vec![] };
+                Json(json!({"Items":items,"TotalRecordCount":items.len()}))
+            }))
+            .route("/Items/directory/Refresh", post(file_refresh))
             .route("/Items/61616/ClearMediaInfo", post(clear))
             .route("/ScheduledTasks", get(|State(host): State<Host>| async move {
                 Json(json!([{"Id":"media","Key":"MediaInfoExtractTask","State":"Idle","LastExecutionResult":{"StartTimeUtc":host.starts.load(Ordering::SeqCst).to_string(),"Status":"Completed"}}]))
@@ -155,7 +186,7 @@ impl Fixture {
             .route("/System/Logs/embyserver.txt/Lines", get(|| async {Json(json!({"Items":[],"TotalRecordCount":0}))}))
             .route("/web/ConfigurationPages", get(||async {Json(json!([{"Name":"MediaInfoExtractPageView","Href":"configurationpage?PageId=plugin:MediaInfoExtractPageView"}]))}))
             .route("/UI/View", get(|State(host): State<Host>|async move {Json(json!({"EditObjectContainer":{"Object":host.settings.lock().await.clone()}}))}))
-            .route("/UI/Command", post(|State(host): State<Host>,Json(body):Json<Value>|async move {*host.settings.lock().await=serde_json::from_str(body["Data"].as_str().unwrap()).unwrap();StatusCode::NO_CONTENT}))
+            .route("/UI/Command", post(|State(host): State<Host>,Json(body):Json<Value>|async move {host.config_writes.fetch_add(1,Ordering::SeqCst);*host.settings.lock().await=serde_json::from_str(body["Data"].as_str().unwrap()).unwrap();StatusCode::NO_CONTENT}))
             .with_state(host.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -188,7 +219,7 @@ impl Fixture {
             })
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::time::timeout(Duration::from_secs(45), async {
             loop {
                 let result = self.state.jobs.result(&task).await.unwrap();
                 if result["is_running"] == false {
@@ -231,6 +262,12 @@ impl Fixture {
             .await
             .unwrap();
         self.admin.close().await;
+    }
+
+    fn assert_file_refresh_only(&self) {
+        assert_eq!(self.host.clears.load(Ordering::SeqCst), 0);
+        assert_eq!(self.host.starts.load(Ordering::SeqCst), 0);
+        assert_eq!(self.host.config_writes.load(Ordering::SeqCst), 0);
     }
 }
 
@@ -290,8 +327,8 @@ async fn original_tiga_audio_titles_restore_languages_and_preserve_live_chinese_
     assert_eq!(live["Chapters"], f.original[0]["Chapters"]);
     assert_eq!(saved[0]["Chapters"], f.original[0]["Chapters"]);
     assert_eq!(*f.host.settings.lock().await, f.original_settings);
-    assert_eq!(f.host.clears.load(Ordering::SeqCst), 1);
-    assert_eq!(f.host.starts.load(Ordering::SeqCst), 1);
+    assert_eq!(f.host.refreshes.load(Ordering::SeqCst), 1);
+    f.assert_file_refresh_only();
     f.close().await;
 }
 
@@ -311,12 +348,14 @@ async fn matching_titles_do_not_complete_when_final_language_readback_is_wrong()
         "{result}"
     );
     assert_eq!(*f.host.settings.lock().await, f.original_settings);
+    assert_eq!(f.host.refreshes.load(Ordering::SeqCst), 1);
+    f.assert_file_refresh_only();
     f.close().await;
 }
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
-async fn local_language_corrections_are_not_forgotten_when_title_restoration_is_retried() {
+async fn local_language_corrections_are_not_forgotten_when_file_refresh_is_retried() {
     let f = Fixture::new(false).await;
     f.single_audio("yue", "粤语").await;
     {
@@ -330,14 +369,15 @@ async fn local_language_corrections_are_not_forgotten_when_title_restoration_is_
     let live = f.host.item.lock().await.clone();
     assert_eq!(live["MediaStreams"][1]["Title"], "粤语");
     assert_eq!(live["MediaStreams"][1]["Language"], "yue", "{result}");
-    assert_eq!(f.host.starts.load(Ordering::SeqCst), 1, "{result}");
+    assert_eq!(f.host.refreshes.load(Ordering::SeqCst), 1, "{result}");
+    f.assert_file_refresh_only();
     assert_eq!(*f.host.settings.lock().await, f.original_settings);
     f.close().await;
 }
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
-async fn equivalent_language_aliases_do_not_trigger_unnecessary_restoration() {
+async fn equivalent_language_aliases_do_not_trigger_unnecessary_file_refresh() {
     let f = Fixture::new(false).await;
     db::save_setting(
         &f.state.db,
@@ -360,7 +400,8 @@ async fn equivalent_language_aliases_do_not_trigger_unnecessary_restoration() {
         let result = f.run().await;
         assert_eq!(result["result"]["completed"], true, "{result}");
         assert_eq!(result["result"]["changed_streams"], 0, "{result}");
-        assert_eq!(f.host.starts.load(Ordering::SeqCst), 0, "{result}");
+        assert_eq!(f.host.refreshes.load(Ordering::SeqCst), 0, "{result}");
+        f.assert_file_refresh_only();
     }
     f.close().await;
 }
@@ -376,6 +417,8 @@ async fn commentary_without_number_fills_title_without_a_language_prefix() {
     assert_eq!(live["MediaStreams"][1]["Title"], "导评");
     assert_eq!(live["MediaStreams"][1]["Language"], "eng");
     assert_eq!(*f.host.settings.lock().await, f.original_settings);
+    assert_eq!(f.host.refreshes.load(Ordering::SeqCst), 1);
+    f.assert_file_refresh_only();
     f.close().await;
 }
 
@@ -397,5 +440,7 @@ async fn numbered_commentary_title_is_saved_while_unknown_language_remains_incom
     assert_eq!(live["MediaStreams"][1]["Title"], "导评3");
     assert_eq!(live["MediaStreams"][1]["Language"], "und");
     assert_eq!(*f.host.settings.lock().await, f.original_settings);
+    assert_eq!(f.host.refreshes.load(Ordering::SeqCst), 1);
+    f.assert_file_refresh_only();
     f.close().await;
 }

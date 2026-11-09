@@ -54,6 +54,7 @@
   "auto_fill_language_titles_on_ingest": false,
   "auto_extract_intro_fingerprint_on_ingest": false,
   "auto_extract_video_thumbnails_on_ingest": false,
+  "extract_video_thumbnails_after_save": false,
   "movie_rename_format": "{{title}}{% if year %} ({{year}}){% endif %}{% if tmdbid %} {tmdbid={{tmdbid}}}{% endif %}/{{title}}{% if en_title %}.{{en_title}}{% endif %}{% if year %}.{{year}}{% endif %}{% if webSource %}.{{webSource}}{% endif %}{% if edition %}.{{edition}}{% endif %}{% if videoFormat %}.{{videoFormat}}{% endif %}{% if videoCodec %}.{{videoCodec}}{% endif %}{% if audioCodec %}.{{audioCodec}}{% endif %}{% if part %}.{{part}}{% endif %}{% if customization %}-{{customization}}{% endif %}{% if releaseGroup %}-{{releaseGroup}}{% endif %}{{fileExt}}",
   "tv_rename_format": "{{title}}{% if year %} ({{year}}){% endif %}{% if tmdbid %} {tmdbid={{tmdbid}}}{% endif %}/Season {{ '%02d' | format(season|default(0)|int) }}/{{title}}{% if en_title %}.{{ en_title }}{% endif %}.{{season_episode}}{% if year %}.{{year}}{% endif %}{% if videoFormat %}.{{videoFormat}}{% endif %}{% if customization %}.{{customization}}{% endif %}{% if resourceType %}.{{resourceType}}{% endif %}{% if effect %}.{{effect}}{% endif %}{% if videoCodec %}.{{videoCodec}}{% endif %}{% if audioCodec %}.{{ audioCodec | replace(' ', '.') }}{% endif %}{% if part %}.{{part}}{% endif %}{% if releaseGroup %}-{{releaseGroup}}{% endif %}{{fileExt}}",
   "user_agent": "Mozilla/5.0 ...",

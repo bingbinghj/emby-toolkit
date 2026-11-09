@@ -172,7 +172,7 @@ impl ExtractionLog {
             }
             if let Some(c) = PROGRESS.captures(line) {
                 self.last_activity = Some(format!(
-                    "正在提取视频 {}/{}：{}",
+                    "正在提取视频缩略图 {}/{}：{}",
                     &c[1],
                     &c[2],
                     crate::media_paths::clean(c[3].trim())
@@ -419,11 +419,11 @@ async fn run_with_trace(
                 context
                     .update(
                         start + ((end - start) as f64 * progress.clamp(0.0, 100.0) / 100.0) as u64,
-                        "神医提取",
+                        "视频缩略图提取",
                         &trace
                             .last_activity
                             .clone()
-                            .unwrap_or_else(|| format!("神医提取进度 {progress:.1}%")),
+                            .unwrap_or_else(|| format!("视频缩略图提取进度 {progress:.1}%")),
                     )
                     .await;
             }

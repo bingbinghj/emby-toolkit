@@ -137,6 +137,7 @@ async fn stage_all(
     state: &AppState,
     prepared: &mut BTreeMap<String, Prepared>,
     order: &std::collections::HashMap<String, crate::media_order::Key>,
+    cache: bool,
 ) -> Result<()> {
     // All identity and chapter reads finish before any persistent write or cache clear.
     let mut transaction = state.db.begin().await?;
@@ -201,7 +202,7 @@ async fn stage_all(
         )
         .await?;
         file.sync_all().await?;
-        if let Some(sha) = &item.target.sha {
+        if cache && let Some(sha) = &item.target.sha {
             sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2) ON CONFLICT(sha1) DO UPDATE SET mediainfo_json=EXCLUDED.mediainfo_json")
                 .bind(sha).bind(&item.info).execute(&mut *transaction).await?;
         }
@@ -224,6 +225,25 @@ pub async fn refresh(state: &AppState, paths: &[String]) -> Result<()> {
     refresh_with_ids(state, paths).await.map(|_| ())
 }
 pub(crate) async fn refresh_with_ids(state: &AppState, paths: &[String]) -> Result<Vec<String>> {
+    let (submitted, failures) = refresh_report(state, paths).await;
+    if failures.is_empty() {
+        Ok(submitted)
+    } else {
+        Err(ApiError::bad(format!(
+            "Emby目录扫描请求未成功：{}",
+            failures
+                .iter()
+                .map(|failure| format!(
+                    "{}：{}",
+                    string(failure, "path"),
+                    string(failure, "reason")
+                ))
+                .collect::<Vec<_>>()
+                .join("；")
+        )))
+    }
+}
+async fn refresh_report(state: &AppState, paths: &[String]) -> (Vec<String>, Vec<Value>) {
     let config = state.config.read().await.clone();
     let local = string(&config, "local_strm_root").replace('\\', "/");
     let cd2 = string(&config, "cd2_media_root").replace('\\', "/");
@@ -330,17 +350,10 @@ pub(crate) async fn refresh_with_ids(state: &AppState, paths: &[String]) -> Resu
         if !refreshed {
             let reason = format!("{}：{last_error}", original_directory.display());
             tracing::warn!("[精准扫描] {reason}；未提交有效扫描请求，媒体信息文件已保留");
-            failures.push(reason);
+            failures.push(json!({"path":original_directory,"reason":last_error}));
         }
     }
-    if failures.is_empty() {
-        Ok(submitted)
-    } else {
-        Err(ApiError::bad(format!(
-            "Emby目录扫描请求未成功：{}",
-            failures.join("；")
-        )))
-    }
+    (submitted, failures)
 }
 pub(crate) async fn restoration_settings(
     state: &AppState,
@@ -421,21 +434,13 @@ pub async fn save_with_rebuilt(
 ) -> Result<(u16, Value)> {
     save_inner(state, id, body, rebuilt, Some(context), false).await
 }
-pub(crate) async fn save_titles(
-    state: &AppState,
-    id: &str,
-    body: &Value,
-    context: Option<&JobContext>,
-) -> Result<(u16, Value)> {
-    save_inner(state, id, body, &BTreeMap::new(), context, false).await
-}
 async fn save_inner(
     state: &AppState,
     id: &str,
     body: &Value,
     rebuilt: &BTreeMap<String, Value>,
     context: Option<&JobContext>,
-    refresh_metadata: bool,
+    file_refresh: bool,
 ) -> Result<(u16, Value)> {
     let mut ids = vec![id.to_string()];
     for value in body["target_item_ids"].as_array().into_iter().flatten() {
@@ -590,13 +595,114 @@ async fn save_inner(
     if let Some(context) = context {
         context.update(35, "暂存", "暂存媒体信息和当前章节").await;
     }
+    if file_refresh {
+        let staged = stage_all(state, &mut restore, &order, false).await;
+        if let Err(error) = staged {
+            cleanup_stages(&restore).await;
+            return Err(error);
+        }
+        let mut warning_details = vec![];
+        let mut written_ids = vec![];
+        let mut items = restore.iter().collect::<Vec<_>>();
+        items.sort_by_cached_key(|(id, _)| order.get(*id).cloned());
+        for (id, item) in items {
+            if let Some(stage) = &item.stage {
+                if let Err(error) = tokio::fs::rename(stage, &item.final_path).await {
+                    failures.push(format!("{id}：媒体信息 JSON 保存失败：{error}"));
+                    continue;
+                }
+                written_ids.push(id.clone());
+                if let Some(sha) = &item.target.sha
+                    && let Err(error) = sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2) ON CONFLICT(sha1) DO UPDATE SET mediainfo_json=EXCLUDED.mediainfo_json")
+                        .bind(sha).bind(&item.info).execute(&state.db).await {
+                    warning_details.push(format!("{id}：媒体信息 JSON 已保存，缓存更新失败：{error}"));
+                }
+            }
+        }
+        cleanup_stages(&restore).await;
+        if written_ids.is_empty() {
+            return failed("媒体信息 JSON 未能保存，未通知 Emby 刷新", &failures, 500);
+        }
+        saved.retain(|id| written_ids.contains(id));
+        if saved.is_empty() {
+            return failed(
+                "编辑目标的媒体信息 JSON 未能保存，已保留关联版本文件",
+                &failures,
+                500,
+            );
+        }
+        let context = context.ok_or_else(|| ApiError::bad("保存任务上下文缺失"))?;
+        context.checkpoint().await?;
+        context
+            .activity("通知Emby刷新", "媒体信息 JSON 已保存，通知 Emby 重新读取")
+            .await;
+        let paths = written_ids
+            .iter()
+            .map(|id| restore[id].path.clone())
+            .collect::<Vec<_>>();
+        let (requested_ids, refresh_failures) = refresh_report(state, &paths).await;
+        let metadata_state = if refresh_failures.is_empty() {
+            "submitted"
+        } else if requested_ids.is_empty() {
+            "failed"
+        } else {
+            "partial"
+        };
+        let failed_ids = saved
+            .iter()
+            .filter(|id| {
+                refresh_failures.iter().any(|failure| {
+                    std::path::Path::new(&restore[*id].path)
+                        .parent()
+                        .is_some_and(|parent| failure["path"] == parent.to_string_lossy().as_ref())
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for failure in &refresh_failures {
+            warning_details.push(format!(
+                "媒体信息 JSON 已保存，通知 Emby 刷新失败：{}：{}",
+                string(failure, "path"),
+                string(failure, "reason")
+            ));
+        }
+        let video_thumbnails = thumbnails_after_save(state, &restore, &saved, context).await?;
+        if video_thumbnails["failed"].as_u64().unwrap_or(0) > 0 {
+            let reason = video_thumbnails["reason"]
+                .as_str()
+                .or_else(|| video_thumbnails["message"].as_str())
+                .unwrap_or("仍有目标未通过图片验收");
+            warning_details.push(format!(
+                "媒体信息 JSON 已保存，视频缩略图处理未完成：{reason}"
+            ));
+        }
+        let skipped_tracks: usize = reports
+            .iter()
+            .map(|v| v["skipped"].as_array().map_or(0, Vec::len))
+            .sum();
+        let warnings = skipped_tracks + warning_details.len();
+        let message = match metadata_state {
+            "submitted" => "媒体信息 JSON 已保存，已通知 Emby 在后台重新读取",
+            "partial" => "媒体信息 JSON 已保存，部分 Emby 刷新通知失败，请查看提醒",
+            _ => "媒体信息 JSON 已保存，Emby 刷新通知失败，请查看提醒",
+        };
+        return Ok((
+            if failures.is_empty() { 200 } else { 207 },
+            json!({
+                "message":message,"saved_item_ids":saved,"media_info_saved":true,
+                "failures":failures,"batch_reports":reports,"warnings":warnings,"warning_details":warning_details,
+                "metadata_refresh":{"state":metadata_state,"requested_ids":requested_ids,"failed_ids":failed_ids,"failures":refresh_failures},
+                "video_thumbnails":video_thumbnails
+            }),
+        ));
+    }
     let targets = restore
         .values()
         .map(|item| (item.target.id.clone(), item.path.clone()))
         .collect::<Vec<_>>();
     let settings =
         restoration_settings(state, &targets, restore.values().any(|item| item.multipart)).await?;
-    let result = stage_all(state, &mut restore, &order).await;
+    let result = stage_all(state, &mut restore, &order, true).await;
     if let Err(error) = result {
         cleanup_stages(&restore).await;
         return Err(error);
@@ -841,60 +947,32 @@ async fn save_inner(
             500,
         );
     }
-    let mut metadata_requested = vec![];
-    let mut metadata_failed = vec![];
-    let mut warning_details = vec![];
-    if refresh_metadata && let Some(context) = context {
-        for saved_id in &saved {
-            context.checkpoint().await?;
-            context
-                .activity(
-                    "提交元数据刷新",
-                    &format!("媒体ID {saved_id}：媒体信息已验收，提交当前条目的后台元数据刷新"),
-                )
-                .await;
-            match crate::emby::refresh_item(state, saved_id, false, context).await {
-                Ok(()) => {
-                    metadata_requested.push(saved_id.clone());
-                    tracing::info!(
-                        "[媒体信息保存] 媒体ID {saved_id}：元数据刷新请求已接收，由 Emby 在后台处理"
-                    );
-                }
-                Err(error) => {
-                    context.checkpoint().await?;
-                    let warning = format!(
-                        "媒体ID {saved_id}：媒体信息已保存，元数据刷新提交失败：{}",
-                        error.1
-                    );
-                    tracing::warn!("[媒体信息保存] {warning}");
-                    metadata_failed.push(saved_id.clone());
-                    warning_details.push(warning);
-                }
-            }
-        }
+    let skipped_tracks: usize = reports
+        .iter()
+        .map(|v| v["skipped"].as_array().map_or(0, Vec::len))
+        .sum();
+    tracing::info!(
+        item_id = id,
+        restored = restore.len(),
+        failures = failures.len(),
+        skipped_tracks,
+        "[媒体信息保存] JSON、媒体流和章节回读验收结束"
+    );
+    Ok((
+        if failures.is_empty() { 200 } else { 207 },
+        json!({"message":format!("媒体信息已更新，已恢复 {} 个版本 JSON，Emby 媒体流、标题和章节已通过回读验收",restore.len()),"failures":failures,"batch_reports":reports,"warnings":skipped_tracks,"warning_details":[],"metadata_refresh":{"state":"not_requested","requested_ids":[],"failed_ids":[]},"video_thumbnails":{"state":"not_requested"}}),
+    ))
+}
+
+async fn thumbnails_after_save(
+    state: &AppState,
+    restore: &BTreeMap<String, Prepared>,
+    saved: &[String],
+    context: &JobContext,
+) -> Result<Value> {
+    if state.config.read().await["extract_video_thumbnails_after_save"] != true {
+        return Ok(json!({"state":"disabled"}));
     }
-    let metadata_state = match (metadata_requested.is_empty(), warning_details.is_empty()) {
-        (false, true) => "submitted",
-        (false, false) => "partial",
-        (true, false) => "failed",
-        (true, true) => "not_requested",
-    };
-    let metadata_message = if !metadata_requested.is_empty() {
-        format!(
-            "；已提交 {} 个媒体的元数据刷新，Emby 在后台处理{}",
-            metadata_requested.len(),
-            if metadata_failed.is_empty() {
-                String::new()
-            } else {
-                format!("，另有 {} 项提交失败，请查看警告", metadata_failed.len())
-            }
-        )
-    } else if !warning_details.is_empty() {
-        "；元数据刷新未能提交，请查看警告".into()
-    } else {
-        String::new()
-    };
-    let mut video_thumbnails = json!({"state":"not_requested"});
     let saved_videos = saved
         .iter()
         .filter_map(|id| {
@@ -906,49 +984,21 @@ async fn save_inner(
                 .then(|| (id.clone(), item.path.clone()))
         })
         .collect::<Vec<_>>();
-    if refresh_metadata
-        && let Some(context) = context
-        && !saved_videos.is_empty()
-    {
-        context.checkpoint().await?;
-        context
-            .activity(
-                "重建视频缩略图",
-                "媒体信息已保存并通过回读，运行神医缩略图提取和验收流程",
-            )
-            .await;
-        video_thumbnails =
-            match crate::thumbnails::repair_saved(state, &saved_videos, context).await {
-                Ok(report) => report,
-                Err(error) if context.is_cancelled() => return Err(error),
-                Err(error) => json!({"state":"failed","failed":1,"reason":error.1}),
-            };
-        if video_thumbnails["failed"].as_u64().unwrap_or(0) > 0 {
-            let reason = video_thumbnails["reason"]
-                .as_str()
-                .or_else(|| video_thumbnails["message"].as_str())
-                .unwrap_or("仍有目标未通过图片验收");
-            let warning = format!("媒体信息已保存，视频缩略图提取或验收未完成：{reason}");
-            tracing::warn!("[媒体信息保存] {warning}");
-            warning_details.push(warning);
-        }
+    if saved_videos.is_empty() {
+        return Ok(json!({"state":"not_requested"}));
     }
-    let skipped_tracks: usize = reports
-        .iter()
-        .map(|v| v["skipped"].as_array().map_or(0, Vec::len))
-        .sum();
-    let warnings = skipped_tracks + warning_details.len();
-    tracing::info!(
-        item_id = id,
-        restored = restore.len(),
-        failures = failures.len(),
-        skipped_tracks,
-        "[媒体信息保存] JSON、媒体流和章节回读验收结束"
-    );
-    Ok((
-        if failures.is_empty() { 200 } else { 207 },
-        json!({"message":format!("媒体信息已更新，已恢复 {} 个版本 JSON，Emby 媒体流、标题和章节已通过回读验收{metadata_message}",restore.len()),"failures":failures,"batch_reports":reports,"warnings":warnings,"warning_details":warning_details,"metadata_refresh":{"state":metadata_state,"requested_ids":metadata_requested,"failed_ids":metadata_failed},"video_thumbnails":video_thumbnails}),
-    ))
+    context.checkpoint().await?;
+    context
+        .activity(
+            "视频缩略图提取",
+            "媒体信息 JSON 已保存，运行神医视频缩略图提取和验收流程",
+        )
+        .await;
+    match crate::thumbnails::repair_saved(state, &saved_videos, context).await {
+        Ok(report) => Ok(report),
+        Err(error) if context.is_cancelled() => Err(error),
+        Err(error) => Ok(json!({"state":"failed","failed":1,"reason":error.1})),
+    }
 }
 fn text(value: &Value) -> String {
     value.as_str().unwrap_or("").to_string()

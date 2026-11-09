@@ -877,6 +877,14 @@
                         </n-text>
                       </template>
                     </n-form-item-grid-item>
+                    <n-form-item-grid-item label="保存后提取视频缩略图" path="extract_video_thumbnails_after_save">
+                      <n-switch v-model:value="configModel.extract_video_thumbnails_after_save" />
+                      <template #feedback>
+                        <n-text depth="3" style="font-size:0.8em;">
+                          手动保存媒体信息后运行神医视频缩略图任务，按神医当前配置范围处理。默认关闭。
+                        </n-text>
+                      </template>
+                    </n-form-item-grid-item>
                     <template #footer>
                       <n-space justify="end">
                         <n-button type="primary" :loading="savingCard === 'ingest'" :disabled="savingConfig" aria-label="保存入库自动处理" @click="saveCard('ingest')">
@@ -2251,7 +2259,7 @@ const cardFields = {
   emby: ['emby_server_url', 'emby_public_url', 'emby_api_key', 'emby_webhook_secret', 'emby_webhook_ingest_enabled', 'emby_user_id', 'emby_admin_user', 'emby_admin_pass', 'emby_api_timeout', 'libraries_to_ignore'],
   ai: ['ai_provider', 'ai_api_key', 'ai_model_name', 'ai_base_url', 'ai_request_timeout', 'ai_max_retries', 'ai_translation_batch_size', 'ai_translate_actor_role', 'ai_translate_on_sync', 'ai_translate_title', 'ai_translate_overview', 'ai_translate_episode_overview', 'ai_joke_fallback', 'ai_translation_mode'],
   logs: ['log_rotation_size_mb', 'log_rotation_backup_count'],
-  ingest: ['auto_repair_truehd_core_on_ingest', 'auto_fill_language_titles_on_ingest', 'auto_extract_intro_fingerprint_on_ingest', 'auto_extract_video_thumbnails_on_ingest'],
+  ingest: ['auto_repair_truehd_core_on_ingest', 'auto_fill_language_titles_on_ingest', 'auto_extract_intro_fingerprint_on_ingest', 'auto_extract_video_thumbnails_on_ingest', 'extract_video_thumbnails_after_save'],
   rename: ['movie_rename_format', 'tv_rename_format'],
 };
 const savingCard = ref(null);

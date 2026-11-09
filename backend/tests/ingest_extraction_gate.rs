@@ -23,8 +23,17 @@ async fn details(
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
     if query.get("Fields").is_some_and(|fields| {
-        fields == "Id,Name,Path,MediaSources,MediaStreams,PartCount,ExtraType,IndexNumber,ParentIndexNumber"
-    }) && host.title_failures.lock().await.contains(&id) {
+        [
+            "Name",
+            "MediaSources",
+            "MediaStreams",
+            "PartCount",
+            "ExtraType",
+        ]
+        .iter()
+        .all(|expected| fields.split(',').any(|field| field == *expected))
+    }) && host.title_failures.lock().await.contains(&id)
+    {
         return StatusCode::FORBIDDEN.into_response();
     }
     match host.items.lock().await.get(&id) {
