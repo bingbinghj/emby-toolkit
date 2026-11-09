@@ -1,34 +1,36 @@
 <template>
-  <n-config-provider :theme="isDark ? darkTheme : undefined" :theme-overrides="theme" :locale="zhCN" :date-locale="dateZhCN">
-    <div class="mp-wallpaper" aria-hidden="true">
-      <img v-if="wallpaperUrl && !wallpaperFailed" :key="wallpaperUrl" :src="wallpaperUrl" alt="" @error="wallpaperFailed = true" />
-    </div>
-    <n-message-provider placement="bottom-right">
-      <n-dialog-provider>
-        <AppContent />
-      </n-dialog-provider>
-    </n-message-provider>
-  </n-config-provider>
+  <VApp class="etk-app">
+    <WallpaperBackground />
+    <MoviePilotGlassRuntime>
+      <AppContent />
+      <FeedbackHost />
+      <GlassSettingsDialog v-model="glassSettingsOpen" @after-leave="restoreGlassSettingsFocus" />
+    </MoviePilotGlassRuntime>
+  </VApp>
 </template>
 
 <script setup>
-import { ref, computed, watch, onUnmounted } from 'vue';
-import { NConfigProvider, NMessageProvider, NDialogProvider, darkTheme, zhCN, dateZhCN } from 'naive-ui';
-import AppContent from './AppContent.vue';
-import { moviePilotTheme, resolveTheme, applyDocumentTheme } from './theme';
-import { useAppearance } from './composables/useAppearance';
+import { onBeforeUnmount, onMounted, ref } from 'vue'
+import AppContent from './AppContent.vue'
+import FeedbackHost from './components/FeedbackHost.vue'
+import WallpaperBackground from './components/WallpaperBackground.vue'
+import MoviePilotGlassRuntime from './components/theme/MoviePilotGlassRuntime.vue'
+import GlassSettingsDialog from './components/theme/GlassSettingsDialog.vue'
+import { GLASS_SETTINGS_OPEN_EVENT } from './composables/useThemeCustomizer'
 
-const systemTheme = window.matchMedia('(prefers-color-scheme: dark)');
-const prefersDark = ref(systemTheme.matches);
-const { settings } = useAppearance();
-const resolvedTheme = computed(() => resolveTheme(settings.theme, prefersDark.value));
-const isDark = computed(() => resolvedTheme.value === 'dark');
-const theme = computed(() => moviePilotTheme(resolvedTheme.value, prefersDark.value, settings));
-const wallpaperUrl = computed(() => settings.wallpaperMode === 'custom' ? settings.wallpaper : '');
-const wallpaperFailed = ref(false);
-watch(wallpaperUrl, () => { wallpaperFailed.value = false; });
-const updateSystemTheme = event => { prefersDark.value = event.matches; };
-systemTheme.addEventListener('change', updateSystemTheme);
-onUnmounted(() => systemTheme.removeEventListener('change', updateSystemTheme));
-watch([settings, prefersDark], () => applyDocumentTheme(settings, prefersDark.value), { immediate: true, deep: true });
+const glassSettingsOpen = ref(false)
+let glassSettingsTrigger
+function openGlassSettings() {
+  if (glassSettingsOpen.value) return
+  glassSettingsTrigger = document.activeElement instanceof HTMLElement ? document.activeElement : undefined
+  glassSettingsOpen.value = true
+}
+function restoreGlassSettingsFocus() {
+  if (glassSettingsOpen.value || !glassSettingsTrigger?.isConnected) return
+  const focused = document.activeElement
+  if (focused === document.body || focused?.closest('.v-dialog')) glassSettingsTrigger.focus({ preventScroll: true })
+  glassSettingsTrigger = undefined
+}
+onMounted(() => window.addEventListener(GLASS_SETTINGS_OPEN_EVENT, openGlassSettings))
+onBeforeUnmount(() => window.removeEventListener(GLASS_SETTINGS_OPEN_EVENT, openGlassSettings))
 </script>

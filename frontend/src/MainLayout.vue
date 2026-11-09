@@ -1,203 +1,86 @@
-<template>
-  <div class="mp-app-shell" :class="{ 'mp-nav-collapsed': collapsed && !isMobile }">
-    <aside v-if="!isMobile" class="mp-sidebar">
-      <div class="mp-brand"><img src="./assets/logo.png" alt="Emby Toolkit" /><div v-if="!collapsed"><strong>Emby Toolkit</strong><span>媒体管理中心</span></div></div>
-      <n-menu v-if="isMenuReady" class="mp-menu" :icon-size="24" :collapsed="collapsed" :collapsed-width="80" :collapsed-icon-size="24" :options="menuOptions" :value="activeMenuKey" :default-expanded-keys="defaultExpandedKeys" @update:value="handleMenuUpdate" />
-    </aside>
-    <div class="mp-main-column">
-      <header class="mp-navbar">
-        <n-button quaternary circle aria-label="切换导航" :aria-expanded="isMobile ? mobileMenuOpen : !collapsed" @click="isMobile ? mobileMenuOpen = !mobileMenuOpen : collapsed = !collapsed"><template #icon><n-icon :component="MenuOutline" /></template></n-button>
-        <div class="mp-navbar-center">
-          <button v-if="authStore.isAdmin && taskStatus?.is_running" class="mp-running-task" aria-label="查看运行任务日志" :title="taskStatus.message" @click="notificationOpen = true">
-            <span class="mp-running-task-title"><strong>{{ taskStatus.current_action }}</strong><span>{{ taskStatus.progress_known ? `${taskStatus.progress}%` : (taskStatus.phase || '执行中') }}</span></span>
-            <span class="mp-running-task-track" role="progressbar" :aria-label="taskStatus.current_action" aria-valuemin="0" aria-valuemax="100" :aria-valuenow="taskStatus.progress_known ? taskStatus.progress : undefined" :class="{ indeterminate: !taskStatus.progress_known }"><span :style="{ width: taskStatus.progress_known ? `${taskStatus.progress}%` : '35%' }" /></span>
-          </button>
-        </div>
-        <div class="mp-navbar-tools">
-          <button v-if="authStore.isAdmin" class="mp-task-trigger" :class="{ running: taskStatus?.is_running }" aria-label="通知中心" title="通知中心" @click="notificationOpen = true">
-            <n-icon :component="NotificationsOutline" :size="19" /><span v-if="taskStatus?.is_running" class="mp-notification-dot" />
-          </button>
-          <n-button quaternary circle aria-label="主题与壁纸" title="主题与壁纸" @click="themeCustomizerOpen = true"><template #icon><n-icon :component="PaletteIcon" /></template></n-button>
-          <n-dropdown v-if="authStore.isLoggedIn" trigger="click" :options="userOptions" @select="handleUserSelect"><button class="mp-user-avatar" :aria-label="`${authStore.username} 的用户菜单`"><img v-if="authStore.avatarUrl && !avatarLoadFailed" :src="authStore.avatarUrl" alt="" @error="avatarLoadFailed = true" /><template v-else>{{ (authStore.username || 'U').slice(0, 1).toUpperCase() }}</template><span /></button></n-dropdown>
-        </div>
-      </header>
-      <main class="mp-page-content" :class="{ 'mp-page-content-media': ['MediaCenter', 'MediaCenterLibrary'].includes(route.name) }"><router-view v-slot="slotProps"><component :is="slotProps.Component" :task-status="props.taskStatus" /></router-view></main>
-    </div>
-    <n-drawer v-model:show="mobileMenuOpen" placement="left" :width="280"><n-drawer-content :native-scrollbar="false"><div class="mp-brand"><img src="./assets/logo.png" alt="Emby Toolkit" /><strong>Emby Toolkit</strong></div><n-menu class="mp-menu" :icon-size="24" :options="menuOptions" :value="activeMenuKey" :default-expanded-keys="defaultExpandedKeys" @update:value="handleMenuUpdate" /></n-drawer-content></n-drawer>
-    <n-modal v-model:show="notificationOpen" class="mp-log-modal" style="width: min(1100px, calc(100vw - 32px))">
-      <div class="mp-log-dialog">
-        <NotificationCenter v-if="notificationOpen" :task="taskStatus" @close="notificationOpen = false" />
-      </div>
-    </n-modal>
-
-    <n-drawer v-model:show="themeCustomizerOpen" placement="right" :width="isMobile ? '100vw' : 400" class="mp-theme-drawer">
-      <n-drawer-content :native-scrollbar="false" body-content-style="padding: 0;">
-        <ThemeCustomizer v-if="themeCustomizerOpen" @close="themeCustomizerOpen = false" />
-      </n-drawer-content>
-    </n-drawer>
-
-    <!-- ★★★ 自定义菜单编辑器模态框 ★★★ -->
-    <n-modal v-model:show="isMenuEditorVisible" preset="card" class="menu-editor-modal" style="width: min(650px, calc(100vw - 32px));" title="自定义侧边栏菜单 (全局生效)">
-      <div class="menu-editor-list">
-
-        <div v-for="(group, gIndex) in menuConfigTree" :key="group.key" class="menu-editor-group">
-          <div class="menu-editor-group-heading">
-            <n-switch v-model:value="group.visible" size="small" :aria-label="`显示 ${getOriginalLabel(group.key)} 菜单组`" />
-            <n-input v-model:value="group.label" :placeholder="getOriginalLabel(group.key)" :input-props="{ 'aria-label': `${getOriginalLabel(group.key)} 菜单组名称` }" size="small" class="menu-editor-group-name" />
-            <span class="menu-editor-hint">一级菜单</span>
-
-            <div class="menu-editor-expanded">
-              <span>默认展开</span>
-              <n-switch v-model:value="group.expanded" size="small" :aria-label="`默认展开 ${getOriginalLabel(group.key)}`" />
-            </div>
-          </div>
-
-          <div
-            class="menu-editor-children"
-            @dragover.prevent="onDragOverEmpty($event, gIndex)"
-            @drop="onDropEmpty($event, gIndex)"
-          >
-            <div
-              v-for="(child, cIndex) in group.children"
-              :key="child.key"
-              class="draggable-item"
-              :class="{
-                'drag-over-top': dragTarget?.gIndex === gIndex && dragTarget?.cIndex === cIndex && dragPosition === 'top',
-                'drag-over-bottom': dragTarget?.gIndex === gIndex && dragTarget?.cIndex === cIndex && dragPosition === 'bottom',
-                'is-dragging': dragSource?.gIndex === gIndex && dragSource?.cIndex === cIndex
-              }"
-              draggable="true"
-              @dragstart="onDragStart($event, gIndex, cIndex)"
-              @dragover.prevent="onDragOver($event, gIndex, cIndex)"
-              @drop="onDrop($event, gIndex, cIndex)"
-              @dragend="onDragEnd"
-            >
-              <n-icon size="18" class="menu-editor-drag-handle"><MenuOutline /></n-icon>
-              <n-switch v-model:value="child.visible" size="small" :aria-label="`显示 ${getOriginalLabel(child.key)}`" />
-              <n-input v-model:value="child.label" :placeholder="getOriginalLabel(child.key)" :input-props="{ 'aria-label': `${getOriginalLabel(child.key)} 菜单名称` }" size="small" class="menu-editor-child-name" />
-            </div>
-
-            <div v-if="group.children.length === 0" class="empty-group-dropzone">
-              拖拽菜单至此处
-            </div>
-          </div>
-        </div>
-
-      </div>
-      <template #footer>
-        <div class="menu-editor-footer">
-          <span class="menu-editor-hint">
-            提示：按住左侧图标可拖拽排序，支持跨组拖拽。<br/>
-            <span>关闭一级菜单显示，可将其下开启的二级菜单自动提升为一级。</span>
-          </span>
-          <n-space>
-            <n-popconfirm :to="true" placement="top-start" style="max-width: min(360px, 70vw)" @positive-click="resetMenuConfig" negative-text="取消" positive-text="确定">
-              <template #trigger>
-                <n-button type="error" ghost :loading="isSavingMenu"><template #icon><UiIcon name="refresh" /></template>恢复默认</n-button>
-              </template>
-              确定要恢复所有菜单的默认名称、顺序和显示状态吗？
-            </n-popconfirm>
-            <n-button type="primary" @click="saveMenuConfig" :loading="isSavingMenu"><template #icon><UiIcon name="save" /></template>保存并应用</n-button>
-          </n-space>
-        </div>
-      </template>
-    </n-modal>
-
-  </div>
-</template>
-
 <script setup>
-import { ref, computed, h, watch, nextTick, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
-import {
-  NDrawer, NDrawerContent,
-  NMenu, NSwitch, NIcon, NModal, NDropdown, NButton,
-  useMessage, useDialog, NInput, NSpace, NPopconfirm
-} from 'naive-ui';
-import { useAuthStore } from './stores/auth';
-import NotificationCenter from './components/NotificationCenter.vue';
-import ThemeCustomizer from './components/ThemeCustomizer.vue';
-import UiIcon from './components/UiIcon.vue';
-import {
-  ListOutline as ReviewListIcon,
-  TimerOutline as SchedulerIcon,
-  OptionsOutline as GeneralIcon,
-  LogOutOutline as LogoutIcon,
-  ColorPaletteOutline as PaletteIcon,
-  NotificationsOutline,
-  SyncOutline as RestartIcon,
-  PersonCircleOutline as UserCenterIcon,
-  FilmOutline as MediaCenterIcon,
-  MenuOutline,
-} from '@vicons/ionicons5';
+import { useDisplay } from 'vuetify';
 import axios from 'axios';
+import { useAuthStore } from '@/stores/auth';
+import { refreshTaskStatus } from '@/composables/useTaskStatus';
+import { useMessage, useDialog } from '@/composables/useFeedback';
+import { useThemeCustomizer, THEME_CUSTOMIZER_OPEN_EVENT } from '@/composables/useThemeCustomizer';
+import DefaultLayout from '@/layouts/components/DefaultLayout.vue';
+import NotificationCenter from '@/components/NotificationCenter.vue';
+import ThemeCustomizer from '@/components/theme/ThemeCustomizer.vue';
+import WallpaperSettings from '@/components/WallpaperSettings.vue';
 
-const message = useMessage();
-const dialog = useDialog();
-
-const isMobile = ref(window.innerWidth < 960);
-const collapsed = ref(false);
-const mobileMenuOpen = ref(false);
-const notificationOpen = ref(false);
-const themeCustomizerOpen = ref(false);
-
-const checkMobile = () => {
-  isMobile.value = window.innerWidth < 960;
-};
-
-onMounted(() => {
-  checkMobile();
-  window.addEventListener('resize', checkMobile);
-  initMenuConfig();
-});
-
-onUnmounted(() => window.removeEventListener('resize', checkMobile));
-
-const props = defineProps({
-  taskStatus: Object
-});
-
-const router = useRouter();
-const route = useRoute();
-const authStore = useAuthStore();
-const avatarLoadFailed = ref(false);
+const props = defineProps({ taskStatus: Object });
+const router = useRouter(), route = useRoute(), authStore = useAuthStore();
+const message = useMessage(), dialog = useDialog();
+const appearance = useThemeCustomizer();
+const { mdAndDown } = useDisplay();
+const isMobile = computed(() => mdAndDown.value);
+const collapsed = computed(() => appearance.settings.value.layout === 'collapsed' && !isMobile.value);
+const notificationOpen = ref(false), themeCustomizerOpen = ref(false), avatarLoadFailed = ref(false);
+const taskControlBusy = ref(false);
+const activeMenuKey = computed(() => route.name === 'MediaCenterLibrary' ? 'MediaCenter' : route.name);
+const taskPaused = computed(() => props.taskStatus?.state === 'paused');
+const taskStopping = computed(() => props.taskStatus?.stop_requested || props.taskStatus?.state === 'stopping');
+const userOptions = computed(() => [
+  { key: 'user-center', label: '用户中心', icon: 'mdi-account-circle-outline' },
+  ...(authStore.isAdmin ? [
+    { key: 'edit-menu', label: '自定义导航', icon: 'mdi-menu-open' },
+    { key: 'restart-container', label: '重启容器', icon: 'mdi-restart' },
+  ] : []),
+  { key: 'logout', label: '退出登录', icon: 'mdi-logout' },
+]);
 watch(() => authStore.avatarUrl, () => { avatarLoadFailed.value = false; });
-watch(() => authStore.isLoggedIn ? authStore.user?.id : null, async (id) => {
+watch(() => authStore.isLoggedIn ? authStore.user?.id : null, async id => {
   if (id) {
-    try { await authStore.fetchAccountInfo(); } catch { /* 保留默认头像，账户页提供错误提示。 */ }
+    try { await authStore.fetchAccountInfo(); } catch { /* Account page exposes account failures. */ }
   }
 }, { immediate: true });
-watch(() => route.fullPath, () => {
-  mobileMenuOpen.value = false;
-  nextTick(() => document.querySelector('.mp-page-content')?.scrollTo({ top: 0 }));
-});
-
-const activeMenuKey = computed(() => route.name === 'MediaCenterLibrary' ? 'MediaCenter' : route.name);
-const renderIcon = (iconComponent, size = 18) => () => h(NIcon, { size }, { default: () => h(iconComponent) });
-
-
-const userOptions = computed(() => {
-  const options = [];
-  if (authStore.isAdmin) {
-    options.push({
-      label: '重启容器',
-      key: 'restart-container',
-      icon: renderIcon(RestartIcon)
-    });
-  }
-
-  if (options.length > 0) {
-    options.push({ type: 'divider', key: 'd1' });
-  }
-
-  options.push({
-    label: '退出登录',
-    key: 'logout',
-    icon: renderIcon(LogoutIcon)
-  });
-
-  return options;
-});
+function openThemeCustomizer() { themeCustomizerOpen.value = true; }
+function handleMenuUpdate(key) { router.push({ name: key }); }
+async function setLayout(layout) {
+  try { await appearance.setLayout(layout); }
+  catch (error) { message.error(error.message || '保存导航布局失败'); }
+}
+async function controlTask(action) {
+  const taskId = props.taskStatus?.task_id;
+  if (!taskId || taskControlBusy.value || taskStopping.value) return;
+  taskControlBusy.value = true;
+  try {
+    const endpoint = action === 'stop' ? '/api/trigger_stop_task' : `/api/tasks/${action}`;
+    const { data } = await axios.post(endpoint, { task_id: taskId });
+    message.info(data.message || '任务控制请求已发送');
+    await refreshTaskStatus(true);
+  } catch (error) { message.error(error.response?.data?.error || error.message || '任务控制失败'); }
+  finally { taskControlBusy.value = false; }
+}
+function confirmStopTask() {
+  const taskId = props.taskStatus?.task_id;
+  const taskName = props.taskStatus?.current_action || '当前任务';
+  if (!taskId || !props.taskStatus?.is_running) return;
+  dialog.warning({ title: '停止当前任务', content: `确定停止“${taskName}”吗？任务将在安全停止点结束，并保留恢复和清理结果。`,
+    positiveText: '停止任务', negativeText: '取消', onPositiveClick: () => {
+      if (props.taskStatus?.task_id !== taskId || !props.taskStatus?.is_running) {
+        message.warning('当前任务已变化，未执行停止操作。');
+        return;
+      }
+      return controlTask('stop');
+    } });
+}
+function confirmResetMenu() {
+  dialog.warning({ title: '恢复默认导航', content: '确定恢复菜单名称、顺序及显示状态吗？',
+    positiveText: '恢复默认', negativeText: '取消', onPositiveClick: resetMenuConfig });
+}
+function moveMenuItem(groupIndex, childIndex, delta) {
+  const children = menuConfigTree.value[groupIndex].children;
+  const target = childIndex + delta;
+  if (target < 0 || target >= children.length) return;
+  children.splice(target, 0, children.splice(childIndex, 1)[0]);
+}
+onMounted(() => { initMenuConfig(); window.addEventListener(THEME_CUSTOMIZER_OPEN_EVENT, openThemeCustomizer); });
+onBeforeUnmount(() => window.removeEventListener(THEME_CUSTOMIZER_OPEN_EVENT, openThemeCustomizer));
 
 const triggerRestart = async () => {
   message.info('正在发送重启指令...');
@@ -235,19 +118,22 @@ const handleUserSelect = async (key) => {
 // ================= 自定义菜单逻辑 (树形结构 + 拖拽) =================
 const isMenuEditorVisible = ref(false);
 const isSavingMenu = ref(false);
-const isMenuReady = ref(false); // 控制 n-menu 渲染时机
+const isMenuReady = ref(false);
+const isMenuLoading = ref(false);
+const menuConfigLoaded = ref(false);
+const menuConfigError = ref('');
 const menuConfigTree = ref([]); // 树形配置数据
 
 // 1. 基础菜单（包含所有权限允许的菜单，带有 defaultLabel 用于重置）
 const baseMenuOptions = computed(() => {
   const discoveryGroup = {
-    label: '发现', defaultLabel: '发现', key: 'group-discovery', children: []
+    label: '发现', defaultLabel: '发现', key: 'group-discovery', icon: 'mdi-compass-outline', children: []
   };
 
   if (authStore.isLoggedIn) {
-    discoveryGroup.children.push({ label: '用户中心', defaultLabel: '用户中心', key: 'UserCenter', icon: renderIcon(UserCenterIcon, 24) });
+    discoveryGroup.children.push({ label: '用户中心', defaultLabel: '用户中心', key: 'UserCenter', icon: 'mdi-account-circle-outline' });
     if (authStore.isAdmin) {
-      discoveryGroup.children.push({ label: '媒体中心', defaultLabel: '媒体中心', key: 'MediaCenter', icon: renderIcon(MediaCenterIcon, 24) });
+      discoveryGroup.children.push({ label: '媒体中心', defaultLabel: '媒体中心', key: 'MediaCenter', icon: 'mdi-filmstrip' });
     }
   }
 
@@ -256,17 +142,17 @@ const baseMenuOptions = computed(() => {
   if (authStore.isAdmin) {
     finalMenu.push(
       {
-        label: '整理', defaultLabel: '整理', key: 'group-management',
+        label: '整理', defaultLabel: '整理', key: 'group-management', icon: 'mdi-folder-play-outline',
         children: [
-          { label: '手动处理', defaultLabel: '手动处理', key: 'ReviewList', icon: renderIcon(ReviewListIcon, 24) },
+          { label: '手动处理', defaultLabel: '手动处理', key: 'ReviewList', icon: 'mdi-playlist-edit' },
         ]
       },
       {
-        label: '系统', defaultLabel: '系统', key: 'group-system',
+        label: '系统', defaultLabel: '系统', key: 'group-system', icon: 'mdi-cog-outline',
         children: [
-          { label: '通用设置', defaultLabel: '通用设置', key: 'settings-general', icon: renderIcon(GeneralIcon, 24) },
-          { label: '任务中心', defaultLabel: '任务中心', key: 'settings-scheduler', icon: renderIcon(SchedulerIcon, 24) },
-          { label: '封面生成', defaultLabel: '封面生成', key: 'CoverGeneratorConfig', icon: renderIcon(PaletteIcon, 24) },
+          { label: '通用设置', defaultLabel: '通用设置', key: 'settings-general', icon: 'mdi-cog-outline' },
+          { label: '任务中心', defaultLabel: '任务中心', key: 'settings-scheduler', icon: 'mdi-timer-outline' },
+          { label: '封面生成', defaultLabel: '封面生成', key: 'CoverGeneratorConfig', icon: 'mdi-palette-outline' },
         ]
       }
     );
@@ -365,15 +251,23 @@ const syncMenuConfig = (savedTree) => {
 
 // 初始化配置
 const initMenuConfig = async () => {
-  isMenuReady.value = false;
+  if (isMenuLoading.value) return;
+  isMenuLoading.value = true;
+  menuConfigLoaded.value = false;
+  menuConfigError.value = '';
+  if (!menuConfigTree.value.length) isMenuReady.value = false;
   try {
     const response = await axios.get('/api/system/menu_config');
+    if (response.data != null && !Array.isArray(response.data)) throw new Error('导航配置格式无效，请重试读取。');
     const saved = response.data || [];
     menuConfigTree.value = syncMenuConfig(saved);
+    menuConfigLoaded.value = true;
   } catch (error) {
     console.error("获取菜单配置失败", error);
+    menuConfigError.value = error.response?.data?.error || error.message || '读取导航配置失败。';
     menuConfigTree.value = syncMenuConfig([]); // 失败时回退到默认
   } finally {
+    isMenuLoading.value = false;
     // 确保数据加载完再渲染菜单
     nextTick(() => {
       isMenuReady.value = true;
@@ -389,6 +283,7 @@ watch(baseMenuOptions, () => {
 
 // 保存配置到后端
 const saveMenuConfig = async () => {
+  if (!menuConfigLoaded.value || isSavingMenu.value) return;
   isSavingMenu.value = true;
   try {
     await axios.post('/api/system/menu_config', menuConfigTree.value);
@@ -407,10 +302,13 @@ const saveMenuConfig = async () => {
 
 // 恢复默认
 const resetMenuConfig = async () => {
+  if (isSavingMenu.value || isMenuLoading.value) return;
   isSavingMenu.value = true;
   try {
     await axios.post('/api/system/menu_config/reset');
     menuConfigTree.value = syncMenuConfig([]); // 传入空数组生成默认树
+    menuConfigLoaded.value = true;
+    menuConfigError.value = '';
     message.success('已恢复默认菜单');
 
     isMenuReady.value = false;
@@ -563,73 +461,134 @@ const clearDragState = () => {
   dragPosition.value = '';
 };
 
-// ==================================================
-
-function handleMenuUpdate(key) {
-  mobileMenuOpen.value = false;
-  router.push({ name: key });
-}
-
 </script>
 
-<style>
-/* ... (保留你原有的 style 代码不变) ... */
+<template>
+  <DefaultLayout :menus="isMenuReady ? menuOptions : []" :active-key="String(activeMenuKey || '')"
+    :expanded-keys="defaultExpandedKeys" :layout="appearance.settings.value.layout" @navigate="handleMenuUpdate" @update:layout="setLayout">
+    <template #brand="{ rail }">
+      <RouterLink :to="{ name: 'UserCenter' }" class="app-brand"><img src="./assets/logo.png" alt="Emby Toolkit" />
+        <span v-if="!rail" class="app-brand-name">Emby Toolkit</span>
+      </RouterLink>
+    </template>
+    <template #navbar-leading>
+      <VBtn v-if="authStore.isAdmin" variant="text" class="navbar-search" prepend-icon="mdi-magnify"
+        :to="{ name: 'ReviewList' }" aria-label="搜索媒体"><span v-if="!isMobile">搜索媒体</span></VBtn>
+      <VMenu v-if="authStore.isAdmin && taskStatus?.is_running" location="bottom" :close-on-content-click="false">
+        <template #activator="{ props: taskMenuProps }">
+          <VBtn v-bind="taskMenuProps" variant="text" class="running-task" aria-label="查看当前任务">
+            <span class="running-task-content"><strong>{{ taskStatus.current_action }}</strong>
+              <VProgressLinear :model-value="taskStatus.progress" :indeterminate="!taskStatus.progress_known" color="primary" rounded height="3" />
+            </span>
+          </VBtn>
+        </template>
+        <VCard width="360" max-width="calc(100vw - 24px)">
+          <VCardItem :title="taskStatus.current_action" :subtitle="taskStatus.phase || taskStatus.state" />
+          <VCardText><VProgressLinear :model-value="taskStatus.progress" :indeterminate="!taskStatus.progress_known" color="primary" rounded height="6" />
+            <div class="task-message">{{ taskStatus.message }}</div>
+            <div v-if="taskStatus.progress_known" class="text-caption">{{ taskStatus.progress }}%</div>
+          </VCardText>
+          <VCardActions class="flex-wrap">
+            <VBtn :prepend-icon="taskPaused ? 'mdi-play' : 'mdi-pause'" :loading="taskControlBusy" :disabled="taskStopping || taskStatus.state === 'pausing'"
+              @click="controlTask(taskPaused ? 'resume' : 'pause')">{{ taskPaused ? '继续' : taskStatus.state === 'pausing' ? '暂停中' : '暂停' }}</VBtn>
+            <VBtn color="error" prepend-icon="mdi-stop" :disabled="taskStopping || taskControlBusy" @click="confirmStopTask">{{ taskStopping ? '停止中' : '停止' }}</VBtn>
+            <VSpacer /><VBtn icon="mdi-text-box-search-outline" aria-label="查看任务日志" @click="notificationOpen = true" />
+          </VCardActions>
+        </VCard>
+      </VMenu>
+    </template>
+    <template #navbar-actions>
+      <VBtn v-if="authStore.isAdmin" icon variant="text" title="通知中心" aria-label="通知中心" @click="notificationOpen = true">
+        <VBadge :model-value="Boolean(taskStatus?.is_running)" color="primary" dot><VIcon icon="mdi-bell-outline" /></VBadge>
+      </VBtn>
+      <VBtn icon="mdi-palette-outline" variant="text" title="主题与壁纸" aria-label="主题与壁纸" @click="openThemeCustomizer" />
+      <VMenu v-if="authStore.isLoggedIn" location="bottom end" offset="8">
+        <template #activator="{ props: userMenuProps }">
+          <VBtn v-bind="userMenuProps" icon variant="text" :aria-label="`${authStore.username} 的用户菜单`">
+            <VAvatar size="38" color="primary"><VImg v-if="authStore.avatarUrl && !avatarLoadFailed" :src="authStore.avatarUrl" alt="" @error="avatarLoadFailed = true" />
+              <span v-else>{{ (authStore.username || 'U').slice(0, 1).toUpperCase() }}</span>
+            </VAvatar>
+          </VBtn>
+        </template>
+        <VList min-width="216"><VListItem :title="authStore.username" :subtitle="authStore.isAdmin ? '管理员' : '用户'" /><VDivider />
+          <VListItem v-for="item in userOptions" :key="item.key" :title="item.label" :prepend-icon="item.icon" @click="handleUserSelect(item.key)" />
+        </VList>
+      </VMenu>
+    </template>
+    <RouterView v-slot="{ Component }"><component :is="Component" :key="route.path" :task-status="props.taskStatus" /></RouterView>
+  </DefaultLayout>
 
-/* ★★★ 拖拽相关样式 ★★★ */
-.draggable-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 8px;
-  padding: 8px;
-  border-radius: 8px;
-  transition: background-color 0.2s;
-  border: 1px solid var(--ui-border);
-  background:var(--ui-surface);
-  min-width:0;
-}
+  <VDialog v-model="notificationOpen" max-width="1100" scrollable>
+    <VCard><NotificationCenter v-if="notificationOpen" :task="taskStatus" @close="notificationOpen = false" /></VCard>
+  </VDialog>
+  <ThemeCustomizer v-if="themeCustomizerOpen" @close="themeCustomizerOpen = false"><WallpaperSettings /></ThemeCustomizer>
+  <VDialog v-model="isMenuEditorVisible" max-width="760" scrollable>
+    <VCard>
+      <VCardItem title="自定义导航" subtitle="修改菜单名称、显示状态和顺序，全局生效">
+        <template #append><VBtn icon="mdi-close" variant="text" aria-label="关闭导航设置" @click="isMenuEditorVisible = false" /></template>
+      </VCardItem>
+      <VCardText class="menu-editor-content">
+        <VAlert v-if="menuConfigError" type="warning" variant="tonal" title="导航设置尚未读取" class="mb-4">
+          <div>{{ menuConfigError }}</div>
+          <p class="mt-2">默认导航仍可使用，成功读取后才能保存更改。</p>
+          <VBtn size="small" variant="tonal" class="mt-2" prepend-icon="mdi-refresh" :loading="isMenuLoading" @click="initMenuConfig">重试读取</VBtn>
+        </VAlert>
+        <VCard v-for="(group, groupIndex) in menuConfigTree" :key="group.key" variant="outlined" class="menu-editor-group">
+          <VCardText>
+            <div class="menu-editor-group-heading">
+              <VSwitch v-model="group.visible" density="compact" hide-details :aria-label="`显示 ${getOriginalLabel(group.key)} 菜单组`" />
+              <VTextField v-model="group.label" :placeholder="getOriginalLabel(group.key)" label="菜单组名称" density="compact" hide-details />
+              <VSwitch v-model="group.expanded" label="默认展开" density="compact" hide-details />
+            </div>
+            <div class="menu-editor-children" @dragover.prevent="onDragOverEmpty($event, groupIndex)" @drop="onDropEmpty($event, groupIndex)">
+              <div v-for="(child, childIndex) in group.children" :key="child.key" class="menu-editor-item" draggable="true"
+                :class="{ 'drag-over-top': dragTarget?.gIndex === groupIndex && dragTarget?.cIndex === childIndex && dragPosition === 'top',
+                  'drag-over-bottom': dragTarget?.gIndex === groupIndex && dragTarget?.cIndex === childIndex && dragPosition === 'bottom',
+                  'is-dragging': dragSource?.gIndex === groupIndex && dragSource?.cIndex === childIndex }"
+                @dragstart="onDragStart($event, groupIndex, childIndex)" @dragover.prevent="onDragOver($event, groupIndex, childIndex)"
+                @drop="onDrop($event, groupIndex, childIndex)" @dragend="onDragEnd">
+                <VIcon icon="mdi-drag" class="menu-drag-handle" />
+                <VSwitch v-model="child.visible" density="compact" hide-details :aria-label="`显示 ${getOriginalLabel(child.key)}`" />
+                <VTextField v-model="child.label" :placeholder="getOriginalLabel(child.key)" label="菜单名称" density="compact" hide-details />
+                <VBtn icon="mdi-chevron-up" variant="text" size="small" :disabled="childIndex === 0" aria-label="上移菜单" @click="moveMenuItem(groupIndex, childIndex, -1)" />
+                <VBtn icon="mdi-chevron-down" variant="text" size="small" :disabled="childIndex === group.children.length - 1" aria-label="下移菜单" @click="moveMenuItem(groupIndex, childIndex, 1)" />
+              </div>
+              <div v-if="!group.children.length" class="empty-group-dropzone">拖拽菜单至此处</div>
+            </div>
+          </VCardText>
+        </VCard>
+        <VAlert type="info" variant="tonal" density="compact">支持跨组拖拽。关闭菜单组显示时，其下已开启的菜单会提升为一级。</VAlert>
+      </VCardText>
+      <VCardActions><VBtn color="error" :loading="isSavingMenu" :disabled="isMenuLoading" prepend-icon="mdi-restore" @click="confirmResetMenu">恢复默认</VBtn>
+        <VSpacer /><VBtn color="primary" variant="tonal" :loading="isSavingMenu" :disabled="!menuConfigLoaded" prepend-icon="mdi-content-save-outline" @click="saveMenuConfig">保存并应用</VBtn>
+      </VCardActions>
+    </VCard>
+  </VDialog>
+</template>
 
-.draggable-item:hover {
-  background-color:var(--ui-surface-muted);
-}
-
-/* 正在被拖拽的元素半透明 */
-.draggable-item.is-dragging {
-  opacity: 0.4;
-}
-
-/* 拖拽目标指示线 */
-.drag-over-top {
-  border-top: 2px solid var(--accent-color) !important;
-}
-
-.drag-over-bottom {
-  border-bottom: 2px solid var(--accent-color) !important;
-}
-
-/* 空组的拖拽区域 */
-.empty-group-dropzone {
-  height: 32px;
-  border: 1px dashed var(--ui-border-strong);
-  border-radius: 4px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color:var(--ui-text-muted);
-  font-size: 12px;
-  margin-bottom: 8px;
-}
-.menu-editor-modal { container-type:inline-size; }
-.menu-editor-list { max-height:60dvh; overflow-y:auto; padding-right:4px; }
-.menu-editor-group { margin-bottom:20px; }
-.menu-editor-group-heading { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin-bottom:8px; padding:12px; border:1px solid var(--ui-border); border-radius:8px; background:var(--ui-surface-muted); }
-.menu-editor-group-name { flex:1 1 150px; min-width:0; }
-.menu-editor-hint { color:var(--ui-text-muted); font-size:12px; line-height:1.6; }
-.menu-editor-expanded { display:flex; align-items:center; gap:8px; color:var(--ui-text-muted); font-size:12px; }
-.menu-editor-children { padding-left:20px; min-height:10px; }
-.menu-editor-drag-handle { flex-shrink:0; cursor:grab; color:var(--ui-text-muted); }
-.menu-editor-child-name { flex:1; min-width:0; }
-.menu-editor-footer { display:flex; flex-wrap:wrap; justify-content:space-between; gap:16px; }
-.menu-editor-footer > .menu-editor-hint { flex:1 1 300px; }
-@container (max-width:460px) { .menu-editor-children { padding-left:8px; } .menu-editor-group-heading { padding:8px; } .menu-editor-group-heading > .menu-editor-hint { display:none; } .menu-editor-expanded { flex-basis:100%; justify-content:flex-end; } .menu-editor-footer > .n-space { margin-left:auto; } }
+<style lang="scss" scoped>
+.app-brand { display: flex; align-items: center; gap: 12px; color: rgb(var(--v-theme-on-surface)); text-decoration: none; min-inline-size: 0; }
+.app-brand img { inline-size: 36px; block-size: 36px; object-fit: contain; }
+.app-brand-name { font-size: 17px; font-weight: 700; white-space: nowrap; }
+.navbar-search { color: rgba(var(--v-theme-on-surface), .65); }
+.running-task { max-inline-size: min(280px, 30vw); min-inline-size: 0; }
+.running-task-content { display: grid; gap: 5px; min-inline-size: 0; inline-size: 100%; }
+.running-task-content strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
+.task-message { margin-block-start: 12px; overflow-wrap: anywhere; }
+.menu-editor-content { max-block-size: 70dvh; }
+.menu-editor-group { margin-block-end: 16px; }
+.menu-editor-group-heading, .menu-editor-item { display: flex; align-items: center; gap: 8px; }
+.menu-editor-group-heading { margin-block-end: 16px; flex-wrap: wrap; }
+.menu-editor-group-heading :deep(.v-input) { flex: 0 0 auto; }
+.menu-editor-group-heading :deep(.v-text-field) { flex: 1 1 180px; }
+.menu-editor-item { padding-block: 10px; border-block: 2px solid transparent; }
+.menu-editor-item :deep(.v-switch) { flex: 0 0 auto; }
+.menu-editor-item :deep(.v-text-field) { min-inline-size: 80px; }
+.menu-editor-children { min-block-size: 44px; }
+.menu-drag-handle { cursor: grab; }
+.drag-over-top { border-block-start-color: rgb(var(--v-theme-primary)); }
+.drag-over-bottom { border-block-end-color: rgb(var(--v-theme-primary)); }
+.is-dragging { opacity: .45; }
+.empty-group-dropzone { text-align: center; color: rgba(var(--v-theme-on-surface), .55); padding: 16px; border: 1px dashed rgba(var(--v-theme-on-surface), .2); }
+@media (width <= 600px) { .running-task { max-inline-size: 25vw; } .app-brand-name { font-size: 15px; } .menu-editor-item { gap: 3px; } }
 </style>

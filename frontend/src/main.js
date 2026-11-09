@@ -1,57 +1,43 @@
-// src/main.js
-
-import { createApp } from 'vue';
-import { createPinia } from 'pinia';
+import { createApp } from 'vue'
+import { createPinia } from 'pinia'
+import { createI18n } from 'vue-i18n'
+import Toast from 'vue-toastification'
+import { PerfectScrollbarPlugin } from 'vue3-perfect-scrollbar'
+import { addCollection } from '@iconify/vue'
 import App from './App.vue'
-import router from './router';
-import naive from 'naive-ui';
-import UiIcon from './components/UiIcon.vue';
-import { useAuthStore } from './stores/auth'; // ★★★ 1. 导入你的 auth store ★★★
-import { installBackgroundTaskInterceptor } from './utils/backgroundTasks';
-import { useAppearance } from './composables/useAppearance';
-import { applyDocumentTheme } from './theme';
+import router from './router'
+import vuetify from './plugins/vuetify'
+import UiIcon from './components/UiIcon.vue'
+import zhCN from './locales/zh-CN'
+import icons from './plugins/icons.json'
+import { useAuthStore } from './stores/auth'
+import { installBackgroundTaskInterceptor } from './utils/backgroundTasks'
+import { initializeThemeRuntime } from './theme'
+import './styles/main.scss'
+import './styles/etk.css'
 
-// 全局样式
-import './assets/global.css';
-import './assets/moviepilot.css';
+icons.forEach(collection => addCollection(collection))
+const app = createApp(App)
+app.use(createPinia())
+app.use(vuetify)
+app.use(createI18n({ legacy: false, locale: 'zh-CN', fallbackLocale: 'zh-CN', messages: { 'zh-CN': zhCN } }))
+app.use(Toast, { position: 'bottom-right', hideProgressBar: true })
+app.use(PerfectScrollbarPlugin)
+app.component('UiIcon', UiIcon)
+installBackgroundTaskInterceptor()
+const disposeTheme = initializeThemeRuntime()
 
-// Apply the saved appearance before waiting for authentication.
-applyDocumentTheme(useAppearance().settings, window.matchMedia('(prefers-color-scheme: dark)').matches);
-
-// --- 创建核心实例 ---
-const pinia = createPinia();
-const app = createApp(App);
-app.component('UiIcon', UiIcon);
-
-// --- 严格按照顺序注册插件 ---
-app.use(pinia);
-installBackgroundTaskInterceptor();
-// 注意：Router 的注册要移到下面，确保在 store 准备好之后
-
-// --- ★★★ 核心修复：异步启动流程 ★★★
 async function initializeApp() {
-  // 2. 在应用启动的最初阶段，获取 auth store 实例
-  const authStore = useAuthStore();
-
+  const authStore = useAuthStore()
   try {
-    // 3. 异步调用 checkAuthStatus，并等待它完成
-    // 这会向后端 /api/auth/status 发送请求，并用权威结果更新 store
-    await authStore.checkAuthStatus();
-    console.log('认证状态已从后端同步完毕。');
-
+    await authStore.checkAuthStatus()
   } catch (error) {
-    // 如果连初始状态都获取失败（比如后端没开），可以在这里处理
-    console.error('应用初始化失败：无法获取初始认证状态。');
-    // 此时 authStore.initializationError 会被设置，你可以在 App.vue 中显示一个全局错误提示
+    console.error('应用初始化失败：', error.message)
   } finally {
-    // 4. 无论 checkAuthStatus 成功还是失败，都要继续挂载应用
-    // 因为路由守卫会根据 store 的最新状态（无论是成功获取的还是失败后重置的）来决定如何跳转
-    app.use(router);
-    app.use(naive);
-    app.mount('#app');
-    console.log('应用已挂载。');
+    app.use(router)
+    app.mount('#app')
   }
 }
 
-// 5. 调用异步启动函数
-initializeApp();
+void initializeApp()
+if (import.meta.hot) import.meta.hot.dispose(disposeTheme)

@@ -1,91 +1,121 @@
 <template>
-  <!-- 1. 使用 n-layout 包裹，适配暗色/亮色主题背景 -->
-  <n-layout class="setup-layout">
-    <div class="setup-container">
+  <div class="login-root setup-root" :data-login-visual-profile="glassEnabled ? 'glass' : 'plain'">
+    <svg v-if="glassEnabled" class="login-glass-filter-defs" aria-hidden="true">
+      <defs>
+        <filter id="login-glass-static-refraction" x="-12%" y="-12%" width="124%" height="124%">
+          <feTurbulence type="fractalNoise" baseFrequency="0.008 0.014" numOctaves="2" seed="8" result="noise" />
+          <feGaussianBlur in="noise" stdDeviation="0.35" result="softNoise" />
+          <feDisplacementMap in="SourceGraphic" in2="softNoise" scale="11" xChannelSelector="R" yChannelSelector="G" />
+        </filter>
+      </defs>
+    </svg>
 
-      <!-- 2. 加上 dashboard-card 类实现辉光，同时保留 setup-card 用于控制尺寸 -->
-      <n-card class="dashboard-card setup-card" :bordered="false" size="large">
-
-        <!-- 头部区域：Logo 和 标题 -->
-        <div class="setup-header">
-          <img src="../assets/logo.png" alt="Logo" class="setup-logo" />
-          <h2 class="setup-title">Emby Toolkit</h2>
-          <p class="setup-subtitle">初始化配置向导</p>
+    <div class="auth-wrapper d-flex align-center justify-center">
+      <VCard class="auth-card login-card setup-card pa-7 pa-sm-9" :class="{ 'glass-effect': glassEnabled }" max-width="36rem" width="100%" flat>
+        <div class="login-card__surface" aria-hidden="true" />
+        <div class="login-head">
+          <img :src="logo" alt="Emby Toolkit" class="login-logo" />
+          <h1 class="login-title">Emby Toolkit</h1>
+          <p class="login-subtitle">初始化配置向导</p>
         </div>
 
-        <div class="intro-text">
-          <p>请配置 Emby 服务器连接信息。</p>
-          <p class="tip">这是系统运行的基础，请确保信息正确。</p>
-        </div>
-
-        <n-form ref="formRef" :model="formModel" :rules="rules" size="large" @submit.prevent="handleSave">
-          <n-form-item label="服务器地址 (URL)" path="url">
-            <n-input
-              v-model:value="formModel.url"
+        <VCardText class="pa-0">
+          <VAlert type="info" variant="tonal" class="mb-6">配置 Emby 服务器连接信息，测试通过后即可登录。</VAlert>
+          <VForm ref="formRef" @submit.prevent="handleSave">
+            <VTextField
+              v-model="formModel.url"
+              label="服务器地址 (URL)"
               placeholder="例如: http://192.168.1.10:8096"
-              :input-props="{ inputmode: 'url', autocapitalize: 'none', spellcheck: false }"
+              name="emby-server-url"
+              inputmode="url"
+              autocapitalize="none"
+              spellcheck="false"
+              prepend-inner-icon="mdi-server-network-outline"
+              :rules="rules.url"
+              :readonly="loading"
+              :mobile-layout="false"
+              class="mb-4"
+              autofocus
             />
-          </n-form-item>
-
-          <n-form-item label="API 密钥 (API Key)" path="api_key">
-            <n-input
-              v-model:value="formModel.api_key"
-              type="password"
-              show-password-on="click"
-              placeholder="在 Emby 控制台 -> 高级 -> API 密钥 中生成"
+            <VTextField
+              v-model="formModel.api_key"
+              label="API 密钥 (API Key)"
+              name="emby-api-key"
+              :type="isApiKeyVisible ? 'text' : 'password'"
+              placeholder="请输入 Emby API 密钥"
               autocomplete="off"
-            />
-          </n-form-item>
-
-          <n-space vertical style="margin-top: 20px;">
-            <n-button type="primary" attr-type="submit" block :loading="loading" size="large" class="setup-btn">
-              测试并保存
-            </n-button>
-          </n-space>
-        </n-form>
-      </n-card>
+              prepend-inner-icon="mdi-key-outline"
+              hint="在 Emby 控制台 → 高级 → API 密钥中生成"
+              persistent-hint
+              :rules="rules.api_key"
+              :readonly="loading"
+              :mobile-layout="false"
+              class="mb-6"
+            >
+              <template #append-inner>
+                <button type="button" class="password-toggle" :aria-label="isApiKeyVisible ? '隐藏 API 密钥' : '显示 API 密钥'" @click="isApiKeyVisible = !isApiKeyVisible">
+                  <VIcon :icon="isApiKeyVisible ? 'mdi-eye-off-outline' : 'mdi-eye-outline'" size="20" />
+                </button>
+              </template>
+            </VTextField>
+            <VBtn block type="submit" prepend-icon="mdi-check-network-outline" :loading="loading" size="large">测试并保存</VBtn>
+            <VAlert v-if="errorMessage" type="error" variant="tonal" class="mt-4" closable @click:close="errorMessage = ''">{{ errorMessage }}</VAlert>
+          </VForm>
+        </VCardText>
+        <div class="login-foot">Emby Toolkit · 媒体处理与管理</div>
+      </VCard>
     </div>
-  </n-layout>
+  </div>
 </template>
 
 <script setup>
-import { ref } from 'vue';
+import { ref, computed, onBeforeUnmount } from 'vue';
 import { useRouter } from 'vue-router';
-import { NLayout, NCard, NForm, NFormItem, NInput, NButton, NSpace, useMessage } from 'naive-ui';
+import { useMessage } from '@/composables/useFeedback';
+import { useThemeCustomizer } from '@/composables/useThemeCustomizer';
+import logo from '../assets/logo.png';
 import axios from 'axios';
 
 const router = useRouter();
 const message = useMessage();
+const { settings } = useThemeCustomizer();
+const glassEnabled = computed(() => settings.value.glassEnabled);
 const loading = ref(false);
 const formRef = ref(null);
-
-const formModel = ref({
-  url: '',
-  api_key: ''
+const isApiKeyVisible = ref(false);
+const errorMessage = ref('');
+const formModel = ref({ url: '', api_key: '' });
+const rules = {
+  url: [value => !!String(value || '').trim() || '请输入服务器地址'],
+  api_key: [value => !!String(value || '').trim() || '请输入 API 密钥']
+};
+let redirectTimer;
+let isPageActive = true;
+onBeforeUnmount(() => {
+  isPageActive = false;
+  clearTimeout(redirectTimer);
 });
 
-const rules = {
-  url: { required: true, message: '请输入服务器地址', trigger: 'blur' },
-  api_key: { required: true, message: '请输入 API 密钥', trigger: 'blur' }
-};
-
 async function handleSave() {
-  if (loading.value) return;
+  if (!isPageActive || loading.value) return;
+  loading.value = true;
+  errorMessage.value = '';
   try {
-    await formRef.value?.validate();
-    loading.value = true;
-
-    const response = await axios.post('/api/auth/setup', formModel.value);
-
+    const validation = await formRef.value?.validate();
+    if (!isPageActive || !validation?.valid) return;
+    const response = await axios.post('/api/auth/setup', { ...formModel.value });
+    if (!isPageActive) return;
     if (response.data.status === 'ok') {
       message.success('配置成功！即将跳转登录页...');
-      setTimeout(() => {
-        router.push({ name: 'Login' });
+      redirectTimer = setTimeout(() => {
+        if (isPageActive) router.push({ name: 'Login' });
       }, 1500);
+    } else {
+      errorMessage.value = response.data.message || response.data.error || '连接测试失败，请检查 URL 和密钥';
     }
   } catch (error) {
-    const msg = error.response?.data?.message || '连接测试失败，请检查 URL 和密钥';
-    message.error(msg);
+    if (!isPageActive) return;
+    errorMessage.value = error.response?.data?.message || error.response?.data?.error || '连接测试失败，请检查 URL 和密钥';
   } finally {
     loading.value = false;
   }
@@ -93,70 +123,21 @@ async function handleSave() {
 </script>
 
 <style scoped>
-/* 布局容器，撑满全屏 */
-.setup-layout {
-  height:100dvh;
-  width:100%;
-}
-
-.setup-container {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  min-height:100dvh;
-  width: 100%;
-  padding:32px 20px;
-}
-
-.setup-card {
-  width: 100%;
-  max-width: 600px; /* 保持较宽的宽度，因为 URL 可能很长 */
-  border-radius: 12px;
-
-  /* 🔥🔥🔥 关键：强制重置高度，防止 dashboard-card 把它拉成巨人 🔥🔥🔥 */
-  height: auto !important;
-  min-height: auto !important;
-  flex: none !important;
-}
-
-/* 头部样式，保持和 Login 一致 */
-.setup-header {
-  text-align: center;
-  margin-bottom: 24px;
-}
-
-.setup-logo {
-  height: 60px;
-  margin-bottom: 10px;
-}
-
-.setup-title {
-  font-size: 24px;
-  font-weight: 600;
-  margin: 0 0 8px 0;
-}
-
-.setup-subtitle {
-  font-size: 14px;
-  color: var(--ui-text-muted);
-  margin: 0;
-}
-
-.intro-text {
-  text-align: center;
-  margin-bottom: 30px;
-  color: var(--ui-text-muted);
-  font-size: 15px;
-}
-
-.tip {
-  font-size: 13px;
-  color: var(--ui-text-muted);
-  margin-top: 5px;
-}
-
-.setup-btn {
-  font-weight: bold;
-}
-@media (max-height:750px) { .setup-container { align-items:flex-start; } }
+/* Auth surface adapted from MoviePilot-Frontend v3's login page. */
+.login-root { display:flex; align-items:center; min-height:100dvh; width:100%; padding:32px 0; }
+.auth-wrapper { position:relative; z-index:2; width:100%; padding-inline:16px; }
+.login-glass-filter-defs { position:absolute; width:0; height:0; overflow:hidden; pointer-events:none; }
+.login-card { position:relative; overflow:hidden; border-radius:var(--app-surface-radius,20px); box-shadow:0 20px 54px rgba(var(--app-shadow-rgb,0,0,0),.12); }
+.login-card > :not(.login-card__surface) { position:relative; z-index:2; }
+.glass-effect { backdrop-filter:none !important; background:transparent !important; }
+.login-card__surface { position:absolute; z-index:0; inset:0; overflow:hidden; border-radius:inherit; pointer-events:none; transform:translateZ(0); }
+.login-root[data-login-visual-profile='glass'] .login-card__surface { background:linear-gradient(145deg,rgba(255,255,255,.08),transparent 34%),linear-gradient(rgba(7,14,25,.04),rgba(7,14,25,.1)); }
+.login-head { display:flex; flex-direction:column; align-items:center; text-align:center; margin-bottom:28px; }
+.login-logo { height:64px; width:64px; object-fit:contain; margin-bottom:16px; }
+.login-title { font-size:1.85rem; font-weight:600; margin:0 0 8px; }
+.login-subtitle { margin:0; color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity,.6)); font-size:.875rem; }
+.password-toggle { display:flex; align-items:center; color:inherit; padding:4px; border-radius:50%; cursor:pointer; }
+.password-toggle:focus-visible { outline:2px solid rgb(var(--v-theme-primary)); outline-offset:2px; }
+.login-foot { margin-top:24px; text-align:center; color:rgba(var(--v-theme-on-surface),var(--v-disabled-opacity,.4)); font-size:.75rem; }
+@media (max-height:750px) { .login-root { align-items:flex-start; } }
 </style>

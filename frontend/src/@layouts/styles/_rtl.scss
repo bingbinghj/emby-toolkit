@@ -1,0 +1,8 @@
+/* MoviePilot-Frontend v3 609ea05, MIT; see frontend/third-party/MoviePilot-LICENSE. */
+@use "./mixins";
+
+.layout-vertical-nav .nav-group-arrow {
+  @include mixins.rtl {
+    transform: rotate(180deg);
+  }
+}

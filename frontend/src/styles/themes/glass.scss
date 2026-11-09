@@ -1,0 +1,2059 @@
+/* MoviePilot-Frontend v3 609ea05, MIT; see frontend/third-party/MoviePilot-LICENSE. */
+/* stylelint-disable no-descending-specificity */
+/* stylelint-disable scss/at-rule-no-unknown */
+
+@use '@configured-variables' as variables;
+@use 'glass-v3';
+
+html[data-theme='plain'] {
+  body,
+  body *,
+  body *::before,
+  body *::after {
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
+
+  .v-overlay__content :is(.v-card, .v-list):not(.bg-primary) {
+    background-color: rgb(var(--v-theme-surface));
+  }
+
+  body .layout-wrapper.layout-nav-type-vertical.layout-navbar-fixed .layout-navbar {
+    background: rgb(var(--v-theme-background)) !important;
+  }
+
+  body .footer-nav-card {
+    -webkit-backdrop-filter: blur(12px) !important;
+    backdrop-filter: blur(12px) !important;
+    background: transparent !important;
+  }
+
+  body .layout-wrapper.layout-nav-type-vertical.layout-navbar-fixed .navbar-content-container {
+    background: transparent !important;
+    box-shadow: none !important;
+  }
+}
+
+// 材质只覆盖统一表面 token；质量档只替换光学层，不改变业务组件契约。
+html[data-theme='glass'] {
+  --glass-material-rgb: 11, 19, 34;
+  --glass-card-rgb: 23, 27, 32;
+  --glass-popup-rgb: 31, 34, 39;
+  --glass-shell-rgb: 23, 27, 32;
+  --glass-frosted-rgb: 243, 246, 249;
+  --glass-wallpaper-shade-rgb: 6, 10, 19;
+  --glass-surface: rgba(var(--glass-material-rgb), calc(0.12 + var(--glass-surface-density, 0.62) * 0.2));
+  --glass-surface-soft: rgba(var(--glass-material-rgb), calc(0.13 + var(--glass-surface-density, 0.62) * 0.23));
+  --glass-surface-raised: rgba(var(--glass-material-rgb), calc(0.07 + var(--glass-surface-density, 0.62) * 0.36));
+  --glass-control: rgba(var(--glass-material-rgb), 52%);
+  --glass-control-prominent: rgba(255, 255, 255, 7%);
+  --glass-control-prominent-focus: color-mix(in srgb, rgba(255, 255, 255, 10%) 84%, rgba(var(--v-theme-primary), 24%));
+  --glass-border: rgba(255, 255, 255, calc(0.04 + var(--glass-reflection, 0.5) * 0.12));
+  --glass-border-raised: rgba(255, 255, 255, calc(0.06 + var(--glass-reflection, 0.5) * 0.16));
+  --glass-border-hover: rgba(255, 255, 255, calc(0.1 + var(--glass-reflection, 0.5) * 0.2));
+  --glass-control-prominent-border: rgba(255, 255, 255, 14%);
+  --glass-highlight: rgba(255, 255, 255, calc(0.06 + var(--glass-reflection, 0.5) * 0.16));
+  --glass-transmission-brightness: 1;
+  --glass-sheen: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 9%),
+    transparent 28%,
+    rgba(255, 255, 255, 3%) 72%,
+    transparent
+  );
+  --glass-shadow:
+    0 10px 28px rgba(0, 0, 0, 24%), inset 0 1px 0 var(--glass-highlight), inset 0 -1px 0 rgba(0, 0, 0, 14%);
+  --glass-dashboard-shadow: inset 0 1px 0 var(--glass-highlight);
+  --glass-dashboard-shadow-hover:
+    inset 0 1px 0 rgba(255, 255, 255, calc(0.16 + var(--glass-reflection, 0.5) * 0.24)),
+    inset -1px 0 0 rgba(0, 0, 0, calc(0.12 + var(--glass-reflection, 0.5) * 0.1)),
+    inset 0 -1px 0 rgba(0, 0, 0, calc(0.14 + var(--glass-reflection, 0.5) * 0.1));
+  --glass-shadow-raised:
+    0 16px 40px rgba(0, 0, 0, 32%), inset 0 1px 0 rgba(255, 255, 255, 24%), inset 0 -1px 0 rgba(0, 0, 0, 18%);
+  --glass-shadow-hover:
+    0 18px 44px rgba(0, 0, 0, 36%), inset 0 1px 0 rgba(255, 255, 255, 28%), inset 0 -1px 0 rgba(0, 0, 0, 18%);
+  --glass-navbar-shadow:
+    0 2px 8px rgba(0, 0, 0, 8%), inset 0 1px 0 rgba(255, 255, 255, 6%), inset 0 -1px 0 rgba(0, 0, 0, 6%);
+  --glass-control-shadow: inset 0 1px 0 rgba(255, 255, 255, 12%), inset 0 -1px 0 rgba(0, 0, 0, 14%);
+  --glass-control-shadow-hover: inset 0 1px 0 rgba(255, 255, 255, 18%), inset 0 -1px 0 rgba(0, 0, 0, 12%);
+  --glass-control-shadow-active: inset 0 1px 0 rgba(255, 255, 255, 7%), inset 0 -1px 0 rgba(0, 0, 0, 20%);
+  --glass-control-prominent-shadow: inset 0 1px 0 rgba(255, 255, 255, 18%), inset 0 -1px 0 rgba(0, 0, 0, 18%);
+  --glass-control-prominent-focus-shadow:
+    0 0 0 2px rgba(var(--v-theme-primary), 16%), inset 0 1px 0 rgba(255, 255, 255, 24%),
+    inset 0 -1px 0 rgba(0, 0, 0, 16%);
+  --glass-native-surface-backdrop-filter: brightness(var(--glass-transmission-brightness));
+  --glass-surface-backdrop-filter: var(--glass-native-surface-backdrop-filter);
+  --glass-raised-backdrop-filter: brightness(var(--glass-transmission-brightness));
+  --glass-fixed-shell-backdrop-filter: var(--glass-raised-backdrop-filter);
+  --glass-fixed-shell-backplate-filter: brightness(var(--glass-transmission-brightness));
+  --glass-control-backdrop-filter: none;
+  --glass-control-prominent-backdrop-filter: none;
+  --glass-navbar-backdrop-filter: var(--glass-raised-backdrop-filter);
+  --glass-navbar-scrolled-backdrop-filter: saturate(115%);
+  --glass-navbar-live-filter: none;
+  --glass-sidebar-live-filter: var(--glass-fixed-shell-backdrop-filter);
+  // 清透弹层不散射背景，靠独立吸收层区分前后两组文字，不改变内容卡片的通透度。
+  --glass-overlay-surface: rgba(var(--glass-material-rgb), calc(0.58 + var(--glass-surface-density, 0.62) * 0.18));
+  --glass-overlay-blur: 0px;
+  --glass-overlay-saturate: 115%;
+  --glass-overlay-scrim: rgba(0, 0, 0, 30%);
+  --glass-overlay-backdrop-filter: blur(var(--glass-overlay-blur)) saturate(var(--glass-overlay-saturate));
+  --glass-control-icon-color: rgba(var(--v-theme-on-surface), 70%);
+  --glass-control-placeholder-color: rgba(var(--v-theme-on-surface), 54%);
+  --glass-control-shortcut-background: rgba(255, 255, 255, 8%);
+  --glass-control-shortcut-border: rgba(255, 255, 255, 12%);
+  --glass-control-shortcut-color: rgba(var(--v-theme-on-surface), 68%);
+  // 小标签由透光底色与镜面高光承载材质，不为每个标签重复采样背景；光学预算留给主要表面。
+  --glass-chip-backdrop-filter: none;
+  --glass-chip-sheen:
+    linear-gradient(135deg, rgba(255, 255, 255, 12%), transparent 38%, rgba(255, 255, 255, 3%) 72%, transparent),
+    linear-gradient(rgba(var(--glass-material-rgb), 36%), rgba(var(--glass-material-rgb), 36%));
+  --glass-chip-tint-opacity: calc(0.22 + var(--glass-tint-density, 0.65) * 0.18);
+  --glass-button-surface: rgba(255, 255, 255, 8%);
+  --glass-button-surface-hover: rgba(255, 255, 255, 12%);
+  --glass-nav-active-background: linear-gradient(
+    90deg,
+    rgba(var(--v-theme-primary), 22%),
+    rgba(var(--v-theme-primary), 48%)
+  );
+  --glass-nav-active-border: 1px solid rgba(var(--v-theme-primary), 36%);
+  --glass-nav-active-shadow: inset 0 1px 0 rgba(255, 255, 255, 14%);
+  --glass-dashboard-backdrop-filter: none;
+  --glass-blur-surface: 16px;
+  --glass-blur: 22px;
+  --glass-blur-raised: 32px;
+  --glass-saturate: 145%;
+  --glass-content-reveal-duration: 160ms;
+  --glass-motion: 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  --app-card-rest-shadow: var(--glass-shadow);
+  --app-card-hover-shadow: var(--glass-shadow-hover);
+  --app-fab-shadow: var(--glass-control-shadow);
+  --app-fab-shadow-strong: var(--glass-control-shadow-hover);
+  --app-fab-shadow-hover: var(--glass-control-shadow-hover);
+  --app-fab-shadow-strong-hover: var(--glass-control-shadow-hover);
+  --app-fab-shadow-active: var(--glass-control-shadow-active);
+  --app-overlay-shadow: var(--glass-shadow-raised);
+  --app-surface-shadow: var(--glass-shadow);
+  --app-surface-hover-shadow: var(--glass-shadow-hover);
+  --app-surface-border-width: 1px;
+  --app-surface-border-opacity: 0.15;
+  --app-surface-border: 1px solid var(--glass-border);
+  --app-card-light-border-width: 1px;
+  --app-card-light-border-opacity: 0.15;
+  --app-card-light-border: 1px solid var(--glass-border);
+  --app-overlay-border: 1px solid var(--glass-border);
+  --app-confirm-dialog-action-color: rgb(var(--v-theme-on-primary));
+  --app-grouped-list-background: var(--glass-surface);
+  --app-grouped-list-backdrop-filter: var(--glass-surface-backdrop-filter);
+  --app-grouped-list-border: 1px solid var(--glass-border);
+  --app-grouped-list-separator-color: rgba(255, 255, 255, 10%);
+  --app-grouped-list-header-color: rgba(var(--v-theme-on-surface), 68%);
+  --app-grouped-list-chevron-color: rgba(var(--v-theme-on-surface), 56%);
+  --app-grouped-list-hover-background: rgba(255, 255, 255, 8%);
+  --app-grouped-list-active-background: rgba(var(--v-theme-primary), 16%);
+  --mp-motion-duration-page: 180ms;
+  --mp-motion-duration-overlay: 180ms;
+  --mp-motion-ease-standard: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  background-color: rgb(var(--v-theme-background));
+  color-scheme: dark;
+
+  body {
+    background-color: rgb(var(--v-theme-background));
+  }
+
+  // 色调保持与透明材质接近的透光度，只叠加主色语义。
+  &[data-glass-appearance='tinted'] {
+    --glass-surface: color-mix(
+      in srgb,
+      rgba(var(--glass-material-rgb), calc(0.12 + var(--glass-surface-density, 0.72) * 0.2)) 88%,
+      rgba(var(--glass-material-accent-rgb), calc(var(--glass-tint-density, 0.65) * 0.28))
+    );
+    --glass-surface-soft: color-mix(
+      in srgb,
+      rgba(var(--glass-material-rgb), calc(0.13 + var(--glass-surface-density, 0.72) * 0.23)) 89%,
+      rgba(var(--glass-material-accent-rgb), calc(var(--glass-tint-density, 0.65) * 0.26))
+    );
+    --glass-surface-raised: color-mix(
+      in srgb,
+      rgba(var(--glass-material-rgb), calc(0.07 + var(--glass-surface-density, 0.72) * 0.36)) 84%,
+      rgba(var(--glass-material-accent-rgb), calc(var(--glass-tint-density, 0.65) * 0.32))
+    );
+    --glass-control: color-mix(in srgb, rgba(var(--glass-material-rgb), 52%) 88%, rgba(var(--v-theme-primary), 28%));
+    --glass-control-prominent: color-mix(in srgb, rgba(255, 255, 255, 7%) 82%, rgba(var(--v-theme-primary), 24%));
+    --glass-control-prominent-focus: color-mix(
+      in srgb,
+      rgba(255, 255, 255, 10%) 76%,
+      rgba(var(--v-theme-primary), 32%)
+    );
+    --glass-border: color-mix(
+      in srgb,
+      rgba(255, 255, 255, calc(0.04 + var(--glass-reflection, 0.5) * 0.12)) 82%,
+      rgba(var(--v-theme-primary), 26%)
+    );
+    --glass-border-raised: color-mix(
+      in srgb,
+      rgba(255, 255, 255, calc(0.06 + var(--glass-reflection, 0.5) * 0.16)) 80%,
+      rgba(var(--v-theme-primary), 30%)
+    );
+    --glass-border-hover: color-mix(
+      in srgb,
+      rgba(255, 255, 255, calc(0.1 + var(--glass-reflection, 0.5) * 0.2)) 78%,
+      rgba(var(--v-theme-primary), 36%)
+    );
+    --glass-control-prominent-border: color-mix(
+      in srgb,
+      rgba(255, 255, 255, 14%) 78%,
+      rgba(var(--v-theme-primary), 32%)
+    );
+    --glass-highlight: color-mix(
+      in srgb,
+      rgba(255, 255, 255, calc(0.06 + var(--glass-reflection, 0.5) * 0.16)) 86%,
+      rgba(var(--v-theme-primary), 18%)
+    );
+    --glass-sheen: linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 9%),
+      transparent 28%,
+      rgba(var(--v-theme-primary), 6%) 72%,
+      transparent
+    );
+    --glass-overlay-surface: color-mix(
+      in srgb,
+      rgba(var(--glass-material-rgb), calc(0.58 + var(--glass-surface-density, 0.72) * 0.18)) 88%,
+      rgba(var(--glass-material-accent-rgb), calc(var(--glass-tint-density, 0.65) * 0.22))
+    );
+    --glass-overlay-blur: 0px;
+    --glass-overlay-saturate: 120%;
+    --glass-overlay-scrim: rgba(0, 0, 0, 32%);
+  }
+
+  // 磨砂材质使用更亮的散射表面，但仍只让高价值层执行实时背景采样。
+  &[data-glass-appearance='frosted'] {
+    --glass-surface: rgba(255, 255, 255, calc(0.035 + var(--glass-surface-density, 0.86) * 0.075));
+    --glass-surface-soft: rgba(255, 255, 255, calc(0.03 + var(--glass-surface-density, 0.86) * 0.07));
+    --glass-surface-raised: rgba(255, 255, 255, calc(0.045 + var(--glass-surface-density, 0.86) * 0.09));
+    --glass-control: rgba(255, 255, 255, 9%);
+    --glass-control-prominent: rgba(255, 255, 255, 10%);
+    --glass-control-prominent-focus: rgba(255, 255, 255, 13%);
+    --glass-border: rgba(255, 255, 255, calc(0.07 + var(--glass-reflection, 0.5) * 0.16));
+    --glass-border-raised: rgba(255, 255, 255, calc(0.08 + var(--glass-reflection, 0.5) * 0.2));
+    --glass-border-hover: rgba(255, 255, 255, calc(0.14 + var(--glass-reflection, 0.5) * 0.28));
+    --glass-control-prominent-border: rgba(255, 255, 255, 18%);
+    --glass-highlight: rgba(255, 255, 255, calc(0.1 + var(--glass-reflection, 0.5) * 0.24));
+    --glass-sheen: linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 7%),
+      transparent 24%,
+      rgba(255, 255, 255, 2%) 72%,
+      transparent
+    );
+    --glass-control-prominent-shadow: inset 0 1px 0 rgba(255, 255, 255, 28%), inset 0 -1px 0 rgba(0, 0, 0, 20%);
+    --glass-control-prominent-focus-shadow:
+      0 0 0 2px rgba(var(--v-theme-primary), 17%), inset 0 1px 0 rgba(255, 255, 255, 34%),
+      inset 0 -1px 0 rgba(0, 0, 0, 18%);
+    --glass-native-surface-backdrop-filter: blur(var(--glass-blur-surface)) saturate(var(--glass-saturate))
+      brightness(var(--glass-transmission-brightness));
+    --glass-surface-backdrop-filter: var(--glass-native-surface-backdrop-filter);
+    --glass-raised-backdrop-filter: blur(var(--glass-blur-raised)) saturate(var(--glass-saturate))
+      brightness(var(--glass-transmission-brightness));
+    // 固定全高导航限制采样半径，避免页面重绘扩大其 backdrop 栅格化区域。
+    --glass-fixed-shell-backdrop-filter: blur(min(var(--glass-blur-raised), 60px)) saturate(var(--glass-saturate))
+      brightness(var(--glass-transmission-brightness));
+    --glass-fixed-shell-backplate-filter: blur(min(var(--glass-blur-raised), 60px)) saturate(var(--glass-saturate))
+      brightness(var(--glass-transmission-brightness));
+    // 固定大表面用受控扩散与吸收表达厚度，避免直接沿用卡片的高频玻璃参数。
+    --glass-sidebar-diffusion-blur: clamp(
+      14px,
+      calc(6px + var(--glass-surface-density, 0.86) * 16px + (1 - var(--glass-background-visibility, 0.58)) * 6px),
+      28px
+    );
+    --glass-sidebar-diffusion-saturation: clamp(
+      126%,
+      calc(112% + var(--glass-background-visibility, 0.58) * 30% + var(--glass-surface-density, 0.86) * 8%),
+      154%
+    );
+    --glass-sidebar-absorption-start: clamp(
+      0.18,
+      calc(0.08 + var(--glass-surface-density, 0.86) * 0.2 + (1 - var(--glass-background-visibility, 0.58)) * 0.12),
+      0.42
+    );
+    --glass-sidebar-absorption-end: clamp(
+      0.28,
+      calc(var(--glass-sidebar-absorption-start) + 0.12 + (1 - var(--glass-background-visibility, 0.58)) * 0.08),
+      0.54
+    );
+    --glass-sidebar-edge-opacity: clamp(
+      0.12,
+      calc(0.08 + var(--glass-reflection, 0.5) * 0.22 + (1 - var(--glass-background-visibility, 0.58)) * 0.06),
+      0.4
+    );
+    --glass-sidebar-backdrop-filter: blur(var(--glass-sidebar-diffusion-blur))
+      saturate(var(--glass-sidebar-diffusion-saturation)) brightness(var(--glass-transmission-brightness));
+    --glass-sidebar-live-filter: var(--glass-sidebar-backdrop-filter);
+    --glass-control-prominent-backdrop-filter: blur(24px) saturate(150%);
+    --glass-overlay-surface: rgba(var(--v-theme-background), calc(0.24 + var(--glass-surface-density, 0.86) * 0.12));
+    --glass-overlay-blur: min(var(--glass-blur-raised), 36px);
+    --glass-overlay-saturate: 135%;
+    --glass-overlay-scrim: rgba(0, 0, 0, 36%);
+    // 高光负责透光感，轻量吸收底面隔开海报细节与标签文字，不重新建立背景滤镜。
+    --glass-chip-sheen:
+      linear-gradient(135deg, rgba(255, 255, 255, 14%), transparent 36%, rgba(255, 255, 255, 5%) 72%, transparent),
+      linear-gradient(rgba(var(--glass-material-rgb), 42%), rgba(var(--glass-material-rgb), 42%));
+    --glass-blur-surface: 40px;
+    --glass-blur: 40px;
+    --glass-blur-raised: 60px;
+    --glass-saturate: 180%;
+    --glass-control-icon-color: rgba(var(--v-theme-on-surface), 78%);
+    --glass-control-placeholder-color: rgba(var(--v-theme-on-surface), 62%);
+    --glass-control-shortcut-background: rgba(255, 255, 255, 11%);
+    --glass-control-shortcut-border: rgba(255, 255, 255, 16%);
+    --glass-control-shortcut-color: rgba(var(--v-theme-on-surface), 76%);
+    --glass-button-surface: rgba(255, 255, 255, 10%);
+    --glass-button-surface-hover: rgba(255, 255, 255, 14%);
+    --glass-dashboard-backdrop-filter: blur(var(--glass-blur-surface)) saturate(var(--glass-saturate))
+      brightness(var(--glass-transmission-brightness));
+
+    // 磨砂弹窗只由最外层表面采样背景，内部卡片与自定义分组表面保持扁平。
+    .v-overlay__content > :where(.v-card, .v-sheet),
+    .v-overlay__content > form > :where(.v-card, .v-sheet) {
+      --app-grouped-list-backdrop-filter: none;
+      --app-grouped-list-background: transparent;
+
+      :where(.app-surface, .v-card, .v-sheet, .v-list, .v-table, .v-expansion-panel, .v-stepper) {
+        border-color: transparent !important;
+        -webkit-backdrop-filter: none !important;
+        backdrop-filter: none !important;
+        background-color: transparent !important;
+        background-image: none !important;
+        box-shadow: none !important;
+        will-change: auto;
+      }
+    }
+
+    .logging-dialog-card .logging-view {
+      --logging-record-bg-even: transparent;
+      --logging-record-bg-odd: transparent;
+      --logging-shadow: none;
+      --logging-shell-backdrop-filter: none;
+      --logging-shell-background: transparent;
+    }
+  }
+
+  &[data-theme-radius='none'] {
+    --app-theme-surface-radius: 8px;
+    --app-field-radius: 8px;
+    --app-control-radius: 8px;
+    --app-overlay-radius: 10px;
+  }
+
+  &[data-theme-radius='small'] {
+    --app-theme-surface-radius: 12px;
+    --app-field-radius: 12px;
+    --app-control-radius: 10px;
+    --app-overlay-radius: 14px;
+  }
+
+  &[data-theme-radius='default'] {
+    --app-theme-surface-radius: 20px;
+    --app-field-radius: 16px;
+    --app-control-radius: 14px;
+    --app-overlay-radius: 22px;
+  }
+
+  &[data-theme-radius='large'] {
+    --app-theme-surface-radius: 24px;
+    --app-field-radius: 20px;
+    --app-control-radius: 16px;
+    --app-overlay-radius: 26px;
+  }
+
+  &[data-theme-radius='extra'] {
+    --app-theme-surface-radius: 28px;
+    --app-field-radius: 24px;
+    --app-control-radius: 18px;
+    --app-overlay-radius: 30px;
+  }
+
+  .app-wrapper::before {
+    position: fixed;
+    z-index: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.82' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='.7'/%3E%3C/svg%3E");
+    // 覆盖 Vuetify 的 no-repeat 重置，以固定尺寸平铺无缝噪点，避免非正方形视口出现明暗分界。
+    background-repeat: repeat;
+    background-size: 180px 180px;
+    block-size: 100%;
+    content: '';
+    inline-size: 100%;
+    inset: 0;
+    opacity: 0.025;
+    pointer-events: none;
+  }
+
+  .v-application,
+  .v-layout,
+  .v-main,
+  .layout-wrapper,
+  .layout-content-wrapper,
+  .page-content-container {
+    background: transparent;
+  }
+
+  // 页面容器不承担玻璃材质，避免内容高度结束处与透明 footer 形成整宽明暗边界。
+  .layout-page-content {
+    background-color: transparent;
+  }
+
+  .v-application {
+    position: relative;
+    z-index: 1;
+  }
+
+  :where(
+    .app-surface:not(.no-blur),
+    .v-card:not(.no-blur, .bg-primary, .bg-success, .bg-info, .bg-warning, .bg-error),
+    .v-sheet:not(.no-blur, .bg-primary, .bg-success, .bg-info, .bg-warning, .bg-error),
+    .v-expansion-panel,
+    .v-stepper,
+    .v-table
+  ) {
+    border-color: var(--glass-border) !important;
+    -webkit-backdrop-filter: var(--glass-surface-backdrop-filter);
+    backdrop-filter: var(--glass-surface-backdrop-filter);
+    background-color: var(--glass-surface) !important;
+    background-image: var(--glass-sheen) !important;
+    box-shadow: var(--glass-shadow) !important;
+  }
+
+  :where(.v-list, .v-footer) {
+    border-color: var(--glass-border);
+    -webkit-backdrop-filter: var(--glass-surface-backdrop-filter);
+    backdrop-filter: var(--glass-surface-backdrop-filter);
+    background-color: var(--glass-surface) !important;
+  }
+
+  // 只有成功覆盖的真实海报才释放底面采样；占位图与失败态仍保留完整材料。
+  .media-card[data-glass-optical-mode='excluded'] {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+
+  .media-card .v-img__img {
+    opacity: 0;
+    transition: opacity var(--glass-content-reveal-duration) cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+
+  .media-card--image-loaded .v-img__img {
+    opacity: 1;
+  }
+
+  // 缓存海报重入只恢复内容；真实 load 提交前仍保持不可见和原有玻璃占位。
+  .media-card--poster-revisit .v-img__img {
+    transition: none;
+  }
+
+  .v-toolbar {
+    border-color: var(--glass-border);
+    -webkit-backdrop-filter: var(--glass-raised-backdrop-filter);
+    backdrop-filter: var(--glass-raised-backdrop-filter);
+    background-color: var(--glass-surface) !important;
+  }
+
+  // Dashboard 顶层工作卡片允许一层业务布局容器，内部图表、列表与海报只使用静态光学表面。
+  .dashboard-grid-item-content > .dashboard-grid-auto-size > .dashboard-grid-content-measure > .v-card,
+  .dashboard-grid-item-content > .dashboard-grid-auto-size > .dashboard-grid-content-measure > :first-child > .v-card {
+    -webkit-backdrop-filter: var(--glass-dashboard-backdrop-filter);
+    backdrop-filter: var(--glass-dashboard-backdrop-filter);
+    box-shadow: var(--glass-dashboard-shadow) !important;
+  }
+
+  .layout-navbar {
+    border-color: var(--glass-border-raised) !important;
+    -webkit-backdrop-filter: var(--glass-raised-backdrop-filter);
+    backdrop-filter: var(--glass-raised-backdrop-filter);
+    background-color: var(--glass-surface-raised) !important;
+    background-image: var(--glass-sheen) !important;
+    box-shadow: var(--glass-shadow-raised) !important;
+  }
+
+  // 临时提示共用菜单阅读材质，确保 Token 提示与升级提示都能隔离背后的页面文字。
+  :where(
+    .Vue-Toastification__toast,
+    .agent-assistant-fab__bubble,
+    .pwa-install-banner,
+    .system-update-prompt,
+    .github-token-prompt
+  ) {
+    border-color: var(--glass-border-raised) !important;
+    -webkit-backdrop-filter: var(--glass-overlay-backdrop-filter) !important;
+    backdrop-filter: var(--glass-overlay-backdrop-filter) !important;
+    background-color: var(--glass-overlay-surface) !important;
+    background-image: var(--glass-sheen) !important;
+    box-shadow: var(--glass-shadow-raised) !important;
+  }
+
+  // 气泡箭头与主体使用同一菜单表面，避免边缘露出组件默认的不透明底色。
+  .agent-assistant-fab__bubbles::before {
+    background-color: var(--glass-overlay-surface) !important;
+    background-image: var(--glass-sheen) !important;
+  }
+
+  // 固定浮层、移动底栏与 Vuetify 弹出层共用材质参数，避免各入口出现不同的模糊和底色。
+  :where(.theme-customizer-panel-host, .agent-assistant-panel, .footer-nav-card) {
+    border-color: var(--glass-border-raised) !important;
+    -webkit-backdrop-filter: var(--glass-overlay-backdrop-filter) !important;
+    backdrop-filter: var(--glass-overlay-backdrop-filter) !important;
+    background-color: var(--glass-overlay-surface) !important;
+    background-image: var(--glass-sheen) !important;
+    box-shadow: var(--glass-shadow-raised) !important;
+  }
+
+  // 快速访问面板保留全屏无边框结构，但材质与其他弹出层完全一致。
+  .plugin-quick-access.v-card {
+    -webkit-backdrop-filter: var(--glass-overlay-backdrop-filter) !important;
+    backdrop-filter: var(--glass-overlay-backdrop-filter) !important;
+    background-color: var(--glass-overlay-surface) !important;
+    background-image: var(--glass-sheen) !important;
+  }
+
+  // 顶栏使用更轻的投影，避免与下方内容形成内陷感。
+  .layout-navbar {
+    box-shadow: var(--glass-navbar-shadow) !important;
+  }
+
+  .layout-vertical-nav {
+    isolation: isolate;
+    border-inline-end: 0;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: transparent !important;
+    box-shadow: none !important;
+
+    // 导航色层与可变菜单内容分离，路由激活态切换不应重建整块材质。
+    &::before {
+      position: absolute;
+      z-index: -1;
+      border-inline-end: 1px solid var(--glass-border-raised);
+      -webkit-backdrop-filter: var(--glass-sidebar-live-filter);
+      backdrop-filter: var(--glass-sidebar-live-filter);
+      background-color: var(--glass-surface-raised);
+      background-image: var(--glass-sheen);
+      box-shadow: var(--glass-shadow-raised);
+      content: '';
+      inset: 0;
+      pointer-events: none;
+    }
+  }
+
+  &[data-glass-appearance='frosted'] {
+    .layout-wrapper[data-shell-mode='desktop'] {
+      --glass-navbar-backdrop-filter: var(--glass-sidebar-backdrop-filter);
+    }
+
+    // Frosted 的大表面先扩散再吸收背景，边缘高光只保留在真实 DOM 背板的外轮廓。
+    .layout-wrapper[data-shell-mode='desktop'] .layout-vertical-nav::before {
+      border-inline-end: 0;
+      background-color: transparent;
+      background-image:
+        var(--glass-sheen),
+        linear-gradient(
+          90deg,
+          rgba(var(--glass-material-rgb), var(--glass-sidebar-absorption-start)),
+          rgba(var(--glass-material-rgb), var(--glass-sidebar-absorption-end))
+        );
+      box-shadow:
+        inset -1px 0 0 rgba(255, 255, 255, var(--glass-sidebar-edge-opacity)),
+        0 8px 24px rgba(0, 0, 0, 0.12);
+    }
+
+    .layout-wrapper[data-shell-mode='desktop'] > .glass-fixed-shell-backplate--main {
+      // 侧栏稳定背板的扩散参数作用于真实承载层，顶栏独立读取滚动正文。
+      --glass-fixed-shell-backplate-filter: var(--glass-sidebar-backdrop-filter);
+    }
+
+    .layout-wrapper[data-shell-mode='desktop'].layout-fixed-shell-backplate-active {
+      .layout-vertical-nav::before {
+        -webkit-backdrop-filter: none !important;
+        backdrop-filter: none !important;
+      }
+    }
+
+    .layout-wrapper[data-shell-mode='desktop']:not(.layout-fixed-shell-backplate-active) .layout-vertical-nav::before,
+    .layout-wrapper[data-shell-mode='desktop']:not(.layout-fixed-shell-backplate-active) .layout-navbar {
+      -webkit-backdrop-filter: var(--glass-sidebar-backdrop-filter) !important;
+      backdrop-filter: var(--glass-sidebar-backdrop-filter) !important;
+    }
+
+    .layout-wrapper[data-shell-mode='desktop']:not(.layout-fixed-shell-backplate-active) .layout-navbar {
+      // 原生回退没有壁纸背板的吸收层，独立保证繁忙页面下的文字对比。
+      background:
+        var(--glass-sheen),
+        linear-gradient(
+          rgba(var(--glass-material-rgb), var(--glass-sidebar-absorption-start)),
+          rgba(var(--glass-material-rgb), var(--glass-sidebar-absorption-end))
+        ) !important;
+    }
+  }
+
+  // Chromium 磨砂侧栏已有稳定壁纸背板，不再重复读取 document backdrop。
+  &[data-glass-appearance='frosted'][data-glass-quality='css'] body[data-theme='glass'] {
+    .layout-wrapper.layout-fixed-shell-backplate-active .layout-vertical-nav::before {
+      -webkit-backdrop-filter: none !important;
+      backdrop-filter: none !important;
+    }
+  }
+
+  .layout-vertical-nav .nav-link > .router-link-exact-active {
+    border: var(--glass-nav-active-border);
+    background: var(--glass-nav-active-background) !important;
+    box-shadow: var(--glass-nav-active-shadow) !important;
+  }
+
+  // 水平导航的基础样式会在滚动时被组件覆盖，需要显式恢复玻璃顶栏材质。
+  .layout-wrapper.layout-horizontal-nav-active.layout-horizontal-nav-scrolled.layout-navbar-fixed .layout-navbar {
+    border-color: var(--glass-border-raised) !important;
+    -webkit-backdrop-filter: var(--glass-navbar-backdrop-filter) !important;
+    backdrop-filter: var(--glass-navbar-backdrop-filter) !important;
+    background-color: var(--glass-surface-raised) !important;
+    background-image: var(--glass-sheen) !important;
+    box-shadow: var(--glass-navbar-shadow) !important;
+  }
+
+  .layout-wrapper.window-scrolled.layout-navbar-fixed .layout-navbar .navbar-content-container,
+  .layout-wrapper.layout-horizontal-nav-active.layout-horizontal-nav-scrolled.layout-navbar-fixed
+    .navbar-content-container {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    background: transparent !important;
+    box-shadow: none !important;
+  }
+
+  :where(.search-desktop-activator, .search-header, .file-list__toolbar) .search-input-wrapper,
+  .transfer-history-desktop-search .v-field {
+    border: 1px solid var(--glass-control-prominent-border) !important;
+    -webkit-backdrop-filter: var(--glass-control-prominent-backdrop-filter);
+    backdrop-filter: var(--glass-control-prominent-backdrop-filter);
+    background-image: var(--glass-sheen) !important;
+    box-shadow: var(--glass-control-prominent-shadow);
+  }
+
+  :where(.search-desktop-activator, .search-header, .file-list__toolbar) .search-input-wrapper:focus-within,
+  .transfer-history-desktop-search .v-field:focus-within {
+    border-color: rgba(var(--v-theme-primary), 70%) !important;
+    box-shadow: var(--glass-control-prominent-focus-shadow);
+  }
+
+  :where(.search-desktop-activator, .search-header, .file-list__toolbar) .search-input-icon,
+  .transfer-history-desktop-search .v-field__prepend-inner {
+    color: var(--glass-control-icon-color) !important;
+  }
+
+  :where(.search-desktop-activator, .search-header, .file-list__toolbar) .search-native-input::placeholder,
+  .transfer-history-desktop-search input::placeholder {
+    color: var(--glass-control-placeholder-color);
+  }
+
+  :where(.search-desktop-activator, .search-header, .file-list__toolbar) .search-shortcut-badge {
+    border: 1px solid var(--glass-control-shortcut-border);
+    background: var(--glass-control-shortcut-background);
+    color: var(--glass-control-shortcut-color);
+  }
+
+  .theme-customizer-panel,
+  .agent-assistant-shell {
+    background-color: transparent !important;
+  }
+
+  .agent-assistant-shell {
+    --agent-assistant-panel-bg: var(--glass-overlay-surface);
+    --agent-assistant-panel-blur: var(--glass-overlay-blur);
+    --agent-assistant-composer-filter: var(--glass-popup-filter);
+    --agent-assistant-assistant-bg: var(--glass-surface);
+  }
+
+  .nav-button,
+  .global-action-buttons .v-btn {
+    border: 1px solid var(--glass-border) !important;
+    -webkit-backdrop-filter: var(--glass-raised-backdrop-filter);
+    backdrop-filter: var(--glass-raised-backdrop-filter);
+    background-color: var(--glass-surface-raised) !important;
+    background-image: var(--glass-sheen) !important;
+    box-shadow: var(--glass-control-shadow) !important;
+  }
+
+  // 聚合 FAB 与弹出菜单使用同一磨砂材质，展开后保持稳定底色和背景采样。
+  .compact-fab .v-btn {
+    border: 1px solid var(--glass-border-raised) !important;
+    -webkit-backdrop-filter: var(--glass-overlay-backdrop-filter) !important;
+    backdrop-filter: var(--glass-overlay-backdrop-filter) !important;
+    background-color: var(--glass-overlay-surface) !important;
+    background-image: var(--glass-sheen) !important;
+    box-shadow: var(--glass-shadow-raised) !important;
+  }
+
+  .v-overlay__scrim {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background: var(--glass-overlay-scrim);
+  }
+
+  // 弹窗实际呈现后才移除来源菜单的绘制，避免双重遮罩和异步加载期间无遮罩的亮帧。
+  // 仅约束头像菜单树，弹窗内新打开的选择菜单仍独立呈现；关闭状态由 VMenu 自身完成。
+  .v-overlay-container:has(> .v-dialog.v-overlay--active) > .user-profile-menu {
+    display: none;
+  }
+
+  .v-dialog--fullscreen {
+    background-color: transparent !important;
+  }
+
+  // 快捷弹窗内部视图贴合外层玻璃表面，避免嵌套容器圆角形成断层。
+  .words-shortcut-dialog-card .words-workspace,
+  .scheduler-shortcut-dialog-card .d-none.d-md-block {
+    border-radius: 0 !important;
+  }
+
+  .v-overlay__content {
+    border-radius: var(--app-overlay-radius);
+
+    > :where(.v-card, .v-sheet, .v-list),
+    > form > :where(.v-card, .v-sheet) {
+      -webkit-backdrop-filter: var(--glass-overlay-backdrop-filter) !important;
+      backdrop-filter: var(--glass-overlay-backdrop-filter) !important;
+      background-color: var(--glass-overlay-surface) !important;
+      background-image: var(--glass-sheen) !important;
+      box-shadow: var(--glass-shadow-raised) !important;
+    }
+  }
+
+  // 菜单与弹窗的材质从首个绘制帧就使用最终状态，避免父层淡入让背景模糊看起来延迟生效。
+  :is(.v-menu, .v-dialog) > .v-overlay__content[class*='-transition-enter-active'] {
+    filter: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+    transition: none !important;
+    will-change: auto;
+  }
+
+  :is(.v-menu, .v-dialog) > .v-overlay__content[class*='-transition-enter-from'] {
+    filter: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  :is(.v-menu, .v-dialog) > .v-overlay__scrim.fade-transition-enter-active,
+  :is(.v-menu, .v-dialog) > .v-overlay__scrim.fade-transition-enter-from {
+    opacity: var(--v-overlay-opacity, 0.32) !important;
+    transition: none !important;
+  }
+
+  // 关闭弹窗时仍保留轻量淡出，但不再缩放需要重新采样的材质层。
+  .v-overlay__content.mp-dialog-transition-leave-active,
+  .v-overlay__content.dialog-transition-leave-active {
+    filter: none;
+    transform: none;
+    transition: opacity 120ms var(--mp-motion-ease-standard);
+    will-change: opacity;
+  }
+
+  .v-overlay__content.mp-dialog-transition-leave-to,
+  .v-overlay__content.dialog-transition-leave-to {
+    filter: none;
+    transform: none;
+  }
+
+  // 桌面内容进入固定导航下方时启用阅读保护；App 自身的显隐不改变材质密度。
+  &:is([data-glass-appearance='clear'], [data-glass-appearance='tinted']) {
+    .layout-wrapper:where([data-shell-mode='desktop']).window-scrolled.layout-navbar-fixed .layout-navbar,
+    .layout-wrapper:where(
+        [data-shell-mode='desktop']
+      ).layout-horizontal-nav-active.layout-horizontal-nav-scrolled.layout-navbar-fixed
+      .layout-navbar {
+      border-color: var(--glass-border-raised) !important;
+      -webkit-backdrop-filter: var(--glass-navbar-scrolled-backdrop-filter) !important;
+      backdrop-filter: var(--glass-navbar-scrolled-backdrop-filter) !important;
+      background-color: var(--glass-overlay-surface) !important;
+      background-image: var(--glass-sheen) !important;
+    }
+  }
+
+  &[data-glass-appearance='clear'] {
+    // contained navbar 会把 %blurry-bg 扩展到内部容器，透明材质不生成这层滚动磨砂。
+    .navbar-blur.layout-navbar .navbar-content-container::before {
+      display: none !important;
+      -webkit-backdrop-filter: none !important;
+      backdrop-filter: none !important;
+      background: transparent !important;
+      content: none !important;
+    }
+
+    // 移动端主导航抽屉属于弹出侧栏，桌面常驻导航继续沿用原透明表面。
+    .layout-vertical-nav.overlay-nav::before {
+      background-color: var(--glass-overlay-surface) !important;
+    }
+  }
+
+  .v-tooltip > .v-overlay__content,
+  .v-snackbar__wrapper {
+    border: 1px solid var(--glass-border);
+    -webkit-backdrop-filter: var(--glass-overlay-backdrop-filter);
+    backdrop-filter: var(--glass-overlay-backdrop-filter);
+    background: var(--glass-overlay-surface) !important;
+    box-shadow: var(--glass-shadow);
+    // 浅色玻璃覆盖了 Vuetify 的暗色提示底，前景色也必须跟随当前主题。
+    color: rgb(var(--v-theme-on-surface)) !important;
+  }
+
+  .v-field {
+    --v-field-border-opacity: 0.14;
+    --v-field-border-width: 1px;
+
+    border-radius: var(--app-field-radius);
+    -webkit-backdrop-filter: var(--glass-control-backdrop-filter);
+    backdrop-filter: var(--glass-control-backdrop-filter);
+    background-color: var(--glass-control) !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 8%);
+    transition:
+      background-color var(--glass-motion),
+      box-shadow var(--glass-motion);
+  }
+
+  .v-field--focused {
+    --v-field-border-opacity: 0.32;
+
+    background-color: color-mix(in srgb, var(--glass-control) 84%, rgba(var(--v-theme-primary), 32%)) !important;
+    background-image: none !important;
+    box-shadow:
+      0 0 0 3px rgba(var(--v-theme-primary), 14%),
+      inset 0 1px 0 rgba(255, 255, 255, 10%);
+  }
+
+  // Outlined 描边自身会为浮动标签留出缺口，移除贯穿整个顶部的 field 阴影线。
+  .v-field.v-field--variant-outlined {
+    box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 22%);
+  }
+
+  .v-field.v-field--variant-underlined,
+  .v-field.v-field--variant-plain {
+    border-radius: 0;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background-color: transparent !important;
+    box-shadow: none !important;
+  }
+
+  .v-field.v-field--variant-underlined.v-field--focused,
+  .v-field.v-field--variant-plain.v-field--focused {
+    background-color: transparent !important;
+    box-shadow: none !important;
+  }
+
+  .v-field input::placeholder,
+  .v-field textarea::placeholder {
+    color: rgba(var(--v-theme-on-surface), 38%);
+    opacity: 1;
+  }
+
+  // Ace 编辑器自带主题会绘制不透明底色，这里让它与普通输入框一样呈现玻璃质感。
+  .ace_editor {
+    border-radius: var(--app-field-radius);
+    -webkit-backdrop-filter: var(--glass-control-backdrop-filter);
+    backdrop-filter: var(--glass-control-backdrop-filter);
+    background-color: var(--glass-control) !important;
+    box-shadow:
+      inset 0 0 0 1px var(--glass-border),
+      inset 0 1px 0 rgba(255, 255, 255, 8%);
+    transition:
+      background-color var(--glass-motion),
+      box-shadow var(--glass-motion);
+  }
+
+  .ace_editor .ace_gutter,
+  .ace_editor .ace_scroller,
+  .ace_editor .ace_content,
+  .ace_editor .ace_gutter-active-line {
+    background: transparent !important;
+  }
+
+  .ace_editor,
+  .ace_editor .ace_gutter,
+  .ace_editor .ace_scroller,
+  .ace_editor .ace_content {
+    color: rgb(var(--v-theme-on-surface)) !important;
+  }
+
+  .ace_editor .ace_gutter {
+    color: rgba(var(--v-theme-on-surface), 44%) !important;
+  }
+
+  .ace_editor .ace_marker-layer .ace_active-line,
+  .ace_editor .ace_marker-layer .ace_selection {
+    background: rgba(255, 255, 255, 8%) !important;
+  }
+
+  .ace_editor .ace_cursor {
+    color: rgb(var(--v-theme-primary)) !important;
+  }
+
+  .ace_editor.ace_focus {
+    background-color: color-mix(in srgb, var(--glass-control) 84%, rgba(var(--v-theme-primary), 32%)) !important;
+    box-shadow:
+      0 0 0 3px rgba(var(--v-theme-primary), 14%),
+      inset 0 0 0 1px rgba(var(--v-theme-primary), 32%),
+      inset 0 1px 0 rgba(255, 255, 255, 10%);
+  }
+
+  .v-btn {
+    letter-spacing: 0;
+    transition:
+      background-color var(--glass-motion),
+      border-color var(--glass-motion),
+      box-shadow var(--glass-motion);
+  }
+
+  // 语义色按钮在半透明玻璃表面上统一使用主题的高对比前景色，避免继承深色 on-color。
+  .app-confirm-dialog-actions .v-btn {
+    color: var(--app-confirm-dialog-action-color) !important;
+  }
+
+  .v-btn:not(.v-btn--variant-text, .v-btn--variant-plain) {
+    border: 1px solid var(--glass-border);
+    -webkit-backdrop-filter: var(--glass-control-backdrop-filter);
+    backdrop-filter: var(--glass-control-backdrop-filter);
+    background-color: var(--glass-button-surface) !important;
+    background-image: none !important;
+    box-shadow: var(--glass-control-shadow) !important;
+  }
+
+  .v-btn.bg-primary {
+    border-color: rgba(var(--v-theme-primary), 48%);
+    background-color: rgba(var(--v-theme-primary), 34%) !important;
+  }
+
+  .v-btn.bg-success {
+    border-color: rgba(var(--v-theme-success), 48%);
+    background-color: rgba(var(--v-theme-success), 34%) !important;
+  }
+
+  .v-btn.bg-info {
+    border-color: rgba(var(--v-theme-info), 48%);
+    background-color: rgba(var(--v-theme-info), 34%) !important;
+  }
+
+  .v-btn.bg-warning {
+    border-color: rgba(var(--v-theme-warning), 48%);
+    background-color: rgba(var(--v-theme-warning), 34%) !important;
+  }
+
+  .v-btn.bg-error {
+    border-color: rgba(var(--v-theme-error), 48%);
+    background-color: rgba(var(--v-theme-error), 34%) !important;
+  }
+
+  :where(.v-btn, .v-card--link, [role='button']):focus-visible {
+    outline: 0;
+    box-shadow:
+      0 0 0 3px rgba(var(--v-theme-primary), 18%),
+      var(--glass-control-shadow) !important;
+  }
+
+  // 只添加材质层，不接管 Chip 的 variant、圆角、边框、尺寸或选中结构。
+  .v-chip {
+    box-shadow: none !important;
+  }
+
+  // 仅填充型 Chip 增加镜面方向；outlined、text、plain 保持原来的空心或无底形态。
+  .v-chip:is(.v-chip--variant-elevated, .v-chip--variant-flat, .v-chip--variant-tonal) {
+    -webkit-backdrop-filter: var(--glass-chip-backdrop-filter) !important;
+    backdrop-filter: var(--glass-chip-backdrop-filter) !important;
+    background-image: var(--glass-chip-sheen);
+    background-clip: padding-box;
+  }
+
+  // Tailwind 的 bg-* 通过 --tw-bg-opacity 输出颜色；只调透明度即可保留每个业务色相。
+  .v-chip[class*='bg-'] {
+    --tw-bg-opacity: var(--glass-chip-tint-opacity) !important;
+  }
+
+  // Vuetify 语义色使用同一套有色玻璃透明度。
+  .v-chip.bg-primary {
+    background-color: rgba(var(--v-theme-primary), 34%) !important;
+  }
+
+  .v-chip.bg-secondary {
+    background-color: rgba(var(--v-theme-secondary), 34%) !important;
+  }
+
+  .v-chip.bg-success {
+    background-color: rgba(var(--v-theme-success), 34%) !important;
+  }
+
+  .v-chip.bg-info {
+    background-color: rgba(var(--v-theme-info), 34%) !important;
+  }
+
+  .v-chip.bg-warning {
+    background-color: rgba(var(--v-theme-warning), 34%) !important;
+  }
+
+  .v-chip.bg-error {
+    background-color: rgba(var(--v-theme-error), 34%) !important;
+  }
+
+  // 种子卡片沿用组件既有的业务色，只降低不透明度并补上透光与镜面材质。
+  .v-chip.chip-season {
+    --glass-chip-tint: 63, 81, 181;
+  }
+
+  .v-chip.chip-web-source {
+    --glass-chip-tint: 128, 0, 255;
+  }
+
+  .v-chip.chip-edition {
+    --glass-chip-tint: 244, 67, 54;
+  }
+
+  .v-chip.chip-resolution {
+    --glass-chip-tint: 123, 31, 162;
+  }
+
+  .v-chip.chip-codec {
+    --glass-chip-tint: 255, 152, 0;
+  }
+
+  .v-chip.chip-team {
+    --glass-chip-tint: 0, 137, 123;
+  }
+
+  .v-chip.chip-label {
+    --glass-chip-tint: 92, 107, 192;
+  }
+
+  .v-chip.chip-hr {
+    --glass-chip-tint: 33, 33, 33;
+  }
+
+  .v-chip.chip-expire {
+    --glass-chip-tint: 126, 87, 194;
+  }
+
+  .v-chip.chip-free {
+    --glass-chip-tint: 76, 175, 80;
+  }
+
+  .v-chip.chip-discount {
+    --glass-chip-tint: 255, 87, 34;
+  }
+
+  .v-chip.chip-bonus {
+    --glass-chip-tint: 156, 39, 176;
+  }
+
+  .v-chip:where(
+    .chip-season,
+    .chip-web-source,
+    .chip-edition,
+    .chip-resolution,
+    .chip-codec,
+    .chip-team,
+    .chip-label,
+    .chip-hr,
+    .chip-expire,
+    .chip-free,
+    .chip-discount,
+    .chip-bonus
+  ) {
+    background-color: rgba(var(--glass-chip-tint), var(--glass-chip-tint-opacity)) !important;
+  }
+
+  .v-table {
+    .v-table__wrapper > table > thead {
+      background-color: rgba(255, 255, 255, 6%);
+    }
+
+    .v-table__wrapper > table > tbody > tr:hover > td {
+      background-color: rgba(255, 255, 255, 6%);
+    }
+  }
+
+  .v-skeleton-loader {
+    background-color: var(--glass-surface-soft);
+  }
+
+  .app-card-colorful {
+    --app-card-accent-start-opacity: 0.018;
+    --app-card-accent-end-opacity: 0.008;
+    --app-card-border-opacity: 0.15;
+    --app-card-hover-border-opacity: 0.28;
+    --app-card-surface-opacity: 0.08;
+
+    -webkit-backdrop-filter: var(--glass-surface-backdrop-filter);
+    backdrop-filter: var(--glass-surface-backdrop-filter);
+  }
+
+  // 工作流卡片复用分享卡的随机色相，以玻璃吸收层和镜面高光控制材质强度。
+  .workflow-task-card {
+    --workflow-card-header-content-rgb: 255, 255, 255;
+    --workflow-card-header-background:
+      var(--glass-sheen),
+      linear-gradient(
+        135deg,
+        rgba(var(--workflow-card-gradient-start-rgb), calc(0.16 + var(--glass-tint-density, 0.65) * 0.34)) 0%,
+        rgba(var(--workflow-card-gradient-end-rgb), calc(0.09 + var(--glass-tint-density, 0.65) * 0.22)) 58%,
+        rgba(var(--workflow-card-gradient-end-rgb), calc(0.04 + var(--glass-tint-density, 0.65) * 0.1)) 100%
+      ),
+      linear-gradient(
+        rgba(var(--v-theme-background), calc(0.08 + var(--glass-surface-density, 0.62) * 0.08)),
+        rgba(var(--v-theme-background), calc(0.14 + var(--glass-surface-density, 0.62) * 0.12))
+      );
+    --workflow-card-header-shadow: inset 0 1px 0 var(--glass-highlight), inset 0 -1px 0 rgba(0, 0, 0, 14%);
+  }
+
+  // 工作流编辑器组件选择栏
+  .workflow-sidebar {
+    --workflow-sidebar-background: var(--glass-surface);
+    --workflow-sidebar-backdrop-filter: var(--glass-surface-backdrop-filter);
+    --workflow-sidebar-header-background: transparent;
+    --workflow-sidebar-footer-background: transparent;
+    --workflow-sidebar-border-color: var(--glass-border);
+    --workflow-sidebar-card-background: var(--glass-control);
+    --workflow-sidebar-card-background-hover: var(--glass-button-surface-hover);
+    --workflow-sidebar-desc-color: var(--glass-control-placeholder-color);
+  }
+
+  // 工作流编辑器流程边设置面板
+  .workflow-edge-panel {
+    --workflow-edge-panel-background: var(--glass-surface);
+    --workflow-edge-panel-backdrop-filter: var(--glass-surface-backdrop-filter);
+  }
+
+  // 分享卡保留原随机渐变的色相，以半透明染色、吸光和镜面层组成有色玻璃。
+  .workflow-share-card {
+    --workflow-share-glass-start-opacity: calc(0.18 + var(--glass-tint-density, 0.65) * 0.38);
+    --workflow-share-glass-end-opacity: calc(0.24 + var(--glass-tint-density, 0.65) * 0.42);
+    --workflow-share-glass-scrim: linear-gradient(
+      rgba(var(--glass-material-rgb), calc(0.1 + var(--glass-surface-density, 0.62) * 0.1)),
+      rgba(var(--glass-material-rgb), calc(0.2 + var(--glass-surface-density, 0.62) * 0.14))
+    );
+    // Glass V3 用更高优先级的整卡 background 覆盖普通卡片样式，这里把分享卡的色相接入同一材质 token。
+    --workflow-share-glass-background:
+      var(--glass-sheen), var(--workflow-share-glass-scrim),
+      linear-gradient(
+        135deg,
+        rgba(var(--workflow-share-gradient-start-rgb, 74, 85, 104), var(--workflow-share-glass-start-opacity)) 0%,
+        rgba(var(--workflow-share-gradient-end-rgb, 45, 55, 72), var(--workflow-share-glass-end-opacity)) 100%
+      );
+    --glass-v3-card-background: var(--workflow-share-glass-background), var(--glass-surface);
+
+    background-color: var(--glass-surface) !important;
+    background-image: var(--workflow-share-glass-background) !important;
+  }
+
+  // 插件卡片头部改为染色玻璃：图标主色只作为透光色相，压暗遮罩换成玻璃吸收与高光。
+  .plugin-card__banner {
+    border-block-end: 1px solid var(--glass-border);
+
+    --plugin-card-banner-scrim: linear-gradient(
+      rgba(var(--glass-material-rgb), calc(0.2 + var(--glass-surface-density, 0.62) * 0.115)) 0%,
+      rgba(var(--glass-material-rgb), calc(0.28 + var(--glass-surface-density, 0.62) * 0.16)) 100%
+    );
+    --plugin-card-banner-tint: linear-gradient(
+      135deg,
+      rgba(var(--plugin-card-effective-accent-rgb), calc(0.2 + var(--glass-tint-density, 0.65) * 0.34)) 0%,
+      rgba(var(--plugin-card-effective-accent-rgb), calc(0.11 + var(--glass-tint-density, 0.65) * 0.2)) 58%,
+      rgba(var(--plugin-card-effective-accent-rgb), calc(0.055 + var(--glass-tint-density, 0.65) * 0.1)) 100%
+    );
+  }
+
+  // 卡片主体已经承担实时背景采样，头部只叠加静态色层与镜面高光。
+  .plugin-card__banner::before {
+    position: absolute;
+    background-image: var(--glass-sheen);
+    box-shadow: inset 0 1px 0 var(--glass-highlight);
+    content: '';
+    inset: 0;
+    pointer-events: none;
+  }
+
+  .plugin-card__banner > * {
+    position: relative;
+  }
+
+  // 磨砂材质透光更强，染色需要同步减弱以免头部压过卡片本体。
+  &[data-glass-appearance='frosted'] .plugin-card__banner {
+    --plugin-card-banner-scrim: linear-gradient(
+      rgba(var(--glass-material-rgb), calc(0.1 + var(--glass-surface-density, 0.86) * 0.09)) 0%,
+      rgba(var(--glass-material-rgb), calc(0.14 + var(--glass-surface-density, 0.86) * 0.145)) 100%
+    );
+    --plugin-card-banner-tint: linear-gradient(
+      135deg,
+      rgba(var(--plugin-card-effective-accent-rgb), calc(0.15 + var(--glass-tint-density, 0.65) * 0.2)) 0%,
+      rgba(var(--plugin-card-effective-accent-rgb), calc(0.07 + var(--glass-tint-density, 0.65) * 0.13)) 58%,
+      rgba(var(--plugin-card-effective-accent-rgb), calc(0.03 + var(--glass-tint-density, 0.65) * 0.06)) 100%
+    );
+  }
+
+  &[data-glass-appearance='frosted'] .workflow-task-card {
+    --workflow-card-header-background:
+      var(--glass-sheen),
+      linear-gradient(
+        135deg,
+        rgba(var(--workflow-card-gradient-start-rgb), calc(0.1 + var(--glass-tint-density, 0.65) * 0.2)) 0%,
+        rgba(var(--workflow-card-gradient-end-rgb), calc(0.05 + var(--glass-tint-density, 0.65) * 0.13)) 58%,
+        rgba(var(--workflow-card-gradient-end-rgb), calc(0.02 + var(--glass-tint-density, 0.65) * 0.06)) 100%
+      ),
+      linear-gradient(
+        rgba(var(--v-theme-background), calc(0.04 + var(--glass-surface-density, 0.86) * 0.04)),
+        rgba(var(--v-theme-background), calc(0.08 + var(--glass-surface-density, 0.86) * 0.08))
+      );
+  }
+
+  &[data-glass-appearance='frosted'] .workflow-share-card {
+    --workflow-share-glass-start-opacity: calc(0.12 + var(--glass-tint-density, 0.65) * 0.28);
+    --workflow-share-glass-end-opacity: calc(0.16 + var(--glass-tint-density, 0.65) * 0.34);
+    --workflow-share-glass-scrim: linear-gradient(
+      rgba(var(--glass-material-rgb), calc(0.06 + var(--glass-surface-density, 0.86) * 0.07)),
+      rgba(var(--glass-material-rgb), calc(0.13 + var(--glass-surface-density, 0.86) * 0.1))
+    );
+  }
+
+  // 色调材质本身带主色语义，头部染色向主色收敛保持整页同一色温。
+  &[data-glass-appearance='tinted'] .plugin-card__banner {
+    --plugin-card-banner-tint: linear-gradient(
+      135deg,
+      color-mix(
+          in srgb,
+          rgba(var(--plugin-card-effective-accent-rgb), calc(0.14 + var(--glass-tint-density, 0.65) * 0.33)) 94%,
+          rgba(var(--glass-material-accent-rgb), calc(0.14 + var(--glass-tint-density, 0.65) * 0.33))
+        )
+        0%,
+      color-mix(
+          in srgb,
+          rgba(var(--plugin-card-effective-accent-rgb), calc(0.07 + var(--glass-tint-density, 0.65) * 0.2)) 94%,
+          rgba(var(--glass-material-accent-rgb), calc(0.07 + var(--glass-tint-density, 0.65) * 0.2))
+        )
+        58%,
+      rgba(var(--plugin-card-effective-accent-rgb), calc(0.04 + var(--glass-tint-density, 0.65) * 0.095)) 100%
+    );
+  }
+
+  &[data-glass-appearance='tinted'] .workflow-task-card {
+    --workflow-card-header-background:
+      var(--glass-sheen),
+      linear-gradient(
+        135deg,
+        color-mix(
+            in srgb,
+            rgba(var(--workflow-card-gradient-start-rgb), calc(0.14 + var(--glass-tint-density, 0.65) * 0.33)) 74%,
+            rgba(var(--v-theme-primary), calc(0.14 + var(--glass-tint-density, 0.65) * 0.33))
+          )
+          0%,
+        color-mix(
+            in srgb,
+            rgba(var(--workflow-card-gradient-end-rgb), calc(0.07 + var(--glass-tint-density, 0.65) * 0.2)) 74%,
+            rgba(var(--v-theme-primary), calc(0.07 + var(--glass-tint-density, 0.65) * 0.2))
+          )
+          58%,
+        rgba(var(--workflow-card-gradient-end-rgb), calc(0.04 + var(--glass-tint-density, 0.65) * 0.095)) 100%
+      ),
+      linear-gradient(
+        rgba(var(--v-theme-background), calc(0.08 + var(--glass-surface-density, 0.72) * 0.08)),
+        rgba(var(--v-theme-background), calc(0.14 + var(--glass-surface-density, 0.72) * 0.12))
+      );
+  }
+
+  &[data-glass-appearance='tinted'] .workflow-share-card {
+    --workflow-share-glass-start-opacity: calc(0.16 + var(--glass-tint-density, 0.65) * 0.32);
+    --workflow-share-glass-end-opacity: calc(0.21 + var(--glass-tint-density, 0.65) * 0.38);
+    --workflow-share-glass-scrim: linear-gradient(
+      rgba(var(--glass-material-rgb), calc(0.09 + var(--glass-surface-density, 0.72) * 0.09)),
+      rgba(var(--glass-material-rgb), calc(0.18 + var(--glass-surface-density, 0.72) * 0.13))
+    );
+  }
+
+  // 文件夹卡片保留用户自选渐变作为色相，只降低不透明度让卡片本体的玻璃透出来。
+  .plugin-folder-card__bg {
+    opacity: calc(0.34 + var(--glass-surface-density, 0.62) * 0.145);
+  }
+
+  .plugin-folder-card__bg::after {
+    position: absolute;
+    background-image: var(--glass-sheen);
+    box-shadow: inset 0 1px 0 var(--glass-highlight);
+    content: '';
+    inset: 0;
+    pointer-events: none;
+  }
+
+  .plugin-folder-card__overlay {
+    background: linear-gradient(
+      rgba(var(--glass-material-rgb), calc(0.2 + var(--glass-surface-density, 0.62) * 0.115)) 0%,
+      rgba(var(--glass-material-rgb), calc(0.28 + var(--glass-surface-density, 0.62) * 0.16)) 100%
+    );
+  }
+
+  // 捷径菜单的嵌套卡片会被通用弹层折叠规则抹平描边与高光，需要完整补齐标准玻璃表面。
+  .shortcut-card-hover-area > .v-card {
+    border-color: var(--glass-border) !important;
+    -webkit-backdrop-filter: var(--glass-surface-backdrop-filter) !important;
+    backdrop-filter: var(--glass-surface-backdrop-filter) !important;
+    background-color: var(--glass-surface) !important;
+    background-image: var(--glass-sheen) !important;
+    box-shadow: var(--glass-shadow) !important;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    .shortcut-card-hover-area:hover > .v-card {
+      border-color: var(--glass-border-hover) !important;
+      box-shadow: var(--glass-shadow-hover) !important;
+    }
+  }
+
+  // 文件地址栏与下方内容卡属于同一工作表面，不使用更强的 raised 材质。
+  .file-browser-toolbar.v-toolbar {
+    -webkit-backdrop-filter: var(--glass-surface-backdrop-filter) !important;
+    backdrop-filter: var(--glass-surface-backdrop-filter) !important;
+  }
+
+  // 文件整理、日历和缓存使用自定义容器，需要同时覆盖桌面与移动端表面。
+  .transfer-history-mobile-page {
+    --transfer-history-mobile-search-bg: var(--glass-surface-soft);
+    --transfer-history-mobile-muted-bg: var(--glass-surface-soft);
+    --transfer-history-mobile-border: var(--glass-border);
+    --transfer-history-mobile-surface-blur: var(--glass-surface-backdrop-filter);
+  }
+
+  .transfer-history-mobile-record,
+  .calendar-event-card,
+  .mobile-calendar-filter-card,
+  .mobile-calendar-event-card,
+  .cache-desktop-stat,
+  .cache-mobile-stat,
+  .cache-mobile-card,
+  .cache-panel-stat,
+  .recognition-cache-mobile-item {
+    border: 1px solid var(--glass-border);
+    -webkit-backdrop-filter: var(--glass-surface-backdrop-filter);
+    backdrop-filter: var(--glass-surface-backdrop-filter);
+    background: var(--glass-surface);
+  }
+
+  // 日志和定时服务的自定义表面通过变量接入主题，避免组件局部样式覆盖玻璃材质。
+  .logging-view,
+  .logging-view.is-dark-theme {
+    --logging-border: var(--glass-border);
+    --logging-record-bg-even: rgba(255, 255, 255, 6%);
+    --logging-record-bg-odd: rgba(255, 255, 255, 3%);
+    --logging-shadow: inset 0 1px 0 rgba(255, 255, 255, 10%);
+    --logging-shell-backdrop-filter: var(--glass-surface-backdrop-filter);
+    --logging-shell-background: var(--glass-surface-soft);
+  }
+
+  .mobile-scheduler-view {
+    --mobile-scheduler-card-backdrop-filter: var(--glass-surface-backdrop-filter);
+    --mobile-scheduler-card-background: var(--glass-surface);
+    --mobile-scheduler-card-border: 1px solid var(--glass-border);
+    --mobile-scheduler-card-shadow: var(--glass-shadow);
+  }
+
+  .mobile-subscribe-calendar {
+    --mobile-calendar-control-bg: var(--glass-surface-soft);
+    --mobile-calendar-placeholder-bg: var(--glass-surface-soft);
+    --mobile-calendar-surface-blur: var(--glass-surface-backdrop-filter);
+  }
+
+  // 用户权限编辑器由普通容器构成，通过主题变量接入玻璃表面材质。
+  .user-permission-editor {
+    --permission-editor-border: 1px solid var(--glass-border);
+    --permission-editor-muted-border: 1px solid rgba(255, 255, 255, 10%);
+    --permission-editor-panel-bg: var(--glass-surface-soft);
+    --permission-editor-hover-bg: rgba(255, 255, 255, 8%);
+    --permission-editor-active-bg: rgba(var(--v-theme-primary), 16%);
+    --permission-editor-selected-bg: rgba(var(--v-theme-primary), 12%);
+    --permission-editor-backdrop-filter: none;
+    --permission-editor-shadow: inset 0 1px 0 rgba(255, 255, 255, 8%);
+  }
+
+  // 智能助手折叠区使用均匀的玻璃描边，替换普通主题渐变产生的顶部黑边。
+  .ai-agent-settings-card {
+    border: 1px solid rgba(255, 255, 255, 10%) !important;
+    -webkit-backdrop-filter: var(--glass-surface-backdrop-filter) !important;
+    backdrop-filter: var(--glass-surface-backdrop-filter) !important;
+    background: var(--glass-surface-soft) !important;
+    box-shadow: none !important;
+  }
+
+  // 横向榜单的滚动容器需要完整容纳玻璃卡片向上下扩散的阴影。
+  .slider-container {
+    --slider-shadow-bleed-start: 48px;
+    --slider-shadow-bleed-end: 96px;
+    --slider-shadow-bleed-inline: 32px;
+  }
+
+  :where(.v-card, .v-sheet) :where(.app-surface, .v-card, .v-sheet, .v-list, .v-table, .v-expansion-panel, .v-stepper) {
+    border-color: transparent !important;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    box-shadow: none !important;
+    will-change: auto;
+  }
+
+  :where(.v-card, .v-sheet)
+    :where(
+      .app-surface:not(.bg-primary, .bg-success, .bg-info, .bg-warning, .bg-error),
+      .v-card:not(.bg-primary, .bg-success, .bg-info, .bg-warning, .bg-error),
+      .v-sheet:not(.bg-primary, .bg-success, .bg-info, .bg-warning, .bg-error),
+      .v-list,
+      .v-table,
+      .v-expansion-panel,
+      .v-stepper
+    ) {
+    background-color: transparent !important;
+  }
+
+  @media (hover: hover) and (pointer: fine) {
+    .v-btn:not(.v-btn--variant-text, .v-btn--variant-plain):hover {
+      border-color: var(--glass-border-hover);
+      background-color: var(--glass-button-surface-hover) !important;
+      box-shadow: var(--glass-control-shadow-hover) !important;
+    }
+
+    .v-btn.bg-primary:hover {
+      border-color: rgba(var(--v-theme-primary), 62%);
+      background-color: rgba(var(--v-theme-primary), 42%) !important;
+    }
+
+    .v-btn.bg-success:hover {
+      border-color: rgba(var(--v-theme-success), 62%);
+      background-color: rgba(var(--v-theme-success), 42%) !important;
+    }
+
+    .v-btn.bg-info:hover {
+      border-color: rgba(var(--v-theme-info), 62%);
+      background-color: rgba(var(--v-theme-info), 42%) !important;
+    }
+
+    .v-btn.bg-warning:hover {
+      border-color: rgba(var(--v-theme-warning), 62%);
+      background-color: rgba(var(--v-theme-warning), 42%) !important;
+    }
+
+    .v-btn.bg-error:hover {
+      border-color: rgba(var(--v-theme-error), 62%);
+      background-color: rgba(var(--v-theme-error), 42%) !important;
+    }
+
+    // FAB 悬浮时保持弹出菜单材质，仅通过描边和阴影反馈交互，避免背景进一步透明。
+    .compact-fab .v-btn:hover {
+      background-color: var(--glass-overlay-surface) !important;
+    }
+
+    .v-card--link:hover {
+      border-color: var(--glass-border-hover) !important;
+      box-shadow: var(--glass-shadow-hover) !important;
+    }
+
+    // 玻璃主题的上浮反馈只增强边缘受光，避免外投影与相邻材质叠成宽暗带。
+    .app-hover-lift-card:is(:hover, .app-hover-lift-card--hovering) {
+      box-shadow: var(--glass-dashboard-shadow-hover) !important;
+    }
+  }
+
+  .v-btn:not(.v-btn--variant-text, .v-btn--variant-plain):active {
+    box-shadow: var(--glass-control-shadow-active) !important;
+  }
+
+  @media (width <= 960px) {
+    // 全屏快捷弹窗释放外层玻璃背景，让定时服务卡片直接采样全局壁纸。
+    &[data-glass-appearance='frosted'] .scheduler-shortcut-dialog-card {
+      -webkit-backdrop-filter: none !important;
+      backdrop-filter: none !important;
+      background: transparent !important;
+      box-shadow: none !important;
+    }
+  }
+
+  @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+    :where(
+      .app-surface,
+      .v-card,
+      .v-sheet,
+      .v-list,
+      .v-toolbar,
+      .v-expansion-panel,
+      .layout-vertical-nav,
+      .layout-navbar,
+      .theme-customizer-panel-host,
+      .agent-assistant-panel
+    ) {
+      background-color: rgba(var(--glass-popup-rgb), 94%) !important;
+    }
+  }
+
+  @media (prefers-reduced-transparency: reduce) {
+    :where(
+      .app-surface,
+      .v-card,
+      .v-sheet,
+      .v-list,
+      .v-toolbar,
+      .layout-vertical-nav,
+      .layout-navbar,
+      .v-overlay__content
+    ) {
+      -webkit-backdrop-filter: none !important;
+      backdrop-filter: none !important;
+      background-color: rgb(var(--glass-material-rgb)) !important;
+    }
+
+    .layout-vertical-nav::before {
+      -webkit-backdrop-filter: none !important;
+      backdrop-filter: none !important;
+      background-color: rgb(var(--glass-material-rgb)) !important;
+    }
+
+    .playing-card__percent {
+      -webkit-backdrop-filter: none !important;
+      backdrop-filter: none !important;
+      background-color: rgba(var(--glass-material-rgb), 88%) !important;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .v-btn,
+    .v-card,
+    .v-field,
+    .background-image {
+      transition-duration: 0.01ms !important;
+    }
+
+    .media-card .v-img__img {
+      transition-duration: 0.01ms;
+    }
+  }
+}
+
+// 光学档位只在 renderer ready 后接管背景采样，加载与失败状态继续使用标准 CSS 材质。
+.glass-optical-layer {
+  z-index: 0;
+  block-size: 100%;
+  inline-size: 100%;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.glass-optical-layer--fixed {
+  position: fixed;
+  z-index: variables.$layout-vertical-nav-layout-navbar-z-index;
+}
+
+// 文档表面与该呈现层共享滚动坐标，canvas backing buffer 仍由 renderer 的质量预算约束。
+.glass-optical-layer--scroll {
+  position: absolute;
+}
+
+html:is([data-glass-quality='balanced'], [data-glass-quality='high'])[data-glass-renderer-state='ready']
+  .glass-optical-layer {
+  opacity: 1;
+}
+
+// 登录页强制使用高质量能力，但不改写用户保存的全局质量属性。
+html[data-glass-renderer-state='ready'] .app-wrapper--login-glass-high .glass-optical-layer {
+  opacity: 1;
+}
+
+// 光学档位先交由 renderer 接管标准表面；各材质在后续规则恢复必要的原生背板。
+html[data-theme='glass']:is(
+    [data-glass-quality='balanced'],
+    [data-glass-quality='high']
+  )[data-glass-renderer-state='ready'] {
+  --glass-surface-backdrop-filter: none;
+  --glass-raised-backdrop-filter: none;
+  --glass-fixed-shell-backdrop-filter: none;
+  --glass-navbar-backdrop-filter: var(--glass-surface-backdrop-filter);
+}
+
+html[data-theme='glass'][data-glass-appearance='frosted']:is(
+    [data-glass-quality='balanced'],
+    [data-glass-quality='high']
+  )[data-glass-renderer-state='ready'] {
+  // 标准表面始终保留稳定磨砂基底；renderer 只叠加折射与交互动态，静态页面也遵守同一材质契约。
+  --glass-surface-backdrop-filter: var(--glass-native-surface-backdrop-filter);
+  --glass-navbar-backdrop-filter: none;
+}
+
+html:is([data-glass-quality='balanced'], [data-glass-quality='high'])[data-glass-renderer-state='ready']
+  body[data-theme='glass'] {
+  .layout-vertical-nav::before,
+  .layout-navbar {
+    -webkit-backdrop-filter: var(--glass-surface-backdrop-filter) !important;
+    backdrop-filter: var(--glass-surface-backdrop-filter) !important;
+  }
+
+  .v-overlay__content > :where(.v-card, .v-sheet, .v-list) {
+    -webkit-backdrop-filter: var(--glass-overlay-backdrop-filter) !important;
+    backdrop-filter: var(--glass-overlay-backdrop-filter) !important;
+  }
+}
+
+// 稳定背板已持有磨砂；没有背板的浏览器在所有滚动状态中都由原生滤镜持有磨砂。
+html[data-glass-appearance='frosted']:is(
+    [data-glass-quality='balanced'],
+    [data-glass-quality='high']
+  )[data-glass-renderer-state='ready']
+  body[data-theme='glass'] {
+  .layout-vertical-nav::before {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+
+  .layout-wrapper:not(.layout-fixed-shell-backplate-active) .layout-vertical-nav::before,
+  .layout-wrapper:not(.layout-fixed-shell-backplate-active) .layout-navbar {
+    -webkit-backdrop-filter: var(--glass-native-surface-backdrop-filter) !important;
+    backdrop-filter: var(--glass-native-surface-backdrop-filter) !important;
+  }
+}
+
+// 滚动表面由原生 backdrop 持有壁纸基底；完整内容覆盖的排除子树不再采样。
+html:is([data-glass-quality='balanced'], [data-glass-quality='high'])[data-glass-renderer-state='ready']
+  body[data-theme='glass'] {
+  :is(
+      .dashboard-grid-item-content > .dashboard-grid-auto-size > .dashboard-grid-content-measure > .v-card,
+      .dashboard-grid-item-content
+        > .dashboard-grid-auto-size
+        > .dashboard-grid-content-measure
+        > :first-child
+        > .v-card,
+      [data-glass-optical-surface],
+      .app-hover-lift-card
+    ):not([data-glass-optical-mode='excluded']):not([data-glass-optical-mode='excluded'] *) {
+    -webkit-backdrop-filter: var(--glass-native-surface-backdrop-filter) !important;
+    backdrop-filter: var(--glass-native-surface-backdrop-filter) !important;
+  }
+}
+
+// 质量档从首帧起固定原生磨砂核；renderer 就绪只叠加光学层，不再切换静态材质密度。
+html[data-glass-appearance='frosted'][data-glass-quality='balanced'] {
+  --glass-dashboard-backdrop-filter: var(--glass-native-surface-backdrop-filter);
+  --glass-native-surface-backdrop-filter: blur(calc(16px * var(--glass-frost-blur-scale, 1))) saturate(162%)
+    brightness(var(--glass-transmission-brightness));
+  --glass-fixed-shell-backplate-filter: var(--glass-native-surface-backdrop-filter);
+}
+
+html[data-glass-appearance='frosted'][data-glass-quality='high'] {
+  --glass-dashboard-backdrop-filter: var(--glass-native-surface-backdrop-filter);
+  --glass-native-surface-backdrop-filter: blur(calc(10px * var(--glass-frost-blur-scale, 1))) saturate(154%)
+    brightness(var(--glass-transmission-brightness));
+  --glass-fixed-shell-backplate-filter: var(--glass-native-surface-backdrop-filter);
+}
+
+// 异步滚动期间只暂停 GPU 动态层；原生壁纸基底不发生材质切换。
+html[data-glass-scroll-presentation='native'][data-glass-renderer-state='ready'] .glass-optical-layer--scroll {
+  opacity: 0 !important;
+}
+
+// 登录页只保留内容保护表面；折射、方向反射和唯一动态焦散均由共享 renderer 负责。
+html[data-theme='glass'] body[data-theme='glass'] {
+  .login-card {
+    box-shadow:
+      inset 0 0 0 1px rgba(255, 255, 255, 0.14),
+      inset 0 1px 0 rgba(255, 255, 255, 0.18),
+      0 24px 64px rgba(0, 0, 0, 0.22) !important;
+  }
+
+  .login-card__surface {
+    -webkit-backdrop-filter: brightness(var(--glass-transmission-brightness));
+    backdrop-filter: brightness(var(--glass-transmission-brightness));
+    background:
+      linear-gradient(145deg, rgba(255, 255, 255, 0.08), transparent 34%),
+      linear-gradient(rgba(var(--glass-material-rgb), 0.04), rgba(var(--glass-material-rgb), 0.1)) !important;
+  }
+
+  .native-login-field {
+    border-color: rgba(255, 255, 255, 0.15);
+    background: rgba(var(--glass-material-rgb), 0.2);
+    -webkit-backdrop-filter: var(--glass-control-backdrop-filter);
+    backdrop-filter: var(--glass-control-backdrop-filter);
+  }
+}
+
+html[data-theme='glass'][data-glass-renderer-state='fallback'] body[data-theme='glass'] {
+  .app-wrapper--login-glass-high .login-card__surface {
+    filter: url('#login-glass-static-refraction');
+  }
+}
+
+html[data-theme='glass'][data-glass-appearance='tinted'] body[data-theme='glass'] {
+  .login-card__surface {
+    background:
+      linear-gradient(145deg, rgba(255, 255, 255, 0.1), transparent 36%),
+      linear-gradient(rgba(var(--glass-material-accent-rgb), 0.08), rgba(var(--glass-material-accent-rgb), 0.03)),
+      linear-gradient(rgba(var(--glass-material-rgb), 0.16), rgba(var(--glass-material-rgb), 0.3)) !important;
+  }
+
+  .native-login-field {
+    border-color: rgba(255, 255, 255, 0.15);
+    background:
+      linear-gradient(rgba(var(--v-theme-primary), 0.07), rgba(var(--v-theme-primary), 0.07)),
+      rgba(var(--glass-material-rgb), 0.2);
+  }
+}
+
+html[data-theme='glass'][data-glass-appearance='frosted'] body[data-theme='glass'] {
+  .login-card {
+    box-shadow: var(--glass-shadow-raised) !important;
+  }
+
+  .login-card__surface {
+    -webkit-backdrop-filter: blur(var(--glass-blur-raised)) saturate(var(--glass-saturate))
+      brightness(var(--glass-transmission-brightness));
+    backdrop-filter: blur(var(--glass-blur-raised)) saturate(var(--glass-saturate))
+      brightness(var(--glass-transmission-brightness));
+    background:
+      var(--glass-sheen), linear-gradient(rgba(var(--glass-material-rgb), 0.34), rgba(var(--glass-material-rgb), 0.48)) !important;
+  }
+
+  .native-login-field {
+    border-color: var(--glass-control-prominent-border);
+    background: var(--glass-control-prominent);
+    -webkit-backdrop-filter: var(--glass-control-prominent-backdrop-filter);
+    backdrop-filter: var(--glass-control-prominent-backdrop-filter);
+    box-shadow: var(--glass-control-prominent-shadow);
+  }
+}
+
+html[data-theme='glass'] body[data-theme='glass'] .native-login-field:focus-within {
+  border-color: rgba(var(--v-theme-primary), 70%);
+  background: var(--glass-control-prominent-focus);
+  box-shadow: var(--glass-control-prominent-focus-shadow);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .glass-optical-layer {
+    transition: none;
+  }
+}
+
+// 浮动顶栏使用同一布局坐标系，以滚动进度改变真实 inset，避免切换 transform 采样空间。
+html[data-theme='glass']:is([data-glass-appearance='clear'], [data-glass-appearance='tinted'])
+  body[data-theme='glass']
+  .layout-wrapper.layout-navbar-floating-eligible
+  .layout-navbar {
+  inline-size: auto !important;
+  inset-block-start: var(--shell-navbar-motion-inset, 0px) !important;
+  inset-inline: var(--shell-navbar-motion-inset, 0px) !important;
+  transform: none !important;
+  transition:
+    background-color var(--shell-floating-navbar-motion-duration) var(--shell-floating-navbar-motion-easing),
+    border-color var(--shell-floating-navbar-motion-duration) var(--shell-floating-navbar-motion-easing),
+    border-radius var(--shell-floating-navbar-motion-duration) var(--shell-floating-navbar-motion-easing),
+    box-shadow var(--shell-floating-navbar-motion-duration) var(--shell-floating-navbar-motion-easing),
+    inset-block-start var(--shell-floating-navbar-motion-duration) var(--shell-floating-navbar-motion-easing),
+    inset-inline-end var(--shell-floating-navbar-motion-duration) var(--shell-floating-navbar-motion-easing),
+    inset-inline-start var(--shell-floating-navbar-motion-duration) var(--shell-floating-navbar-motion-easing) !important;
+
+  .navbar-content-container {
+    // 外壳已使用真实内缩，内容不再叠加基础布局的反向缩放。
+    transform: none !important;
+  }
+}
+
+// 水平导航沿滚动进度从内容区居中展开至两端；只改变留白，不缩放控件。
+html[data-theme='glass']
+  body[data-theme='glass']
+  .layout-wrapper.layout-nav-type-vertical.layout-horizontal-nav-active.layout-navbar-floating-eligible {
+  .layout-navbar {
+    --shell-navbar-motion-progress: var(--shell-navbar-scroll-progress, 0);
+    --shell-navbar-expand-progress: var(--shell-navbar-motion-progress);
+    --shell-navbar-motion-inset: calc(var(--shell-floating-navbar-inset) * var(--shell-navbar-motion-progress));
+    --shell-navbar-motion-scale-x: calc(
+      1 + (var(--shell-floating-navbar-scale-x) - 1) * var(--shell-navbar-motion-progress)
+    );
+    // 磨砂内容经过反向缩放后仍覆盖视口，不扣除外壳的几何内缩。
+    --shell-navbar-content-inset-compensation: 0px;
+  }
+
+  .layout-navbar,
+  .layout-navbar .navbar-content-container {
+    // 几何完全跟随滚动；材质过渡仍保留，但不再叠加第二套几何时间动画。
+    transition-property: background-color, border-color, box-shadow, opacity !important;
+  }
+
+  .layout-navbar .navbar-content-container {
+    position: relative;
+    z-index: 1;
+    inline-size: 100%;
+    margin-inline: 0;
+    max-inline-size: none;
+    padding-inline: calc(
+      1.5rem + var(--shell-navbar-content-top-gutter, 0px) * (1 - var(--shell-navbar-expand-progress)) +
+        var(--shell-navbar-content-floating-gutter, 16px) *
+        var(--shell-navbar-expand-progress) - var(--shell-navbar-content-inset-compensation)
+    ) !important;
+  }
+}
+
+html[data-theme='glass']:is([data-glass-appearance='clear'], [data-glass-appearance='tinted'])
+  body[data-theme='glass']
+  .layout-wrapper.layout-horizontal-nav-active.layout-navbar-floating-eligible
+  .layout-navbar {
+  // 留白按视口坐标计算；透明材质的真实内缩必须同步扣除，避免中间帧横移偏离轨迹。
+  --shell-navbar-content-inset-compensation: var(--shell-navbar-motion-inset);
+}
+
+html[data-theme='glass'][data-glass-appearance='frosted']
+  body[data-theme='glass']
+  .layout-wrapper.layout-horizontal-nav-active.layout-navbar-floating-eligible
+  .layout-navbar {
+  transform: translate3d(0, var(--shell-navbar-motion-inset), 0) scaleX(var(--shell-navbar-motion-scale-x)) !important;
+
+  .navbar-content-container {
+    // 与外壳使用同一瞬时比例，控件在整个过程中保持原始尺寸。
+    transform: scaleX(calc(1 / var(--shell-navbar-motion-scale-x))) !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-theme='glass']
+    body[data-theme='glass']
+    .layout-wrapper.layout-horizontal-nav-active.layout-navbar-floating-eligible
+    .layout-navbar {
+    --shell-navbar-motion-progress: 0 !important;
+    // 减少动态效果时保留居中，避免宽屏上的长距离横移。
+    --shell-navbar-expand-progress: 0 !important;
+  }
+
+  html[data-theme='glass']
+    body[data-theme='glass']
+    .layout-wrapper.layout-horizontal-nav-active.layout-navbar-floating-eligible.layout-navbar-away-from-top
+    .layout-navbar {
+    --shell-navbar-motion-progress: 1 !important;
+  }
+}
+
+// 基础材质由单一真实表面承载；柔和迎光表达厚度，不叠加父子两层硬高光。
+html[data-theme='glass']:is([data-glass-appearance='clear'], [data-glass-appearance='tinted'])
+  body[data-theme='glass']
+  .layout-wrapper.layout-navbar-floating-eligible.layout-navbar-away-from-top
+  .layout-navbar {
+  // 共享材质响应只改变浮动表面的光学参数，不把内容层一起变暗或变透明。
+  // 0.38 是 Natural clear/high 的反射参考值，三个亮边在该点保持默认材质能量。
+  --glass-navbar-reflection-ratio: clamp(0, calc(var(--glass-reflection, 0.38) * 2.6316), 1.7);
+  --glass-navbar-sheen-opacity: clamp(0, calc(0.18 * var(--glass-navbar-reflection-ratio)), 0.3);
+  --glass-navbar-rim-opacity: clamp(0, calc(0.24 * var(--glass-navbar-reflection-ratio)), 0.4);
+  --glass-navbar-top-opacity: clamp(0, calc(0.4 * var(--glass-navbar-reflection-ratio)), 0.65);
+  --glass-navbar-opacity: clamp(
+    0,
+    calc(0.02 + var(--glass-surface-density, 0.62) * 0.05 + (1 - var(--glass-background-visibility, 0.58)) * 0.02),
+    0.2
+  );
+  --glass-navbar-scrim-end: clamp(
+    0,
+    calc(0.045 + var(--glass-surface-density, 0.62) * 0.1 + (1 - var(--glass-background-visibility, 0.58)) * 0.05),
+    0.28
+  );
+  --glass-navbar-brightness: var(--glass-transmission-brightness, 1);
+  --glass-navbar-saturation: clamp(
+    110%,
+    calc(110% + var(--glass-background-visibility, 0.58) * 12% + var(--glass-tint-density, 0.65) * 4%),
+    124%
+  );
+  --glass-navbar-sheen: linear-gradient(
+    145deg,
+    rgba(255, 255, 255, var(--glass-navbar-sheen-opacity)),
+    transparent 38%
+  );
+  --glass-navbar-rim: rgba(255, 255, 255, var(--glass-navbar-rim-opacity));
+  --glass-navbar-scrim: linear-gradient(
+    rgba(var(--glass-material-rgb), var(--glass-navbar-opacity)),
+    rgba(var(--glass-material-rgb), var(--glass-navbar-scrim-end))
+  );
+  --glass-navbar-tint: clamp(0, calc(var(--glass-tint-density, 0.65) * 0.12), 0.18);
+  --glass-navbar-shadow:
+    inset 0 0 0 1px var(--glass-navbar-rim), inset 0 1px 2px rgba(255, 255, 255, var(--glass-navbar-top-opacity)),
+    inset 0 -1px 2px rgba(0, 0, 0, calc(0.04 + var(--glass-surface-density, 0.62) * 0.04)),
+    0 4px 14px
+      rgba(0, 0, 0, calc(0.035 + var(--glass-reflection, 0.5) * 0.025 + var(--glass-surface-density, 0.62) * 0.02));
+  --glass-navbar-live-filter: var(--glass-navbar-reading-filter, saturate(100%))
+    saturate(var(--glass-navbar-saturation)) brightness(var(--glass-navbar-brightness));
+
+  border: 0 !important;
+  -webkit-backdrop-filter: var(--glass-navbar-live-filter) !important;
+  backdrop-filter: var(--glass-navbar-live-filter) !important;
+  background: var(--glass-navbar-sheen), var(--glass-navbar-scrim) !important;
+  box-shadow: var(--glass-navbar-shadow) !important;
+  inset-block-start: var(--shell-navbar-motion-inset, var(--shell-floating-navbar-inset)) !important;
+  inset-inline: var(--shell-navbar-motion-inset, var(--shell-floating-navbar-inset)) !important;
+}
+
+// 只有已确认的 Chromium SVG 能力才替换基础 CSS 滤镜；未就绪时保持同族材质与真实几何。
+html[data-theme='glass'][data-glass-quality='high']:is(
+    [data-glass-appearance='clear'],
+    [data-glass-appearance='tinted']
+  )
+  body[data-theme='glass']
+  .layout-wrapper[data-glass-navbar-refraction='chromium'][data-glass-navbar-refraction-ready='true'].layout-navbar-floating-eligible.layout-navbar-away-from-top
+  .layout-navbar {
+  --glass-navbar-live-filter: var(--glass-navbar-reading-filter, saturate(100%))
+    url('#glass-navbar-live-refraction-high') saturate(var(--glass-navbar-saturation))
+    brightness(var(--glass-navbar-brightness));
+}
+
+html[data-theme='glass'][data-glass-quality='balanced']:is(
+    [data-glass-appearance='clear'],
+    [data-glass-appearance='tinted']
+  )
+  body[data-theme='glass']
+  .layout-wrapper[data-glass-navbar-refraction='chromium'][data-glass-navbar-refraction-ready='true'].layout-navbar-floating-eligible.layout-navbar-away-from-top
+  .layout-navbar {
+  --glass-navbar-live-filter: var(--glass-navbar-reading-filter, saturate(100%))
+    url('#glass-navbar-live-refraction-balanced') saturate(var(--glass-navbar-saturation))
+    brightness(var(--glass-navbar-brightness));
+}
+
+// 常驻侧栏保持附着几何，只有同源位移图解码完成后才接管其单独的背景表面。
+html[data-theme='glass'][data-glass-quality='high']:is(
+    [data-glass-appearance='clear'],
+    [data-glass-appearance='tinted']
+  )
+  body[data-theme='glass']
+  .layout-wrapper[data-glass-navigation-refraction='chromium'][data-glass-sidebar-refraction-ready='true']
+  .layout-vertical-nav:not(.overlay-nav):not([data-glass-panel-refraction]) {
+  --glass-sidebar-live-filter: url('#glass-sidebar-live-refraction-high') saturate(115%)
+    brightness(var(--glass-transmission-brightness));
+
+  -webkit-backdrop-filter: var(--glass-sidebar-live-filter) !important;
+  backdrop-filter: var(--glass-sidebar-live-filter) !important;
+
+  &::before {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+}
+
+html[data-theme='glass'][data-glass-quality='balanced']:is(
+    [data-glass-appearance='clear'],
+    [data-glass-appearance='tinted']
+  )
+  body[data-theme='glass']
+  .layout-wrapper[data-glass-navigation-refraction='chromium'][data-glass-sidebar-refraction-ready='true']
+  .layout-vertical-nav:not(.overlay-nav):not([data-glass-panel-refraction]) {
+  --glass-sidebar-live-filter: url('#glass-sidebar-live-refraction-balanced') saturate(115%)
+    brightness(var(--glass-transmission-brightness));
+
+  -webkit-backdrop-filter: var(--glass-sidebar-live-filter) !important;
+  backdrop-filter: var(--glass-sidebar-live-filter) !important;
+
+  &::before {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+}
+
+html[data-theme='glass'][data-glass-appearance='tinted']
+  body[data-theme='glass']
+  .layout-wrapper.layout-navbar-floating-eligible.layout-navbar-away-from-top
+  .layout-navbar {
+  background:
+    var(--glass-navbar-sheen),
+    linear-gradient(
+      rgba(var(--glass-material-accent-rgb), var(--glass-navbar-tint)),
+      rgba(var(--glass-material-accent-rgb), calc(var(--glass-navbar-tint) * 0.45))
+    ),
+    var(--glass-navbar-scrim) !important;
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  html[data-theme='glass'] body[data-theme='glass'] .layout-vertical-nav {
+    --glass-sidebar-live-filter: none !important;
+  }
+
+  html[data-theme='glass']:is([data-glass-appearance='clear'], [data-glass-appearance='tinted'])
+    body[data-theme='glass']
+    .layout-wrapper.layout-navbar-floating-eligible.layout-navbar-away-from-top
+    .layout-navbar {
+    --glass-navbar-live-filter: none !important;
+
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    background: rgb(var(--glass-material-rgb)) !important;
+    background-image: none !important;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-theme='glass']:is([data-glass-appearance='clear'], [data-glass-appearance='tinted'])
+    body[data-theme='glass']
+    .layout-wrapper.layout-navbar-floating-eligible
+    .layout-navbar,
+  html[data-theme='glass']:is([data-glass-appearance='clear'], [data-glass-appearance='tinted'])
+    body[data-theme='glass']
+    .layout-wrapper.layout-navbar-floating-eligible
+    .navbar-content-container {
+    transition: none !important;
+  }
+}
+
+@include glass-v3.surfaces;
+
+/* 明暗仅更换材质色系，玻璃质量、光学参数及网页布局设置保持独立。*/
+html[data-theme='glass'][data-glass-color-scheme='light'] {
+  --glass-material-rgb: 255, 255, 255;
+  --glass-card-rgb: 255, 255, 255;
+  --glass-popup-rgb: 255, 255, 255;
+  --glass-shell-rgb: 242, 242, 247;
+  --glass-frosted-rgb: 255, 255, 255;
+  --glass-wallpaper-shade-rgb: 255, 255, 255;
+}
+
+html[data-theme='glass'][data-glass-color-scheme='light'][data-glass-appearance][data-glass-ui-style] {
+  --glass-control: rgba(118, 118, 128, 8%);
+  --glass-control-prominent: rgba(118, 118, 128, 8%);
+  --glass-control-prominent-focus: color-mix(in srgb, rgba(118, 118, 128, 10%) 84%, rgba(var(--v-theme-primary), 16%));
+  --glass-border: rgba(60, 60, 67, calc(0.06 + var(--glass-reflection, 0.5) * 0.12));
+  --glass-border-raised: rgba(60, 60, 67, calc(0.08 + var(--glass-reflection, 0.5) * 0.14));
+  --glass-border-hover: rgba(60, 60, 67, 24%);
+  --glass-control-prominent-border: rgba(60, 60, 67, 14%);
+  --glass-button-surface: rgba(118, 118, 128, 8%);
+  --glass-button-surface-hover: rgba(118, 118, 128, 14%);
+  --glass-shadow: 0 10px 28px rgba(0, 0, 0, 8%), inset 0 1px 0 rgba(255, 255, 255, 70%);
+  --glass-shadow-raised: 0 16px 40px rgba(0, 0, 0, 12%), inset 0 1px 0 rgba(255, 255, 255, 80%);
+  --glass-v3-fill: clamp(0.5, calc(0.5 + var(--glass-surface-density, 0.62) * 0.28), 0.84);
+  --glass-v3-shadow: 0 12px 30px rgba(0, 0, 0, 6%);
+  --glass-v3-hover-shadow: 0 16px 34px rgba(0, 0, 0, 10%);
+  --glass-popup-surface: rgba(255, 255, 255, calc(0.64 + var(--glass-surface-density, 0.62) * 0.2));
+  --glass-navbar-frosted-background:
+    linear-gradient(rgba(255, 255, 255, 24%), rgba(255, 255, 255, 24%)), var(--glass-v3-card-background);
+
+  &[data-glass-ui-style='clear'] {
+    --glass-popup-surface: rgba(255, 255, 255, calc(0.48 + var(--glass-surface-density, 0.62) * 0.2));
+  }
+
+  &[data-glass-appearance='tinted'] {
+    --glass-popup-surface: color-mix(
+      in srgb,
+      rgba(255, 255, 255, calc(0.66 + var(--glass-surface-density, 0.72) * 0.2)) 94%,
+      rgba(var(--glass-material-accent-rgb), 24%)
+    );
+  }
+}
+
+/* 浅色玻璃填充上的文字使用主题前景色，品牌染色与深色主题保持独立。*/
+html[data-theme='glass'][data-glass-color-scheme='light'] body[data-theme='glass'] {
+  .v-btn:is(.bg-primary, .bg-success, .bg-info, .bg-warning, .bg-error),
+  .v-chip:is(.v-chip--variant-elevated, .v-chip--variant-flat, .v-chip--variant-tonal),
+  .layout-vertical-nav .nav-link > .router-link-exact-active {
+    color: rgb(var(--v-theme-on-surface)) !important;
+  }
+
+  .plugin-card__banner .text-white,
+  .plugin-card__status--rating {
+    color: rgb(var(--v-theme-on-surface)) !important;
+    text-shadow: none;
+  }
+
+  .plugin-card__banner .text-gray-200 {
+    color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)) !important;
+  }
+}

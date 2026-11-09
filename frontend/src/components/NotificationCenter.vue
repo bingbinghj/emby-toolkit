@@ -3,46 +3,47 @@
     <header class="notification-heading">
       <div><h2>通知中心</h2><p>查看运行状态与日志</p></div>
       <div class="notification-window-actions">
-        <n-button quaternary circle aria-label="关闭通知中心" title="关闭" @click="$emit('close')"><template #icon><n-icon :component="CloseOutline" /></template></n-button>
+        <VBtn variant="text" icon="mdi-close" size="small" aria-label="关闭通知中心" title="关闭" @click="$emit('close')" />
       </div>
     </header>
-    <n-tabs v-model:value="activeTab" type="line" class="notification-tabs">
-      <n-tab name="logs"><UiIcon name="notifications" :size="16" /> 实时日志</n-tab>
-      <n-tab name="history"><UiIcon name="time" :size="16" /> 历史日志</n-tab>
-    </n-tabs>
+    <VTabs v-model="activeTab" color="primary" density="compact" class="notification-tabs">
+      <VTab value="logs" prepend-icon="mdi-text-box-outline">实时日志</VTab>
+      <VTab value="history" prepend-icon="mdi-history">历史日志</VTab>
+    </VTabs>
     <div v-show="activeTab === 'logs'" class="notification-live">
-      <section class="notification-task" aria-label="当前任务">
+      <VCard variant="tonal" class="notification-task" aria-label="当前任务">
         <div class="notification-task-heading">
           <strong>{{ task.is_running ? task.current_action : (task.last_action || '暂无运行任务') }}</strong>
-          <n-tag size="small" :type="statusType">{{ stateLabel }}</n-tag>
+          <VChip size="small" :color="statusType" variant="tonal">{{ stateLabel }}</VChip>
         </div>
         <p class="notification-task-message">{{ taskMessage }}</p>
-        <n-progress v-if="task.is_running && task.progress_known" type="line" :percentage="Number(task.progress) || 0" :show-indicator="true" :height="5" />
+        <div v-if="task.is_running && task.progress_known" class="notification-progress">
+          <VProgressLinear :model-value="Number(task.progress) || 0" color="primary" :height="5" rounded aria-label="任务进度" />
+          <span>{{ Number(task.progress) || 0 }}%</span>
+        </div>
         <div v-if="task.is_running" class="notification-task-controls">
           <span v-if="task.phase" class="notification-task-phase">{{ task.phase }}</span>
-          <n-button size="small" secondary :loading="controlAction === 'pause' || controlAction === 'resume'" :disabled="controlDisabled" @click="togglePause">
-            <template #icon><n-icon :component="task.state === 'paused' ? PlayOutline : PauseOutline" /></template>
+          <VBtn size="small" variant="tonal" color="primary" :prepend-icon="task.state === 'paused' ? 'mdi-play' : 'mdi-pause'" :loading="controlAction === 'pause' || controlAction === 'resume'" :disabled="controlDisabled" @click="togglePause">
             {{ task.state === 'pausing' ? '正在暂停…' : task.state === 'paused' ? '继续任务' : '暂停任务' }}
-          </n-button>
-          <n-popconfirm :to="true" placement="top-end" :width="320" style="max-width: calc(100vw - 64px)" @positive-click="stopTask" positive-text="停止任务" negative-text="取消" :positive-button-props="{ type: 'error' }">
-            <template #trigger><n-button size="small" type="error" secondary :loading="controlAction === 'stop'" :disabled="!!controlAction || task.stop_requested || task.state === 'stopping'"><template #icon><n-icon :component="StopOutline" /></template>{{ task.stop_requested || task.state === 'stopping' ? '正在停止…' : '停止任务' }}</n-button></template>
-            停止后将完成必要的收尾操作，当前任务不会继续处理新项目。
-          </n-popconfirm>
+          </VBtn>
+          <VBtn size="small" color="error" variant="tonal" prepend-icon="mdi-stop" :loading="controlAction === 'stop'" :disabled="!!controlAction || task.stop_requested || task.state === 'stopping'" @click="confirmStopTask">
+            {{ task.stop_requested || task.state === 'stopping' ? '正在停止…' : '停止任务' }}
+          </VBtn>
         </div>
-      </section>
+      </VCard>
       <div class="notification-toolbar">
-        <n-input v-model:value="keyword" clearable placeholder="搜索实时日志" aria-label="搜索实时日志" size="small"><template #prefix><n-icon :component="SearchOutline" /></template></n-input>
-        <n-select v-model:value="logFilter" :options="filterOptions" aria-label="日志类型" size="small" class="notification-filter" />
-        <label class="notification-follow"><n-switch v-model:value="following" size="small" aria-label="自动跟随日志" />自动跟随</label>
-        <n-button size="small" secondary @click="downloadLogs" :disabled="!filteredLogs.length">导出日志</n-button>
+        <VTextField v-model="keyword" clearable hide-details variant="outlined" density="compact" prepend-inner-icon="mdi-magnify" placeholder="搜索实时日志" aria-label="搜索实时日志" class="notification-search" />
+        <VSelect v-model="logFilter" :items="filterOptions" item-title="label" item-value="value" hide-details variant="outlined" density="compact" aria-label="日志类型" class="notification-filter" />
+        <VSwitch v-model="following" hide-details inset color="primary" density="compact" label="自动跟随" aria-label="自动跟随日志" class="notification-follow" />
+        <VBtn size="small" variant="tonal" prepend-icon="mdi-download" @click="downloadLogs" :disabled="!filteredLogs.length">导出日志</VBtn>
       </div>
       <div ref="logRef" class="notification-log" role="region" aria-label="实时日志内容" tabindex="0" @scroll="handleScroll">
         <div v-for="(line, index) in filteredLogs" :key="index" class="notification-line" :class="lineClass(line)"><span class="notification-line-number" aria-hidden="true">{{ index + 1 }}</span><span>{{ line }}</span></div>
-        <n-empty v-if="!filteredLogs.length" :description="displayedLogs.length ? '没有匹配的日志' : '暂无实时日志'" class="notification-empty" />
+        <VAlert v-if="!filteredLogs.length" variant="tonal" color="secondary" icon="mdi-text-box-outline" class="notification-empty">{{ displayedLogs.length ? '没有匹配的日志' : '暂无实时日志' }}</VAlert>
       </div>
       <footer class="notification-footer">
         <span>{{ filteredLogs.length }} 条日志{{ following ? ' · 自动跟随最新日志' : ' · 已暂停跟随' }}</span>
-        <n-button v-if="!following" size="small" type="primary" secondary @click="following = true"><template #icon><UiIcon name="refresh" /></template>{{ hasNewLogs ? '有新日志 · 回到最新' : '回到最新' }}</n-button>
+        <VBtn v-if="!following" size="small" color="primary" variant="tonal" prepend-icon="mdi-arrow-down" @click="following = true">{{ hasNewLogs ? '有新日志 · 回到最新' : '回到最新' }}</VBtn>
       </footer>
     </div>
     <LogViewer v-show="activeTab === 'history'" :show="activeTab === 'history'" />
@@ -51,8 +52,7 @@
 
 <script setup>
 import { computed, ref, watch, nextTick } from 'vue';
-import { NTabs, NTab, NTag, NButton, NEmpty, NIcon, NInput, NSelect, NSwitch, NProgress, NPopconfirm, useMessage } from 'naive-ui';
-import { CloseOutline, SearchOutline, PauseOutline, PlayOutline, StopOutline } from '@vicons/ionicons5';
+import { useMessage, useDialog } from '@/composables/useFeedback';
 import LogViewer from './LogViewer.vue';
 import { refreshTaskStatus } from '../composables/useTaskStatus.js';
 import axios from 'axios';
@@ -60,12 +60,13 @@ import axios from 'axios';
 const props = defineProps({ task: { type: Object, default: () => ({}) } });
 defineEmits(['close']);
 const message = useMessage();
+const dialog = useDialog();
 const activeTab = ref('logs'), logRef = ref(null), controlAction = ref('');
 const keyword = ref(''), logFilter = ref('all'), following = ref(true), displayedLogs = ref([]);
 const filterOptions = [{ label: '全部日志', value: 'all' }, { label: '任务进度', value: 'progress' }, { label: '警告', value: 'warning' }, { label: '错误', value: 'error' }];
 const labels = { idle: '空闲', queued: '等待执行', completed: '已完成', completed_with_warnings: '已完成，有提醒', failed: '失败', cancelled: '已停止', paused: '已暂停', pausing: '正在暂停', stopping: '正在停止', running: '执行中' };
 const stateLabel = computed(() => props.task.stop_requested ? '正在停止' : (labels[props.task.state] || (props.task.is_running ? '执行中' : '空闲')));
-const statusType = computed(() => props.task.state === 'failed' ? 'error' : ['pausing', 'paused', 'stopping', 'completed_with_warnings'].includes(props.task.state) ? 'warning' : props.task.is_running ? 'info' : props.task.state === 'completed' ? 'success' : 'default');
+const statusType = computed(() => props.task.state === 'failed' ? 'error' : ['pausing', 'paused', 'stopping', 'completed_with_warnings'].includes(props.task.state) ? 'warning' : props.task.is_running ? 'info' : props.task.state === 'completed' ? 'success' : 'secondary');
 const controlDisabled = computed(() => !!controlAction.value || !props.task.task_id || props.task.stop_requested || !['running', 'paused'].includes(props.task.state));
 const taskMessage = computed(() => props.task.stop_requested || props.task.state === 'stopping' ? '正在完成收尾操作，请稍候。' : props.task.state === 'pausing' ? '已请求暂停，当前操作完成后会在安全检查点暂停。' : props.task.state === 'paused' ? '任务已暂停，点击继续任务将从当前进度恢复。' : (props.task.message || '开始任务后，可在这里查看进度。'));
 
@@ -88,6 +89,18 @@ function togglePause() {
   if (!controlDisabled.value) return control(props.task.state === 'paused' ? 'resume' : 'pause');
 }
 function stopTask() { return control('stop'); }
+function confirmStopTask() {
+  const taskId = props.task.task_id;
+  dialog.warning({
+    title: '停止任务',
+    content: '停止后将完成必要的收尾操作，当前任务不会继续处理新项目。',
+    positiveText: '停止任务',
+    negativeText: '取消',
+    onPositiveClick: () => {
+      if (props.task.task_id === taskId) return stopTask();
+    },
+  });
+}
 const latestLogs = computed(() => props.task.logs || []);
 const hasNewLogs = computed(() => latestLogs.value.join('\n') !== displayedLogs.value.join('\n'));
 function downloadLogs() {
@@ -100,7 +113,7 @@ function downloadLogs() {
 }
 const logLevel = line => line.match(/^\[\d{2}:\d{2}:\d{2}\] \[([A-Z]+)\]/)?.[1];
 const filteredLogs = computed(() => displayedLogs.value.filter(line =>
-  (!keyword.value.trim() || line.toLowerCase().includes(keyword.value.trim().toLowerCase())) &&
+  (!String(keyword.value || '').trim() || line.toLowerCase().includes(String(keyword.value || '').trim().toLowerCase())) &&
   (logFilter.value === 'all' || (logFilter.value === 'progress' ? /\[任务(?:进度|开始|结束|暂停|继续)\]/.test(line) : logFilter.value === 'warning' ? logLevel(line) === 'WARNING' : logFilter.value === 'error' && ['ERROR', 'CRITICAL'].includes(logLevel(line))))
 ));
 const lineClass = line => ['ERROR', 'CRITICAL'].includes(logLevel(line)) ? 'log-error' : logLevel(line) === 'WARNING' ? 'log-warning' : /\[任务(?:进度|开始|结束|暂停|继续)\]/.test(line) ? 'log-progress' : '';
@@ -129,12 +142,14 @@ h2 { margin:0; font-size:20px; font-weight:600; }
 .notification-task-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; }
 .notification-task-heading strong { min-width:0; overflow-wrap:anywhere; font-size:14px; }
 .notification-task-message { margin:8px 0 12px; max-height:5.1em; overflow:auto; color:var(--ui-text-muted); font-size:12px; line-height:1.7; overflow-wrap:anywhere; }
+.notification-progress { display:flex; align-items:center; gap:10px; }
+.notification-progress > span { flex-shrink:0; font-size:12px; color:var(--ui-text-muted); }
 .notification-task-controls { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:10px; margin-top:14px; }
 .notification-task-phase { flex:1; min-width:0; max-height:3.2em; overflow:auto; overflow-wrap:anywhere; color:var(--ui-text-muted); font-size:12px; }
 .notification-toolbar { display:flex; align-items:center; gap:12px; flex-shrink:0; }
-.notification-toolbar > .n-input { min-width:0; }
+.notification-search { flex:1; min-width:0; }
 .notification-filter { width:145px; flex-shrink:0; }
-.notification-follow { display:flex; align-items:center; gap:8px; white-space:nowrap; font-size:12px; }
+.notification-follow { flex:0 0 auto; white-space:nowrap; }
 .notification-log { flex:1; min-height:100px; overflow:auto; overscroll-behavior:contain; padding:12px; border:1px solid var(--ui-border); border-radius:10px; background:var(--ui-surface-muted); font:12px/1.8 ui-monospace, SFMono-Regular, Consolas, monospace; }
 .notification-line { display:flex; gap:12px; padding:3px 0; }
 .notification-line > span:last-child { white-space:pre-wrap; overflow-wrap:anywhere; min-width:0; }
@@ -147,7 +162,7 @@ h2 { margin:0; font-size:20px; font-weight:600; }
 .notification-empty { margin:40px 0; }
 @media (max-width:600px) {
   .notification-toolbar { flex-wrap:wrap; gap:10px; }
-  .notification-toolbar > .n-input { flex-basis:100%; }
+  .notification-search { flex-basis:100%; }
   .notification-filter { flex:1; width:auto; }
   .notification-center, .notification-live { gap:12px; }
   .notification-log { padding:8px; }

@@ -1,0 +1,29 @@
+/* MoviePilot-Frontend v3 609ea05, MIT; see frontend/third-party/MoviePilot-LICENSE. */
+// @use "@styles/style.scss";
+
+// 👉 Vertical nav
+$layout-vertical-nav-z-index: 12 !default;
+$layout-vertical-nav-width: 16.25rem !default;
+$layout-vertical-nav-collapsed-width: 5rem !default;
+
+// 👉 Horizontal nav
+$layout-horizontal-nav-z-index: 11 !default;
+$layout-horizontal-nav-navbar-height: 4rem !default;
+
+// 👉 Navbar
+$layout-vertical-nav-navbar-height: 4rem !default;
+$layout-vertical-nav-navbar-is-contained: true !default;
+$layout-vertical-nav-layout-navbar-z-index: 11 !default;
+$layout-horizontal-nav-layout-navbar-z-index: 11 !default;
+
+// 👉 Main content
+$layout-boxed-content-width: 90rem !default;
+
+//  👉Footer
+$layout-vertical-nav-footer-height: 8rem !default;
+
+// 👉 Layout overlay
+$layout-overlay-z-index: 11 !default;
+
+// 👉 RTL
+$enable-rtl-styles: true !default;

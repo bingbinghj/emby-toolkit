@@ -1,124 +1,58 @@
-<!-- src/components/LogViewer.vue -->
 <template>
   <section class="history-log-view" aria-label="历史日志">
-      <div class="drawer-inner-wrapper">
-
-        <!-- 顶部控制区 -->
-        <n-space vertical class="header-section">
-          <n-input-group>
-            <n-input
-              v-model:value="searchQuery"
-              placeholder="在所有日志文件中搜索..."
-              clearable
-              @keyup.enter="executeSearch"
-              :disabled="isLoading"
-            ><template #prefix><UiIcon name="search" /></template></n-input>
-            <n-button type="primary" @click="executeSearch" :loading="isSearching">
-              <template #icon><UiIcon name="search" /></template>
-              搜索
-            </n-button>
-          </n-input-group>
-
-          <n-radio-group v-model:value="searchMode" name="search-mode-radio">
-            <n-radio-button value="filter" :disabled="isLoading">
-              <UiIcon name="options" :size="16" />
-              匹配日志行
-            </n-radio-button>
-            <n-radio-button value="context" :disabled="isLoading">
-              <UiIcon name="time" :size="16" />
-              完整上下文
-            </n-radio-button>
-          </n-radio-group>
-        </n-space>
-
-        <n-divider style="margin: 10px 0;" />
-
-        <n-spin :show="isLoading" class="flex-spin">
-
-          <!-- 场景 1: 定位模式 (HTML iframe) -->
-          <div v-if="isSearchMode && searchMode === 'context'" class="view-container">
-             <div class="toolbar">
-               <n-button @click="clearSearch" size="tiny" secondary>
-                 <template #icon><UiIcon name="back" /></template>
-                 返回文件浏览
-               </n-button>
-               <span class="tip">已隐藏日期与模块名，仅显示核心流</span>
-             </div>
-
-            <div v-if="htmlContent" class="iframe-wrapper">
-              <iframe :srcdoc="htmlContent" title="日志搜索上下文" frameborder="0" width="100%" height="100%" @load="applyFrameTheme"></iframe>
-            </div>
-            <n-empty v-else description="未找到匹配的完整处理流程。" style="margin-top: 50px;" />
-          </div>
-
-          <!-- 场景 2: 筛选模式 (JSON) - 保持不变，用于快速查看原始行 -->
-          <div v-else-if="isSearchMode && searchMode === 'filter'" class="view-container">
-            <n-button @click="clearSearch" size="tiny" secondary style="margin-bottom: 5px;">
-              <template #icon><UiIcon name="back" /></template>
-              返回文件浏览
-            </n-button>
-
-            <div v-if="hasSearchResults" class="log-text-area">
-              <div
-                v-for="(line, index) in parsedLogResults"
-                :key="index"
-                class="log-line"
-                :class="line.type === 'log' ? line.level.toLowerCase() : 'raw'"
-              >
-                <template v-if="line.type === 'log'">
-                  <span class="timestamp">{{ line.timestamp }}</span>
-                  <span class="level">{{ line.level }}</span>
-                  <span class="message">{{ line.message }}</span>
-                </template>
-                <template v-else>{{ line.content }}</template>
-              </div>
-            </div>
-            <n-empty v-else description="未找到匹配的日志记录。" style="margin-top: 50px;" />
-          </div>
-
-          <!-- ★★★ 场景 3: 文件浏览 (默认) - 改为 HTML iframe ★★★ -->
-          <div v-else class="view-container">
-            <div class="toolbar">
-              <n-select
-                v-model:value="selectedFile"
-                placeholder="请选择日志文件"
-                :options="fileOptions"
-                :loading="isLoadingFiles"
-                @update:value="filename => fetchLogContent(filename)"
-                size="small"
-                class="history-file-select"
-              />
-              <span class="tip"><UiIcon name="time" :size="14" /> 最新日志在顶部</span>
-              <n-button quaternary circle aria-label="刷新历史日志" title="刷新" :loading="isLoading" @click="refreshLogs"><template #icon><n-icon :component="RefreshOutline" /></template></n-button>
-            </div>
-            <div v-if="logPages > 1" class="history-pagination">
-              <n-button size="tiny" :disabled="isLoading || logPage <= 1" @click="fetchLogContent(selectedFile, logPage - 1)"><template #icon><UiIcon name="time" :size="14" /></template>较新日志</n-button>
-              <span>第 {{ logPage }} / {{ logPages }} 页，共 {{ logTotalLines }} 行</span>
-              <n-button size="tiny" :disabled="isLoading || logPage >= logPages" @click="fetchLogContent(selectedFile, logPage + 1)"><template #icon><UiIcon name="time" :size="14" /></template>较早日志</n-button>
-            </div>
-
-            <!-- 这里复用 iframe-wrapper -->
-            <div v-if="logContent" class="iframe-wrapper">
-              <iframe :srcdoc="logContent" title="历史日志内容" frameborder="0" width="100%" height="100%" @load="applyFrameTheme"></iframe>
-            </div>
-            <n-empty v-else description="无数据" style="margin-top: 50px;" />
-          </div>
-
-          <template #description>{{ loadingText }}</template>
-        </n-spin>
+    <div class="drawer-inner-wrapper">
+      <div class="header-section">
+        <div class="d-flex ga-3 align-start">
+          <VTextField v-model="searchQuery" label="在所有日志文件中搜索" placeholder="输入关键词" clearable hide-details density="compact" prepend-inner-icon="mdi-magnify" :disabled="isLoading" @keyup.enter="executeSearch" />
+          <VBtn color="primary" variant="tonal" prepend-icon="mdi-magnify" :loading="isSearching" :disabled="isLoading" @click="executeSearch">搜索</VBtn>
+        </div>
+        <VRadioGroup v-model="searchMode" inline hide-details class="mt-2" :disabled="isLoading">
+          <VRadio label="匹配日志行" value="filter" />
+          <VRadio label="完整上下文" value="context" />
+        </VRadioGroup>
       </div>
+      <VDivider class="my-3" />
+      <div class="flex-spin">
+        <VOverlay :model-value="isLoading" contained persistent class="align-center justify-center" :scrim="false">
+          <VCard class="pa-4 text-center" aria-live="polite"><VProgressCircular indeterminate color="primary" /><p class="text-body-2 mt-3">{{ loadingText }}</p></VCard>
+        </VOverlay>
+        <div v-if="isSearchMode && searchMode === 'context'" class="view-container">
+          <div class="toolbar"><VBtn variant="tonal" size="small" prepend-icon="mdi-arrow-left" @click="clearSearch">返回文件浏览</VBtn><span class="tip">已隐藏日期与模块名，仅显示核心流</span></div>
+          <div v-if="htmlContent" class="iframe-wrapper"><iframe :srcdoc="htmlContent" title="日志搜索上下文" frameborder="0" width="100%" height="100%" @load="applyFrameTheme" /></div>
+          <div v-else class="empty-state"><VIcon icon="mdi-text-search" size="40" class="text-medium-emphasis" /><p>未找到匹配的完整处理流程</p></div>
+        </div>
+        <div v-else-if="isSearchMode && searchMode === 'filter'" class="view-container">
+          <div class="toolbar"><VBtn variant="tonal" size="small" prepend-icon="mdi-arrow-left" @click="clearSearch">返回文件浏览</VBtn></div>
+          <div v-if="hasSearchResults" class="log-text-area">
+            <div v-for="(line, index) in parsedLogResults" :key="index" class="log-line" :class="line.type === 'log' ? line.level.toLowerCase() : 'raw'">
+              <template v-if="line.type === 'log'"><span class="timestamp">{{ line.timestamp }}</span><span class="level">{{ line.level }}</span><span class="message">{{ line.message }}</span></template>
+              <template v-else>{{ line.content }}</template>
+            </div>
+          </div>
+          <div v-else class="empty-state"><VIcon icon="mdi-text-search" size="40" class="text-medium-emphasis" /><p>未找到匹配的日志记录</p></div>
+        </div>
+        <div v-else class="view-container">
+          <div class="toolbar">
+            <VSelect v-model="selectedFile" :items="fileOptions" item-title="label" item-value="value" label="日志文件" :loading="isLoadingFiles" hide-details density="compact" class="history-file-select" @update:model-value="filename => fetchLogContent(filename)" />
+            <span class="tip"><VIcon icon="mdi-clock-outline" size="14" /> 最新日志在顶部</span>
+            <VBtn icon="mdi-refresh" variant="text" size="small" aria-label="刷新历史日志" :loading="isLoading" @click="refreshLogs" />
+          </div>
+          <div v-if="logPages > 1" class="history-pagination">
+            <VBtn variant="tonal" size="small" prepend-icon="mdi-chevron-left" :disabled="isLoading || logPage <= 1" @click="fetchLogContent(selectedFile, logPage - 1)">较新日志</VBtn>
+            <span>第 {{ logPage }} / {{ logPages }} 页，共 {{ logTotalLines }} 行</span>
+            <VBtn variant="tonal" size="small" append-icon="mdi-chevron-right" :disabled="isLoading || logPage >= logPages" @click="fetchLogContent(selectedFile, logPage + 1)">较早日志</VBtn>
+          </div>
+          <div v-if="logContent" class="iframe-wrapper"><iframe :srcdoc="logContent" title="历史日志内容" frameborder="0" width="100%" height="100%" @load="applyFrameTheme" /></div>
+          <div v-else class="empty-state"><VIcon icon="mdi-file-document-outline" size="40" class="text-medium-emphasis" /><p>暂无日志内容</p></div>
+        </div>
+      </div>
+    </div>
   </section>
 </template>
-
 <script setup>
 import { ref, watch, computed, onMounted, onUnmounted } from 'vue';
 import axios from 'axios';
-import {
-  useMessage, NSelect, NSpace, NSpin,
-  NInput, NInputGroup, NButton, NDivider, NEmpty, NIcon,
-  NRadioGroup, NRadioButton
-} from 'naive-ui';
-import { RefreshOutline } from '@vicons/ionicons5';
+import { useMessage } from '@/composables/useFeedback';
 
 const props = defineProps({ show: { type: Boolean, default: false } });
 
@@ -242,7 +176,7 @@ const fetchLogContent = async (filename, page = 1) => {
 
 const executeSearch = async () => {
   if (isLoading.value) return;
-  if (!searchQuery.value.trim()) {
+  if (!String(searchQuery.value || '').trim()) {
     message.warning('请输入搜索关键词。');
     return;
   }
@@ -289,7 +223,7 @@ const clearSearch = () => {
 };
 
 watch(() => props.show, visible => { if (visible && !logFiles.value.length) fetchLogFiles(); }, { immediate: true });
-watch(searchMode, () => { if (isSearchMode.value && searchQuery.value.trim()) executeSearch(); });
+watch(searchMode, () => { if (isSearchMode.value && String(searchQuery.value || '').trim()) executeSearch(); });
 async function refreshLogs() {
   if (isLoading.value) return;
   await fetchLogFiles();
@@ -298,7 +232,6 @@ async function refreshLogs() {
 </script>
 
 <style scoped>
-/* 保持之前的 CSS 样式不变，这里是完美的 */
 .history-log-view { display:flex; flex:1; min-height:0; min-width:0; }
 .drawer-inner-wrapper {
   height: 100%;
@@ -319,14 +252,11 @@ async function refreshLogs() {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  min-height: 0;
+  min-height: 320px;
+  position: relative;
 }
 
-:deep(.n-spin-content) {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-}
+.empty-state { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; flex:1; min-height:240px; color:rgb(var(--v-theme-on-surface)); opacity:.7; }
 
 .view-container {
   flex: 1;

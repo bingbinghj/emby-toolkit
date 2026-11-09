@@ -1,915 +1,291 @@
-<!-- src/components/MediaEditPage.vue -->
 <template>
-  <n-layout class="mp-page editor-page" content-style="padding: 0;">
-    <div class="media-edit-page">
-      <n-page-header class="mp-page-header" @back="goBack">
-        <template #title>
-          手动编辑媒体信息
-        </template>
-      </n-page-header>
+  <div class="mp-page editor-page">
+    <VRow align="center" class="mb-4">
+      <VCol cols="auto"><VBtn icon="mdi-arrow-left" variant="text" aria-label="返回列表" @click="goBack" /></VCol>
+      <VCol><h1 class="text-h5">手动编辑媒体信息</h1><p class="text-body-2 text-medium-emphasis mt-1">管理演员、图像、媒体版本和音轨</p></VCol>
+    </VRow>
 
-      <n-divider />
+    <VAlert v-if="mediaOperationFeedback" :type="mediaOperationFeedback.type" :title="mediaOperationFeedback.message" variant="tonal" class="mb-4">
+      <div v-for="(detail, index) in mediaOperationFeedback.details" :key="index" class="text-wrap">{{ detail }}</div>
+    </VAlert>
 
-      <n-alert v-if="mediaOperationFeedback" :type="mediaOperationFeedback.type" :title="mediaOperationFeedback.message"
-        style="margin-bottom: 16px;">
-        <div v-for="(detail, index) in mediaOperationFeedback.details" :key="index" style="overflow-wrap: anywhere;">{{ detail }}</div>
-      </n-alert>
-
-      <div v-if="isLoading" class="loading-container">
-        <n-spin size="large" />
-        <p style="text-align: center; margin-top: 10px;">正在加载媒体详情...</p>
-      </div>
-
-      <div v-else-if="itemDetails && itemDetails.item_name">
-        <n-grid cols="1 920:4" :x-gap="24" :y-gap="24">
-          <!-- 左侧信息栏 (海报) -->
-          <n-grid-item span="1">
-            <n-space vertical :size="24">
-              <n-card :bordered="false"><template #header>{{ itemDetails.item_name }}</template>
-                <template #cover>
-                  <n-image
-                    :src="posterUrl"
-                    lazy
-                    object-fit="cover"
-                    class="media-poster"
-                    :fallback-src="fallbackAvatar"
-                  >
-                    <template #placeholder>
-                      <div class="poster-placeholder">
-                        <n-icon :component="ImageIcon" size="48" :depth="3" />
-                      </div>
-                    </template>
-                  </n-image>
-                </template>
-                <template #header-extra>
-                  <n-tag :type="itemDetails.item_type === 'Movie' ? 'info' : 'success'" size="small" round>
-                    {{ itemTypeInChinese }}
-                  </n-tag>
-                </template>
-                <n-descriptions label-placement="left" bordered :column="1" size="small">
-                  <n-descriptions-item label="Emby ItemID">
-                    {{ itemDetails.item_id }}
-                  </n-descriptions-item>
-                  <n-descriptions-item label="原始记录评分" v-if="itemDetails.original_score !== null && itemDetails.original_score !== undefined">
-                    <n-tag type="warning" size="small">{{ itemDetails.original_score }}</n-tag>
-                  </n-descriptions-item>
-                  <n-descriptions-item label="待复核原因" v-if="itemDetails.review_reason">
-                    <n-text type="error">{{ itemDetails.review_reason }}</n-text>
-                  </n-descriptions-item>
-                </n-descriptions>
-
-                <!-- ★★★ 编辑图像按钮 ★★★ -->
-                <template #action>
-                  <n-space vertical>
-                    <n-button block type="primary" secondary @click="showImageEditor = true">
-                      <template #icon>
-                        <n-icon :component="ImagesIcon" />
-                      </template>
-                      编辑图像
-                    </n-button>
-                    <!-- ▼▼▼ 编辑媒体信息按钮 ▼▼▼ -->
-                    <n-button
-                      block
-                      type="info"
-                      secondary
-                      @click="handleMediaInfoButtonClick"
-                    >
-                      <template #icon>
-                        <n-icon :component="DocumentTextIcon" />
-                      </template>
-                      编辑媒体信息 (音轨/字幕)
-                    </n-button>
-                    <n-button block secondary :loading="isRevalidatingFingerprints"
-                      @click="revalidateFingerprints(itemDetails.item_id || itemId)"><template #icon><UiIcon name="check" /></template>
-                      重新校验指纹（{{ fingerprintScopeLabel }}）
-                    </n-button>
-                    <n-popconfirm
-                      v-if="['Series', 'Season', 'Episode'].includes(itemDetails.item_type)"
-                      @positive-click="replaceEpisodeImages"
-                    >
-                      <template #trigger>
-                        <n-button
-                          block
-                          type="warning"
-                          secondary
-                          :loading="isReplacingEpisodeImages"
-                        >
-                          <template #icon><n-icon :component="ImagesIcon" /></template>
-                          替换剧集图
-                        </n-button>
-                      </template>
-                      将删除当前{{ itemDetails.item_type === 'Episode' ? '单集' : itemDetails.item_type === 'Season' ? '季所有分集' : '电视剧所有分集' }}的 Primary 海报，随后让神医助手使用 ffprobe 截图生成集图。是否继续？
-                    </n-popconfirm>
-                    <n-button
-                      block
-                      type="warning"
-                      secondary
-                      @click="openRenameEditor"
-                    >
-                      <template #icon>
-                        <n-icon :component="RepairIcon" />
-                      </template>
-                      重命名媒体
-                    </n-button>
-                    <n-popconfirm @positive-click="repairCurrentP115Orphans">
-                      <template #trigger>
-                        <n-button
-                          block
-                          type="warning"
-                          secondary
-                          :loading="isRepairingP115Orphan"
-                        >
-                          <template #icon>
-                            <n-icon :component="CloudIcon" />
-                          </template>
-                          检查115孤儿文件
-                        </n-button>
-                      </template>
-                      确认只检查{{ p115OrphanScopeLabel }}？
-                    </n-popconfirm>
-                  </n-space>
-                </template>
-              </n-card>
-
-              <n-card :bordered="false"><template #header>辅助工具</template>
-                <n-space vertical>
-                  <n-form-item label="数据操作" label-placement="top">
-                    <n-space>
-                      <n-button-group>
-                      <n-button
-                        tag="a"
-                        :href="searchLinks.baidu"
-                        target="_blank"
-                        :disabled="!searchLinks.baidu"
-                        :loading="isLoading"
-                      ><template #icon><UiIcon name="search" /></template>
-                        百度搜索
-                      </n-button>
-                      <n-dropdown
-                        trigger="click"
-                        :options="searchDropdownOptions"
-                        @select="handleSearchDropdownSelect"
-                      >
-                        <n-button :disabled="searchDropdownOptions.length === 0">
-                          <template #icon>
-                            <n-icon :component="ChevronDownIcon" />
-                          </template>
-                        </n-button>
-                      </n-dropdown>
-                    </n-button-group>
-                      <n-button
-                        type="info"
-                        @click="translateAllFields"
-                        :loading="isTranslating"
-                        :disabled="isLoading"
-                      ><template #icon><UiIcon name="language" /></template>
-                        一键翻译
-                      </n-button>
-                    </n-space>
-                  </n-form-item>
-                </n-space>
-              </n-card>
-            </n-space>
-          </n-grid-item>
-
-          <!-- 右侧演员列表 -->
-          <n-grid-item span="1 920:3">
-            <n-card :bordered="false" class="dashboard-card">
-              <template #header>
-                <span class="card-title">演员列表</span>
-              </template>
-              <n-form label-placement="top" label-width="auto">
-                <draggable
-                  v-model="editableCast"
-                  tag="div"
-                  item-key="_temp_id"
-                  class="actor-grid-container"
-                  handle=".drag-handle"
-                  animation="300"
-                >
-                  <template #item="{ element: actor, index }">
-                    <div class="actor-grid-item">
-                      <n-card size="small" class="dashboard-card actor-edit-card" content-style="padding: 16px;">
-                        <template #header>
-                          <div class="actor-card-header">
-                            <n-avatar
-                              round
-                              size="small"
-                              :style="{ backgroundColor: getAvatarColor(actor.name), color: textColorForBackground(getAvatarColor(actor.name)) }"
-                            >
-                              {{ index + 1 }}
-                            </n-avatar>
-                            <span class="actor-name-title" :title="actor.name">{{ actor.name || '新演员' }}</span>
-                          </div>
-                        </template>
-                        <template #header-extra>
-                          <n-space>
-                            <n-button text class="drag-handle">
-                              <n-icon :component="DragHandleIcon" />
-                            </n-button>
-                            <n-popconfirm @positive-click="removeActor(index)">
-                              <template #trigger>
-                                <n-button text type="error">
-                                  <n-icon :component="TrashIcon" />
-                                </n-button>
-                              </template>
-                              确定要删除演员 “{{ actor.name || '新演员' }}” 吗？
-                            </n-popconfirm>
-                          </n-space>
-                        </template>
-
-                        <div class="actor-card-content">
-                          <n-image
-                            :src="getActorImageUrl(actor)"
-                            lazy
-                            object-fit="cover"
-                            class="actor-avatar-image"
-                          >
-                            <template #placeholder>
-                              <div class="avatar-placeholder">
-                                <n-icon :component="PersonIcon" size="24" :depth="3" />
-                              </div>
-                            </template>
-                          </n-image>
-
-                          <div class="actor-inputs">
-                            <n-form-item label="演员" label-placement="left" label-width="40" class="compact-form-item">
-                              <n-input v-model:value="actor.name" placeholder="演员名" size="small" style="width: 100%;" />
-                            </n-form-item>
-                            <n-form-item label="角色" label-placement="left" label-width="40" class="compact-form-item">
-                              <n-input v-model:value="actor.role" placeholder="角色名" size="small" style="width: 100%;" />
-                            </n-form-item>
-                          </div>
-                        </div>
-                        <n-alert v-if="actor.matchStatus === '翻译未完成' || actor.translationWarning" type="warning" title="翻译未完成" style="margin-top: 12px;">
-                          {{ actor.translationWarning || '姓名或角色尚未翻译完成，请检查后再保存。' }}
-                        </n-alert>
-                      </n-card>
-                    </div>
-                  </template>
-                </draggable>
-              </n-form>
-
-              <div class="sticky-actions">
-                <n-space>
-                  <n-button @click="showAddActorModal = true" type="default" secondary>
-                    <template #icon>
-                      <n-icon :component="AddIcon" />
-                    </template>
-                    添加演员
-                  </n-button>
-                  <n-button @click="goBack"><template #icon><UiIcon name="back" /></template>返回列表</n-button>
-                  <n-button type="primary" @click="handleSaveChanges" :loading="isSaving"><template #icon><UiIcon name="save" /></template>
-                    保存修改
-                  </n-button>
-                </n-space>
-              </div>
-            </n-card>
-          </n-grid-item>
-        </n-grid>
-      </div>
-
-      <div v-else class="error-container">
-        <n-alert title="错误" type="error">
-          无法加载媒体详情，或指定的媒体项不存在。请检查后端日志或确认该媒体项有效。
-          <n-button text @click="goBack" style="margin-left: 10px;"><template #icon><UiIcon name="back" /></template>返回列表</n-button>
-        </n-alert>
-      </div>
+    <div v-if="isLoading" class="loading-container">
+      <VProgressCircular indeterminate size="48" /><p class="mt-4 text-medium-emphasis">正在加载媒体详情...</p>
     </div>
 
-    <!-- ★★★ 剧集分集选择模态框 ★★★ -->
-    <n-modal
-      v-model:show="showEpisodeSelector"
-      preset="card"
-      style="width: 980px; max-width: 95vw;"
-      :bordered="false"
-      size="huge"
-    ><template #header>{{ itemDetails?.item_type === 'Series' ? '选择季和要编辑的视频' : '选择要编辑的视频' }}</template>
-      <n-spin :show="isFetchingEpisodes">
-        <n-button secondary :loading="isRevalidatingFingerprints" style="margin-bottom: 12px;"
-          @click="revalidateFingerprints(itemDetails.item_id || itemId)"><template #icon><UiIcon name="check" /></template>
-          重新校验指纹（{{ fingerprintScopeLabel }}）
-        </n-button>
-        <div v-if="episodesList.length > 0" class="episode-selector-board">
-          <div class="episode-selector-toolbar">
-            <div v-if="itemDetails.item_type === 'Series'" class="episode-season-switcher">
-              <span class="episode-season-switcher-label">选择季</span>
-              <n-button
-                v-for="season in episodeSeasonGroups"
-                :key="`season-switch-${season.season_number}`"
-                size="small"
-                :type="season.season_number === selectedSeasonNumber ? 'primary' : 'default'"
-                :secondary="season.season_number !== selectedSeasonNumber"
-                @click="handleSeasonChange(season.season_number)"
-              ><template #icon><UiIcon name="media" /></template>
-                {{ formatSeasonLabel(season.season_number) }}
-              </n-button>
+    <VRow v-else-if="itemDetails && itemDetails.item_name" class="media-edit-page">
+      <VCol cols="12" md="3">
+        <VCard class="mb-6">
+          <VImg :src="posterUrl" :aspect-ratio="2 / 3" cover class="media-poster" :alt="itemDetails.item_name" @click="previewMediaImage(posterUrl, itemDetails.item_name)">
+            <template #placeholder><div class="poster-placeholder"><VProgressCircular indeterminate /></div></template>
+            <template #error><div class="poster-placeholder"><VIcon icon="mdi-image-outline" size="48" /></div></template>
+          </VImg>
+          <VCardTitle class="d-flex align-center ga-2 text-wrap">
+            <span class="flex-grow-1">{{ itemDetails.item_name }}</span>
+            <VChip :color="itemDetails.item_type === 'Movie' ? 'info' : 'success'" size="small">{{ itemTypeInChinese }}</VChip>
+          </VCardTitle>
+          <VList density="compact">
+            <VListItem title="Emby ItemID" :subtitle="String(itemDetails.item_id || '')" />
+            <VListItem v-if="itemDetails.original_score !== null && itemDetails.original_score !== undefined" title="原始记录评分">
+              <template #append><VChip color="warning" size="small">{{ itemDetails.original_score }}</VChip></template>
+            </VListItem>
+            <VListItem v-if="itemDetails.review_reason" title="待复核原因" :subtitle="itemDetails.review_reason" class="text-error" />
+          </VList>
+          <VCardText class="d-flex flex-column ga-3">
+            <VBtn block variant="tonal" prepend-icon="mdi-image-multiple-outline" @click="showImageEditor = true">编辑图像</VBtn>
+            <VBtn block color="info" variant="tonal" prepend-icon="mdi-file-document-outline" data-testid="media-info-open" @click="handleMediaInfoButtonClick">编辑媒体信息 (音轨/字幕)</VBtn>
+            <VBtn block variant="tonal" prepend-icon="mdi-shield-check-outline" :loading="isRevalidatingFingerprints" @click="revalidateFingerprints(itemDetails.item_id || itemId)">重新校验指纹（{{ fingerprintScopeLabel }}）</VBtn>
+            <VBtn v-if="['Series', 'Season', 'Episode'].includes(itemDetails.item_type)" block color="warning" variant="tonal" prepend-icon="mdi-image-refresh-outline" :loading="isReplacingEpisodeImages" @click="confirmEpisodeImageReplacement">替换剧集图</VBtn>
+            <VBtn block color="warning" variant="tonal" prepend-icon="mdi-file-edit-outline" @click="openRenameEditor">重命名媒体</VBtn>
+            <VBtn block color="warning" variant="tonal" prepend-icon="mdi-cloud-search-outline" :loading="isRepairingP115Orphan" @click="confirmMediaAction('检查115孤儿文件', `确认只检查${p115OrphanScopeLabel}？`, repairCurrentP115Orphans)">检查115孤儿文件</VBtn>
+          </VCardText>
+        </VCard>
+        <VCard title="辅助工具">
+          <VCardText class="d-flex flex-column ga-3">
+            <div class="d-flex ga-1">
+              <VBtn class="flex-grow-1" variant="tonal" :href="searchLinks.baidu" target="_blank" :disabled="!searchLinks.baidu" :loading="isLoading" prepend-icon="mdi-magnify">百度搜索</VBtn>
+              <VMenu>
+                <template #activator="{ props }"><VBtn v-bind="props" variant="tonal" icon="mdi-chevron-down" :disabled="searchDropdownOptions.length === 0" aria-label="其他搜索方式" /></template>
+                <VList><VListItem v-for="option in searchDropdownOptions" :key="option.key" :title="option.label" @click="handleSearchDropdownSelect(option.key)" /></VList>
+              </VMenu>
             </div>
-            <div class="episode-selector-summary">
-              {{ itemDetails.item_type === 'Series' ? '当前季' : '本季' }} {{ visibleSeasonEpisodes.length }} 个视频，已选 {{ selectedEpisodeIds.length }} 个。
-            </div>
-            <n-space size="small">
-              <n-select
-                v-if="currentSeasonHasMultipleVersions"
-                v-model:value="selectedBatchVersionIndex"
-                :options="batchVersionOptions"
-                size="small"
-                style="width: 260px; max-width: 100%;"
-                placeholder="选择版本"
-              />
-              <n-button
-                v-if="currentSeasonHasMultipleVersions"
-                size="small"
-                secondary
-                :disabled="selectedBatchVersionIndex === null"
-                @click="selectEpisodesByVersion"
-              ><template #icon><UiIcon name="check" /></template>
-                选择此版本
-              </n-button>
-              <n-button size="small" secondary @click="selectAllEpisodes">全选</n-button>
-              <n-button size="small" secondary @click="clearSelectedEpisodes"><template #icon><UiIcon name="close" /></template>清空</n-button>
-            </n-space>
-          </div>
+            <VBtn block color="info" variant="tonal" prepend-icon="mdi-translate" :loading="isTranslating" :disabled="isLoading || isSaving" @click="translateAllFields">一键翻译</VBtn>
+          </VCardText>
+        </VCard>
+      </VCol>
 
-          <section
-            v-if="selectedSeasonGroup"
-            class="episode-season-block"
-          >
-            <div class="episode-season-header">
-              <span class="episode-season-title">{{ formatSeasonLabel(selectedSeasonGroup.season_number) }}</span>
-              <span class="episode-season-count">{{ selectedSeasonGroup.episodes.length }} 个视频</span>
-            </div>
+      <VCol cols="12" md="9">
+        <VCard class="dashboard-card" title="演员列表">
+          <VCardText>
+            <VForm>
+              <draggable v-model="editableCast" tag="div" item-key="_temp_id" class="actor-grid-container" handle=".drag-handle" :animation="300" :disabled="isSaving">
+                <template #item="{ element: actor, index }">
+                  <VCard class="actor-edit-card" variant="outlined">
+                    <VCardTitle class="actor-card-header">
+                      <VAvatar :color="getAvatarColor(actor.name)" size="28" :style="{ color: textColorForBackground(getAvatarColor(actor.name)) }">{{ index + 1 }}</VAvatar>
+                      <span class="actor-name-title" :title="actor.name">{{ actor.name || '新演员' }}</span>
+                      <VBtn icon="mdi-drag" size="small" variant="text" color="default" class="drag-handle" :disabled="isSaving" :aria-label="`拖动演员${actor.name || index + 1}`" />
+                      <VBtn icon="mdi-delete-outline" size="small" variant="text" color="error" :disabled="isSaving" :aria-label="`删除演员${actor.name || index + 1}`" @click="confirmMediaAction('删除演员', `确定要删除演员“${actor.name || '新演员'}”吗？`, () => removeActor(index))" />
+                    </VCardTitle>
+                    <VCardText>
+                      <div class="actor-card-content">
+                        <VImg :src="getActorImageUrl(actor)" :alt="actor.name || '演员照片'" cover class="actor-avatar-image" @click="previewMediaImage(getActorImageUrl(actor), actor.name)">
+                          <template #error><div class="avatar-placeholder"><VIcon icon="mdi-account-outline" size="24" /></div></template>
+                        </VImg>
+                        <div class="actor-inputs">
+                          <VTextField v-model="actor.name" label="演员" placeholder="演员名" density="compact" :disabled="isSaving" />
+                          <VTextField v-model="actor.role" label="角色" placeholder="角色名" density="compact" :disabled="isSaving" />
+                        </div>
+                      </div>
+                      <VAlert v-if="actor.matchStatus === '翻译未完成' || actor.translationWarning" type="warning" title="翻译未完成" variant="tonal" class="mt-3">{{ actor.translationWarning || '姓名或角色尚未翻译完成，请检查后再保存。' }}</VAlert>
+                    </VCardText>
+                  </VCard>
+                </template>
+              </draggable>
+            </VForm>
+          </VCardText>
+          <VCardActions class="editor-actions">
+            <VBtn variant="tonal" prepend-icon="mdi-plus" :disabled="isSaving" @click="showAddActorModal = true">添加演员</VBtn>
+            <VSpacer /><VBtn variant="text" prepend-icon="mdi-arrow-left" @click="goBack">返回列表</VBtn>
+            <VBtn variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSaving" @click="handleSaveChanges">保存修改</VBtn>
+          </VCardActions>
+        </VCard>
+      </VCol>
+    </VRow>
 
-            <div class="episode-parade-grid">
-              <div
-                v-for="ep in selectedSeasonGroup.episodes"
-                :key="ep.emby_id"
-                :class="[
-                  'episode-chip-shell',
-                  {
-                    'episode-chip-selected': isEpisodeSelected(ep.emby_id),
-                    'episode-chip-multi-version': Number(ep.version_count || 0) > 1,
-                    'episode-chip-track-issue': ep.track_status === 'inconsistent'
-                  }
-                ]"
-              >
-                <span
-                  v-if="ep.track_status === 'inconsistent'"
-                  class="episode-chip-issue-dot"
-                >!</span>
-                <n-checkbox
-                  class="episode-chip-checkbox"
-                  :checked="isEpisodeSelected(ep.emby_id)"
-                  @update:checked="checked => toggleEpisodeSelection(ep.emby_id, checked)"
-                />
-                <button
-                  type="button"
-                  :class="['episode-chip', { 'episode-chip-active': String(currentEditMediaId || '') === String(ep.emby_id || '') }]"
-                  :title="getEpisodeTooltip(ep)"
-                  @click="handleEpisodeChipClick(ep)"
-                >
-                  {{ formatEpisodeLabel(ep) }}
-                </button>
+    <VAlert v-else title="错误" type="error" variant="tonal">无法加载媒体详情，或指定的媒体项不存在。请检查后端日志或确认该媒体项有效。<VBtn variant="text" class="ml-3" @click="goBack">返回列表</VBtn></VAlert>
+
+    <VDialog v-model="showEpisodeSelector" max-width="980" scrollable>
+      <VCard>
+        <VCardTitle class="d-flex align-center ga-3"><span class="flex-grow-1 text-wrap">{{ itemDetails?.item_type === 'Series' ? '选择季和要编辑的视频' : '选择要编辑的视频' }}</span><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭分集选择" @click="showEpisodeSelector = false" /></VCardTitle>
+        <VProgressLinear v-if="isFetchingEpisodes" indeterminate />
+        <VCardText>
+          <VBtn variant="tonal" prepend-icon="mdi-shield-check-outline" :loading="isRevalidatingFingerprints" class="mb-3" @click="revalidateFingerprints(itemDetails.item_id || itemId)">重新校验指纹（{{ fingerprintScopeLabel }}）</VBtn>
+          <div v-if="episodesList.length > 0" class="episode-selector-board">
+            <div class="episode-selector-toolbar">
+              <div v-if="itemDetails.item_type === 'Series'" class="episode-season-switcher">
+                <span class="episode-season-switcher-label">选择季</span>
+                <VBtn v-for="season in episodeSeasonGroups" :key="season.season_number" size="small" :variant="season.season_number === selectedSeasonNumber ? 'flat' : 'tonal'" @click="handleSeasonChange(season.season_number)">{{ formatSeasonLabel(season.season_number) }}</VBtn>
+              </div>
+              <div class="episode-selector-summary">{{ itemDetails.item_type === 'Series' ? '当前季' : '本季' }} {{ visibleSeasonEpisodes.length }} 个视频，已选 {{ selectedEpisodeIds.length }} 个。</div>
+              <div class="d-flex flex-wrap align-center ga-2">
+                <VSelect v-if="currentSeasonHasMultipleVersions" v-model="selectedBatchVersionIndex" :items="batchVersionOptions" item-title="label" item-value="value" label="选择版本" density="compact" class="batch-version-select" />
+                <VBtn v-if="currentSeasonHasMultipleVersions" size="small" variant="tonal" :disabled="selectedBatchVersionIndex === null" @click="selectEpisodesByVersion">选择此版本</VBtn>
+                <VBtn size="small" variant="tonal" @click="selectAllEpisodes">全选</VBtn><VBtn size="small" variant="tonal" @click="clearSelectedEpisodes">清空</VBtn>
               </div>
             </div>
-          </section>
-        </div>
-
-        <n-empty v-else description="未找到在库的分集，请确认该剧集已入库" style="padding: 40px 0;" />
-      </n-spin>
-    </n-modal>
-
-    <!-- 搜索演员模态框 -->
-    <n-modal
-      v-model:show="showAddActorModal"
-      preset="card"
-      style="width: 600px"
-      :bordered="false"
-      size="huge"
-      :segmented="{ content: 'soft', footer: 'soft' }"
-    ><template #header>搜索并添加演员</template>
-      <n-input
-        v-model:value="actorSearchQuery"
-        placeholder="输入演员名进行搜索..."
-        clearable
-        @update:value="debouncedSearchActors"
-      />
-      <n-spin :show="isSearchingActors" style="margin-top: 20px; min-height: 150px;">
-        <n-list hoverable clickable>
-          <n-list-item v-for="actor in actorSearchResults" :key="actor.id" @click="selectActor(actor)">
-            <template #prefix>
-              <n-avatar
-                :src="getTMDbImageUrl(actor.profile_path, 'w92')"
-                :fallback-src="fallbackAvatar"
-                size="large"
-                object-fit="cover"
-              />
-            </template>
-            <n-thing :title="actor.name">
-              <template #description>
-                <n-text depth="3" v-if="actor.known_for">
-                  代表作: {{ actor.known_for }}
-                </n-text>
-                <n-text depth="3" v-else>
-                  {{ actor.department || '表演' }}
-                </n-text>
-              </template>
-            </n-thing>
-            <template #suffix>
-              <n-button size="small" type="primary"><template #icon><UiIcon name="check" /></template>选择</n-button>
-            </template>
-          </n-list-item>
-        </n-list>
-        <n-empty v-if="!isSearchingActors && actorSearchResults.length === 0 && actorSearchQuery" description="未找到相关人物" style="padding: 20px 0;" />
-      </n-spin>
-    </n-modal>
-
-    <!-- ★★★ 图像编辑模态框 (Emby 排版风格 - 单行等大卡片) ★★★ -->
-    <n-modal
-      v-model:show="showImageEditor"
-      preset="card"
-      style="width: 1100px; max-width: 95vw;"
-      :bordered="false"
-      size="huge"
-    ><template #header>编辑图像</template>
-      <div class="emby-image-grid">
-        <div v-for="img in imageTypes" :key="img.type" class="emby-image-card">
-          <!-- 图片展示区 (统一使用 16:9 比例，图片 contain 缩放) -->
-          <div class="emby-card-image-container">
-            <n-image
-              :src="getDynamicImageUrl(img.embyType, img.type)"
-              lazy
-              object-fit="contain"
-              class="full-image"
-              :fallback-src="fallbackAvatar"
-            >
-              <template #placeholder>
-                <div class="image-placeholder">
-                  <n-icon :component="ImageIcon" size="40" :depth="3" />
+            <section v-if="selectedSeasonGroup" class="episode-season-block">
+              <div class="episode-season-header"><span class="episode-season-title">{{ formatSeasonLabel(selectedSeasonGroup.season_number) }}</span><VChip size="small" variant="tonal">{{ selectedSeasonGroup.episodes.length }} 个视频</VChip></div>
+              <div class="episode-parade-grid">
+                <div v-for="ep in selectedSeasonGroup.episodes" :key="ep.emby_id" :class="['episode-chip-shell', { 'episode-chip-selected': isEpisodeSelected(ep.emby_id), 'episode-chip-multi-version': Number(ep.version_count || 0) > 1, 'episode-chip-track-issue': ep.track_status === 'inconsistent' }]">
+                  <span v-if="ep.track_status === 'inconsistent'" class="episode-chip-issue-dot">!</span>
+                  <VCheckboxBtn class="episode-chip-checkbox" :model-value="isEpisodeSelected(ep.emby_id)" :aria-label="`选择${formatEpisodeLabel(ep)}`" @update:model-value="checked => toggleEpisodeSelection(ep.emby_id, checked)" />
+                  <VBtn size="small" class="episode-chip" :variant="String(currentEditMediaId || '') === String(ep.emby_id || '') ? 'flat' : 'tonal'" :color="ep.track_status === 'inconsistent' ? 'error' : Number(ep.version_count || 0) > 1 ? 'warning' : 'primary'" :title="getEpisodeTooltip(ep)" @click="handleEpisodeChipClick(ep)">{{ formatEpisodeLabel(ep) }}</VBtn>
                 </div>
-              </template>
-            </n-image>
-          </div>
-
-          <!-- 信息与操作区 -->
-          <div class="emby-card-footer">
-            <div class="emby-card-title">{{ img.label }}</div>
-            <div class="emby-card-actions">
-              <n-tooltip trigger="hover" placement="bottom">
-                <template #trigger>
-                  <n-button text class="emby-action-btn" :aria-label="`搜索${img.label}`" @click="openTmdbSelector(img.type, img.tmdbKey)">
-                    <n-icon :component="SearchIcon" size="22" />
-                  </n-button>
-                </template>
-                搜索新图像
-              </n-tooltip>
-
-              <n-tooltip trigger="hover" placement="bottom">
-                <template #trigger>
-                  <n-button text class="emby-action-btn" :aria-label="`上传${img.label}`" @click="triggerFileUpload(img.type)">
-                    <n-icon :component="CloudUploadIcon" size="24" />
-                  </n-button>
-                </template>
-                上传图像文件
-              </n-tooltip>
-
-              <n-tooltip trigger="hover" placement="bottom">
-                <template #trigger>
-                  <n-button text class="emby-action-btn" :aria-label="`设置${img.label}网络图片`" @click="openUrlPrompt(img.type)">
-                    <n-icon :component="LinkIcon" size="22" />
-                  </n-button>
-                </template>
-                设置网络图像
-              </n-tooltip>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- 隐藏的文件上传组件 -->
-      <input
-        type="file"
-        ref="fileInputRef"
-        style="display: none"
-        accept="image/jpeg, image/png, image/webp"
-        @change="handleFileUpload"
-      >
-    </n-modal>
-
-    <!-- ★★★ TMDb 备选图模态框 (Emby 排版风格 - 完整显示不裁剪) ★★★ -->
-    <n-modal
-      v-model:show="showTmdbSelector"
-      preset="card"
-      style="width: 1200px; max-width: 95vw;"
-      :bordered="false"
-      size="huge"
-    ><template #header>{{ `搜索图像 - ${currentTmdbImageLabel}` }}</template>
-      <div v-if="isFetchingTmdbImages" class="tmdb-loading-state">
-        <n-spin size="large" />
-        <div style="margin-top: 16px; color: var(--n-text-color-3);">正在从 TheMovieDb 拉取数据...</div>
-      </div>
-
-      <div v-else-if="currentTmdbImages.length === 0" class="tmdb-loading-state">
-        <n-empty description="未找到相关图像" />
-      </div>
-
-      <div v-else class="emby-tmdb-grid">
-        <div
-          v-for="(img, index) in currentTmdbImages"
-          :key="index"
-          class="emby-tmdb-card"
-          @click="selectTmdbImage(img.original)"
-        >
-          <!-- 动态比例容器，内部图片 contain -->
-          <div class="tmdb-card-image-wrapper" :style="{ aspectRatio: currentTmdbImageAspect }">
-            <n-image
-              :src="img.preview"
-              lazy
-              object-fit="contain"
-              preview-disabled
-              class="full-image"
-            />
-          </div>
-          <div class="tmdb-card-info">
-            <div class="tmdb-meta" v-if="img.width && img.height">
-              {{ img.width }} × {{ img.height }}
-            </div>
-          </div>
-        </div>
-      </div>
-    </n-modal>
-
-    <!-- 输入图片URL模态框 -->
-    <n-modal v-model:show="showUrlPrompt" preset="dialog" :show-icon="false"><template #header>设置网络图片</template>
-      <n-input
-        v-model:value="imageUrlInput"
-        type="text"
-        placeholder="请粘贴以 http/https 开头的图片直链..."
-      />
-      <template #action>
-        <n-button @click="showUrlPrompt = false">取消</n-button>
-        <n-button type="primary" @click="submitUrlImage" :loading="isUploadingImage"><template #icon><UiIcon name="check" /></template>确定</n-button>
-      </template>
-    </n-modal>
-    <!-- ★★★ 媒体信息编辑模态框 ★★★ -->
-    <n-modal
-      v-model:show="showMediaInfoEditor"
-      preset="card"
-      style="width: 800px; max-width: 95vw;"
-      :bordered="false"
-      size="huge"
-    ><template #header>编辑媒体信息 (音轨/字幕)</template>
-      <n-button secondary :loading="isRevalidatingFingerprints" style="margin-bottom: 16px;"
-        :disabled="isSavingMediaInfo || isDeletingMediaVersion || isRepairingTruehdCore"
-        @click="revalidateFingerprints(currentEditMediaId)"><template #icon><UiIcon name="check" /></template>
-        重新校验当前视频指纹
-      </n-button>
-      <n-alert v-if="mediaInfoContext.fingerprint_pending" type="warning" style="margin-bottom: 16px;">
-        文件身份待校验。请先重新校验指纹，完成后重新打开编辑器，再保存媒体信息。
-      </n-alert>
-      <n-alert v-if="mediaInfoSaveFeedback" :type="mediaInfoSaveFeedback.type" :title="mediaInfoSaveFeedback.message"
-        style="margin-bottom: 16px;">
-        <div style="max-height: 200px; overflow: auto; overflow-wrap: anywhere;">
-          <div v-for="(detail, index) in mediaInfoSaveFeedback.details" :key="index">{{ detail }}</div>
-        </div>
-      </n-alert>
-      <n-text depth="3" style="display: block; margin-bottom: 16px;">
-        保存后会回读验收媒体信息；未通过时保留编辑器并显示具体原因。
-      </n-text>
-      <n-form-item
-        v-if="mediaInfoVersionOptions.length === 1 && mediaInfoSingleVersionFileName"
-        label="媒体文件"
-        label-placement="left"
-      >
-        <div
-          class="media-info-single-file-name"
-          :title="mediaInfoSingleVersionFileName"
-        >
-          {{ mediaInfoSingleVersionFileName }}
-        </div>
-      </n-form-item>
-
-      <n-form-item v-if="mediaInfoVersionOptions.length > 1" label="媒体版本" label-placement="left">
-        <div class="media-info-version-toolbar">
-          <div class="media-info-version-controls">
-            <div
-              v-if="mediaInfoCurrentVersionFileName"
-              class="media-info-current-version-name"
-              :title="mediaInfoCurrentVersionFileName"
-            >
-              <span v-if="mediaInfoCurrentVersionMeta" class="media-info-version-accent">
-                {{ mediaInfoCurrentVersionMeta }}
-              </span>
-              <span class="media-info-version-filename">{{ mediaInfoCurrentVersionFileName }}</span>
-            </div>
-            <n-select
-              class="media-info-version-select"
-              :value="currentMediaInfoVersionId"
-              :options="mediaInfoVersionOptions"
-              :consistent-menu-width="false"
-              :render-label="renderMediaInfoVersionLabel"
-              @update:value="handleMediaInfoVersionChange"
-            />
-          </div>
-          <n-popconfirm :to="true" placement="bottom-start" style="max-width: min(360px, 70vw)" @positive-click="deleteCurrentMediaVersion">
-            <template #trigger>
-              <n-button
-                type="error"
-                secondary
-                :loading="isDeletingMediaVersion"
-                :disabled="isSavingMediaInfo || isRepairingTruehdCore"
-              >
-                <template #icon><n-icon :component="TrashIcon" /></template>
-                删除当前版本
-              </n-button>
-            </template>
-            将永久删除当前选中的整套媒体版本，包括 115 云端文件、本地 STRM、NFO、图片、媒体信息和 Emby 版本。其他格式版本不受影响，确认继续吗？
-          </n-popconfirm>
-        </div>
-      </n-form-item>
-
-      <n-form-item v-if="mediaInfoSegmentOptions.length > 1" label="电影分段" label-placement="left">
-        <n-select
-          class="media-info-version-select"
-          :value="String(currentEditMediaId || '')"
-          :options="mediaInfoSegmentOptions"
-          @update:value="handleMediaInfoSegmentChange"
-        />
-      </n-form-item>
-
-      <n-alert type="info" style="margin-bottom: 16px;">
-        修改语言标签后保存，系统会重载保存的媒体信息 JSON 并回读验收。<br/>
-        <b style="color: var(--ui-error-text);">注意：</b>字幕的标题 (Title) 必须包含 <b>“简体”</b> 或 <b>“繁体”</b> 字样，Emby 才能正确识别并显示为 Chinese Simplified/Traditional。
-      </n-alert>
-
-      <n-alert v-if="canBatchApplyMediaInfo" type="warning" style="margin-bottom: 16px;">
-        <n-checkbox v-model:checked="applyToSelectedEpisodes">
-          同时应用到已选 {{ selectedEpisodeIds.length }} 集（当前正在编辑的集也会保存）
-        </n-checkbox>
-        <div class="media-info-batch-hint">
-          仅修改可唯一匹配的轨道；无法匹配的音轨和字幕保持原值。
-        </div>
-      </n-alert>
-
-      <!-- ★★★ 硬字幕标记按钮 ★★★ -->
-      <n-card size="small" style="margin-bottom: 16px;"><template #header>标记硬字幕 (写入视频流 Title)</template>
-        <n-space>
-          <n-button @click="setHardcodedSubtitle('简中硬字幕')" secondary>简中</n-button>
-          <n-button @click="setHardcodedSubtitle('繁中硬字幕')" secondary>繁中</n-button>
-          <n-button @click="setHardcodedSubtitle('简英硬字幕')" secondary>简英</n-button>
-          <n-button @click="setHardcodedSubtitle('繁英硬字幕')" secondary>繁英</n-button>
-          <n-button @click="clearHardcodedSubtitle()" secondary><template #icon><UiIcon name="close" /></template>清除标记</n-button>
-        </n-space>
-      </n-card>
-
-      <n-space justify="end" style="margin-bottom: 12px;">
-        <n-button secondary :loading="isFillingMediaInfoTitles" :disabled="isSavingMediaInfo || isRepairingTruehdCore || isDeletingMediaVersion" @click="fillLanguagesToTitles">
-          <template #icon>
-            <n-icon :component="TextIcon" />
-          </template>
-          语言填入标题
-        </n-button>
-      </n-space>
-
-      <div class="media-info-table-scroll" role="region" aria-label="音轨和字幕编辑表格" tabindex="0">
-      <n-table :bordered="true" :single-line="false" size="small">
-        <thead>
-          <tr>
-            <th style="width: 120px;">轨道</th>
-            <th style="width: 110px;">比特率</th>
-            <th>当前标题 (Title)</th>
-            <th style="width: 200px;">修正语言 (Language)</th>
-            <th style="width: 80px; text-align: center;">默认</th>
-            <th style="width: 64px; text-align: center;">操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <!-- ▼▼▼ 只显示音轨和字幕，隐藏视频流 ▼▼▼ -->
-          <tr v-for="stream in displayStreams" :key="getMediaInfoStreamRowKey(stream)">
-            <td>
-              <n-tag
-                :type="stream.Type === 'Audio' ? 'info' : 'success'"
-                size="small"
-              >
-                {{ stream.Type === 'Audio' ? '音轨' : '字幕' }} {{ getStreamTypeOrdinal(stream) }}
-              </n-tag>
-              <div class="stream-technical-label">{{ getStreamTechnicalLabel(stream) }}</div>
-            </td>
-            <td>
-              {{ stream.Type === 'Audio' ? formatAudioBitRate(stream) : '-' }}
-            </td>
-            <td>
-              <input
-                v-model="stream.Title"
-                class="media-info-title-input"
-                type="text"
-                placeholder="无标题"
-                autocomplete="off"
-                spellcheck="false"
-              />
-            </td>
-            <td>
-              <div
-                title="双击将当前语言填入标题"
-                @dblclick.stop.prevent="handleLanguageDoubleClick(stream)"
-              >
-                <n-select
-                  :ref="instance => setMediaInfoLanguageSelectRef(getMediaInfoStreamRowKey(stream), instance)"
-                  :value="getMediaInfoLanguageSelection(stream)"
-                  :options="stream.Type === 'Audio' ? audioLanguageOptions : subtitleLanguageOptions"
-                  :filter="filterMediaInfoLanguageOption"
-                  placeholder="输入语言名称或代码"
-                  filterable
-                  clearable
-                  size="small"
-                  :aria-label="`${getMediaInfoStreamDeleteLabel(stream)}修正语言`"
-                  @update:value="val => handleLanguageChange(stream, val)"
-                />
               </div>
-            </td>
-            <td style="text-align: center;">
-              <n-checkbox
-                v-model:checked="stream.IsDefault"
-                @update:checked="(val) => handleDefaultChange(stream, val)"
-              />
-            </td>
-            <td style="text-align: center;">
-              <n-popconfirm :to="true" placement="top-end" style="max-width: min(360px, 70vw)" @positive-click="removeMediaInfoStream(stream)">
-                <template #trigger>
-                  <n-button
-                    text
-                    type="error"
-                    :disabled="isSavingMediaInfo || isRepairingTruehdCore"
-                    title="删除此轨道"
-                  >
-                    <template #icon>
-                      <n-icon :component="TrashIcon" />
-                    </template>
-                  </n-button>
-                </template>
-                确认从当前编辑草稿中删除“{{ getMediaInfoStreamDeleteLabel(stream) }}”吗？只有保存后才会生效。
-              </n-popconfirm>
-            </td>
-          </tr>
-          <tr v-if="displayStreams.length === 0">
-            <td colspan="6" style="text-align: center; padding: 20px;">
-              <n-text depth="3">未解析到媒体流</n-text>
-            </td>
-          </tr>
-        </tbody>
-      </n-table>
-      </div>
-
-      <template #action>
-        <n-space justify="space-between">
-          <n-popconfirm :to="true" placement="top-start" style="max-width: min(360px, 70vw)" @positive-click="repairCurrentAudioTracks">
-            <template #trigger>
-              <n-button
-                type="warning"
-                secondary
-                :loading="isRepairingTruehdCore"
-                :disabled="isSavingMediaInfo"
-              >
-                <template #icon>
-                  <n-icon :component="RepairIcon" />
-                </template>
-                纠正多出音轨
-              </n-button>
-            </template>
-            将丢弃当前未保存修改；存在歧义时会只读探测 CD2，并且只纠正证据唯一的高清音轨兼容核心。是否继续？
-          </n-popconfirm>
-          <n-space>
-            <n-button :disabled="isRepairingTruehdCore" @click="showMediaInfoEditor = false">取消</n-button>
-            <n-button
-              type="primary"
-              :disabled="isRepairingTruehdCore || isFillingMediaInfoTitles"
-              :loading="isSavingMediaInfo"
-              @click="saveMediaInfo"
-            ><template #icon><UiIcon name="save" /></template>
-              保存并刷新
-            </n-button>
-          </n-space>
-        </n-space>
-      </template>
-    </n-modal>
-
-    <!-- 媒体重命名模态框 -->
-    <n-modal
-      v-model:show="showRenameEditor"
-      preset="card"
-      style="width: 760px; max-width: 95vw;"
-      :bordered="false"
-      size="huge"
-    ><template #header>重命名媒体</template>
-      <n-alert type="info" style="margin-bottom: 16px;">
-        输入新的文件名即可。目录按高级设置中的 MoviePilot 重命名格式生成；源文件扩展名固定，115 文件、STRM 和媒体信息路径会同步更新。
-      </n-alert>
-      <n-form-item label="新文件名">
-        <n-input-group>
-          <n-input
-            :value="renameCustomName"
-            @update:value="handleRenameNameChange"
-            placeholder="输入文件名"
-            spellcheck="false"
-          />
-          <n-input :value="renameExtension" readonly style="width: 90px;" />
-        </n-input-group>
-      </n-form-item>
-      <n-form-item label="指定 Part">
-        <n-input
-          v-model:value="renamePart"
-          placeholder="留空表示未指定，例如：花絮、Part 1"
-          spellcheck="false"
-          @update:value="renamePreview = null"
-        />
-      </n-form-item>
-      <n-form-item v-if="renameVersions.length > 1" label="媒体版本">
-        <n-select
-          v-model:value="renameTargetId"
-          :options="renameVersionOptions"
-          @update:value="switchRenameVersion"
-        />
-      </n-form-item>
-      <n-space justify="space-between" align="center" style="margin-bottom: 12px;">
-        <n-button secondary :loading="isProbingRename" @click="probeRenameFields">
-          <template #icon><n-icon :component="RepairIcon" /></template>
-          ffprobe 命名补充并预览
-        </n-button>
-      </n-space>
-      <n-text v-if="Object.keys(renameSupplementFields).length" depth="3" style="display:block; margin-bottom:12px;">
-        ffprobe 补充：{{ Object.entries(renameSupplementFields).map(([key, value]) => `${key}=${value}`).join(' · ') }}
-      </n-text>
-      <div v-if="renamePreview" class="rename-result-panel">
-        <div class="rename-result-title">预览结果</div>
-        <div class="rename-result-row">
-          <span class="rename-result-label">目标文件</span>
-          <code>{{ renamePreview.target_name }}</code>
-        </div>
-        <div v-if="renamePreview.target_relative_path" class="rename-result-row rename-result-tree-row">
-          <span class="rename-result-label">目标相对路径</span>
-          <div class="rename-result-tree">
-            <div
-              v-for="(part, index) in renamePreviewPathParts"
-              :key="`${part}-${index}`"
-              class="rename-result-tree-node"
-              :style="{ paddingLeft: `${index * 18}px` }"
-            >
-              <n-icon :component="index === renamePreviewPathParts.length - 1 ? FileIcon : FolderIcon" :color="index === renamePreviewPathParts.length - 1 ? 'var(--ui-info-text)' : 'var(--ui-warning-text)'" />
-              <code>{{ part }}</code>
-            </div>
+            </section>
           </div>
-        </div>
-        <div v-if="renamePreview.target_cloud_path" class="rename-result-row">
-          <span class="rename-result-label">115 路径</span>
-          <code>{{ renamePreview.target_cloud_path }}</code>
-        </div>
-        <div v-if="renamePreview.target_local_path" class="rename-result-row">
-          <span class="rename-result-label">本地路径</span>
-          <code>{{ renamePreview.target_local_path }}</code>
-        </div>
-      </div>
-      <template #action>
-        <n-space justify="end">
-          <n-button @click="previewRename" :loading="isPreviewingRename"><template #icon><UiIcon name="preview" /></template>预览</n-button>
-          <n-button
-            type="primary"
-            @click="executeRename"
-            :loading="isExecutingRename"
-            :disabled="!renamePreview"
-          ><template #icon><UiIcon name="save" /></template>
-            保存重命名
-          </n-button>
-        </n-space>
-      </template>
-    </n-modal>
-  </n-layout>
+          <VEmptyState v-else-if="!isFetchingEpisodes" title="未找到在库的分集" text="请确认该剧集已入库" icon="mdi-television-off" />
+        </VCardText>
+        <VCardActions><VSpacer /><VBtn variant="text" @click="showEpisodeSelector = false">关闭</VBtn></VCardActions>
+      </VCard>
+    </VDialog>
+
+    <VDialog v-model="showAddActorModal" max-width="600" scrollable>
+      <VCard>
+        <VCardTitle class="d-flex align-center"><span class="flex-grow-1">搜索并添加演员</span><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭演员搜索" @click="showAddActorModal = false" /></VCardTitle>
+        <VCardText>
+          <VTextField v-model="actorSearchQuery" label="演员名" placeholder="输入演员名进行搜索..." clearable prepend-inner-icon="mdi-magnify" @update:model-value="value => { actorSearchQuery = value || ''; debouncedSearchActors(); }" />
+          <VProgressLinear v-if="isSearchingActors" indeterminate class="mt-3" />
+          <VList class="mt-3">
+            <VListItem v-for="actor in actorSearchResults" :key="actor.id" :title="actor.name" :subtitle="actor.known_for ? `代表作: ${actor.known_for}` : actor.department || '表演'" @click="selectActor(actor)">
+              <template #prepend><VAvatar :image="getTMDbImageUrl(actor.profile_path, 'w92')" size="48"><VIcon v-if="!actor.profile_path" icon="mdi-account-outline" /></VAvatar></template>
+              <template #append><VBtn size="small" variant="tonal" @click.stop="selectActor(actor)">选择</VBtn></template>
+            </VListItem>
+          </VList>
+          <VEmptyState v-if="!isSearchingActors && actorSearchResults.length === 0 && actorSearchQuery" title="未找到相关人物" icon="mdi-account-search-outline" />
+        </VCardText>
+      </VCard>
+    </VDialog>
+
+    <VDialog v-model="showImageEditor" max-width="1100" scrollable>
+      <VCard>
+        <VCardTitle class="d-flex align-center"><span class="flex-grow-1">编辑图像</span><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭图像编辑" @click="showImageEditor = false" /></VCardTitle>
+        <VCardText>
+          <div class="media-image-grid">
+            <VCard v-for="img in imageTypes" :key="img.type" variant="outlined" class="media-image-card">
+              <VImg :src="getDynamicImageUrl(img.embyType, img.type)" :aspect-ratio="img.type === 'poster' ? 2 / 3 : 16 / 9" :alt="img.label" class="media-image" @click="previewMediaImage(getDynamicImageUrl(img.embyType, img.type), img.label)">
+                <template #error><div class="image-placeholder"><VIcon icon="mdi-image-outline" size="40" /></div></template>
+              </VImg>
+              <VCardTitle class="text-subtitle-1">{{ img.label }}</VCardTitle>
+              <VCardActions class="justify-center">
+                <VTooltip text="搜索新图像" location="bottom"><template #activator="{ props }"><VBtn v-bind="props" icon="mdi-magnify" variant="text" :aria-label="`搜索${img.label}`" @click="openTmdbSelector(img.type, img.tmdbKey)" /></template></VTooltip>
+                <VTooltip text="上传图像文件" location="bottom"><template #activator="{ props }"><VBtn v-bind="props" icon="mdi-cloud-upload-outline" variant="text" :aria-label="`上传${img.label}`" @click="triggerFileUpload(img.type)" /></template></VTooltip>
+                <VTooltip text="设置网络图像" location="bottom"><template #activator="{ props }"><VBtn v-bind="props" icon="mdi-link-variant" variant="text" :aria-label="`设置${img.label}网络图片`" @click="openUrlPrompt(img.type)" /></template></VTooltip>
+              </VCardActions>
+            </VCard>
+          </div>
+          <input ref="fileInputRef" type="file" class="d-none" accept="image/jpeg,image/png,image/webp" @change="handleFileUpload" />
+        </VCardText>
+      </VCard>
+    </VDialog>
+
+    <VDialog v-model="showTmdbSelector" max-width="1200" scrollable>
+      <VCard>
+        <VCardTitle class="d-flex align-center"><span class="flex-grow-1 text-wrap">搜索图像 - {{ currentTmdbImageLabel }}</span><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭图像搜索" @click="showTmdbSelector = false" /></VCardTitle>
+        <VCardText>
+          <div v-if="isFetchingTmdbImages" class="tmdb-loading-state"><VProgressCircular indeterminate size="48" /><p class="mt-4 text-medium-emphasis">正在从 TheMovieDb 拉取数据...</p></div>
+          <VEmptyState v-else-if="currentTmdbImages.length === 0" title="未找到相关图像" icon="mdi-image-search-outline" />
+          <div v-else class="media-tmdb-grid">
+            <VCard v-for="(img, index) in currentTmdbImages" :key="index" class="media-tmdb-card" variant="outlined" @click="selectTmdbImage(img.original)">
+              <VImg :src="img.preview" :aspect-ratio="currentTmdbImageAspect === '2/3' ? 2 / 3 : 16 / 9" :alt="`${currentTmdbImageLabel}备选图${index + 1}`" />
+              <VCardText v-if="img.width && img.height" class="text-center text-caption">{{ img.width }} × {{ img.height }}</VCardText>
+            </VCard>
+          </div>
+        </VCardText>
+      </VCard>
+    </VDialog>
+
+    <VDialog v-model="showUrlPrompt" max-width="560">
+      <VCard title="设置网络图片">
+        <VCardText><VTextField v-model="imageUrlInput" label="图片直链" placeholder="请粘贴以 http/https 开头的图片直链..." /></VCardText>
+        <VCardActions><VSpacer /><VBtn variant="text" @click="showUrlPrompt = false">取消</VBtn><VBtn variant="flat" :loading="isUploadingImage" @click="submitUrlImage">确定</VBtn></VCardActions>
+      </VCard>
+    </VDialog>
+
+    <VDialog :model-value="showMediaInfoEditor" max-width="1100" scrollable @update:model-value="value => { if (!value) closeMediaInfoEditor(); }">
+      <VCard>
+        <VCardTitle class="d-flex align-center"><span class="flex-grow-1">编辑媒体信息 (音轨/字幕)</span><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭媒体信息编辑器" @click="closeMediaInfoEditor" /></VCardTitle>
+        <VCardText>
+          <VBtn variant="tonal" prepend-icon="mdi-shield-check-outline" :loading="isRevalidatingFingerprints" class="mb-4" :disabled="isSavingMediaInfo || isDeletingMediaVersion || isRepairingTruehdCore" @click="revalidateFingerprints(currentEditMediaId)">重新校验当前视频指纹</VBtn>
+          <VAlert v-if="mediaInfoContext.fingerprint_pending" type="warning" variant="tonal" class="mb-4">文件身份待校验。请先重新校验指纹，完成后重新打开编辑器，再保存媒体信息。</VAlert>
+          <VAlert v-if="mediaInfoSaveFeedback" :type="mediaInfoSaveFeedback.type" :title="mediaInfoSaveFeedback.message" variant="tonal" class="mb-4">
+            <div class="media-info-feedback"><div v-for="(detail, index) in mediaInfoSaveFeedback.details" :key="index">{{ detail }}</div></div>
+          </VAlert>
+          <p class="text-body-2 text-medium-emphasis mb-4">保存后会回读验收媒体信息；未通过时保留编辑器并显示具体原因。</p>
+          <div v-if="mediaInfoVersionOptions.length === 1 && mediaInfoSingleVersionFileName" class="mb-4"><label class="text-caption text-medium-emphasis">媒体文件</label><div class="media-info-single-file-name" :title="mediaInfoSingleVersionFileName">{{ mediaInfoSingleVersionFileName }}</div></div>
+          <div v-if="mediaInfoVersionOptions.length > 1" class="media-info-version-toolbar mb-4">
+            <div class="media-info-version-controls">
+              <div v-if="mediaInfoCurrentVersionFileName" class="media-info-current-version-name" :title="mediaInfoCurrentVersionFileName"><span v-if="mediaInfoCurrentVersionMeta" class="media-info-version-accent">{{ mediaInfoCurrentVersionMeta }}</span><span class="media-info-version-filename">{{ mediaInfoCurrentVersionFileName }}</span></div>
+              <VSelect :model-value="currentMediaInfoVersionId" :items="mediaInfoVersionOptions" item-title="label" item-value="value" label="媒体版本" class="media-info-version-select" color="warning" :disabled="isSavingMediaInfo || isRepairingTruehdCore || isDeletingMediaVersion" @update:model-value="handleMediaInfoVersionChange">
+                <template #selection="{ item }"><div class="media-info-version-option-label"><span class="media-info-version-accent">{{ mediaInfoVersionMeta(item.raw) }}</span><span class="media-info-version-filename">{{ item.raw.file_name || item.raw.display_name || item.raw.label }}</span></div></template>
+                <template #item="{ props, item }"><VListItem v-bind="props"><template #title><div class="media-info-version-option-label"><span class="media-info-version-accent">{{ mediaInfoVersionMeta(item.raw) }}</span><span class="media-info-version-filename">{{ item.raw.file_name || item.raw.display_name || item.raw.label }}</span></div></template></VListItem></template>
+              </VSelect>
+            </div>
+            <VBtn color="error" variant="tonal" prepend-icon="mdi-delete-outline" :loading="isDeletingMediaVersion" :disabled="isSavingMediaInfo || isRepairingTruehdCore" @click="confirmMediaAction('删除当前版本', '将永久删除当前选中的整套媒体版本，包括115云端文件、本地STRM、NFO、图片、媒体信息和Emby版本。其他格式版本不受影响，确认继续吗？', deleteCurrentMediaVersion)">删除当前版本</VBtn>
+          </div>
+          <VSelect v-if="mediaInfoSegmentOptions.length > 1" :model-value="String(currentEditMediaId || '')" :items="mediaInfoSegmentOptions" item-title="label" item-value="value" label="电影分段" class="mb-4" :disabled="isSavingMediaInfo || isRepairingTruehdCore" @update:model-value="handleMediaInfoSegmentChange" />
+          <VAlert type="info" variant="tonal" class="mb-4">修改语言标签后保存，系统会重载保存的媒体信息 JSON 并回读验收。<br /><strong>注意：</strong>字幕的标题 (Title) 必须包含“简体”或“繁体”字样，Emby 才能正确识别并显示为 Chinese Simplified/Traditional。</VAlert>
+          <VAlert v-if="canBatchApplyMediaInfo" type="warning" variant="tonal" class="mb-4">
+            <VCheckbox v-model="applyToSelectedEpisodes" :label="`同时应用到已选 ${selectedEpisodeIds.length} 集（当前正在编辑的集也会保存）`" :disabled="isSavingMediaInfo || isRepairingTruehdCore" />
+            <p class="text-caption">仅修改可唯一匹配的轨道；无法匹配的音轨和字幕保持原值。</p>
+          </VAlert>
+          <VCard variant="outlined" class="mb-4" title="标记硬字幕 (写入视频流 Title)">
+            <VCardText class="d-flex flex-wrap ga-2">
+              <VBtn variant="tonal" :disabled="isSavingMediaInfo || isRepairingTruehdCore" @click="setHardcodedSubtitle('简中硬字幕')">简中</VBtn><VBtn variant="tonal" :disabled="isSavingMediaInfo || isRepairingTruehdCore" @click="setHardcodedSubtitle('繁中硬字幕')">繁中</VBtn>
+              <VBtn variant="tonal" :disabled="isSavingMediaInfo || isRepairingTruehdCore" @click="setHardcodedSubtitle('简英硬字幕')">简英</VBtn><VBtn variant="tonal" :disabled="isSavingMediaInfo || isRepairingTruehdCore" @click="setHardcodedSubtitle('繁英硬字幕')">繁英</VBtn>
+              <VBtn variant="tonal" :disabled="isSavingMediaInfo || isRepairingTruehdCore" prepend-icon="mdi-close" @click="clearHardcodedSubtitle">清除标记</VBtn>
+            </VCardText>
+          </VCard>
+          <div class="d-flex justify-end mb-3"><VBtn variant="tonal" prepend-icon="mdi-translate" :loading="isFillingMediaInfoTitles" :disabled="isSavingMediaInfo || isRepairingTruehdCore || isDeletingMediaVersion" @click="fillLanguagesToTitles">语言填入标题</VBtn></div>
+          <div class="media-info-table-scroll" role="region" aria-label="音轨和字幕编辑表格" tabindex="0">
+            <VTable density="compact">
+              <thead><tr><th style="width:120px">轨道</th><th style="width:110px">比特率</th><th style="min-width:200px">当前标题 (Title)</th><th style="width:250px">修正语言 (Language)</th><th style="width:80px" class="text-center">默认</th><th style="width:64px" class="text-center">操作</th></tr></thead>
+              <tbody>
+                <tr v-for="stream in displayStreams" :key="getMediaInfoStreamRowKey(stream)">
+                  <td><VChip :color="stream.Type === 'Audio' ? 'info' : 'success'" size="small">{{ stream.Type === 'Audio' ? '音轨' : '字幕' }} {{ getStreamTypeOrdinal(stream) }}</VChip><div class="stream-technical-label">{{ getStreamTechnicalLabel(stream) }}</div></td>
+                  <td>{{ stream.Type === 'Audio' ? formatAudioBitRate(stream) : '-' }}</td>
+                  <td><VTextField v-model="stream.Title" density="compact" placeholder="无标题" :aria-label="`${getMediaInfoStreamDeleteLabel(stream)}当前标题`" :disabled="isSavingMediaInfo || isRepairingTruehdCore" autocomplete="off" spellcheck="false" :mobile-layout="false" /></td>
+                  <td><div title="双击将当前语言填入标题" @dblclick.stop.prevent="handleLanguageDoubleClick(stream)"><VAutocomplete :ref="instance => setMediaInfoLanguageSelectRef(getMediaInfoStreamRowKey(stream), instance)" :model-value="getMediaInfoLanguageSelection(stream)" :items="stream.Type === 'Audio' ? audioLanguageOptions : subtitleLanguageOptions" item-title="label" item-value="value" :custom-filter="mediaInfoLanguageFilter" placeholder="输入语言名称或代码" clearable density="compact" :mobile-layout="false" :aria-label="`${getMediaInfoStreamDeleteLabel(stream)}修正语言`" :disabled="isSavingMediaInfo || isRepairingTruehdCore || isFillingMediaInfoTitles" @update:model-value="value => handleLanguageChange(stream, value)" /></div></td>
+                  <td class="text-center"><VCheckboxBtn v-model="stream.IsDefault" :aria-label="`${getMediaInfoStreamDeleteLabel(stream)}默认轨道`" :disabled="isSavingMediaInfo || isRepairingTruehdCore" @update:model-value="value => handleDefaultChange(stream, value)" /></td>
+                  <td class="text-center"><VBtn icon="mdi-delete-outline" variant="text" color="error" size="small" :disabled="isSavingMediaInfo || isRepairingTruehdCore" :aria-label="`删除${getMediaInfoStreamDeleteLabel(stream)}`" @click="confirmMediaAction('删除轨道', `确认从当前编辑草稿中删除“${getMediaInfoStreamDeleteLabel(stream)}”吗？只有保存后才会生效。`, () => removeMediaInfoStream(stream))" /></td>
+                </tr>
+                <tr v-if="displayStreams.length === 0"><td colspan="6" class="text-center py-6 text-medium-emphasis">未解析到媒体流</td></tr>
+              </tbody>
+            </VTable>
+          </div>
+        </VCardText>
+        <VCardActions class="editor-actions">
+          <VBtn color="warning" variant="tonal" prepend-icon="mdi-wrench-outline" :loading="isRepairingTruehdCore" :disabled="isSavingMediaInfo" @click="confirmMediaAction('纠正多出音轨', '将丢弃当前未保存修改；存在歧义时会只读探测 CD2，并且只纠正证据唯一的高清音轨兼容核心。是否继续？', repairCurrentAudioTracks)">纠正多出音轨</VBtn>
+          <VSpacer /><VBtn variant="text" @click="closeMediaInfoEditor">取消</VBtn><VBtn variant="flat" prepend-icon="mdi-content-save-outline" :disabled="isRepairingTruehdCore || isFillingMediaInfoTitles" :loading="isSavingMediaInfo" data-testid="media-info-save" @click="saveMediaInfo">保存并刷新</VBtn>
+        </VCardActions>
+      </VCard>
+    </VDialog>
+
+    <VDialog v-model="showRenameEditor" max-width="760" scrollable>
+      <VCard>
+        <VCardTitle class="d-flex align-center"><span class="flex-grow-1">重命名媒体</span><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭重命名" @click="showRenameEditor = false" /></VCardTitle>
+        <VCardText>
+          <VAlert type="info" variant="tonal" class="mb-4">输入新的文件名即可。目录按高级设置中的 MoviePilot 重命名格式生成；源文件扩展名固定，115 文件、STRM 和媒体信息路径会同步更新。</VAlert>
+          <div class="d-flex ga-2 mb-4"><VTextField :model-value="renameCustomName" label="新文件名" placeholder="输入文件名" spellcheck="false" @update:model-value="handleRenameNameChange" /><VTextField :model-value="renameExtension" label="扩展名" readonly style="max-width:100px" /></div>
+          <VTextField v-model="renamePart" label="指定 Part" placeholder="留空表示未指定，例如：花絮、Part 1" spellcheck="false" class="mb-4" @update:model-value="renamePreview = null" />
+          <VSelect v-if="renameVersions.length > 1" v-model="renameTargetId" :items="renameVersionOptions" item-title="label" item-value="value" label="媒体版本" class="mb-4" @update:model-value="switchRenameVersion" />
+          <VBtn variant="tonal" prepend-icon="mdi-wrench-outline" :loading="isProbingRename" class="mb-3" @click="probeRenameFields">ffprobe 命名补充并预览</VBtn>
+          <p v-if="Object.keys(renameSupplementFields).length" class="text-caption text-medium-emphasis mb-3">ffprobe 补充：{{ Object.entries(renameSupplementFields).map(([key, value]) => `${key}=${value}`).join(' · ') }}</p>
+          <div v-if="renamePreview" class="rename-result-panel">
+            <div class="rename-result-title">预览结果</div>
+            <div class="rename-result-row"><span class="rename-result-label">目标文件</span><code>{{ renamePreview.target_name }}</code></div>
+            <div v-if="renamePreview.target_relative_path" class="rename-result-row"><span class="rename-result-label">目标相对路径</span><div class="rename-result-tree"><div v-for="(part, index) in renamePreviewPathParts" :key="`${part}-${index}`" class="rename-result-tree-node" :style="{ paddingLeft: `${index * 18}px` }"><VIcon :icon="index === renamePreviewPathParts.length - 1 ? 'mdi-file-outline' : 'mdi-folder-outline'" :color="index === renamePreviewPathParts.length - 1 ? 'info' : 'warning'" /><code>{{ part }}</code></div></div></div>
+            <div v-if="renamePreview.target_cloud_path" class="rename-result-row"><span class="rename-result-label">115 路径</span><code>{{ renamePreview.target_cloud_path }}</code></div>
+            <div v-if="renamePreview.target_local_path" class="rename-result-row"><span class="rename-result-label">本地路径</span><code>{{ renamePreview.target_local_path }}</code></div>
+          </div>
+        </VCardText>
+        <VCardActions><VSpacer /><VBtn variant="tonal" prepend-icon="mdi-eye-outline" :loading="isPreviewingRename" @click="previewRename">预览</VBtn><VBtn variant="flat" prepend-icon="mdi-content-save-outline" :loading="isExecutingRename" :disabled="!renamePreview" @click="executeRename">保存重命名</VBtn></VCardActions>
+      </VCard>
+    </VDialog>
+
+    <VDialog :model-value="Boolean(imagePreview)" max-width="1200" @update:model-value="value => { if (!value) imagePreview = null; }">
+      <VCard v-if="imagePreview"><VCardTitle class="d-flex align-center"><span class="flex-grow-1 text-wrap">{{ imagePreview.title || '图像预览' }}</span><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭图像预览" @click="imagePreview = null" /></VCardTitle><VCardText><VImg :src="imagePreview.url" max-height="80vh" /></VCardText></VCard>
+    </VDialog>
+  </div>
 </template>
 
 <script setup>
-import { ref, shallowRef, onMounted, onBeforeUnmount, watch, computed, nextTick, toRaw, h } from 'vue';
+import { ref, shallowRef, onMounted, onBeforeUnmount, watch, computed, nextTick, toRaw } from 'vue';
 import draggable from 'vuedraggable';
-import { NIcon, NInput, NInputGroup, NGrid, NGridItem, NFormItem, NTag, NAvatar, NPopconfirm, NImage, NModal, NList, NListItem, NThing, NEmpty, NButtonGroup, NDropdown, NTooltip, NCheckbox, NText, NSelect } from 'naive-ui';
 import { useRoute, useRouter } from 'vue-router';
 import axios from 'axios';
-import { NPageHeader, NDivider, NSpin, NCard, NDescriptions, NDescriptionsItem, NButton, NSpace, NAlert, useMessage } from 'naive-ui';
-import {
-  MoveOutline as DragHandleIcon,
-  TrashOutline as TrashIcon,
-  ImageOutline as ImageIcon,
-  ImagesOutline as ImagesIcon,
-  PersonOutline as PersonIcon,
-  AddOutline as AddIcon,
-  ChevronDownOutline as ChevronDownIcon,
-  CloudUploadOutline as CloudUploadIcon,
-  LinkOutline as LinkIcon,
-  SearchOutline as SearchIcon,
-  DocumentTextOutline as DocumentTextIcon,
-  DocumentTextOutline as FileIcon,
-  FolderOutline as FolderIcon,
-  CloudOutline as CloudIcon,
-  BuildOutline as RepairIcon,
-  TextOutline as TextIcon
-} from '@vicons/ionicons5';
+import { useMessage, useDialog } from '@/composables/useFeedback';
 import { debounce } from 'lodash-es';
 import { textColorForBackground } from '../theme.js';
 import {
@@ -928,12 +304,34 @@ import {
 const route = useRoute();
 const router = useRouter();
 const message = useMessage();
+const dialog = useDialog();
+const imagePreview = ref(null);
+const previewMediaImage = (url, title) => {
+  if (url) imagePreview.value = { url, title };
+};
+const confirmMediaAction = (title, content, action) => dialog.warning({
+  title, content, positiveText: '确认', negativeText: '取消', onPositiveClick: action,
+});
+const confirmEpisodeImageReplacement = () => {
+  const scope = itemDetails.value?.item_type === 'Episode' ? '单集'
+    : itemDetails.value?.item_type === 'Season' ? '季所有分集' : '电视剧所有分集';
+  confirmMediaAction('替换剧集图', `将删除当前${scope}的 Primary 海报，随后让神医助手使用 ffprobe 截图生成集图。是否继续？`, replaceEpisodeImages);
+};
+const mediaInfoLanguageFilter = (value, query, item) => filterMediaInfoLanguageOption(query, item?.raw || item);
 
 const itemId = ref(null);
 const isLoading = ref(true);
 const itemDetails = ref(null);
+let mediaDetailsLoadSequence = 0;
 const editableCast = ref([]);
 const isSaving = ref(false);
+let actorSaveSession = 0;
+let actorSaveNavigationTimer = null;
+const invalidateActorSaveSession = () => {
+  ++actorSaveSession;
+  if (actorSaveNavigationTimer !== null) clearTimeout(actorSaveNavigationTimer);
+  actorSaveNavigationTimer = null;
+};
 
 const searchLinks = ref({});
 const isTranslating = ref(false);
@@ -1154,6 +552,11 @@ const mediaInfoIsoLanguageOptions = ref([]);
 const subtitleChineseDefaultLanguage = ref('chs');
 const mediaInfoLanguageSelectRefs = new Map();
 const mediaInfoLanguageUndoStack = [];
+const closeMediaInfoEditor = () => {
+  ++mediaInfoLoadSequence;
+  showMediaInfoEditor.value = false;
+  mediaInfoLanguageSelectRefs.clear();
+};
 
 // ★ 新增：剧集分集选择相关状态
 const showEpisodeSelector = ref(false);
@@ -1177,14 +580,6 @@ const mediaInfoVersionMeta = (version) => {
   if (version?.version_detail) parts.push(String(version.version_detail));
   return parts.join(' · ');
 };
-const renderMediaInfoVersionLabel = (option) => h(
-  'div',
-  { class: 'media-info-version-option-label' },
-  [
-    h('span', { class: 'media-info-version-accent' }, mediaInfoVersionMeta(option)),
-    h('span', { class: 'media-info-version-filename' }, option.file_name || option.display_name || option.label),
-  ],
-);
 const currentMediaInfoVersion = computed(() => mediaInfoVersions.value.find(version => (
   String(version.emby_id) === String(currentEditMediaId.value || '')
   || (version.segments || []).some(segment => String(segment.emby_id) === String(currentEditMediaId.value || ''))
@@ -1606,7 +1001,6 @@ const clearSelectedEpisodes = () => {
 const audioLanguageOptions = ref([]);
 const subtitleLanguageOptions = ref([]);
 
-
 // ★ 新增：点击编辑按钮的分流逻辑
 const handleMediaInfoButtonClick = async () => {
   if (['Series', 'Season'].includes(itemDetails.value.item_type)) {
@@ -1994,7 +1388,13 @@ const deleteCurrentMediaVersion = async () => {
 
 // 3. 保存修改 (修改为使用 currentEditMediaId)
 const saveMediaInfo = async () => {
-  if (isFillingMediaInfoTitles.value) return;
+  const targetId = String(currentEditMediaId.value || '').trim();
+  if (!targetId || isFillingMediaInfoTitles.value || isSavingMediaInfo.value || isRepairingTruehdCore.value || isDeletingMediaVersion.value) return;
+  const sequence = mediaInfoLoadSequence;
+  const draftSnapshot = JSON.stringify(mediaInfoData.value);
+  const isCurrentEditor = () => showMediaInfoEditor.value
+    && sequence === mediaInfoLoadSequence
+    && targetId === String(currentEditMediaId.value || '');
   isSavingMediaInfo.value = true;
   mediaInfoSaveFeedback.value = null;
   const loadingMsg = message.loading("正在保存媒体信息并通知 Emby 重新加载...", { duration: 0 });
@@ -2011,7 +1411,8 @@ const saveMediaInfo = async () => {
     }
 
     // 使用 currentEditMediaId 而不是全局的 itemId
-    const res = await axios.post(`/api/media_info/edit/${currentEditMediaId.value}`, payload);
+    const res = await axios.post(`/api/media_info/edit/${targetId}`, payload);
+    if (!isCurrentEditor()) return;
     const reports = Array.isArray(res.data.batch_reports) ? res.data.batch_reports : [];
     const skippedReports = reports.filter(report => Array.isArray(report.skipped) && report.skipped.length > 0);
     if (skippedReports.length > 0) {
@@ -2045,6 +1446,7 @@ const saveMediaInfo = async () => {
       details.push(`Emby 刷新尚未通过验收${metadata.failed_ids?.length ? `（${metadata.failed_ids.join('、')}）` : ''}`);
     }
     if (Number(thumbnails.failed) > 0) details.push(thumbnails.reason || thumbnails.message || '视频缩略图处理未完成');
+    if (draftSnapshot !== JSON.stringify(mediaInfoData.value)) details.push('保存期间草稿已修改，已保留新草稿，请确认后重新保存');
     if (Number(res.data.warnings) > 0 && !details.length) details.push(res.data.message || '部分处理未完成，请检查任务结果');
     if (details.length) {
       mediaInfoSaveFeedback.value = {
@@ -2053,9 +1455,10 @@ const saveMediaInfo = async () => {
       message.warning(mediaInfoSaveFeedback.value.message);
     } else {
       message.success(res.data.message || "媒体信息已更新！");
-      showMediaInfoEditor.value = false;
+      closeMediaInfoEditor();
     }
   } catch (e) {
+    if (!isCurrentEditor()) return;
     const result = e.response?.data || {};
     mediaInfoSaveFeedback.value = {
       type: 'error', message: result.message || result.error || '保存失败',
@@ -2071,12 +1474,17 @@ const saveMediaInfo = async () => {
 const repairCurrentAudioTracks = async () => {
   const targetId = String(currentEditMediaId.value || '').trim();
   if (!targetId || isRepairingTruehdCore.value) return;
+  const sequence = mediaInfoLoadSequence;
+  const isCurrentEditor = () => showMediaInfoEditor.value
+    && sequence === mediaInfoLoadSequence
+    && targetId === String(currentEditMediaId.value || '');
 
   isRepairingTruehdCore.value = true;
   const loadingMsg = message.loading('正在检查当前媒体音轨，歧义时将只读探测 CD2...', { duration: 0 });
   let repaired = false;
   try {
     const res = await axios.post(`/api/media_info/repair_truehd_core/${targetId}`);
+    if (!isCurrentEditor()) return;
     const report = res.data?.result || res.data;
     repaired = Number(report?.repaired || 0) > 0;
     const hasWarnings = Number(report?.warnings || res.data?.warnings || 0) > 0 || Number(report?.ambiguous || 0) > 0;
@@ -2092,6 +1500,7 @@ const repairCurrentAudioTracks = async () => {
       message.info(feedback || '当前媒体无需纠正');
     }
   } catch (error) {
+    if (!isCurrentEditor()) return;
     const report = error.response?.data || {};
     const summary = report.message || report.error || '纠正当前媒体音轨失败';
     const reason = (report.result || report).failed_items?.[0]?.reason;
@@ -2103,7 +1512,7 @@ const repairCurrentAudioTracks = async () => {
     isRepairingTruehdCore.value = false;
   }
 
-  if (repaired) {
+  if (repaired && isCurrentEditor()) {
     await openMediaInfoEditor(targetId);
   }
 };
@@ -2383,9 +1792,12 @@ const translateAllFields = async () => {
 };
 
 const fetchMediaDetails = async () => {
+  const sequence = ++mediaDetailsLoadSequence;
+  const targetId = String(itemId.value || '');
   isLoading.value = true;
   try {
-    const response = await axios.get(`/api/media_for_editing/${itemId.value}`);
+    const response = await axios.get(`/api/media_for_editing/${targetId}`);
+    if (sequence !== mediaDetailsLoadSequence) return;
     const redirectItemId = String(response.data?.redirect_item_id || '').trim();
     if (redirectItemId && redirectItemId !== String(itemId.value || '')) {
       itemId.value = redirectItemId;
@@ -2393,6 +1805,7 @@ const fetchMediaDetails = async () => {
       renameTargetId.value = redirectItemId;
       await router.replace({ name: 'MediaEditPage', params: { itemId: redirectItemId } });
     }
+    if (sequence !== mediaDetailsLoadSequence) return;
     itemDetails.value = response.data;
 
     if (response.data && response.data.search_links) {
@@ -2400,12 +1813,34 @@ const fetchMediaDetails = async () => {
     }
 
   } catch (error) {
+    if (sequence !== mediaDetailsLoadSequence) return;
     message.error(error.response?.data?.error || "获取媒体详情失败。");
     itemDetails.value = null;
   } finally {
-    isLoading.value = false;
+    if (sequence === mediaDetailsLoadSequence) isLoading.value = false;
   }
 };
+
+watch(() => route.fullPath, () => {
+  invalidateActorSaveSession();
+});
+
+watch(() => route.params.itemId, (value) => {
+  const targetId = String(value || '');
+  if (!targetId || targetId === String(itemId.value || '')) return;
+  closeMediaInfoEditor();
+  showEpisodeSelector.value = false;
+  showRenameEditor.value = false;
+  showImageEditor.value = false;
+  showAddActorModal.value = false;
+  showTmdbSelector.value = false;
+  imagePreview.value = null;
+  tmdbImagesCache.value = null;
+  mediaOperationFeedback.value = null;
+  debouncedSearchActors.cancel();
+  itemId.value = targetId;
+  fetchMediaDetails();
+});
 
 onMounted(() => {
   window.addEventListener('keydown', handleMediaInfoUndoShortcut);
@@ -2420,7 +1855,11 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  invalidateActorSaveSession();
+  ++mediaDetailsLoadSequence;
   window.removeEventListener('keydown', handleMediaInfoUndoShortcut);
+  closeMediaInfoEditor();
+  debouncedSearchActors.cancel();
 });
 
 const goBack = () => {
@@ -2432,10 +1871,21 @@ const goBack = () => {
 };
 
 const handleSaveChanges = async () => {
-  if (!itemDetails.value?.item_id) return;
+  if (!itemDetails.value?.item_id || isSaving.value) return;
+  invalidateActorSaveSession();
+  const session = actorSaveSession;
+  const targetId = String(itemDetails.value.item_id);
+  const requestedItem = itemDetails.value;
+  const draftSnapshot = JSON.stringify(editableCast.value);
+  const isCurrentItem = () => session === actorSaveSession
+    && route.name === 'MediaEditPage'
+    && targetId === String(route.params.itemId || '')
+    && requestedItem === itemDetails.value
+    && targetId === String(itemDetails.value?.item_id || '');
   isSaving.value = true;
   try {
     await nextTick();
+    if (!isCurrentItem()) return;
 
     const castPayload = editableCast.value.map(actor => {
       return {
@@ -2451,14 +1901,22 @@ const handleSaveChanges = async () => {
       item_name: itemDetails.value.item_name,
     };
 
-    await axios.post(`/api/update_media_cast_sa/${itemDetails.value.item_id}`, payload);
+    await axios.post(`/api/update_media_cast_sa/${targetId}`, payload);
+    if (!isCurrentItem()) return;
+    if (draftSnapshot !== JSON.stringify(editableCast.value)) {
+      message.warning('保存期间演员列表已修改，已保留当前草稿，请确认后重新保存。');
+      return;
+    }
 
     message.success("修改已保存，Emby将自动刷新。");
-    setTimeout(() => {
-      goBack();
+    const navigationTimer = setTimeout(() => {
+      if (actorSaveNavigationTimer === navigationTimer) actorSaveNavigationTimer = null;
+      if (isCurrentItem() && draftSnapshot === JSON.stringify(editableCast.value)) goBack();
     }, 1500);
+    actorSaveNavigationTimer = navigationTimer;
 
   } catch (error) {
+    if (!isCurrentItem()) return;
     console.error("保存修改失败:", error);
     message.error(error.response?.data?.error || "保存修改失败，请检查后端日志。");
   } finally {
@@ -2474,15 +1932,15 @@ const handleSaveChanges = async () => {
 }
 .rename-result-panel {
   margin: 14px 0 4px;
-  border: 1px solid var(--n-border-color);
+  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
   border-radius: 6px;
   overflow: hidden;
-  background: var(--n-color-embedded);
+  background: rgb(var(--v-theme-surface));
 }
 .rename-result-title {
   padding: 10px 14px;
-  border-bottom: 1px solid var(--n-border-color);
-  color: var(--n-text-color);
+  border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  color: rgb(var(--v-theme-on-surface));
   font-size: 14px;
   font-weight: 600;
 }
@@ -2490,7 +1948,7 @@ const handleSaveChanges = async () => {
   display: grid;
   grid-template-columns: 112px minmax(0, 1fr);
   align-items: stretch;
-  border-bottom: 1px solid var(--n-divider-color);
+  border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
 }
 .rename-result-row:last-child {
   border-bottom: 0;
@@ -2501,10 +1959,10 @@ const handleSaveChanges = async () => {
   box-sizing: border-box;
   min-width: 0;
   padding: 12px 14px;
-  color: var(--n-text-color-3);
+  color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
   font-size: 12px;
   line-height: 1.5;
-  background: var(--n-action-color);
+  background: rgba(var(--v-theme-on-surface), 0.04);
 }
 .rename-result-row > code,
 .rename-result-tree {
@@ -2512,7 +1970,7 @@ const handleSaveChanges = async () => {
   box-sizing: border-box;
   min-width: 0;
   padding: 12px 14px;
-  color: var(--n-text-color-2);
+  color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity));
   font-size: 12px;
   line-height: 1.5;
   word-break: break-word;
@@ -2541,7 +1999,7 @@ const handleSaveChanges = async () => {
   .rename-result-label {
     padding: 8px 14px 5px;
     background: transparent;
-    border-bottom: 1px solid var(--n-divider-color);
+    border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
   }
   .rename-result-row > code,
   .rename-result-tree {
@@ -2560,11 +2018,11 @@ const handleSaveChanges = async () => {
 .media-poster {
   width: 100%;
   height: auto;
-  background-color: var(--n-card-color);
+  background-color: rgb(var(--v-theme-surface));
   aspect-ratio: 2 / 3;
 }
-@container (max-width: 919px) {
-  .media-poster { max-height:260px; aspect-ratio:auto; display:flex; justify-content:center; background:var(--ui-surface-muted); }
+@media (max-width: 959px) {
+  .media-poster { max-height:260px; aspect-ratio:auto; display:flex; justify-content:center; background:rgb(var(--v-theme-surface)); }
   .media-poster :deep(img) { max-height:260px; width:auto !important; max-width:100%; }
 }
 
@@ -2574,7 +2032,7 @@ const handleSaveChanges = async () => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background-color: var(--n-action-color);
+  background-color: rgba(var(--v-theme-on-surface), 0.04);
 }
 
 .actor-grid-container {
@@ -2583,15 +2041,10 @@ const handleSaveChanges = async () => {
   gap: 16px;
 }
 .actor-grid-item { min-width:0; }
-.actor-grid-item > .n-card { height:100%; }
-.actor-edit-card :deep(.n-card-header) { flex-wrap:nowrap; padding:16px 16px 8px !important; }
-.actor-edit-card :deep(.n-card-header__main) { min-width:0; }
-.actor-edit-card :deep(.n-card-header__extra) { width:auto; flex-shrink:0; }
-.actor-edit-card :deep(.n-card__content) { padding:16px !important; }
 
 .actor-edit-card:hover {
   transform: translateY(-4px);
-  box-shadow: var(--n-box-shadow-hover) !important;
+  box-shadow: var(--app-card-hover-shadow, none) !important;
 }
 
 .actor-card-header {
@@ -2618,7 +2071,7 @@ const handleSaveChanges = async () => {
 .actor-avatar-image {
   width:72px;
   height:96px;
-  border-radius: var(--n-border-radius);
+  border-radius: var(--app-card-radius, 12px);
   flex-shrink: 0;
 }
 
@@ -2631,27 +2084,7 @@ const handleSaveChanges = async () => {
   min-width: 0;
 }
 
-.compact-form-item {
-  margin-bottom: 0 !important;
-}
-
-.sticky-actions {
-  position: sticky;
-  bottom:0;
-  left: 0;
-  right: 0;
-  padding: 16px 24px;
-  background-color:var(--modal-solid-bg-color);
-  border-top:1px solid var(--ui-border);
-  display: flex;
-  justify-content: flex-end;
-  z-index: 10;
-  margin: 24px -24px 0;
-}
 @media (max-width:540px) {
-  .sticky-actions { padding:16px; margin-inline:-16px; }
-  .sticky-actions :deep(.n-space) { width:100%; gap:8px !important; }
-  .sticky-actions :deep(.n-button) { padding-inline:10px; }
   .actor-card-content { gap:10px; }
 }
 
@@ -2664,8 +2097,8 @@ const handleSaveChanges = async () => {
 
 .sortable-ghost {
   opacity: 0.4;
-  background: var(--n-action-color);
-  border: 1px dashed var(--n-border-color);
+  background: rgba(var(--v-theme-on-surface), 0.04);
+  border: 1px dashed rgba(var(--v-border-color), var(--v-border-opacity));
 }
 .sortable-drag {
   opacity: 1 !important;
@@ -2686,7 +2119,7 @@ const handleSaveChanges = async () => {
 .episode-selector-summary {
   flex: 1;
   min-width: 220px;
-  color: var(--n-text-color-3);
+  color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
   font-size: 13px;
 }
 
@@ -2700,7 +2133,7 @@ const handleSaveChanges = async () => {
 }
 
 .episode-season-switcher-label {
-  color: var(--n-text-color-2);
+  color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity));
   font-size: 13px;
   font-weight: 600;
   white-space: nowrap;
@@ -2719,8 +2152,8 @@ const handleSaveChanges = async () => {
 .episode-season-block {
   margin-bottom: 14px;
   padding: 12px;
-  background-color: var(--n-color-embedded);
-  border: 1px solid var(--n-border-color);
+  background-color: rgb(var(--v-theme-surface));
+  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
   border-radius: 8px;
 }
 
@@ -2738,15 +2171,15 @@ const handleSaveChanges = async () => {
 .episode-season-title {
   font-size: 14px;
   font-weight: 700;
-  color: var(--n-text-color);
+  color: rgb(var(--v-theme-on-surface));
 }
 
 .episode-season-count {
   padding: 1px 7px;
   border-radius: 999px;
   font-size: 12px;
-  color: var(--n-text-color-3);
-  background-color: var(--n-action-color);
+  color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
+  background-color: rgba(var(--v-theme-on-surface), 0.04);
 }
 
 .episode-parade-grid {
@@ -2779,8 +2212,8 @@ const handleSaveChanges = async () => {
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background-color: var(--ui-error-color);
-  color: var(--ui-on-error);
+  background-color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-on-error));
   font-size: 10px;
   font-weight: 700;
   line-height: 14px;
@@ -2791,10 +2224,10 @@ const handleSaveChanges = async () => {
   width: 42px;
   height: 30px;
   padding: 0;
-  border: 1px solid var(--ui-border);
+  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
   border-radius: 5px;
-  background-color: var(--ui-surface-muted);
-  color: var(--ui-text);
+  background-color: rgb(var(--v-theme-surface));
+  color: rgb(var(--v-theme-on-surface));
   font-size: 12px;
   font-weight: 700;
   line-height: 1;
@@ -2811,59 +2244,52 @@ const handleSaveChanges = async () => {
 }
 
 .episode-chip-active {
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-color) 16%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, rgb(var(--v-theme-primary)) 16%, transparent);
 }
 
 .episode-chip-selected .episode-chip {
-  border-color: var(--accent-color);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent-color) 12%, transparent);
+  border-color: rgb(var(--v-theme-primary));
+  box-shadow: 0 0 0 2px color-mix(in srgb, rgb(var(--v-theme-primary)) 12%, transparent);
 }
 
 .episode-chip-multi-version .episode-chip {
-  border-color: var(--ui-warning-color);
-  background-color: color-mix(in srgb, var(--ui-warning-color) 12%, var(--ui-surface-muted));
-  color: var(--ui-warning-text);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ui-warning-color) 14%, transparent);
+  border-color: rgb(var(--v-theme-warning));
+  background-color: color-mix(in srgb, rgb(var(--v-theme-warning)) 12%, rgb(var(--v-theme-surface)));
+  color: rgb(var(--v-theme-warning));
+  box-shadow: 0 0 0 2px color-mix(in srgb, rgb(var(--v-theme-warning)) 14%, transparent);
 }
 
 .episode-chip-track-issue .episode-chip {
-  border-color: var(--ui-error-color);
-  color: var(--ui-error-text);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ui-error-color) 12%, transparent);
+  border-color: rgb(var(--v-theme-error));
+  color: rgb(var(--v-theme-error));
+  box-shadow: 0 0 0 2px color-mix(in srgb, rgb(var(--v-theme-error)) 12%, transparent);
 }
 
 .episode-chip-track-unavailable .episode-chip {
-  border-color: var(--ui-warning-color);
-  color: var(--ui-warning-text);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ui-warning-color) 12%, transparent);
+  border-color: rgb(var(--v-theme-warning));
+  color: rgb(var(--v-theme-warning));
+  box-shadow: 0 0 0 2px color-mix(in srgb, rgb(var(--v-theme-warning)) 12%, transparent);
 }
 
 .episode-chip-track-unavailable .episode-chip-issue-dot {
-  background-color: var(--ui-warning-color);
-  color: var(--ui-on-warning);
+  background-color: rgb(var(--v-theme-warning));
+  color: rgb(var(--v-theme-on-warning));
 }
 
 .episode-chip-multi-version.episode-chip-track-issue .episode-chip {
-  color: var(--ui-warning-text);
+  color: rgb(var(--v-theme-warning));
 }
 
 .episode-chip:is(:hover, .episode-chip-active) {
-  border-color: var(--accent-color);
-  background-color: var(--ui-primary-solid);
-  color: var(--ui-on-primary);
+  border-color: rgb(var(--v-theme-primary));
+  background-color: rgb(var(--v-theme-primary));
+  color: rgb(var(--v-theme-on-primary));
 }
 
 .episode-chip-multi-version .episode-chip:is(:hover, .episode-chip-active) {
-  border-color: var(--ui-warning-color);
-  background-color: var(--ui-warning-color);
-  color: var(--ui-on-warning);
-}
-
-.media-info-version-select :deep(.n-base-selection) {
-  --n-border: 1px solid var(--ui-warning-color) !important;
-  --n-border-hover: 1px solid var(--ui-warning-color) !important;
-  --n-border-active: 1px solid var(--ui-warning-color) !important;
-  --n-box-shadow-active: 0 0 0 2px color-mix(in srgb, var(--ui-warning-color) 18%, transparent) !important;
+  border-color: rgb(var(--v-theme-warning));
+  background-color: rgb(var(--v-theme-warning));
+  color: rgb(var(--v-theme-on-warning));
 }
 
 .media-info-version-toolbar {
@@ -2889,10 +2315,10 @@ const handleSaveChanges = async () => {
   width: 100%;
   min-width: 0;
   padding: 7px 10px;
-  border: 1px solid var(--n-border-color);
+  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
   border-radius: 6px;
-  background-color: var(--n-color-embedded);
-  color: var(--n-text-color);
+  background-color: rgb(var(--v-theme-surface));
+  color: rgb(var(--v-theme-on-surface));
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
@@ -2909,14 +2335,14 @@ const handleSaveChanges = async () => {
 }
 
 .media-info-version-accent {
-  color: var(--ui-error-text);
+  color: rgb(var(--v-theme-error));
   font-weight: 700;
   white-space: nowrap;
 }
 
 .media-info-version-filename {
   min-width: 0;
-  color: var(--n-text-color);
+  color: rgb(var(--v-theme-on-surface));
   overflow-wrap: anywhere;
 }
 
@@ -2930,56 +2356,27 @@ const handleSaveChanges = async () => {
   width: 100%;
   min-width: 0;
   padding: 8px 12px;
-  border: 1px solid var(--n-border-color);
+  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
   border-radius: 6px;
-  background-color: var(--n-color-embedded);
-  color: var(--n-text-color);
+  background-color: rgb(var(--v-theme-surface));
+  color: rgb(var(--v-theme-on-surface));
   line-height: 1.5;
   overflow-wrap: anywhere;
 }
 
 .media-info-batch-hint {
   margin-top: 6px;
-  color: var(--n-text-color-3);
+  color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
   font-size: 12px;
 }
 
 .stream-technical-label {
   margin-top: 4px;
-  color: var(--n-text-color-3);
+  color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
   font-size: 11px;
   line-height: 1.25;
   white-space: normal;
   overflow-wrap: anywhere;
-}
-
-.media-info-title-input {
-  width: 100%;
-  height: 28px;
-  box-sizing: border-box;
-  padding: 0 10px;
-  color: var(--ui-text);
-  background-color: var(--ui-input-bg);
-  border: 1px solid var(--ui-input-border);
-  border-radius: 6px;
-  outline: none;
-  font: inherit;
-  line-height: 1.5;
-  caret-color: var(--n-primary-color);
-  transition: border-color 0.3s, box-shadow 0.3s;
-}
-
-.media-info-title-input:hover,
-.media-info-title-input:focus {
-  border-color: var(--n-primary-color);
-}
-
-.media-info-title-input:focus {
-  box-shadow: 0 0 0 2px var(--accent-glow-color);
-}
-
-.media-info-title-input::placeholder {
-  color: var(--n-text-color-3);
 }
 
 .media-info-table-scroll { overflow-x:auto; max-width:100%; }
@@ -2992,11 +2389,11 @@ const handleSaveChanges = async () => {
   background: transparent;
 }
 .episode-selector-board::-webkit-scrollbar-thumb {
-  background: var(--n-border-color);
+  background: rgba(var(--v-border-color), var(--v-border-opacity));
   border-radius: 4px;
 }
 .episode-selector-board::-webkit-scrollbar-thumb:hover {
-  background: var(--n-text-color-3);
+  background: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
 }
 
 @media (max-width: 640px) {
@@ -3027,99 +2424,28 @@ const handleSaveChanges = async () => {
 /* =========================================================
    ★★★ 图像编辑模态框 (Emby 排版风格) ★★★
    ========================================================= */
-.emby-image-grid {
+.media-image-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
   gap: 20px;
   padding: 10px 0;
 }
 
-.emby-image-card {
-  background-color: var(--n-color-embedded);
-  border: 1px solid var(--n-border-color);
-  border-radius: 8px;
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  transition: all 0.2s;
+.media-image-card:hover {
+  box-shadow: var(--app-card-hover-shadow, none);
+  border-color: rgb(var(--v-theme-primary));
 }
 
-.emby-image-card:hover {
-  box-shadow: var(--n-box-shadow-hover);
-  border-color: var(--n-primary-color);
-}
-
-.emby-card-image-container {
-  width: 100%;
-  /* 强制所有卡片的图片区域为 16:9 横版比例 */
-  aspect-ratio: 16 / 9;
-  background-color: var(--n-action-color);
-  border-radius: 4px;
-  overflow: hidden;
-  position: relative;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-/* 确保 n-image 组件本身撑满容器 */
-.full-image {
-  width: 100%;
-  height: 100%;
-  display: block; /* ⚠️ 删掉原来的 display: flex */
-}
-
-/* ⚠️ 关键修复：穿透到内部真实的 img 标签，强制它 100% 宽高并 contain */
-.full-image :deep(img) {
-  width: 100%;
-  height: 100%;
-  object-fit: contain !important;
-}
-
-/* 修复占位符居中问题（因为去掉了 full-image 的 flex） */
 .image-placeholder {
   width: 100%;
   height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
-  background-color: var(--n-action-color);
+  background-color: rgba(var(--v-theme-on-surface), 0.04);
   position: absolute;
   top: 0;
   left: 0;
-}
-
-.emby-card-footer {
-  margin-top: 16px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-}
-
-.emby-card-title {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--n-text-color);
-}
-
-.emby-card-actions {
-  display: flex;
-  gap: 16px;
-  justify-content: center;
-  width: 100%;
-  margin-top: 4px;
-}
-
-.emby-action-btn {
-  color: var(--n-text-color-3) !important;
-  transition: color 0.2s, transform 0.1s;
-}
-
-.emby-action-btn:hover {
-  color: var(--n-primary-color) !important;
-  transform: scale(1.1);
 }
 
 /* =========================================================
@@ -3133,7 +2459,7 @@ const handleSaveChanges = async () => {
   min-height: 300px;
 }
 
-.emby-tmdb-grid {
+.media-tmdb-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
   gap: 24px 16px;
@@ -3143,66 +2469,39 @@ const handleSaveChanges = async () => {
   padding-right: 8px;
 }
 
-.emby-tmdb-grid::-webkit-scrollbar {
+.media-tmdb-grid::-webkit-scrollbar {
   width: 6px;
 }
-.emby-tmdb-grid::-webkit-scrollbar-track {
+.media-tmdb-grid::-webkit-scrollbar-track {
   background: transparent;
 }
-.emby-tmdb-grid::-webkit-scrollbar-thumb {
-  background: var(--n-border-color);
+.media-tmdb-grid::-webkit-scrollbar-thumb {
+  background: rgba(var(--v-border-color), var(--v-border-opacity));
   border-radius: 4px;
 }
-.emby-tmdb-grid::-webkit-scrollbar-thumb:hover {
-  background: var(--n-text-color-3);
+.media-tmdb-grid::-webkit-scrollbar-thumb:hover {
+  background: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
 }
 
-.emby-tmdb-card {
+.media-tmdb-card {
   cursor: pointer;
   display: flex;
   flex-direction: column;
   transition: transform 0.2s;
 }
 
-.emby-tmdb-card:hover .tmdb-card-image-wrapper {
-  transform: scale(1.03);
-  box-shadow: 0 0 0 2px var(--n-primary-color);
-}
-
-.tmdb-card-image-wrapper {
-  width: 100%;
-  background-color: var(--n-action-color);
-  border-radius: 6px;
-  overflow: hidden;
-  transition: all 0.2s;
-  box-shadow: var(--n-box-shadow);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.tmdb-card-info {
-  margin-top: 10px;
-  text-align: center;
-  line-height: 1.5;
-}
-
-.tmdb-provider {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--n-text-color);
-}
-
-.tmdb-meta {
-  font-size: 12px;
-  color: var(--n-text-color-3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.tmdb-score {
-  font-size: 12px;
-  color: var(--n-text-color-3);
-}
+.editor-actions { flex-wrap: wrap; gap: 8px; padding: 16px 24px; }
+.actor-edit-card { height: 100%; }
+.actor-edit-card :deep(.v-card-title) { padding: 12px 12px 0; font-size: 15px; }
+.actor-edit-card :deep(.v-card-text) { padding: 12px; }
+.media-info-feedback { max-height: 200px; overflow: auto; overflow-wrap: anywhere; }
+.media-info-table-scroll :deep(.v-field) { min-width: 160px; }
+.media-info-table-scroll :deep(.v-table__wrapper > table > tbody > tr > td) { padding-block: 8px; }
+.batch-version-select { min-width: 240px; max-width: 100%; }
+.media-poster, .actor-avatar-image, .media-image { cursor: zoom-in; }
+.media-image-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr)); align-items: start; }
+.media-tmdb-card { cursor: pointer; }
+.episode-chip { min-width: 0; border-radius: 6px; }
+.episode-chip-checkbox { inline-size: 24px; block-size: 24px; }
+@media (max-width: 600px) { .editor-actions { padding: 12px 16px; } .batch-version-select { width: 100%; } }
 </style>

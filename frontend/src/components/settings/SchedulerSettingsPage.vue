@@ -1,150 +1,90 @@
-<!-- src/components/settings/SchedulerSettingsPage.vue -->
 <template>
-  <n-layout class="mp-page scheduler-page" content-style="padding: 0;">
-    <n-page-header class="mp-page-header" subtitle="查看任务说明并执行媒体维护"><template #title>任务中心</template></n-page-header>
-    <div v-if="isLoading" class="center-container">
-      <n-spin size="large" />
+  <section class="mp-page scheduler-page">
+    <div class="mp-page-header mb-6">
+      <h1 class="text-h5 font-weight-semibold">任务中心</h1>
+      <p class="text-body-2 text-medium-emphasis mt-1">查看任务说明并执行媒体维护</p>
     </div>
-
+    <div v-if="isLoading" class="center-container"><VProgressCircular indeterminate color="primary" size="48" /></div>
+    <VAlert v-else-if="configError" type="error" variant="tonal">{{ configError }}</VAlert>
     <div v-else-if="configModel" class="scheduler-content">
       <div class="scheduler-overview">
-      <n-card :bordered="false" class="dashboard-card">
-        <template #header>
-          <span class="card-title">Telegram 快捷菜单</span>
-        </template>
-        <template #header-extra>
-          <n-text depth="3">配置显示在 TG 机器人输入框左侧 Menu 按钮中的快捷任务</n-text>
-        </template>
-
-        <n-grid cols="1 720:3" :x-gap="24" :y-gap="16">
-          <n-gi span="1">
-            <n-button type="default" @click="showTgMenuConfigModal = true" style="width: 100%;">
-              <template #icon><n-icon :component="Settings24Regular" /></template>
-              配置 TG 菜单任务
-            </n-button>
-          </n-gi>
-
-          <n-gi span="1 720:2">
-            <n-text strong>当前 TG 菜单列表</n-text>
-            <div class="flowchart-wrapper">
-              <div v-if="enabledTgMenuTasks.length > 0" class="flowchart-container">
-                <n-tooltip v-for="task in enabledTgMenuTasks" :key="task.key" trigger="hover" placement="top">
-                  <template #trigger>
-                    <div class="flowchart-node">{{ task.name }}</div>
-                  </template>
-                  <div class="task-tooltip-content">
-                    <div class="task-tooltip-title">{{ task.name }}</div>
-                    <div>{{ getTaskHelp(task) }}</div>
-                  </div>
-                </n-tooltip>
-              </div>
-              <div v-else class="flowchart-container empty">
-                <n-text depth="3">暂未配置任何 TG 菜单任务...</n-text>
-              </div>
+        <VCard class="dashboard-card">
+          <VCardItem title="Telegram 快捷菜单" subtitle="配置机器人 Menu 按钮中的快捷任务">
+            <template #prepend><VIcon icon="mdi-telegram" color="primary" /></template>
+          </VCardItem>
+          <VCardText>
+            <VBtn variant="tonal" color="primary" prepend-icon="mdi-cog-outline" @click="showTgMenuConfigModal = true">配置 TG 菜单任务</VBtn>
+            <p class="text-body-2 font-weight-medium mt-6 mb-3">当前 TG 菜单列表</p>
+            <div v-if="enabledTgMenuTasks.length" class="d-flex flex-wrap ga-2">
+              <VTooltip v-for="task in enabledTgMenuTasks" :key="task.key" location="top">
+                <template #activator="{ props: activatorProps }"><VChip v-bind="activatorProps" color="primary" variant="tonal">{{ task.name }}</VChip></template>
+                <div class="task-tooltip-content">{{ getTaskHelp(task) }}</div>
+              </VTooltip>
             </div>
-          </n-gi>
-        </n-grid>
-      </n-card>
-
-      <FingerprintAuditPanel class="fingerprint-overview-card" :running="isBackgroundTaskRunning" :task-state="backgroundTaskStatus.state" />
+            <p v-else class="text-body-2 text-medium-emphasis">暂未配置任何 TG 菜单任务</p>
+          </VCardText>
+        </VCard>
+        <FingerprintAuditPanel class="fingerprint-overview-card" :running="isBackgroundTaskRunning" :task-state="backgroundTaskStatus.state" />
       </div>
-      <n-card :bordered="false" class="dashboard-card manual-tasks-card">
-        <template #header>
-          <span class="card-title">临时任务</span>
-        </template>
-        <template #header-extra>
-          <n-text depth="3">用于需要立即手动执行的场景</n-text>
-        </template>
-
-        <div class="temp-task-groups">
-          <section v-for="group in manualTaskGroups" :key="group.key" class="temp-task-group">
-            <div class="temp-task-group-title">{{ group.name }}</div>
-            <div class="temp-task-grid">
-              <div v-for="task in group.tasks" :key="task.key">
-                <n-tooltip trigger="hover" placement="top">
-                  <template #trigger>
-                    <div class="temp-task-item">
-                      <div class="temp-task-copy">
-                        <n-text class="temp-task-name">{{ task.name }}</n-text>
-                        <p class="temp-task-description">{{ getTaskHelp(task) }}</p>
-                      </div>
-                      <n-button
-                        size="small"
-                        type="primary"
-                        ghost
-                        @click="triggerTaskNow(task.key)"
-                        :loading="isTriggeringTask === task.key"
-                        :disabled="isBackgroundTaskRunning"
-                      >
-                        <template #icon><n-icon :component="Play24Regular" /></template>
-                        立即执行
-                      </n-button>
+      <VAlert v-if="taskRunFeedback" :type="taskRunFeedback.type" variant="tonal" :title="taskRunFeedback.message" role="status">
+        <div v-for="detail in taskRunFeedback.details" :key="detail">{{ detail }}</div>
+      </VAlert>
+      <VCard class="dashboard-card manual-tasks-card">
+        <VCardItem title="临时任务" subtitle="立即执行媒体维护任务"><template #prepend><VIcon icon="mdi-play-circle-outline" color="primary" /></template></VCardItem>
+        <VCardText>
+          <div class="temp-task-groups">
+            <section v-for="group in manualTaskGroups" :key="group.key" class="temp-task-group">
+              <h2 class="text-subtitle-1 font-weight-medium mb-3">{{ group.name }}</h2>
+              <div class="temp-task-grid">
+                <VCard v-for="task in group.tasks" :key="task.key" variant="outlined" class="task-card">
+                  <VCardText class="temp-task-item">
+                    <div class="temp-task-copy">
+                      <div class="temp-task-name">{{ task.name }}</div>
+                      <p class="temp-task-description">{{ getTaskHelp(task) }}</p>
                     </div>
-                  </template>
-                  <div class="task-tooltip-content">
-                    <div class="task-tooltip-title">{{ task.name }}</div>
-                    <div>{{ getTaskHelp(task) }}</div>
-                  </div>
-                </n-tooltip>
+                    <VTooltip :text="getTaskHelp(task)" location="top">
+                      <template #activator="{ props: activatorProps }">
+                        <VBtn v-bind="activatorProps" color="primary" variant="tonal" size="small" prepend-icon="mdi-play" :loading="isTriggeringTask === task.key" :disabled="isBackgroundTaskRunning || Boolean(isTriggeringTask)" @click="triggerTaskNow(task.key)">立即执行</VBtn>
+                      </template>
+                    </VTooltip>
+                  </VCardText>
+                </VCard>
               </div>
-            </div>
-          </section>
-        </div>
-      </n-card>
-    </div>
-
-    <n-modal
-      v-model:show="showTgMenuConfigModal"
-      class="custom-card custom-modal glass-modal"
-      preset="card"
-      style="width: 90%; max-width: 600px;"
-      :mask-closable="false"
-    ><template #header>配置 Telegram 快捷菜单</template>
-      <n-alert type="info" :show-icon="false" style="margin-bottom: 16px;">
-        请勾选需要在 Telegram 机器人菜单中显示的任务，并拖动调整顺序。
-      </n-alert>
-      <div class="task-chain-list" ref="draggableContainerTgMenu">
-        <n-tooltip v-for="task in configuredTgMenuSequence" :key="task.key" to="body" trigger="hover" placement="bottom">
-          <template #trigger>
-            <div class="task-chain-item" :data-key="task.key">
-              <n-icon :component="Drag24Regular" class="drag-handle" />
-              <n-checkbox v-model:checked="task.enabled" style="flex-grow: 1;">{{ task.name }}</n-checkbox>
-            </div>
-          </template>
-          <div class="task-tooltip-content">
-            <div class="task-tooltip-title">{{ task.name }}</div>
-            <div>{{ getTaskHelp(task) }}</div>
+            </section>
           </div>
-        </n-tooltip>
-      </div>
-      <template #footer>
-        <n-space justify="end">
-          <n-button @click="showTgMenuConfigModal = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
-          <n-button type="primary" @click="saveTgMenuConfig"><template #icon><UiIcon name="save" /></template>保存</n-button>
-        </n-space>
-      </template>
-    </n-modal>
-
-    <n-modal v-model:show="showSyncModeModal" preset="dialog" :show-icon="false" :mask-closable="false" class="glass-modal" style="width: min(560px, calc(100vw - 32px));"><template #header>选择处理模式</template>
-      <n-text>您希望如何执行此任务？</n-text>
-      <template #action>
-        <div class="sync-mode-actions">
-        <n-button @click="showSyncModeModal = false"><template #icon><UiIcon name="close" /></template>取消</n-button>
-        <n-button @click="runTaskFromModal(false)"><template #icon><UiIcon name="play" /></template>快速模式（增量）</n-button>
-        <n-button type="warning" @click="runTaskFromModal(true)"><template #icon><UiIcon name="play" /></template>深度模式 (全量)</n-button>
-        </div>
-      </template>
-    </n-modal>
-  </n-layout>
+        </VCardText>
+      </VCard>
+    </div>
+    <VDialog v-model="showTgMenuConfigModal" max-width="600" persistent>
+      <VCard title="配置 Telegram 快捷菜单">
+        <VCardText>
+          <VAlert type="info" variant="tonal" class="mb-4">勾选需要显示的任务，并拖动调整顺序。</VAlert>
+          <div ref="draggableContainerTgMenu" class="task-chain-list">
+            <div v-for="task in configuredTgMenuSequence" :key="task.key" class="task-chain-item" :data-key="task.key">
+              <VIcon icon="mdi-drag" class="drag-handle" aria-label="拖动调整任务顺序" />
+              <VCheckbox v-model="task.enabled" :label="task.name" hide-details density="compact" class="flex-grow-1" />
+              <VTooltip :text="getTaskHelp(task)" location="bottom"><template #activator="{ props: activatorProps }"><VIcon v-bind="activatorProps" icon="mdi-information-outline" size="18" class="text-medium-emphasis" /></template></VTooltip>
+            </div>
+          </div>
+        </VCardText>
+        <VCardActions><VSpacer /><VBtn variant="text" @click="showTgMenuConfigModal = false">取消</VBtn><VBtn color="primary" variant="tonal" prepend-icon="mdi-content-save-outline" @click="saveTgMenuConfig">保存</VBtn></VCardActions>
+      </VCard>
+    </VDialog>
+    <VDialog v-model="showSyncModeModal" max-width="560" persistent>
+      <VCard title="选择处理模式">
+        <VCardText>您希望如何执行此任务？</VCardText>
+        <VCardActions class="sync-mode-actions">
+          <VBtn variant="text" @click="showSyncModeModal = false">取消</VBtn>
+          <VBtn color="primary" variant="tonal" prepend-icon="mdi-play" @click="runTaskFromModal(false)">快速模式（增量）</VBtn>
+          <VBtn color="warning" variant="tonal" prepend-icon="mdi-play" @click="runTaskFromModal(true)">深度模式（全量）</VBtn>
+        </VCardActions>
+      </VCard>
+    </VDialog>
+  </section>
 </template>
-
 <script setup>
-import { ref, onMounted, watch, nextTick, computed } from 'vue';
-import {
-  NCheckbox, NGrid, NGi, NAlert, NButton, NCard, NSpace, NIcon,
-  NText, useMessage, NLayout, NSpin, NModal, NTooltip, NPageHeader
-} from 'naive-ui';
-import { Play24Regular, Settings24Regular, Drag24Regular } from '@vicons/fluent';
+import { ref, onMounted, onBeforeUnmount, watch, nextTick, computed } from 'vue';
+import { useMessage } from '@/composables/useFeedback';
 import { useConfig } from '../../composables/useConfig.js';
 import { useTaskStatus } from '../../composables/useTaskStatus.js';
 import axios from 'axios';
@@ -188,6 +128,7 @@ const { isBackgroundTaskRunning, backgroundTaskStatus } = useTaskStatus();
 const availableTasksForManualRun = ref([]);
 const availableTasksForTgMenu = ref([]);
 const isTriggeringTask = ref(null);
+const taskRunFeedback = ref(null);
 const showTgMenuConfigModal = ref(false);
 const configuredTgMenuSequence = ref([]);
 const draggableContainerTgMenu = ref(null);
@@ -234,16 +175,30 @@ const fetchAvailableTasks = async () => {
   }
 };
 
+const showTaskRunResult = (response) => {
+  const result = response.data || {};
+  const details = [...new Set([
+    ...(Array.isArray(result.failures) ? result.failures : []),
+    ...(Array.isArray(result.warning_details) ? result.warning_details : []),
+  ].map(value => typeof value === 'string' ? value : [value?.item_id || value?.path, value?.reason || value?.error || value?.message].filter(Boolean).join('：')).filter(Boolean))];
+  const hasWarnings = response.status === 207 || Number(result.warnings) > 0 || Number(result.failed) > 0 || details.length > 0;
+  const summary = result.message || (hasWarnings ? '任务处理有提醒，请检查结果。' : '任务已完成。');
+  taskRunFeedback.value = hasWarnings ? { type: 'warning', message: summary, details } : null;
+  if (hasWarnings) message.warning(summary);
+  else message.success(summary);
+};
+
 const runTaskFromModal = async (isDeepMode) => {
   showSyncModeModal.value = false;
   const taskIdentifier = taskToRunInModal.value;
   if (!taskIdentifier) return;
 
   isTriggeringTask.value = taskIdentifier;
+  taskRunFeedback.value = null;
   try {
     const payload = { task_name: taskIdentifier, force_full_update: isDeepMode };
     const response = await axios.post('/api/tasks/run', payload);
-    message.success(response.data.message || '任务已成功提交。');
+    showTaskRunResult(response);
   } catch (error) {
     message.error(error.response?.data?.error || '请求后端接口失败。');
   } finally {
@@ -253,7 +208,7 @@ const runTaskFromModal = async (isDeepMode) => {
 };
 
 const triggerTaskNow = async (taskIdentifier) => {
-  if (isBackgroundTaskRunning.value) {
+  if (isBackgroundTaskRunning.value || isTriggeringTask.value) {
     message.warning('已有后台任务正在运行，请稍后再试。');
     return;
   }
@@ -265,9 +220,10 @@ const triggerTaskNow = async (taskIdentifier) => {
   }
 
   isTriggeringTask.value = taskIdentifier;
+  taskRunFeedback.value = null;
   try {
     const response = await axios.post('/api/tasks/run', { task_name: taskIdentifier });
-    message.success(response.data.message || '任务已成功提交。');
+    showTaskRunResult(response);
   } catch (error) {
     message.error(error.response?.data?.error || '请求后端接口失败。');
   } finally {
@@ -330,16 +286,19 @@ onMounted(() => {
   fetchAvailableTasks();
 });
 
-watch(showTgMenuConfigModal, (newValue) => {
-  if (newValue) {
+watch([showTgMenuConfigModal, draggableContainerTgMenu], ([visible, container]) => {
+  if (visible && container && !sortableInstanceTgMenu) {
     nextTick(() => {
-      sortableInstanceTgMenu = initializeSortable(draggableContainerTgMenu.value, configuredTgMenuSequence);
+      if (showTgMenuConfigModal.value && draggableContainerTgMenu.value && !sortableInstanceTgMenu) {
+        sortableInstanceTgMenu = initializeSortable(draggableContainerTgMenu.value, configuredTgMenuSequence);
+      }
     });
-  } else if (sortableInstanceTgMenu) {
+  } else if (!visible && sortableInstanceTgMenu) {
     sortableInstanceTgMenu.destroy();
     sortableInstanceTgMenu = null;
   }
 });
+onBeforeUnmount(() => sortableInstanceTgMenu?.destroy());
 
 watch([configModel, availableTasksForTgMenu], ([newConfig, tgMenuTasks]) => {
   if (newConfig && tgMenuTasks.length > 0) {
@@ -349,113 +308,26 @@ watch([configModel, availableTasksForTgMenu], ([newConfig, tgMenuTasks]) => {
 </script>
 
 <style scoped>
-.scheduler-content { display:grid; gap:24px; }
-.sync-mode-actions { display:grid; grid-template-columns:auto 1fr 1fr; gap:10px; width:100%; }
-@media (max-width:540px) { .sync-mode-actions { grid-template-columns:minmax(0,1fr); } }
-.scheduler-overview { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:24px; align-items:stretch; }
-.scheduler-overview > * { min-width:0; height:100%; }
-@container (max-width:899px) { .scheduler-overview { grid-template-columns:minmax(0,1fr); } }
-
-.center-container {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  height: calc(100vh - 200px);
-}
-.temp-task-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 12px;
-  min-height: 128px;
-  height:100%;
-  padding:16px;
-  border:1px solid var(--ui-border);
-  border-radius:10px;
-  background:var(--ui-surface-muted);
-}
-.temp-task-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap:14px; }
-.temp-task-grid > div { min-width:0; }
-.temp-task-copy { min-width:0; flex:1; }
-.temp-task-name { color:var(--ui-text); font-weight:600; line-height:1.6; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-.temp-task-description { margin:6px 0 0; font-size:12px; line-height:1.6; color:var(--ui-text-muted); display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
-.temp-task-item > .n-button { flex-shrink:0; align-self:center; }
-.temp-task-groups {
-  display: flex;
-  flex-direction: column;
-  gap: 22px;
-}
-.temp-task-group {
-  min-width: 0;
-}
-.temp-task-group-title {
-  margin-bottom: 10px;
-  color: var(--n-text-color-2);
-  font-size: 14px;
-  font-weight: 600;
-}
-.task-chain-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.task-chain-item {
-  display: flex;
-  align-items: center;
-  padding: 10px;
-  background-color: var(--n-action-color);
-  border-radius: 4px;
-  border:1px solid var(--ui-border);
-  cursor: help;
-}
-.task-chain-item :deep(.n-checkbox) { min-width:0; }
-.task-chain-item :deep(.n-checkbox__label) { white-space:normal; overflow-wrap:anywhere; }
-.task-chain-item.sortable-ghost {
-  background-color: var(--n-color-target-suppl);
-}
-.drag-handle {
-  cursor: grab;
-  margin-right: 12px;
-  color: var(--n-text-color-disabled);
-}
-.drag-handle:active {
-  cursor: grabbing;
-}
-.task-tooltip-content {
-  max-width: 320px;
-  line-height: 1.6;
-  white-space: normal;
-}
-.task-tooltip-title {
-  font-weight: 600;
-  margin-bottom: 4px;
-}
-.flowchart-wrapper {
-  margin-top: 12px;
-  min-height: 64px;
-  display: flex;
-  align-items: center;
-  overflow-x: auto;
-  padding: 8px;
-  background-color:var(--ui-surface-muted);
-  border-radius:8px;
-}
-.flowchart-container {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.flowchart-container.empty {
-  width: 100%;
-  justify-content: center;
-}
-.flowchart-node {
-  padding: 6px 12px;
-  border-radius: 4px;
-  background-color:var(--ui-surface);
-  border:1px solid var(--ui-border);
-  white-space: nowrap;
-  cursor: help;
-}
+.scheduler-content { display: grid; gap: 24px; }
+.scheduler-overview { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px; align-items: stretch; }
+.scheduler-overview > * { min-width: 0; }
+.center-container { display: flex; justify-content: center; align-items: center; min-height: 320px; }
+.temp-task-groups { display: grid; gap: 24px; }
+.temp-task-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 16px; }
+.task-card { min-width: 0; }
+.temp-task-item { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 120px; }
+.temp-task-copy { min-width: 0; flex: 1; }
+.temp-task-name { font-weight: 600; line-height: 1.6; overflow-wrap: anywhere; }
+.temp-task-description { margin: 6px 0 0; font-size: 12px; line-height: 1.6; color: rgb(var(--v-theme-on-surface)); opacity: .7; }
+.temp-task-item > *:last-child { flex-shrink: 0; }
+.task-chain-list { display: grid; gap: 8px; }
+.task-chain-item { display: flex; align-items: center; gap: 12px; padding: 8px 12px; background: rgba(var(--v-theme-on-surface), .04); border: 1px solid rgba(var(--v-theme-on-surface), .12); border-radius: 8px; }
+.task-chain-item :deep(.v-label) { white-space: normal; overflow-wrap: anywhere; }
+.task-chain-item.sortable-ghost { background: rgba(var(--v-theme-primary), .12); }
+.drag-handle { cursor: grab; touch-action: none; }
+.drag-handle:active { cursor: grabbing; }
+.task-tooltip-content { max-width: 320px; line-height: 1.6; white-space: normal; }
+.sync-mode-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 16px; }
+@media (max-width: 899px) { .scheduler-overview { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 540px) { .sync-mode-actions { flex-direction: column; align-items: stretch; } .temp-task-item { align-items: flex-start; } }
 </style>

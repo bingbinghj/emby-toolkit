@@ -1,0 +1,9 @@
+/* MoviePilot-Frontend v3 609ea05, MIT; see frontend/third-party/MoviePilot-LICENSE. */
+@use "placeholders";
+@use "variables" as core-vars;
+
+.layout-navbar {
+  @if core-vars.$navbar-high-emphasis-text {
+    @extend %layout-navbar;
+  }
+}

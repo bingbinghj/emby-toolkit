@@ -1,0 +1,17 @@
+/* ETK business surfaces inside the MoviePilot v3 shell. */
+html, body, #app { min-height: 100%; }
+.etk-app { background: transparent !important; }
+.mp-page, .mp-card { background: transparent; }
+.mp-page-header { margin-block-end: 1.25rem; }
+.mp-title-with-icon { display: inline-flex; align-items: center; gap: .5rem; }
+.ui-icon { flex-shrink: 0; }
+.mp-aligned-grid > .v-col { display: flex; flex-direction: column; }
+.mp-aligned-grid > .v-col > .v-card { height: 100%; }
+.mp-page .v-card, .mp-page .v-data-table { max-width: 100%; }
+.mp-page .v-card-text { overflow-wrap: anywhere; }
+.Vue-Toastification__toast-body { white-space: pre-wrap; overflow-wrap: anywhere; }
+.Vue-Toastification__toast { font-family: inherit; }
+@media (max-width: 600px) {
+  .mp-page .v-card-text { padding: 1rem; }
+  .Vue-Toastification__container { inset-inline: .5rem; inline-size: auto; }
+}

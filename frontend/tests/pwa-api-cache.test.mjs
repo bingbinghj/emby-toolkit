@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
+import { fileURLToPath } from 'node:url';
 
 // Load the real Workbox strategy selected by the actual Vite PWA configuration.
 globalThis.self = globalThis;
@@ -10,8 +11,10 @@ globalThis.registration = { scope: 'https://etk.example/' };
 process.env.NODE_ENV = 'production';
 const source = readFileSync(new URL('../vite.config.js', import.meta.url), 'utf8');
 let workbox;
-vm.runInNewContext(source.replace(/^import .+$/gm, '').replace('export default', 'globalThis.config ='), {
+vm.runInNewContext(source.replace(/^import .+$/gm, '').replaceAll('import.meta.url', '__VITE_CONFIG_URL__').replace('export default', 'globalThis.config ='), {
   defineConfig: config => config, vue: () => [], version: 'test',
+  vuetify: () => [], AutoImport: () => [], fileURLToPath, URL,
+  __VITE_CONFIG_URL__: new URL('../vite.config.js', import.meta.url).href,
   VitePWA: options => { workbox = options.workbox; return []; },
 });
 const rule = workbox.runtimeCaching.find(rule => rule.urlPattern.test('https://etk.example/api/status'));

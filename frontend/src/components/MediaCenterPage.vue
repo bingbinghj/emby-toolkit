@@ -1,111 +1,96 @@
 <template>
-  <div ref="mediaPage" class="mp-page media-center-page">
+  <div ref="mediaPage" class="media-center-page">
     <div ref="stickyControls" class="media-center-sticky-controls">
-      <n-page-header
-        class="mp-page-header"
-        @back="libraryId ? goToLibraries() : undefined"
-      >
-        <template #title>{{ libraryId ? (library?.name || '媒体库') : '媒体中心' }}</template>
-        <template #back v-if="libraryId">
-          <n-button quaternary circle aria-label="返回媒体库" title="返回媒体库">
-            <template #icon><n-icon><ArrowBackOutline /></n-icon></template>
-          </n-button>
+      <header class="d-flex align-center justify-space-between ga-3 mb-4">
+        <div class="d-flex align-center ga-3 min-width-0">
+          <VBtn v-if="libraryId" icon="mdi-arrow-left" variant="text" color="default"
+            aria-label="返回媒体库" title="返回媒体库" @click="goToLibraries" />
+          <div class="min-width-0">
+            <h1 class="text-h5 font-weight-bold text-truncate">{{ libraryId ? (library?.name || '媒体库') : '媒体中心' }}</h1>
+            <p class="text-body-2 text-medium-emphasis mt-1">{{ libraryId ? `浏览${mediaTypeLabel} · ${total} 项媒体` : '浏览和管理 Emby 媒体库' }}</p>
+          </div>
+        </div>
+        <VBtn icon="mdi-refresh" variant="text" color="default" aria-label="刷新" title="刷新"
+          :loading="loading" @click="refresh" />
+      </header>
+      <VTextField v-if="libraryId" v-model="search" class="library-search"
+        :placeholder="`搜索当前${mediaTypeLabel}`" label="搜索媒体" prepend-inner-icon="mdi-magnify"
+        clearable density="compact" hide-details
+        @update:model-value="onSearchInput" @keyup.enter="searchItems" @click:clear="searchItems">
+        <template #append-inner>
+          <VBtn icon="mdi-magnify" variant="text" size="small" aria-label="搜索" title="搜索"
+            @click.stop="searchItems" />
         </template>
-        <template #extra>
-          <n-button quaternary circle class="refresh-button" aria-label="刷新" title="刷新" @click="refresh" :loading="loading">
-            <template #icon><n-icon><RefreshOutline /></n-icon></template>
-          </n-button>
-        </template>
-      </n-page-header>
-
-      <div v-if="libraryId" class="library-toolbar">
-        <n-input
-          v-model:value="search"
-          clearable
-          :placeholder="`搜索当前${mediaTypeLabel}`"
-          class="library-search"
-          @update:value="onSearchInput"
-          @keyup.enter="searchItems"
-          @clear="searchItems"
-        >
-          <template #prefix><n-icon><SearchOutline /></n-icon></template>
-          <template #suffix>
-            <n-button quaternary circle size="tiny" class="search-submit" aria-label="搜索" title="搜索" @click.stop="searchItems">
-              <template #icon><n-icon><SearchOutline /></n-icon></template>
-            </n-button>
-          </template>
-        </n-input>
-      </div>
+      </VTextField>
     </div>
 
-    <n-alert v-if="error" type="error" closable class="media-center-alert" @close="error = ''">
-      {{ error }}
-    </n-alert>
+    <VAlert v-if="error" type="error" variant="tonal" closable class="my-4" @click:close="error = ''">{{ error }}</VAlert>
 
     <div v-if="!libraryId" class="library-grid" v-show="!loading || libraries.length">
-      <button
-        v-for="item in libraries"
-        :key="item.id"
-        class="library-card"
-        type="button"
-        @click="openLibrary(item.id)"
-      >
-        <div class="library-art">
-          <img v-if="libraryImage(item)" :src="libraryImage(item)" :alt="item.name" />
-          <n-icon v-else class="library-art-icon" size="54">
-            <component :is="libraryIcon(item.collection_type)" />
-          </n-icon>
-          <span class="library-count">{{ item.item_count }}</span>
-        </div>
-        <div class="library-card-body">
-          <strong>{{ item.name }}</strong>
-        </div>
-      </button>
+      <VCard v-for="item in libraries" :key="item.id" tag="button" type="button"
+        class="library-card app-hover-lift-card" :aria-label="`打开${item.name}`" @click="openLibrary(item.id)">
+        <VImg :src="libraryImage(item) || undefined" :aspect-ratio="16 / 9" cover class="library-art"
+          gradient="to bottom, rgba(0,0,0,.02), rgba(0,0,0,.55)">
+          <template #error><div class="poster-fallback"><VIcon :icon="libraryIcon(item.collection_type)" size="54" /></div></template>
+          <div v-if="!libraryImage(item)" class="poster-fallback"><VIcon :icon="libraryIcon(item.collection_type)" size="54" /></div>
+          <VChip class="library-count" color="success" variant="flat" size="small">{{ item.item_count }}</VChip>
+        </VImg>
+        <VCardTitle class="text-body-1 font-weight-bold text-center">{{ item.name }}</VCardTitle>
+        <VCardSubtitle class="pb-4 text-center">{{ libraryType(item.collection_type) }}</VCardSubtitle>
+      </VCard>
     </div>
 
     <div v-else class="library-content">
       <div class="media-browser">
         <div v-if="total" ref="mediaGrid" class="media-grid">
           <template v-for="index in total" :key="index - 1">
-            <button
-              v-if="itemsByIndex[index - 1]"
-              class="media-card"
-              :data-media-index="index - 1"
-              type="button"
-              @click="openMedia(itemsByIndex[index - 1].Id)"
-            >
-              <div class="media-poster-wrap">
-                <img v-if="itemImage(itemsByIndex[index - 1])" :src="itemImage(itemsByIndex[index - 1])" :alt="itemsByIndex[index - 1].Name" loading="lazy" />
-                <div v-else class="poster-fallback"><n-icon size="32"><component :is="libraryIcon(itemsByIndex[index - 1].Type)" /></n-icon></div>
+            <VHover v-if="itemsByIndex[index - 1]" v-slot="{ isHovering, props: hoverProps }">
+              <div v-bind="hoverProps" class="media-card-hover-area" :data-media-index="index - 1">
+                <VCard tag="button" type="button" :ripple="false" class="media-card app-hover-lift-card"
+                  :class="{ 'app-hover-lift-card--hovering': isHovering }"
+                  :data-glass-optical-mode="posterIsLoaded(itemsByIndex[index - 1]) ? 'excluded' : undefined"
+                  :aria-label="`编辑 ${itemsByIndex[index - 1].Name}`" @click="openMedia(itemsByIndex[index - 1].Id)">
+                  <VImg :src="itemImage(itemsByIndex[index - 1]) || undefined" :aspect-ratio="2 / 3" cover
+                    class="media-poster-wrap" @load="markPosterLoaded">
+                    <template #placeholder><div class="poster-fallback"><VProgressCircular v-if="itemImage(itemsByIndex[index - 1])" indeterminate size="24" width="2" /></div></template>
+                    <template #error><div class="poster-fallback"><VIcon :icon="libraryIcon(itemsByIndex[index - 1].Type)" size="36" /></div></template>
+                    <div v-if="!itemImage(itemsByIndex[index - 1])" class="poster-fallback"><VIcon :icon="libraryIcon(itemsByIndex[index - 1].Type)" size="36" /></div>
+                    <VChip v-if="itemsByIndex[index - 1].CommunityRating" class="media-rating" color="warning" variant="flat" size="x-small" prepend-icon="mdi-star">
+                      {{ Number(itemsByIndex[index - 1].CommunityRating).toFixed(1) }}
+                    </VChip>
+                    <div v-if="isHovering" class="media-card-detail">
+                      <span class="text-caption">{{ itemsByIndex[index - 1].ProductionYear }}</span>
+                      <h2 class="text-body-1 font-weight-bold my-2">{{ itemsByIndex[index - 1].Name }}</h2>
+                      <p v-if="itemsByIndex[index - 1].Overview" class="media-overview text-caption mb-3">{{ itemsByIndex[index - 1].Overview }}</p>
+                      <span class="d-flex align-center ga-2 text-caption"><VIcon icon="mdi-pencil-outline" size="18" />打开媒体编辑</span>
+                    </div>
+                  </VImg>
+                  <VCardText class="pa-3">
+                    <div class="media-card-title" :title="itemsByIndex[index - 1].Name">{{ itemsByIndex[index - 1].Name }}</div>
+                    <div class="media-card-meta">
+                      <span v-if="itemsByIndex[index - 1].ProductionYear">{{ itemsByIndex[index - 1].ProductionYear }}</span>
+                      <span v-if="itemsByIndex[index - 1].Type === 'Series' && itemsByIndex[index - 1].ChildCount">{{ itemsByIndex[index - 1].ChildCount }} 季</span>
+                    </div>
+                  </VCardText>
+                </VCard>
               </div>
-              <div class="media-card-title" :title="itemsByIndex[index - 1].Name">{{ itemsByIndex[index - 1].Name }}</div>
-              <div class="media-card-meta">
-                <span v-if="itemsByIndex[index - 1].ProductionYear">{{ itemsByIndex[index - 1].ProductionYear }}</span>
-                <span v-if="itemsByIndex[index - 1].Type === 'Series' && itemsByIndex[index - 1].ChildCount">{{ itemsByIndex[index - 1].ChildCount }} 季</span>
-              </div>
-            </button>
+            </VHover>
             <div v-else class="media-card-placeholder" aria-hidden="true"></div>
           </template>
         </div>
-
-        <n-empty v-else-if="!loading" :description="emptyDescription" class="media-empty" />
-
+        <VCard v-else-if="!loading" variant="tonal" class="media-empty pa-8 text-center">
+          <VIcon icon="mdi-movie-search-outline" size="54" color="secondary" />
+          <p class="text-body-1 text-medium-emphasis mt-4">{{ emptyDescription }}</p>
+        </VCard>
         <nav class="alphabet-nav" :style="alphabetStyle" aria-label="按首字母筛选">
-          <button
-            v-for="letter in letters"
-            :key="letter"
-            type="button"
-            :class="{ 'is-active': selectedLetter === letter }"
-            :title="letter === '#' ? '全部' : '按首字母筛选'"
-            @click="selectLetter(letter)"
-          >
-            {{ letter }}
-          </button>
+          <VBtn v-for="letter in letters" :key="letter" :variant="selectedLetter === letter ? 'tonal' : 'text'"
+            :color="selectedLetter === letter ? 'primary' : 'default'" size="x-small"
+            :title="letter === '#' ? '全部' : `按首字母 ${letter} 筛选`" :aria-pressed="selectedLetter === letter"
+            @click="selectLetter(letter)">{{ letter }}</VBtn>
         </nav>
       </div>
     </div>
-
-    <div v-if="loading && !hasContent" class="media-center-loading"><n-spin size="large" /></div>
+    <div v-if="loading && !hasContent" class="media-center-loading"><VProgressCircular indeterminate size="40" width="3" /></div>
   </div>
 </template>
 
@@ -113,17 +98,6 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import axios from 'axios';
-import {
-  NAlert, NButton, NEmpty, NIcon, NInput, NPageHeader, NSpin,
-} from 'naive-ui';
-import {
-  ArrowBackOutline,
-  FilmOutline,
-  MusicalNoteOutline,
-  RefreshOutline,
-  SearchOutline,
-  TvOutline,
-} from '@vicons/ionicons5';
 
 const route = useRoute();
 const router = useRouter();
@@ -167,10 +141,10 @@ const libraryType = (type) => ({
 const libraryIcon = (type) => {
   const normalized = String(type || '').toLowerCase();
   return normalized === 'music' || normalized === 'musicalbum'
-    ? MusicalNoteOutline
+    ? 'mdi-music-note'
     : normalized === 'tvshows' || normalized === 'series'
-      ? TvOutline
-      : FilmOutline;
+      ? 'mdi-television'
+      : 'mdi-movie-open-outline';
 };
 
 const mediaTypeLabel = computed(() => library.value
@@ -185,6 +159,12 @@ const itemImage = (item) => {
   const tag = item.ImageTags?.Primary;
   return tag ? `/image_proxy/Items/${item.Id}/Images/Primary?tag=${encodeURIComponent(tag)}&quality=90` : '';
 };
+
+const loadedPosterUrls = ref(new Set());
+const absolutePosterUrl = url => url ? new URL(url, window.location.href).href : '';
+const markPosterLoaded = url => { if (url) loadedPosterUrls.value.add(absolutePosterUrl(url)); };
+const posterIsLoaded = item => loadedPosterUrls.value.has(absolutePosterUrl(itemImage(item)));
+
 
 const loadLibraries = async () => {
   loading.value = true;
@@ -219,7 +199,7 @@ const loadPage = async (startIndex, { reset = false, target = null } = {}) => {
     const response = await axios.get(`/api/media_center/libraries/${encodeURIComponent(libraryId.value)}/items`, {
       params: {
         page_size: pageSize,
-        search: search.value.trim(),
+        search: String(search.value || '').trim(),
         ...(reset && selectedLetter.value !== '#'
           ? { letter: selectedLetter.value === '#' ? '' : selectedLetter.value }
           : { start_index: normalizedStart }),
@@ -262,15 +242,18 @@ const resetBrowserPosition = () => {
   mediaPage.value?.scrollTo({ top: 0, behavior: 'auto' });
 };
 const searchItems = () => {
+  clearTimeout(searchTimer);
   resetBrowserPosition();
   loadPage(0, { reset: true });
 };
 const onSearchInput = (value) => {
+  search.value = String(value ?? '');
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => searchItems(), 320);
 };
 const selectLetter = (letter) => {
   if (selectedLetter.value === letter) return;
+  clearTimeout(searchTimer);
   selectedLetter.value = letter;
   resetBrowserPosition();
   loadPage(0, { reset: true });
@@ -377,54 +360,32 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.media-center-page { position:relative; height:100%; min-height:0; overflow-y:auto; padding:0 4px 24px 0; color:var(--ui-text); }
-:global(.page-content-inner-wrapper.media-center-layout) { height: 100%; overflow: visible; }
-.media-center-sticky-controls { position:sticky; z-index:4; top:0; padding:0 0 12px; background:color-mix(in srgb,var(--ui-page-bg) 94%,transparent); backdrop-filter:blur(8px); }
-.media-center-sticky-controls .mp-page-header { margin-bottom:0; }
-.media-center-alert { margin: 18px 0; }
-.library-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,220px),1fr)); gap:24px 20px; margin-top:20px; }
-.library-card { position: relative; min-width: 0; padding: 0; border: 0; border-radius: 8px; color: var(--ui-text); background: transparent; cursor: pointer; text-align: left; }
-.library-card:hover .library-art { border-color:var(--accent-color); box-shadow:var(--ui-shadow-hover); transform:translateY(-2px); }
-.library-art { position: relative; display: grid; aspect-ratio: 16 / 9; place-items: center; overflow: hidden; border: 1px solid var(--ui-border); border-radius: 8px; color: #fff; background: var(--ui-surface-muted); box-shadow: var(--ui-shadow); transition: border-color .2s, transform .2s, box-shadow .2s; }
-.library-art::before { position: absolute; z-index: 1; inset: 0; background: linear-gradient(90deg, rgba(0, 0, 0, .56), rgba(0, 0, 0, .06)); content: ''; }
-.library-art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-.library-art-icon, .library-art-title, .library-count { z-index: 2; }
-.library-art-icon { position: absolute; left: 16px; opacity: .9; }
-.library-count { position:absolute; top:10px; right:10px; display:grid; min-width:28px; aspect-ratio:1; padding:6px; box-sizing:border-box; place-items:center; border:1px solid rgba(255,255,255,.32); border-radius:50%; color:#fff; background:#52b54b; font-size:11px; font-weight:600; line-height:1; white-space:nowrap; }
-.library-card-body { display: flex; min-width: 0; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 9px 4px 0; text-align: center; }
-.library-card-body strong { width:100%; overflow:hidden; font-size:14px; text-overflow:ellipsis; white-space:nowrap; }
-.library-card-body span, .result-count { flex-shrink: 0; color: var(--ui-text-muted); font-size: 12px; }
-.library-toolbar { display:flex; align-items:center; gap:14px; margin:20px 0 8px; }
-.library-search { width: min(460px, 100%); }
-.library-search :deep(.n-input) { border: 1px solid var(--ui-border-strong); border-radius: 10px; background: var(--ui-surface); box-shadow: 0 2px 10px rgba(15, 23, 42, .06); transition: border-color .2s, box-shadow .2s; }
-.library-search :deep(.n-input:hover), .library-search :deep(.n-input.n-input--focus) { border-color: var(--n-primary-color); box-shadow: 0 0 0 3px color-mix(in srgb, var(--n-primary-color) 15%, transparent); }
-.search-submit { color: var(--n-primary-color); }
+.media-center-page { position:relative; height:100%; min-height:0; overflow-y:auto; padding:0 4px 24px 0; }
+:global(.page-content-inner-wrapper.media-center-layout) { height:100%; overflow:visible; }
+.media-center-sticky-controls { position:sticky; z-index:4; top:0; padding:0 0 16px; background:rgba(var(--v-theme-background),.84); backdrop-filter:blur(12px); }
+.min-width-0 { min-width:0; }
+.library-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,220px),1fr)); gap:24px; margin-top:20px; }
+.library-card { min-width:0; width:100%; text-align:left; cursor:pointer; }
+.library-art { background:rgba(var(--v-theme-on-surface),.06); }
+.library-count { position:absolute; top:12px; right:12px; }
+.library-search { width:min(480px,100%); }
 .media-browser { position:relative; display:grid; grid-template-columns:minmax(0,1fr) 34px; gap:16px; align-items:start; }
-.media-grid { display:grid; grid-auto-rows:auto; grid-template-columns:repeat(auto-fill,minmax(min(100%,148px),1fr)); gap:24px 18px; margin-top:16px; }
-.media-card, .media-card-placeholder { min-width:0; height:auto; }
-.media-card { padding: 0; border: 0; color: var(--ui-text); background: transparent; cursor: pointer; text-align: left; }
+.media-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,148px),1fr)); gap:24px 18px; margin-top:16px; }
+.media-card-hover-area { min-width:0; height:100%; }
+.media-card { min-width:0; width:100%; height:100%; text-align:left; cursor:pointer; }
+.media-poster-wrap { position:relative; background:rgba(var(--v-theme-on-surface),.06); }
 .media-card-placeholder::before { content:''; display:block; aspect-ratio:2/3; }
-.media-card-placeholder::after { content:''; display:block; height:50px; }
-.media-card:hover .media-poster-wrap { box-shadow:0 0 0 2px var(--accent-color),var(--ui-shadow-hover); transform:translateY(-3px); }
-.media-poster-wrap { position: relative; aspect-ratio: 2 / 3; overflow: hidden; border: 1px solid var(--ui-border); border-radius: 7px; background: var(--ui-surface-muted); box-shadow: var(--ui-shadow); transition: border-color .2s, transform .2s, box-shadow .2s; }
-.media-poster-wrap img { display: block; width: 100%; height: 100%; object-fit: cover; }
-.poster-fallback { display: grid; width: 100%; height: 100%; place-items: center; color: var(--ui-text-muted); }
-.media-type { position: absolute; top: 8px; left: 8px; padding: 3px 7px; border-radius: 4px; color: #fff; background: rgba(15, 23, 42, .72); font-size: 11px; }
-.media-card-title { margin:9px 2px 3px; overflow:hidden; font-size:14px; font-weight:600; line-height:20px; text-align:center; text-overflow:ellipsis; white-space:nowrap; }
-.media-card-meta { display:flex; min-height:18px; justify-content:center; gap:8px; margin:0 2px; color:var(--ui-text-muted); font-size:12px; line-height:18px; text-align:center; }
-.media-empty { margin: 70px 0; }
-.load-before-sentinel { min-height: 12px; display: flex; align-items: center; justify-content: center; }
-.load-more-sentinel { display: flex; min-height: 54px; align-items: center; justify-content: center; gap: 10px; color: var(--ui-text-muted); font-size: 12px; }
-.alphabet-nav { position:sticky; z-index:3; top:0; grid-column:2; display:flex; flex-direction:column; gap:2px; margin-top:16px; padding:4px 2px; overflow-y:auto; border:1px solid var(--ui-border); border-radius:8px; background:var(--modal-solid-bg-color); box-shadow:var(--ui-shadow); scrollbar-width:none; }
-.alphabet-nav::-webkit-scrollbar { display: none; }
-.alphabet-nav button { flex:0 0 20px; width:28px; height:20px; padding:0; border:0; border-radius:5px; color:var(--ui-text-muted); background:transparent; cursor:pointer; font-size:12px; line-height:20px; }
-.alphabet-nav button:hover, .alphabet-nav button.is-active { color:var(--ui-primary-text); background:var(--accent-glow-color); font-weight:700; }
-.media-center-loading { position: fixed; inset: 64px 0 0 244px; display: grid; place-items: center; pointer-events: none; background: color-mix(in srgb, var(--ui-page-bg) 45%, transparent); }
-@container (max-width:540px) {
-  .library-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px 12px; }
-  .media-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:20px 12px; }
-  .library-toolbar { align-items:stretch; }
-  .library-search { width:100%; }
-}
-@media (max-width:959px) { .media-center-loading { left:0; } }
+.media-card-placeholder::after { content:''; display:block; height:72px; }
+.poster-fallback { display:flex; align-items:center; justify-content:center; height:100%; width:100%; color:rgba(var(--v-theme-on-surface),.45); }
+.media-card-detail { position:absolute; inset:0; display:flex; flex-direction:column; justify-content:flex-end; padding:12px; color:#fff; text-align:left; background:linear-gradient(rgba(45,55,72,.4),rgba(45,55,72,.9)); }
+.media-overview { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+.media-rating { position:absolute; top:8px; right:8px; }
+.media-card-title { overflow:hidden; font-size:14px; font-weight:600; line-height:20px; text-align:center; text-overflow:ellipsis; white-space:nowrap; }
+.media-card-meta { display:flex; min-height:18px; justify-content:center; gap:8px; margin-top:6px; color:rgba(var(--v-theme-on-surface),.6); font-size:12px; line-height:18px; }
+.media-empty { margin:50px 0; }
+.alphabet-nav { position:sticky; z-index:3; top:0; grid-column:2; display:flex; flex-direction:column; gap:2px; margin-top:16px; padding:4px 2px; overflow-y:auto; border:1px solid rgba(var(--v-border-color),var(--v-border-opacity)); border-radius:12px; background:rgb(var(--v-theme-surface)); scrollbar-width:none; }
+.alphabet-nav::-webkit-scrollbar { display:none; }
+.alphabet-nav :deep(.v-btn) { flex:0 0 22px; min-width:28px; width:28px; height:22px; padding:0; font-size:12px; }
+.media-center-loading { position:absolute; inset:100px 0 0; display:grid; place-items:center; pointer-events:none; }
+@media (max-width:600px) { .library-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px 12px; } .media-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:20px 12px; } .media-browser { gap:10px; } }
 </style>

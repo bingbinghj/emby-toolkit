@@ -1,291 +1,158 @@
-<!-- src/components/modals/MappingManager.vue -->
+<!-- Metadata mappings use the MoviePilot v3 Vuetify form and dialog components. -->
 <template>
   <div class="mapping-manager">
-    <n-tabs type="line" animated v-model:value="activeTab">
+    <VProgressLinear v-if="isLoading" indeterminate color="primary" aria-label="正在加载映射配置" class="mb-4" />
+    <VAlert v-if="loadError" type="error" variant="tonal" title="映射配置加载失败" :text="loadError" class="mb-4">
+      <template #append><VBtn variant="text" :loading="isLoading" @click="fetchData">重新加载</VBtn></template>
+    </VAlert>
+    <VTabs v-model="activeTab" :disabled="!isReady" show-arrows class="mapping-tabs">
+      <VTab value="keywords" prepend-icon="mdi-tag-outline">关键词</VTab>
+      <VTab value="studios" prepend-icon="mdi-domain">工作室</VTab>
+      <VTab value="countries" prepend-icon="mdi-earth">国家/地区</VTab>
+      <VTab value="languages" prepend-icon="mdi-translate">原语言</VTab>
+      <VTab value="rating_labels" prepend-icon="mdi-label-outline">分级标签</VTab>
+      <VTab value="ratings" prepend-icon="mdi-shield-account-outline">分级制度</VTab>
+    </VTabs>
 
-      <!-- Tab 1: 关键词 -->
-      <n-tab-pane name="keywords"><template #tab><span class="mp-title-with-icon"><UiIcon name="settings" :size="16" />关键词</span></template>
-        <n-alert type="info" :bordered="false" class="mb-4">
-          将中文标签映射到 TMDb 的英文关键词或 ID。
-        </n-alert>
-        <div class="list-header">
-          <div class="col-handle"></div>
-          <div class="col-label">中文标签</div>
-          <div class="col-en">英文关键词</div>
-          <div class="col-ids">TMDb IDs</div>
-          <div class="col-action">操作</div>
-        </div>
+    <VWindow v-if="isReady" v-model="activeTab" class="mapping-content">
+      <VWindowItem value="keywords" eager>
+        <VAlert type="info" variant="tonal" class="mb-4">将中文标签映射到 TMDb 的英文关键词或 ID。</VAlert>
         <div ref="keywordListRef" class="sortable-list">
-          <div v-for="(item, index) in keywordList" :key="item.id" class="list-item">
-            <div class="col-handle drag-handle"><n-icon :component="DragIcon" /></div>
-            <div class="col-label" data-label="中文名称"><n-input v-model:value="item.label" placeholder="例如：丧尸" /></div>
-            <div class="col-en" data-label="英文名称"><n-input v-model:value="item.en" placeholder="zombie" /></div>
-            <div class="col-ids" data-label="TMDb IDs"><n-input v-model:value="item.ids" placeholder="12377" /></div>
-            <div class="col-action">
-              <n-button circle text type="error" aria-label="删除此映射" title="删除此映射" @click="removeItem(keywordList, index)"><n-icon :component="DeleteIcon" /></n-button>
-            </div>
-          </div>
+          <VCard v-for="(item, index) in keywordList" :key="item.id" variant="outlined" class="list-item">
+            <div class="col-handle drag-handle" aria-label="拖动调整顺序"><VIcon icon="mdi-drag-vertical" /></div>
+            <VTextField v-model="item.label" label="中文标签" placeholder="例如：丧尸" :disabled="isSaving" class="col-label" />
+            <VTextField v-model="item.en" label="英文关键词" placeholder="zombie" :disabled="isSaving" class="col-en" />
+            <VTextField v-model="item.ids" label="TMDb IDs" placeholder="12377" :disabled="isSaving" class="col-ids" />
+            <VBtn icon="mdi-delete-outline" variant="text" color="error" :disabled="isSaving" aria-label="删除此映射" @click="removeItem(keywordList, index)" />
+          </VCard>
         </div>
-        <n-button dashed block class="mt-4" @click="addItem(keywordList)"><template #icon><UiIcon name="add" /></template>添加关键词</n-button>
-      </n-tab-pane>
+        <VBtn block variant="outlined" prepend-icon="mdi-plus" class="mt-4" :disabled="isSaving" @click="addItem(keywordList)">添加关键词</VBtn>
+      </VWindowItem>
 
-      <!-- Tab 2: 工作室 -->
-      <n-tab-pane name="studios"><template #tab><span class="mp-title-with-icon"><UiIcon name="settings" :size="16" />工作室</span></template>
-        <n-alert type="info" :bordered="false" class="mb-4">
-          配置出品公司或播出平台。<b>请区分电影制作公司和电视播出平台 ID。</b>
-        </n-alert>
-        <div class="list-header">
-          <div class="col-handle"></div>
-          <div class="col-label">中文简称</div>
-          <div class="col-en">英文原名</div>
-          <!-- ★★★ 修改：拆分为两列 ★★★ -->
-          <div class="col-ids">制作公司 IDs (Movie)</div>
-          <div class="col-ids">播出平台 IDs (TV)</div>
-          <div class="col-action">操作</div>
-        </div>
+      <VWindowItem value="studios" eager>
+        <VAlert type="info" variant="tonal" class="mb-4">配置出品公司或播出平台。请区分电影制作公司和电视播出平台 ID。</VAlert>
         <div ref="studioListRef" class="sortable-list">
-          <div v-for="(item, index) in studioList" :key="item.id" class="list-item">
-            <div class="col-handle drag-handle"><n-icon :component="DragIcon" /></div>
-            <div class="col-label" data-label="中文名称"><n-input v-model:value="item.label" placeholder="例如：爱奇艺" /></div>
-            <div class="col-en" data-label="英文名称"><n-input v-model:value="item.en" placeholder="iQIYI" /></div>
-
-            <!-- ★★★ 修改：两个输入框 ★★★ -->
-            <div class="col-ids" data-label="制作公司 IDs（电影）">
-              <n-input v-model:value="item.company_ids" placeholder="Company ID" />
-            </div>
-            <div class="col-ids" data-label="播出平台 IDs（电视）">
-              <n-input v-model:value="item.network_ids" placeholder="Network ID" />
-            </div>
-
-            <div class="col-action">
-              <n-button circle text type="error" aria-label="删除此映射" title="删除此映射" @click="removeItem(studioList, index)"><n-icon :component="DeleteIcon" /></n-button>
-            </div>
-          </div>
+          <VCard v-for="(item, index) in studioList" :key="item.id" variant="outlined" class="list-item studio-item">
+            <div class="col-handle drag-handle" aria-label="拖动调整顺序"><VIcon icon="mdi-drag-vertical" /></div>
+            <VTextField v-model="item.label" label="中文简称" placeholder="例如：爱奇艺" :disabled="isSaving" class="col-label" />
+            <VTextField v-model="item.en" label="英文原名" placeholder="iQIYI" :disabled="isSaving" class="col-en" />
+            <VTextField v-model="item.company_ids" label="制作公司 IDs（电影）" placeholder="Company ID" :disabled="isSaving" class="col-ids" />
+            <VTextField v-model="item.network_ids" label="播出平台 IDs（电视）" placeholder="Network ID" :disabled="isSaving" class="col-ids" />
+            <VBtn icon="mdi-delete-outline" variant="text" color="error" :disabled="isSaving" aria-label="删除此映射" @click="removeItem(studioList, index)" />
+          </VCard>
         </div>
-        <n-button dashed block class="mt-4" @click="addItem(studioList)"><template #icon><UiIcon name="add" /></template>添加工作室</n-button>
-      </n-tab-pane>
+        <VBtn block variant="outlined" prepend-icon="mdi-plus" class="mt-4" :disabled="isSaving" @click="addItem(studioList, 'studio')">添加工作室</VBtn>
+      </VWindowItem>
 
-      <!-- Tab 3: 国家/地区 -->
-      <n-tab-pane name="countries"><template #tab><span class="mp-title-with-icon"><UiIcon name="settings" :size="16" />国家/地区</span></template>
-        <n-alert type="info" :bordered="false" class="mb-4">
-          配置国家/地区代码映射。<b>ISO代码</b>用于API筛选，<b>别名</b>用于元数据翻译匹配。
-        </n-alert>
-        <div class="list-header">
-          <div class="col-handle"></div>
-          <div class="col-label">中文名称</div>
-          <div class="col-en">ISO 代码 (如 US)</div>
-          <div class="col-extra">别名 (逗号分隔)</div>
-          <div class="col-action">操作</div>
-        </div>
+      <VWindowItem value="countries" eager>
+        <VAlert type="info" variant="tonal" class="mb-4">配置国家/地区代码映射。ISO 代码用于 API 筛选，别名用于元数据翻译匹配。</VAlert>
         <div ref="countryListRef" class="sortable-list">
-          <div v-for="(item, index) in countryList" :key="item.id" class="list-item">
-            <div class="col-handle drag-handle"><n-icon :component="DragIcon" /></div>
-            <div class="col-label" data-label="中文名称"><n-input v-model:value="item.label" placeholder="例如：美国" /></div>
-            <div class="col-en" data-label="ISO 代码"><n-input v-model:value="item.value" placeholder="US" /></div>
-            <div class="col-extra" data-label="别名（逗号分隔）"><n-input v-model:value="item.aliases" placeholder="USA, United States" /></div>
-            <div class="col-action">
-              <n-button circle text type="error" aria-label="删除此映射" title="删除此映射" @click="removeItem(countryList, index)"><n-icon :component="DeleteIcon" /></n-button>
-            </div>
-          </div>
+          <VCard v-for="(item, index) in countryList" :key="item.id" variant="outlined" class="list-item">
+            <div class="col-handle drag-handle" aria-label="拖动调整顺序"><VIcon icon="mdi-drag-vertical" /></div>
+            <VTextField v-model="item.label" label="中文名称" placeholder="例如：美国" :disabled="isSaving" class="col-label" />
+            <VTextField v-model="item.value" label="ISO 代码" placeholder="US" :disabled="isSaving" class="col-en" />
+            <VTextField v-model="item.aliases" label="别名（逗号分隔）" placeholder="USA, United States" :disabled="isSaving" class="col-extra" />
+            <VBtn icon="mdi-delete-outline" variant="text" color="error" :disabled="isSaving" aria-label="删除此映射" @click="removeItem(countryList, index)" />
+          </VCard>
         </div>
-        <n-button dashed block class="mt-4" @click="addItem(countryList, 'country')"><template #icon><UiIcon name="add" /></template>添加国家/地区</n-button>
-      </n-tab-pane>
+        <VBtn block variant="outlined" prepend-icon="mdi-plus" class="mt-4" :disabled="isSaving" @click="addItem(countryList, 'country')">添加国家/地区</VBtn>
+      </VWindowItem>
 
-      <!-- Tab 4: 原语言 -->
-      <n-tab-pane name="languages"><template #tab><span class="mp-title-with-icon"><UiIcon name="settings" :size="16" />原语言</span></template>
-        <n-alert type="info" :bordered="false" class="mb-4">
-          配置语言代码映射。用于筛选器的语言选项。<b>别名</b>可用于兼容TMDb的历史遗留代码（如 cn 和 yue），以及压制组各种不规范的参数用于格式化媒体信息，注意别名第一个必须用三位语言代码。
-        </n-alert>
-        <div class="list-header">
-          <div class="col-handle"></div>
-          <div class="col-label">中文名称</div>
-          <div class="col-en">ISO 代码 (如 en)</div>
-          <!-- ★★★ 核心修改：把 col-empty 换成别名输入框 ★★★ -->
-          <div class="col-extra">别名 (逗号分隔)</div>
-          <div class="col-action">操作</div>
-        </div>
+      <VWindowItem value="languages" eager>
+        <VAlert type="info" variant="tonal" class="mb-4">配置筛选器使用的语言代码。别名兼容历史语言代码和媒体信息标记，首个别名应填写三位语言代码。</VAlert>
         <div ref="languageListRef" class="sortable-list">
-          <div v-for="(item, index) in languageList" :key="item.id" class="list-item">
-            <div class="col-handle drag-handle"><n-icon :component="DragIcon" /></div>
-            <div class="col-label" data-label="中文名称"><n-input v-model:value="item.label" placeholder="例如：粤语" /></div>
-            <div class="col-en" data-label="ISO 代码"><n-input v-model:value="item.value" placeholder="cn" /></div>
-            <!-- ★★★ 核心修改：绑定 item.aliases ★★★ -->
-            <div class="col-extra" data-label="别名（逗号分隔）"><n-input v-model:value="item.aliases" placeholder="yue, cmn" /></div>
-            <div class="col-action">
-              <n-button circle text type="error" aria-label="删除此映射" title="删除此映射" @click="removeItem(languageList, index)"><n-icon :component="DeleteIcon" /></n-button>
-            </div>
-          </div>
+          <VCard v-for="(item, index) in languageList" :key="item.id" variant="outlined" class="list-item">
+            <div class="col-handle drag-handle" aria-label="拖动调整顺序"><VIcon icon="mdi-drag-vertical" /></div>
+            <VTextField v-model="item.label" label="中文名称" placeholder="例如：粤语" :disabled="isSaving" class="col-label" />
+            <VTextField v-model="item.value" label="ISO 代码" placeholder="cn" :disabled="isSaving" class="col-en" />
+            <VTextField v-model="item.aliases" label="别名（逗号分隔）" placeholder="yue, cmn" :disabled="isSaving" class="col-extra" />
+            <VBtn icon="mdi-delete-outline" variant="text" color="error" :disabled="isSaving" aria-label="删除此映射" @click="removeItem(languageList, index)" />
+          </VCard>
         </div>
-        <n-button dashed block class="mt-4" @click="addItem(languageList, 'language')"><template #icon><UiIcon name="add" /></template>添加语言</n-button>
-      </n-tab-pane>
+        <VBtn block variant="outlined" prepend-icon="mdi-plus" class="mt-4" :disabled="isSaving" @click="addItem(languageList, 'language')">添加语言</VBtn>
+      </VWindowItem>
 
-      <!-- Tab 5: 分级标签 -->
-      <n-tab-pane name="rating_labels"><template #tab><span class="mp-title-with-icon"><UiIcon name="settings" :size="16" />分级标签</span></template>
-        <n-alert type="info" :bordered="false" class="mb-4">
-          定义系统中可用的<b>中文分级名称</b>（如“全年龄”、“限制级”）。<br/>
-          这些标签将用于下方的“分级制度”映射以及分级筛选器。
-        </n-alert>
-        <div class="list-header">
-          <div class="col-handle"></div>
-          <div class="col-label" style="flex: 1">中文分级名称</div>
-          <div class="col-action">操作</div>
-        </div>
+      <VWindowItem value="rating_labels" eager>
+        <VAlert type="info" variant="tonal" class="mb-4">定义可用的中文分级名称，如“全年龄”、“限制级”。这些标签用于分级制度映射和分级筛选器。</VAlert>
         <div ref="ratingLabelListRef" class="sortable-list">
-          <div v-for="(item, index) in ratingLabelList" :key="item.id" class="list-item">
-            <div class="col-handle drag-handle"><n-icon :component="DragIcon" /></div>
-            <div class="col-label" data-label="中文分级名称">
-              <n-input v-model:value="item.label" placeholder="例如：儿童专区" />
-            </div>
-            <div class="col-action">
-              <n-button circle text type="error" aria-label="删除此映射" title="删除此映射" @click="removeItem(ratingLabelList, index)">
-                <n-icon :component="DeleteIcon" />
-              </n-button>
-            </div>
-          </div>
+          <VCard v-for="(item, index) in ratingLabelList" :key="item.id" variant="outlined" class="list-item">
+            <div class="col-handle drag-handle" aria-label="拖动调整顺序"><VIcon icon="mdi-drag-vertical" /></div>
+            <VTextField v-model="item.label" label="中文分级名称" placeholder="例如：儿童专区" :disabled="isSaving" class="simple-label" />
+            <VBtn icon="mdi-delete-outline" variant="text" color="error" :disabled="isSaving" aria-label="删除此映射" @click="removeItem(ratingLabelList, index)" />
+          </VCard>
         </div>
-        <n-button dashed block class="mt-4" @click="addItem(ratingLabelList, 'simple')"><template #icon><UiIcon name="add" /></template>添加分级标签</n-button>
-      </n-tab-pane>
+        <VBtn block variant="outlined" prepend-icon="mdi-plus" class="mt-4" :disabled="isSaving" @click="addItem(ratingLabelList, 'simple')">添加分级标签</VBtn>
+      </VWindowItem>
 
-      <!-- Tab 6: 分级制度 (映射) -->
-      <n-tab-pane name="ratings"><template #tab><span class="mp-title-with-icon"><UiIcon name="settings" :size="16" />分级制度</span></template>
-        <n-alert type="info" :bordered="false" class="mb-4">
-          TMDb 返回各国分级数据。在此定义<b>优先级</b>和<b>中文映射</b>。<br/>
-          <b>Emby等级值</b>：用于封面生成时的权限控制 (G=1, PG=5, PG-13=8, R=9, NC-17=10, XXX=15)。
-        </n-alert>
-
-        <!-- 1. 优先级策略 -->
-        <n-card size="small" title="优先级策略" class="mb-4" embedded>
-          <template #header-extra>
-            <n-text depth="3" style="font-size: 12px">拖拽调整查找顺序</n-text>
-          </template>
-          <div ref="ratingPriorityRef" class="priority-tags">
-            <n-tag
-              v-for="(country, index) in ratingPriority"
-              :key="country"
-              closable
-              @close="removePriority(index)"
-              class="priority-tag drag-handle"
-              :type="country === 'ORIGIN' ? 'success' : 'default'"
-            >
-              {{ country === 'ORIGIN' ? '原产国 (自动)' : getCountryName(country) }}
-            </n-tag>
-
-            <!-- 添加优先级的下拉框 -->
-            <n-popselect
-              v-model:value="newPriorityCountry"
-              :options="availablePriorityOptions"
-              trigger="click"
-              @update:value="addPriority"
-              scrollable
-            >
-              <n-button dashed size="small" type="primary">
-                <template #icon><n-icon :component="AddIcon" /></template>
-                添加国家
-              </n-button>
-            </n-popselect>
-          </div>
-        </n-card>
-
-        <!-- 2. 分级映射表 -->
-        <div class="list-header rating-list-header">
-          <div class="col-label" style="flex: 1">国家/地区分级表 (跟随优先级排序)</div>
-          <div class="col-action">
-            <n-button size="tiny" dashed @click="addRatingCountry"><template #icon><UiIcon name="add" /></template>添加国家</n-button>
-          </div>
-        </div>
-
-        <div class="rating-container">
-          <n-collapse display-directive="show" :default-expanded-names="['US']">
-
-            <n-collapse-item
-              v-for="countryCode in sortedMappingKeys"
-              :key="countryCode"
-              :title="getCountryName(countryCode)"
-              :name="countryCode"
-            >
-              <template #header-extra>
-                <n-button size="tiny" type="error" text @click.stop="removeRatingCountry(countryCode)"><template #icon><UiIcon name="delete" /></template>删除整组</n-button>
-              </template>
-
-              <!-- 具体分级规则表格 -->
-              <!-- ★★★ 修改：初始化时增加 emby_value 字段 ★★★ -->
-              <n-dynamic-input
-                v-model:value="ratingMapping[countryCode]"
-                :on-create="() => ({ code: '', label: '全年龄', emby_value: null })"
-              >
-                <template #default="{ value }">
-                  <div class="rating-rule">
-                    <!-- 1. 原始分级代码 -->
-                    <n-input v-model:value="value.code" placeholder="原始分级 (如 R)" :input-props="{ 'aria-label': '原始分级代码' }" class="rating-code" />
-
-                    <!-- 2. Emby 等级值 (新增) -->
-                    <n-tooltip trigger="focus">
-                      <template #trigger>
-                        <n-input-number
-                          v-model:value="value.emby_value"
-                          placeholder="等级值"
-                          :min="0"
-                          :max="100"
-                          class="rating-value" :input-props="{ 'aria-label': 'Emby 等级值' }"
-                          :show-button="false"
-                        >
-                          <template #suffix>级</template>
-                        </n-input-number>
-                      </template>
-                      Emby 内部限制等级 (MaxParentalRating)<br/>
-                      参考值：G=1, PG=5, PG-13=8, R=9, NC-17=10, XXX=15
-                    </n-tooltip>
-
-                    <div class="rating-rule-arrow" aria-hidden="true">➜</div>
-
-                    <!-- 3. 中文标签 -->
-                    <n-select
-                      v-model:value="value.label"
-                      :options="dynamicRatingOptions"
-                      placeholder="选择中文标签"
-                      class="rating-label" aria-label="中文分级标签"
-                      filterable
-                      tag
-                    />
-                  </div>
+      <VWindowItem value="ratings" eager>
+        <VAlert type="info" variant="tonal" class="mb-4">配置各国分级的查找优先级及中文映射。Emby 等级值用于封面权限控制：G=1、PG=5、PG-13=8、R=9、NC-17=10、XXX=15。</VAlert>
+        <VCard variant="outlined" class="mb-4">
+          <VCardTitle class="text-subtitle-1">优先级策略</VCardTitle>
+          <VCardSubtitle>拖拽调整查找顺序</VCardSubtitle>
+          <VCardText>
+            <div ref="ratingPriorityRef" class="priority-tags">
+              <VChip v-for="(country, index) in ratingPriority" :key="country" closable variant="tonal" class="priority-tag drag-handle" :color="country === 'ORIGIN' ? 'success' : undefined" :disabled="isSaving" @click:close="removePriority(index)">
+                {{ country === 'ORIGIN' ? '原产国（自动）' : getCountryName(country) }}
+              </VChip>
+              <VMenu>
+                <template #activator="{ props: menuProps }">
+                  <VBtn v-bind="menuProps" variant="outlined" size="small" prepend-icon="mdi-plus" :disabled="isSaving || !availablePriorityOptions.length">添加国家</VBtn>
                 </template>
-              </n-dynamic-input>
-            </n-collapse-item>
-
-            <!-- 空状态提示 -->
-            <div v-if="sortedMappingKeys.length === 0" class="rating-empty">
-              请在上方添加国家以配置分级映射
+                <VList density="compact">
+                  <VListItem v-for="option in availablePriorityOptions" :key="option.value" :title="option.label" @click="addPriority(option.value)" />
+                </VList>
+              </VMenu>
             </div>
+          </VCardText>
+        </VCard>
 
-          </n-collapse>
+        <div class="rating-heading">
+          <div class="text-subtitle-1">国家/地区分级表</div>
+          <VBtn variant="text" size="small" prepend-icon="mdi-plus" :disabled="isSaving || !availablePriorityOptions.length" @click="addRatingCountry">添加国家</VBtn>
         </div>
-      </n-tab-pane>
-
-    </n-tabs>
+        <VExpansionPanels v-model="expandedCountries" multiple class="rating-container">
+          <VExpansionPanel v-for="countryCode in sortedMappingKeys" :key="countryCode" :value="countryCode">
+            <div class="rating-panel-heading">
+              <VExpansionPanelTitle>{{ getCountryName(countryCode) }}</VExpansionPanelTitle>
+              <VBtn variant="text" color="error" size="small" prepend-icon="mdi-delete-outline" :disabled="isSaving" @click.stop="removeRatingCountry(countryCode)">删除整组</VBtn>
+            </div>
+            <VExpansionPanelText>
+              <div v-for="(rule, index) in ratingMapping[countryCode]" :key="index" class="rating-rule">
+                <VTextField v-model="rule.code" label="原始分级代码" placeholder="例如：R" :disabled="isSaving" class="rating-code" />
+                <VNumberInput v-model="rule.emby_value" label="Emby 等级值" :min="0" :max="100" :precision="0" control-variant="stacked" :disabled="isSaving" class="rating-value" />
+                <VIcon icon="mdi-arrow-right" size="20" class="rating-rule-arrow" />
+                <VCombobox v-model="rule.label" :items="dynamicRatingOptions" item-title="label" item-value="value" :return-object="false" label="中文分级标签" placeholder="选择或输入标签" :disabled="isSaving" class="rating-label" />
+                <VBtn icon="mdi-delete-outline" variant="text" color="error" :disabled="isSaving" aria-label="删除此分级规则" @click="removeRatingRule(countryCode, index)" />
+              </div>
+              <VBtn variant="outlined" prepend-icon="mdi-plus" :disabled="isSaving" class="mt-2" @click="addRatingRule(countryCode)">添加分级规则</VBtn>
+            </VExpansionPanelText>
+          </VExpansionPanel>
+        </VExpansionPanels>
+        <VAlert v-if="!sortedMappingKeys.length" type="info" variant="tonal" class="mt-3" title="尚未配置分级映射" text="添加国家后即可定义分级规则。" />
+      </VWindowItem>
+    </VWindow>
 
     <div class="footer-actions">
-      <n-button ghost type="warning" @click="handleRestoreDefaults">
-        <template #icon><n-icon :component="RefreshIcon" /></template>
-        恢复当前页默认
-      </n-button>
-      <n-button type="primary" :loading="isSaving" @click="handleSave"><template #icon><UiIcon name="save" /></template>
-        保存所有配置
-      </n-button>
+      <VBtn variant="outlined" color="warning" prepend-icon="mdi-restore" :disabled="isSaving || !isReady" @click="handleRestoreDefaults">恢复当前页默认</VBtn>
+      <VBtn prepend-icon="mdi-content-save-outline" :loading="isSaving" :disabled="isLoading || !isReady" @click="handleSave">保存所有配置</VBtn>
     </div>
+
+    <VDialog v-model="showCountryDialog" max-width="440">
+      <VCard title="添加分级国家">
+        <VCardText>
+          <VAutocomplete v-model="newPriorityCountry" :items="availablePriorityOptions" item-title="label" item-value="value" :return-object="false" label="国家/地区" placeholder="搜索国家" autofocus @update:model-value="selectRatingCountry" />
+        </VCardText>
+        <VCardActions><VSpacer /><VBtn variant="text" @click="showCountryDialog = false">取消</VBtn></VCardActions>
+      </VCard>
+    </VDialog>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, nextTick, watch, onUnmounted, computed, h } from 'vue';
+import { ref, onMounted, nextTick, watch, onUnmounted, computed } from 'vue';
 import axios from 'axios';
 import Sortable from 'sortablejs';
-import { useMessage, useDialog, NSelect } from 'naive-ui';
-import {
-  AddOutline as AddIcon,
-  TrashOutline as DeleteIcon,
-  ReorderFourOutline as DragIcon,
-  RefreshOutline as RefreshIcon
-} from '@vicons/ionicons5';
+import { useMessage, useDialog } from '@/composables/useFeedback';
 
 const message = useMessage();
 const dialog = useDialog();
@@ -303,9 +170,14 @@ const ratingLabelList = ref([]); // 新增：分级标签列表
 const ratingMapping = ref({}); // 结构: { "US": [{code: 'R', label: '限制级'}] }
 const ratingPriority = ref([]); // 结构: ['ORIGIN', 'US']
 const newPriorityCountry = ref(null);
+const showCountryDialog = ref(false);
+const expandedCountries = ref(['US']);
 const ratingPriorityRef = ref(null);
 
 const isSaving = ref(false);
+const isLoading = ref(false);
+const isReady = ref(false);
+const loadError = ref('');
 
 // 拖拽 DOM 引用
 const keywordListRef = ref(null);
@@ -434,6 +306,7 @@ const setupRatingSortable = () => {
     const s = Sortable.create(ratingPriorityRef.value, {
       animation: 150,
       ghostClass: 'sortable-ghost',
+      draggable: '.priority-tag',
       onEnd: (evt) => {
         const item = ratingPriority.value.splice(evt.oldIndex, 1)[0];
         ratingPriority.value.splice(evt.newIndex, 0, item);
@@ -467,6 +340,10 @@ watch(activeTab, () => {
 
 // 初始化数据
 const fetchData = async () => {
+  if (isLoading.value) return;
+  isLoading.value = true;
+  isReady.value = false;
+  loadError.value = '';
   try {
     const [kwRes, stRes, cnRes, lgRes, rMapRes, rPrioRes, rLabelRes] = await Promise.all([
       axios.get('/api/mappings/config/keyword_mapping'),
@@ -478,19 +355,32 @@ const fetchData = async () => {
       axios.get('/api/mappings/config/unified_ratings')
     ]);
 
-    keywordList.value = processBackendData(kwRes.data, 'keyword');
-    studioList.value = processBackendData(stRes.data, 'studio');
-    countryList.value = processBackendData(cnRes.data, 'country');
-    languageList.value = processBackendData(lgRes.data, 'language');
-    ratingLabelList.value = processBackendData(rLabelRes.data, 'simple');
-
-    ratingMapping.value = rMapRes.data || {};
-    ratingPriority.value = rPrioRes.data || [];
-
+    if (![kwRes, stRes, cnRes, lgRes, rLabelRes, rPrioRes].every(response => Array.isArray(response.data))
+      || !rMapRes.data || typeof rMapRes.data !== 'object' || Array.isArray(rMapRes.data)) {
+      throw new Error('映射配置返回格式不完整，请重新加载。');
+    }
+    const loaded = {
+      keywords: processBackendData(kwRes.data, 'keyword'),
+      studios: processBackendData(stRes.data, 'studio'),
+      countries: processBackendData(cnRes.data, 'country'),
+      languages: processBackendData(lgRes.data, 'language'),
+      labels: processBackendData(rLabelRes.data, 'simple'),
+    };
+    keywordList.value = loaded.keywords;
+    studioList.value = loaded.studios;
+    countryList.value = loaded.countries;
+    languageList.value = loaded.languages;
+    ratingLabelList.value = loaded.labels;
+    ratingMapping.value = rMapRes.data;
+    ratingPriority.value = rPrioRes.data;
+    isReady.value = true;
     setupSortables();
   } catch (e) {
     console.error(e);
+    loadError.value = e.response?.data?.error || e.response?.data?.message || e.message || '无法完整加载映射配置，请重新加载。';
     message.error('加载配置失败');
+  } finally {
+    isLoading.value = false;
   }
 };
 
@@ -500,7 +390,7 @@ const addItem = (list, type = 'normal') => {
     item.value = ''; item.aliases = '';
   } else if (type === 'simple') {
     // 仅需要 label
-  } else if (list === studioList) {
+  } else if (type === 'studio' || list === studioList.value) {
     // 注意：这里判断 list === studioList 或者传 type='studio' 都可以
     item.en = '';
     item.company_ids = '';
@@ -562,21 +452,24 @@ const removeRatingCountry = (code) => {
 };
 
 const addRatingCountry = () => {
-  dialog.create({
-    title: '添加分级国家',
-    content: () => h(NSelect, {
-      options: availablePriorityOptions.value, // 复用优先级的可选列表
-      filterable: true,
-      placeholder: '搜索国家...',
-      onUpdateValue: (v) => {
-        addPriority(v); // 直接调用上面的联动添加函数
-        dialog.destroyAll();
-      }
-    })
-  });
+  newPriorityCountry.value = null;
+  showCountryDialog.value = true;
 };
 
+const selectRatingCountry = (value) => {
+  if (!value) return;
+  addPriority(value);
+  showCountryDialog.value = false;
+};
 
+const addRatingRule = (countryCode) => {
+  if (!Array.isArray(ratingMapping.value[countryCode])) ratingMapping.value[countryCode] = [];
+  ratingMapping.value[countryCode].push({ code: '', label: '全年龄', emby_value: null });
+};
+
+const removeRatingRule = (countryCode, index) => {
+  ratingMapping.value[countryCode].splice(index, 1);
+};
 
 const handleRestoreDefaults = () => {
   // 特殊处理 ratings Tab
@@ -634,6 +527,11 @@ const handleRestoreDefaults = () => {
 };
 
 const handleSave = async () => {
+  if (isSaving.value) return;
+  if (!isReady.value || isLoading.value || loadError.value) {
+    message.error('请先完整加载映射配置，再保存。');
+    return;
+  }
   isSaving.value = true;
   try {
     await Promise.all([
@@ -665,101 +563,38 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.mapping-manager { padding:0; min-width:0; container-type:inline-size; }
-.mb-4 { margin-bottom: 16px; }
-.mt-4 { margin-top: 16px; }
-
-.list-header {
-  display: flex;
-  gap: 12px;
-  padding: 8px 12px;
-  background:var(--ui-surface-muted);
-  font-weight: bold;
-  color:var(--ui-text-muted);
-  border-bottom:1px solid var(--ui-border);
-}
-
-.list-item {
-  display: flex;
-  gap: 12px;
-  padding: 8px 12px;
-  align-items: center;
-  background:var(--ui-surface);
-  border-bottom:1px solid var(--ui-border);
-  transition: background 0.2s;
-}
-.list-item:hover { background:var(--ui-surface-muted); }
-
-.sortable-ghost { opacity:0.5; background:var(--accent-glow-color); }
-
-.sortable-list {
-  max-height:60dvh;
-  overflow-y: auto;
-  padding-right:4px;
-  display: flex;
-  flex-direction: column;
-}
-.sortable-list::-webkit-scrollbar { width: 6px; }
-.sortable-list::-webkit-scrollbar-thumb { background-color:var(--ui-border-strong); border-radius:3px; }
-
-/* 列宽定义 */
-.col-handle { width:24px; flex-shrink:0; display:flex; align-items:center; cursor:grab; color:var(--ui-text-muted); }
+.mapping-manager { min-inline-size: 0; container-type: inline-size; }
+.mapping-tabs { border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+.mapping-content { padding-block-start: 20px; }
+.sortable-list { display: flex; flex-direction: column; gap: 10px; max-block-size: 60dvh; overflow-y: auto; padding-inline-end: 4px; }
+.list-item { display: flex; align-items: center; gap: 12px; padding: 14px 12px; }
+.col-handle { inline-size: 24px; flex: 0 0 24px; display: flex; align-items: center; cursor: grab; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); }
 .col-handle:active { cursor: grabbing; }
-.col-label { width:120px; min-width:0; }
-.col-en { flex:1.5; min-width:0; }
-.col-ids { flex:1; min-width:0; }
-.col-extra { flex:2; min-width:0; } /* 用于国家别名 */
-.col-empty { flex: 2; } /* 用于语言占位 */
-.col-action { width:40px; flex-shrink:0; display:flex; justify-content:center; }
-.rating-list-header .col-action { width:auto; }
-
-.footer-actions {
-  margin-top: 24px;
-  display: flex;
-  flex-wrap:wrap;
-  gap:12px;
-  justify-content: space-between;
-  padding-top: 16px;
-  border-top:1px solid var(--ui-border);
+.col-label { flex: 1; min-inline-size: 120px; }
+.col-en, .col-ids { flex: 1.2; min-inline-size: 0; }
+.col-extra { flex: 1.8; min-inline-size: 0; }
+.simple-label { flex: 1; min-inline-size: 0; }
+.sortable-ghost { opacity: 0.5; }
+.priority-tags { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.priority-tag { cursor: grab; }
+.rating-heading { display: flex; gap: 12px; justify-content: space-between; align-items: center; margin-block-end: 12px; }
+.rating-panel-heading { display: flex; align-items: center; padding-inline-end: 12px; }
+.rating-panel-heading > .v-expansion-panel-title { flex: 1; inline-size: auto; min-inline-size: 0; }
+.rating-rule { display: flex; align-items: center; flex-wrap: wrap; inline-size: 100%; gap: 12px; margin-block-end: 12px; }
+.rating-code, .rating-label { flex: 1 1 150px; min-inline-size: 0; }
+.rating-value { flex: 0 0 140px; min-inline-size: 0; }
+.rating-rule-arrow { color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); }
+.footer-actions { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; margin-block-start: 24px; padding-block-start: 16px; border-block-start: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
+@container (max-width: 760px) {
+  .list-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; }
+  .list-item > .col-handle { grid-column: 1; grid-row: 1; }
+  .list-item > .v-btn { grid-column: 2; grid-row: 1; }
+  .list-item > .v-input, .list-item > :deep(.app-responsive-input) { grid-column: 1 / -1; min-inline-size: 0; }
+  .rating-rule { align-items: start; }
+  .rating-code { flex: 1 1 140px; }
+  .rating-value { flex-basis: 140px; }
+  .rating-label { flex-basis: calc(100% - 52px); }
+  .rating-rule-arrow { display: none; }
+  .footer-actions > .v-btn { flex: 1 1 160px; }
 }
-
-/* 优先级标签样式 */
-.priority-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  padding: 8px;
-  background:var(--ui-surface-muted);
-  border-radius: 4px;
-}
-.priority-tag { cursor: move; }
-.rating-container {
-  margin-top: 10px;
-  border:1px solid var(--ui-border);
-  border-radius: 4px;
-  overflow: hidden;
-}
-.rating-rule { display:flex; align-items:center; width:100%; min-width:0; gap:10px; }
-.rating-code,.rating-label { flex:1.5; min-width:0; }
-.rating-value { width:110px; }
-.rating-rule-arrow { flex:0 0 20px; text-align:center; color:var(--ui-text-muted); }
-.rating-empty { padding:20px; text-align:center; color:var(--ui-text-muted); }
-@container (max-width:660px) {
-  .list-header:not(.rating-list-header) { display:none; }
-  .sortable-list { gap:12px; }
-  .list-item { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; padding:12px; border:1px solid var(--ui-border); border-radius:10px; }
-  .list-item > .col-handle { grid-column:1; grid-row:1; width:auto; min-height:28px; }
-  .list-item > .col-action { grid-column:2; grid-row:1; width:auto; justify-content:flex-end; }
-  .list-item > [data-label] { width:auto; }
-  .list-item > [data-label]::before { content:attr(data-label); display:block; margin-bottom:6px; color:var(--ui-text-muted); font-size:12px; }
-  .list-item > .col-extra { grid-column:1 / -1; }
-  .rating-rule { flex-wrap:wrap; gap:8px; }
-  .rating-code { flex:1 1 120px; }
-  .rating-value { width:90px; }
-  .rating-label { flex-basis:100%; }
-  .rating-rule-arrow { display:none; }
-  :deep(.n-dynamic-input-item__action) { margin-left:8px; }
-  .footer-actions > .n-button { flex:1 1 160px; }
-}
-@container (max-width:360px) { .list-item { grid-template-columns:minmax(0,1fr) auto; } .list-item > [data-label] { grid-column:1 / -1; } }
 </style>

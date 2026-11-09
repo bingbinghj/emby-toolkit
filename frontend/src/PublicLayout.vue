@@ -1,12 +1,11 @@
 <!-- src/PublicLayout.vue -->
 <template>
-  <n-layout style="height: 100vh;">
-    <n-layout-content style="display: flex; align-items: center; justify-content: center;">
-      <router-view />
-    </n-layout-content>
-  </n-layout>
+  <main class="public-layout"><slot><RouterView /></slot></main>
 </template>
 
 <script setup>
-import { NLayout, NLayoutContent } from 'naive-ui';
 </script>
+
+<style scoped>
+.public-layout { position: relative; display: flex; align-items: center; justify-content: center; min-height: 100dvh; padding: 24px 16px; }
+</style>
