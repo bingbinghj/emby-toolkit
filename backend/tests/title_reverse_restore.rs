@@ -433,7 +433,7 @@ impl Fixture {
             .route("/Items/directory/Refresh", post(file_refresh))
             .route("/Items/61616/Refresh", post(exact_refresh))
             .route("/Items/61616/ThumbnailSet", get(|State(host): State<Host>| async move { let frames=native_bif_frames(&*host.item.lock().await).unwrap_or_default();Json(json!({"Thumbnails":frames.iter().map(|(ms,_)|json!({"Time":ms,"Tag":"old-thumbnail"})).collect::<Vec<_>>()})) }))
-            .route("/Items/61616/SpecialFeatures", get(|| async { Json(json!([])) }))
+            .route("/Users/user/Items/61616/SpecialFeatures", get(|| async { Json(json!([])) }))
             .route("/Videos/61616/AdditionalParts", get(|| async { Json(json!({"Items":[]})) }))
             .route("/Items/61616/ClearMediaInfo", post(clear))
             .route("/ScheduledTasks", get(|State(host): State<Host>| async move {

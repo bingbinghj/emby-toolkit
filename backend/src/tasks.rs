@@ -249,26 +249,13 @@ async fn translate_persons(state: &AppState, context: &crate::jobs::JobContext) 
                     continue;
                 }
                 let id = crate::state::string(person, "Id");
-                let result = async {
-                    let mut person =
-                        crate::media_edit::details(state, &id, "ProviderIds,Name").await?;
-                    person["Name"] = json!(value);
-                    state
-                        .emby(
-                            reqwest::Method::POST,
-                            &format!("Items/{id}"),
-                            &[],
-                            Some(person),
-                        )
-                        .await?;
-                    Ok::<_, ApiError>(())
-                }
-                .await;
+                let result = crate::persons::update_name(state, &id, value, Some(context)).await;
                 match result {
-                    Ok(()) => {
+                    Ok(true) => {
                         updated += 1;
                         tracing::info!("[人物中文化] '{name}' → '{value}' 已更新（Item {id}）");
                     }
+                    Ok(false) => (),
                     Err(error) => {
                         if context.is_cancelled() {
                             return Err(error);

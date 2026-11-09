@@ -39,6 +39,7 @@ mod native {
         cached_image_reads: Arc<AtomicUsize>,
         video_reads: Arc<AtomicUsize>,
         mutate_unselected_once: Arc<AtomicBool>,
+        reject_features: Arc<AtomicBool>,
     }
 
     impl Proxy {
@@ -204,7 +205,10 @@ mod native {
                     Err(_) => StatusCode::NOT_FOUND.into_response(),
                 };
             }
-            if path.starts_with("/Items/") && path.ends_with("/SpecialFeatures") {
+            if path.starts_with("/Users/user/Items/") && path.ends_with("/SpecialFeatures") {
+                if proxy.reject_features.load(Ordering::SeqCst) {
+                    return StatusCode::NOT_FOUND.into_response();
+                }
                 return Json(json!([])).into_response();
             }
             if path.starts_with("/Videos/") && path.ends_with("/AdditionalParts") {
@@ -610,6 +614,7 @@ mod native {
                 cached_image_reads: Arc::default(),
                 video_reads: Arc::default(),
                 mutate_unselected_once: Arc::default(),
+                reject_features: Arc::default(),
             };
             let app = Router::new()
                 .fallback(self::proxy)
@@ -1065,6 +1070,62 @@ mod native {
             cached[0]["EmbeddedImage"], info[0]["EmbeddedImage"],
             "only the native reload copy may strip stale cover data"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn manual_save_uses_official_special_features_route_and_reports_404_with_item() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        let wrong = f
+            .native
+            .state
+            .emby(
+                reqwest::Method::GET,
+                "Items/61616/SpecialFeatures",
+                &[("api_key", "secret-not-for-output".into())],
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(wrong.1.contains("GET /Items/61616/SpecialFeatures"));
+        assert!(wrong.1.contains("404"));
+        assert!(!wrong.1.contains("secret-not-for-output"));
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("官方接口保存标题");
+        let saved = f.save(json!({"mediainfo":edited}), false).await;
+        assert_eq!(
+            saved["result"]["metadata_refresh"]["state"], "verified",
+            "{saved}"
+        );
+        f.proxy.reject_features.store(true, Ordering::SeqCst);
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("不应实际替换的标题");
+        let before = f.native.host.clears.load(Ordering::SeqCst);
+        let result = f.save(json!({"mediainfo":edited}), false).await;
+        let report = result["result"]["metadata_refresh"].clone();
+        let live = f.native.host.item.lock().await.clone();
+        let after = f.native.host.clears.load(Ordering::SeqCst);
+        f.close().await;
+        assert_eq!(report["state"], "failed", "{report}");
+        assert_eq!(report["failed_ids"], json!(["61616"]));
+        assert_eq!(report["failures"][0]["item_id"], "61616");
+        assert!(
+            report["failures"][0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("GET /Users/user/Items/61616/SpecialFeatures")
+        );
+        assert!(
+            report["failures"][0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("404")
+        );
+        assert_eq!(
+            after, before,
+            "404 must stop before native media info is cleared"
+        );
+        assert_eq!(live["MediaStreams"][1]["Title"], "官方接口保存标题");
     }
 
     #[tokio::test]

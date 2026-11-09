@@ -220,9 +220,6 @@ pub async fn save(state: &AppState, id: &str, body: &Value, context: &JobContext
     let config = state.config.read().await.clone();
     let actors = crate::cast::manual(&actors, &item, &config);
     context.checkpoint().await?;
-    for actor in &actors {
-        crate::persons::upsert(state, actor).await?;
-    }
     let defaults: Value = serde_json::from_str(include_str!("../assets/defaults.json")).unwrap();
     let studio = crate::db::setting(&state.db, "studio_mapping")
         .await?
@@ -258,18 +255,9 @@ pub async fn save(state: &AppState, id: &str, body: &Value, context: &JobContext
         if let Some(person) = list(&item["People"])
             .iter()
             .find(|p| string(&p["ProviderIds"], "Tmdb") == actor_id)
-            && person["Name"] != actor["name"]
         {
             let person_id = string(person, "Id");
-            let mut person = details(state, &person_id, "Name").await?;
-            person["Name"] = actor["name"].clone();
-            state
-                .emby(
-                    reqwest::Method::POST,
-                    &format!("Items/{person_id}"),
-                    &[],
-                    Some(person),
-                )
+            crate::persons::update_name(state, &person_id, &string(actor, "name"), Some(context))
                 .await?;
         }
     }
@@ -281,8 +269,32 @@ pub async fn save(state: &AppState, id: &str, body: &Value, context: &JobContext
     if refresh.is_empty() {
         return Err(ApiError::bad("无法定位目标Season刷新"));
     }
+    let position = crate::media_extra::log_position(state).await?;
     crate::emby::refresh_item(state, &refresh, true, context).await?;
-    tracing::info!(item_id = id, refresh_id = %refresh, "[手动处理] 已提交《{media_name}》刷新，开始保存数据库结果");
+    crate::emby::wait_item_refresh(
+        state,
+        &refresh,
+        None,
+        Some(crate::media_extra::RefreshTrace::new(position)),
+        context,
+        "验收演员刷新",
+        &media_name,
+    )
+    .await?;
+    let people = list(&item["People"]);
+    let expected = json!({"People":actors.iter().map(|actor| {
+        let tmdb = actor["id"].as_i64().unwrap().to_string();
+        let native = people.iter().find(|person|string(&person["ProviderIds"], "Tmdb") == tmdb).map(|person|person["Id"].clone());
+        json!({"Id":native,"Type":"Actor","Name":actor["name"],"Role":actor["character"],"ProviderIds":{"Tmdb":tmdb}})
+    }).collect::<Vec<_>>()});
+    crate::persons::verify_readback(state, id, &expected, Some(context)).await?;
+    context.checkpoint().await?;
+    for actor in &actors {
+        context.checkpoint().await?;
+        crate::persons::upsert(state, actor).await?;
+    }
+    tracing::info!(item_id = id, refresh_id = %refresh, "[手动处理] 《{media_name}》演员姓名、角色及本次刷新已通过验收，开始保存数据库结果");
+    context.checkpoint().await?;
     let mut transaction = state.db.begin().await?;
     sqlx::query("UPDATE media_metadata SET actors_json=$1,last_updated_at=NOW() WHERE tmdb_id=$2 AND item_type=$3").bind(crate::cast::relations(&actors)).bind(&tmdb).bind(&kind).execute(&mut *transaction).await?;
     for actor in &actors {
@@ -299,6 +311,9 @@ pub async fn save(state: &AppState, id: &str, body: &Value, context: &JobContext
         .bind(id)
         .execute(&mut *transaction)
         .await?;
+    if context.is_cancelled() {
+        context.checkpoint().await?;
+    }
     transaction.commit().await?;
     Ok(json!({"written":written,"message":"演员与目标NFO已更新"}))
 }

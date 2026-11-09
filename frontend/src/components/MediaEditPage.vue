@@ -10,6 +10,11 @@
 
       <n-divider />
 
+      <n-alert v-if="mediaOperationFeedback" :type="mediaOperationFeedback.type" :title="mediaOperationFeedback.message"
+        style="margin-bottom: 16px;">
+        <div v-for="(detail, index) in mediaOperationFeedback.details" :key="index" style="overflow-wrap: anywhere;">{{ detail }}</div>
+      </n-alert>
+
       <div v-if="isLoading" class="loading-container">
         <n-spin size="large" />
         <p style="text-align: center; margin-top: 10px;">正在加载媒体详情...</p>
@@ -566,7 +571,7 @@
         </div>
       </n-alert>
       <n-text depth="3" style="display: block; margin-bottom: 16px;">
-        保存会重载媒体信息；章节图失效时，请在神医助手中手动重新提取。
+        保存后会回读验收媒体信息；未通过时保留编辑器并显示具体原因。
       </n-text>
       <n-form-item
         v-if="mediaInfoVersionOptions.length === 1 && mediaInfoSingleVersionFileName"
@@ -630,7 +635,7 @@
       </n-form-item>
 
       <n-alert type="info" style="margin-bottom: 16px;">
-        修改语言标签后保存，系统将自动覆盖底层指纹文件并通知 Emby 重新加载。<br/>
+        修改语言标签后保存，系统会重载保存的媒体信息 JSON 并回读验收。<br/>
         <b style="color: var(--ui-error-text);">注意：</b>字幕的标题 (Title) 必须包含 <b>“简体”</b> 或 <b>“繁体”</b> 字样，Emby 才能正确识别并显示为 Chinese Simplified/Traditional。
       </n-alert>
 
@@ -929,6 +934,7 @@ const isSaving = ref(false);
 
 const searchLinks = ref({});
 const isTranslating = ref(false);
+const mediaOperationFeedback = ref(null);
 
 const showAddActorModal = ref(false);
 const actorSearchQuery = ref('');
@@ -1036,16 +1042,43 @@ const uploadImagePayload = async (payload) => {
   }
 };
 
+const mediaOperationDetails = (values) => {
+  const details = [...new Set(values.map(value => {
+    const text = typeof value === 'string' ? value : value && typeof value === 'object'
+      ? [value.item_id || value.path, value.reason || value.error || value.message || '处理未完成'].filter(Boolean).join('：') : '';
+    return text.replace(/^媒体信息 JSON 已保存，Emby 刷新或回读(?:尚)?未确认[：:]\s*/, '').replace(/^[：:\s]+/, '').trim();
+  }).filter(Boolean))];
+  return details.filter(detail => !details.some(other => other !== detail && other.endsWith(`：${detail}`)));
+};
+
 const replaceEpisodeImages = async () => {
   isReplacingEpisodeImages.value = true;
+  mediaOperationFeedback.value = null;
   const loadingMsg = message.loading('剧集图正在后台处理，可在通知中心中查看生成数量...', { duration: 0 });
   try {
     const response = await axios.post(`/api/media_info/replace_episode_images/${itemId.value}`);
-    message.success(
-      `${response.data.message || '剧集图替换请求已完成'}；已有图删除 ${response.data.deleted_count || 0} 集，原本无图 ${response.data.missing_count || 0} 集。`,
-    );
+    const result = response.data || {};
+    const details = mediaOperationDetails([
+      ...(Array.isArray(result.warning_details) ? result.warning_details : []),
+      ...(Array.isArray(result.failures) ? result.failures : []),
+      result.error || '',
+    ]);
+    const summary = `${result.message || '剧集图替换请求已完成'}；已有图删除 ${result.deleted_count || 0} 集，原本无图 ${result.missing_count || 0} 集。`;
+    if (response.status === 207 || Number(result.warnings) > 0 || details.length) {
+      mediaOperationFeedback.value = { type: 'warning', message: '剧集图处理有提醒', details: details.length ? details : [summary] };
+      message.warning(summary);
+    } else {
+      message.success(summary);
+      imageRefreshTokens.value.poster = Date.now();
+    }
   } catch (error) {
-    message.error(error.response?.data?.error || '替换剧集图失败，请检查日志。');
+    const result = error.response?.data || {};
+    const summary = result.message || result.error || '替换剧集图失败，请检查日志。';
+    mediaOperationFeedback.value = { type: 'error', message: summary, details: mediaOperationDetails([
+      ...(Array.isArray(result.warning_details) ? result.warning_details : []),
+      ...(Array.isArray(result.failures) ? result.failures : []), result.error || summary,
+    ]) };
+    message.error(summary);
   } finally {
     loadingMsg.destroy();
     isReplacingEpisodeImages.value = false;
@@ -1909,22 +1942,47 @@ const deleteCurrentMediaVersion = async () => {
   if (!targetId || mediaInfoVersionOptions.value.length <= 1) return;
 
   isDeletingMediaVersion.value = true;
+  mediaOperationFeedback.value = null;
   const loadingMsg = message.loading('正在删除 115、STRM 和 Emby 当前版本...', { duration: 0 });
   try {
     const response = await axios.post(`/api/media_info/delete_version/${targetId}`);
-    const remainingItemId = String(response.data?.remaining_item_id || '').trim();
+    const result = response.data || {};
+    const remainingItemId = String(result.remaining_item_id || '').trim();
+    const deletedItemId = String(result.deleted_item_id || '').trim();
+    const details = mediaOperationDetails([
+      ...(Array.isArray(result.warning_details) ? result.warning_details : []),
+      ...(Array.isArray(result.failures) ? result.failures : []), result.error || '',
+    ]);
+    if (remainingItemId === targetId || deletedItemId && deletedItemId !== targetId) details.push('删除结果中的媒体身份不一致，未切换到返回的版本，请检查任务结果');
+    if (deletedItemId === targetId && !remainingItemId) details.push('当前版本已删除，但未返回可验证的剩余版本，请检查任务结果');
+    if (!deletedItemId && !remainingItemId && !details.length && !result.warnings && response.status !== 207) details.push('未确认删除后的剩余版本，请检查任务结果');
+    const hasWarnings = response.status === 207 || Number(result.warnings) > 0 || details.length > 0;
+    const summary = result.message || (hasWarnings ? '删除版本有提醒，请检查处理结果' : '当前版本已删除并刷新');
+    if (hasWarnings) {
+      mediaOperationFeedback.value = { type: 'warning', message: summary, details: details.length ? details : [summary] };
+      message.warning(summary);
+    } else {
+      message.success(summary);
+    }
+    const deleted = deletedItemId === targetId || !deletedItemId && !hasWarnings;
+    if (!deleted) return;
     showMediaInfoEditor.value = false;
-    message.success(response.data?.message || '当前版本已删除并刷新');
 
-    if (remainingItemId) {
+    if (remainingItemId && remainingItemId !== targetId) {
       itemId.value = remainingItemId;
       currentEditMediaId.value = remainingItemId;
       renameTargetId.value = remainingItemId;
       await router.replace({ name: 'MediaEditPage', params: { itemId: remainingItemId } });
+      await fetchMediaDetails();
     }
-    await fetchMediaDetails();
   } catch (error) {
-    message.error(error.response?.data?.error || '删除当前版本失败，请检查日志');
+    const result = error.response?.data || {};
+    const summary = result.message || result.error || '删除当前版本失败，请检查日志';
+    mediaOperationFeedback.value = { type: 'error', message: summary, details: mediaOperationDetails([
+      ...(Array.isArray(result.warning_details) ? result.warning_details : []),
+      ...(Array.isArray(result.failures) ? result.failures : []), result.error || summary,
+    ]) };
+    message.error(summary);
   } finally {
     loadingMsg.destroy();
     isDeletingMediaVersion.value = false;
@@ -1975,10 +2033,10 @@ const saveMediaInfo = async () => {
     const details = [
       ...(Array.isArray(res.data.warning_details) ? res.data.warning_details : []),
       ...(Array.isArray(res.data.failures) ? res.data.failures : []),
-      ...skippedReports.flatMap(report => report.skipped.map(item =>
-        `${report.item_id} · ${report.path || ''}：${item.reason}`)),
-      ...(Array.isArray(metadata.failures) ? metadata.failures.map(item =>
-        typeof item === 'string' ? item : `${item.item_id || item.path || ''}：${item.reason || '刷新未完成'}`) : []),
+      ...skippedReports.flatMap(report => report.skipped.map(item => ({
+        item_id: [report.item_id, report.path].filter(Boolean).join(' · '), reason: item.reason,
+      }))),
+      ...(Array.isArray(metadata.failures) ? metadata.failures : []),
     ];
     if (metadata.state && !['verified', 'completed'].includes(metadata.state)) {
       details.push(`Emby 刷新尚未通过验收${metadata.failed_ids?.length ? `（${metadata.failed_ids.join('、')}）` : ''}`);
@@ -1987,7 +2045,7 @@ const saveMediaInfo = async () => {
     if (Number(res.data.warnings) > 0 && !details.length) details.push(res.data.message || '部分处理未完成，请检查任务结果');
     if (details.length) {
       mediaInfoSaveFeedback.value = {
-        type: 'warning', message: '保存有提醒，请检查处理结果', details: [...new Set(details)],
+        type: 'warning', message: '保存有提醒，请检查处理结果', details: mediaOperationDetails(details),
       };
       message.warning(mediaInfoSaveFeedback.value.message);
     } else {
@@ -1998,7 +2056,7 @@ const saveMediaInfo = async () => {
     const result = e.response?.data || {};
     mediaInfoSaveFeedback.value = {
       type: 'error', message: result.message || result.error || '保存失败',
-      details: Array.isArray(result.failures) && result.failures.length ? result.failures : [result.error || '请检查后端日志'],
+      details: mediaOperationDetails(Array.isArray(result.failures) && result.failures.length ? result.failures : [result.error || '请检查后端日志']),
     };
     message.error(mediaInfoSaveFeedback.value.message);
   } finally {

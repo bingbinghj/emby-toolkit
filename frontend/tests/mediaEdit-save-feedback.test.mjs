@@ -6,6 +6,8 @@ import vm from 'node:vm';
 const page = readFileSync(new URL('../src/components/MediaEditPage.vue', import.meta.url), 'utf8');
 const start = page.indexOf('const saveMediaInfo = ');
 const end = page.indexOf('\n};', start) + 4;
+const detailStart = page.indexOf('const mediaOperationDetails = ');
+const detailEnd = page.indexOf('\n};', detailStart) + 4;
 
 async function save(result) {
   const messages = [];
@@ -21,7 +23,7 @@ async function save(result) {
       ...Object.fromEntries(['success', 'warning', 'error'].map(type => [type, text => messages.push({ type, text })])),
     },
   });
-  vm.runInContext(`${page.slice(start, end)}\nthis.save = saveMediaInfo;`, context);
+  vm.runInContext(`${page.slice(detailStart, detailEnd)}\n${page.slice(start, end)}\nthis.save = saveMediaInfo;`, context);
   await context.save();
   return { context, messages };
 }
@@ -53,4 +55,26 @@ test('skipped tracks keep their detailed episode warning', async () => {
   assert.equal(f.context.showMediaInfoEditor.value, true);
   assert.match(f.context.episodesList.value[0].track_difference, /轨道范围不唯一/);
   assert.match(f.context.mediaInfoSaveFeedback.value.details[0], /101.*轨道范围不唯一/);
+});
+
+test('duplicate upstream failures have no empty identifier or repeated save prefix', async () => {
+  const f = await save({
+    warning_details: ['媒体信息 JSON 已保存，Emby 刷新或回读未确认：：无法访问上游服务'],
+    metadata_refresh: { state: 'failed', failed_ids: ['61616'], failures: [{ reason: '无法访问上游服务' }] },
+  });
+  const details = Array.from(f.context.mediaInfoSaveFeedback.value.details);
+  assert.equal(details.filter(detail => detail.includes('无法访问上游服务')).length, 1);
+  assert.ok(details.every(detail => !detail.startsWith('：') && !detail.includes('：：')));
+  assert.ok(details.includes('Emby 刷新尚未通过验收（61616）'));
+});
+
+test('failure de-duplication retains different target IDs', async () => {
+  const f = await save({
+    warning_details: ['媒体信息 JSON 已保存，Emby 刷新或回读未确认：61616：读取失败'],
+    metadata_refresh: { state: 'failed', failures: [
+      { item_id: '61616', reason: '读取失败' }, { item_id: '61617', reason: '读取失败' }, { reason: '读取失败' },
+    ] },
+  });
+  const details = Array.from(f.context.mediaInfoSaveFeedback.value.details);
+  assert.deepEqual(details.filter(detail => detail.includes('读取失败')), ['61616：读取失败', '61617：读取失败']);
 });

@@ -152,7 +152,7 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
             .into_owned()
             .collect();
     if request.method() == axum::http::Method::GET {
-        if path.ends_with("/SpecialFeatures") {
+        if path.starts_with("/Users/user/Items/") && path.ends_with("/SpecialFeatures") {
             return Json(json!([])).into_response();
         }
         if path.ends_with("/ThumbnailSet") {

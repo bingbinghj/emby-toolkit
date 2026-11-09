@@ -7,6 +7,167 @@ use crate::{
 };
 use serde_json::{Value, json};
 
+fn actors_match(expected: &Value, actual: &Value) -> bool {
+    let (Some(expected), Some(actual)) = (expected.as_array(), actual.as_array()) else {
+        return false;
+    };
+    let expected = expected
+        .iter()
+        .filter(|person| person["Type"] == "Actor")
+        .collect::<Vec<_>>();
+    let actual = actual
+        .iter()
+        .filter(|person| person["Type"] == "Actor")
+        .collect::<Vec<_>>();
+    if expected.len() != actual.len() {
+        return false;
+    }
+    let mut used = std::collections::HashSet::new();
+    for person in expected {
+        let matched = actual.iter().enumerate().find(|(index, live)| {
+            !used.contains(index)
+                && live["Name"] == person["Name"]
+                && string(live, "Role") == string(person, "Role")
+                && person["Id"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .is_none_or(|id| live["Id"] == id)
+                && person["ProviderIds"]["Tmdb"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .is_none_or(|id| live["ProviderIds"]["Tmdb"] == id)
+        });
+        if let Some((index, _)) = matched {
+            used.insert(index);
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+pub(crate) async fn verify_readback(
+    state: &AppState,
+    id: &str,
+    expected: &Value,
+    context: Option<&crate::jobs::JobContext>,
+) -> Result<()> {
+    use std::time::Duration;
+    let mut deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut reason = None;
+    let user = string(&*state.config.read().await, "emby_user_id");
+    let path = format!("GET Users/{user}/Items/{id}");
+    loop {
+        if let Some(context) = context {
+            let paused = tokio::time::Instant::now();
+            context.checkpoint().await?;
+            deadline += paused.elapsed();
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        let read = tokio::time::timeout_at(
+            deadline,
+            crate::media_edit::details(state, id, "Id,Name,People"),
+        );
+        let live = if let Some(context) = context {
+            tokio::select! { _=context.cancelled()=>{context.checkpoint().await?;unreachable!()}, value=read=>value }
+        } else {
+            read.await
+        };
+        match live {
+            Ok(Ok(live)) => {
+                if live["Id"] != id {
+                    return Err(ApiError(
+                        axum::http::StatusCode::CONFLICT,
+                        format!("人物回读 ID 与目标 {id} 不一致，已停止保存"),
+                    ));
+                }
+                let name_matches = expected
+                    .get("Name")
+                    .is_none_or(|name| live["Name"] == *name);
+                let people_matches = expected
+                    .get("People")
+                    .is_none_or(|people| actors_match(people, &live["People"]));
+                if name_matches && people_matches {
+                    tracing::info!("[人物回读] 媒体/人物ID {id}：本次姓名和演员角色已通过验收");
+                    return Ok(());
+                }
+                reason = Some(if !name_matches {
+                    format!(
+                        "姓名未一致（期望 {}，实际 {}）",
+                        expected["Name"], live["Name"]
+                    )
+                } else {
+                    format!(
+                        "演员、角色或人物关联未一致（期望 {}，实际 {}）",
+                        expected["People"], live["People"]
+                    )
+                });
+            }
+            Ok(Err(error)) => reason = Some(format!("回读失败：{}", error.1)),
+            Err(_) => {
+                reason.get_or_insert_with(|| format!("回读失败：{path} 请求耗尽30秒共享期限"));
+                break;
+            }
+        }
+        let delay = Duration::from_millis(500)
+            .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+        let before = tokio::time::Instant::now();
+        if let Some(context) = context {
+            context.sleep(delay).await?;
+            deadline += before.elapsed().saturating_sub(delay);
+        } else {
+            tokio::time::sleep(delay).await;
+        }
+    }
+    let message = format!(
+        "目标 {id} 的人物修改尚未通过30秒回读验收：{}",
+        reason.unwrap_or_else(|| "尚未取得回读结果".into())
+    );
+    tracing::warn!("[人物回读] {message}");
+    Err(ApiError(axum::http::StatusCode::CONFLICT, message))
+}
+
+pub(crate) async fn update_name(
+    state: &AppState,
+    id: &str,
+    name: &str,
+    context: Option<&crate::jobs::JobContext>,
+) -> Result<bool> {
+    if let Some(context) = context {
+        context.checkpoint().await?;
+    }
+    let read = crate::media_edit::details(state, id, "Id,ProviderIds,Name");
+    let mut person = if let Some(context) = context {
+        tokio::select! { _=context.cancelled()=>{context.checkpoint().await?;unreachable!()}, value=read=>value? }
+    } else {
+        read.await?
+    };
+    if person["Id"] != id {
+        return Err(ApiError(
+            axum::http::StatusCode::CONFLICT,
+            format!("人物 ID 与目标 {id} 不一致，未修改人物"),
+        ));
+    }
+    if person["Name"] == name {
+        return Ok(false);
+    }
+    person["Name"] = json!(name);
+    if let Some(context) = context {
+        context.checkpoint().await?;
+    }
+    let path = format!("Items/{id}");
+    let write = state.emby(reqwest::Method::POST, &path, &[], Some(person));
+    if let Some(context) = context {
+        tokio::select! { _=context.cancelled()=>{context.checkpoint().await?;unreachable!()}, result=write=>result? };
+    } else {
+        write.await?;
+    }
+    verify_readback(state, id, &json!({"Name":name}), context).await?;
+    Ok(true)
+}
+
 pub async fn upsert(state: &AppState, person: &Value) -> Result<()> {
     let id = crate::cast::person_id(&person["id"])
         .or_else(|| crate::cast::person_id(&person["tmdb_id"]))
@@ -267,6 +428,24 @@ pub async fn update_emby(
     data: &Value,
     item: &Value,
 ) -> Result<usize> {
+    update_emby_inner(state, cast, data, item, None).await
+}
+pub async fn update_emby_in_job(
+    state: &AppState,
+    cast: &[Value],
+    data: &Value,
+    item: &Value,
+    context: &crate::jobs::JobContext,
+) -> Result<usize> {
+    update_emby_inner(state, cast, data, item, Some(context)).await
+}
+async fn update_emby_inner(
+    state: &AppState,
+    cast: &[Value],
+    data: &Value,
+    item: &Value,
+    context: Option<&crate::jobs::JobContext>,
+) -> Result<usize> {
     tracing::info!(
         "Emby 人物名字同步开始：Emby {}，名称 {}",
         string(item, "Id"),
@@ -337,6 +516,9 @@ pub async fn update_emby(
         }
     }
     for id in names.keys() {
+        if let Some(context) = context {
+            context.checkpoint().await?;
+        }
         if locations.contains_key(id) {
             continue;
         }
@@ -369,31 +551,18 @@ pub async fn update_emby(
     );
     let mut updated = 0;
     for (id, location) in locations {
-        let mut person = crate::media_edit::details(state, &location, "Name").await?;
-        if names.get(&id).is_some_and(|name| person["Name"] != *name) {
-            tracing::debug!(
-                "Emby 人物名字更新开始：{} → {}，人员 {location}，TMDb {id}",
-                string(&person, "Name"),
-                names[&id]
-            );
-            person["Name"] = json!(names[&id]);
-            state
-                .emby(
-                    reqwest::Method::POST,
-                    &format!("Items/{location}"),
-                    &[],
-                    Some(person),
-                )
-                .await?;
+        let Some(name) = names.get(&id) else {
+            continue;
+        };
+        if update_name(state, &location, name, context).await? {
             updated += 1;
             tracing::debug!(
                 "Emby 人物名字更新完成：{}，人员 {location}，TMDb {id}",
-                names[&id]
+                name
             );
         } else {
             tracing::debug!(
-                "Emby 人物名字更新跳过：{}，人员 {location}，TMDb {id}，名字无需更新",
-                string(&person, "Name")
+                "Emby 人物名字更新跳过：{name}，人员 {location}，TMDb {id}，名字无需更新"
             );
         }
     }

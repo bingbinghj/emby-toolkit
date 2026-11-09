@@ -345,20 +345,16 @@ async fn changed(states: &BTreeMap<PathBuf, Option<SystemTime>>) -> usize {
     }
     count
 }
-async fn save_recovery(
-    state: &AppState,
-    id: &str,
-    snapshots: &BTreeMap<PathBuf, Vec<u8>>,
-) -> Result<PathBuf> {
-    let root = state
-        .data_dir
-        .join("episode-image-recovery")
-        .join(format!("{id}-{}", uuid::Uuid::new_v4().simple()));
-    tokio::fs::create_dir_all(&root).await?;
+async fn save_recovery(root: &FsPath, snapshots: &BTreeMap<PathBuf, Vec<u8>>) -> Result<()> {
+    tokio::fs::create_dir_all(root).await?;
     let mut manifest = serde_json::Map::new();
     for (i, (path, bytes)) in snapshots.iter().enumerate() {
         let name = format!("{i}.json");
         tokio::fs::write(root.join(&name), bytes).await?;
+        tokio::fs::File::open(root.join(&name))
+            .await?
+            .sync_all()
+            .await?;
         manifest.insert(path.to_string_lossy().into_owned(), json!(name));
     }
     tokio::fs::write(
@@ -366,7 +362,124 @@ async fn save_recovery(
         serde_json::to_vec_pretty(&manifest).unwrap(),
     )
     .await?;
-    Ok(root)
+    tokio::fs::File::open(root.join("manifest.json"))
+        .await?
+        .sync_all()
+        .await?;
+    Ok(())
+}
+struct CapturePictures {
+    local: BTreeMap<PathBuf, PathBuf>,
+    primary: BTreeMap<String, (PathBuf, String, Value)>,
+}
+async fn capture_picture_backups(
+    state: &AppState,
+    episodes: &[Value],
+    root: &FsPath,
+) -> Result<CapturePictures> {
+    use tokio::io::AsyncWriteExt;
+    let config = state.config.read().await.clone();
+    let mut result = CapturePictures {
+        local: BTreeMap::new(),
+        primary: BTreeMap::new(),
+    };
+    for episode in episodes {
+        let id = string(episode, "Id");
+        for path in episode_images(state, &string(episode, "Path")).await {
+            if path.is_file() {
+                if result.local.contains_key(&path) {
+                    continue;
+                }
+                let backup = root.join(format!("local-image-{}", result.local.len()));
+                tokio::fs::copy(&path, &backup).await?;
+                tokio::fs::File::open(&backup).await?.sync_all().await?;
+                result.local.insert(path, backup);
+            }
+        }
+        if !string(&episode["ImageTags"], "Primary").is_empty() {
+            let response = crate::emby::send(
+                state
+                    .http
+                    .get(format!(
+                        "{}/Items/{id}/Images/Primary",
+                        string(&config, "emby_server_url").trim_end_matches('/')
+                    ))
+                    .header("X-Emby-Token", string(&config, "emby_api_key")),
+            )
+            .await?
+            .error_for_status()?;
+            let bytes = response.bytes().await?;
+            let format = image::guess_format(&bytes)
+                .map_err(|_| ApiError::bad("原剧集图不是可恢复的图片，未开始截图"))?;
+            let backup = root.join(format!("primary-{id}"));
+            let mut file = tokio::fs::File::create(&backup).await?;
+            file.write_all(&bytes).await?;
+            file.sync_all().await?;
+            result.primary.insert(
+                id,
+                (backup, format.to_mime_type().to_string(), episode.clone()),
+            );
+        }
+    }
+    tokio::fs::write(
+        root.join("image-backups.json"),
+        serde_json::to_vec(&json!({"local":result.local,"primary":result.primary})).unwrap(),
+    )
+    .await?;
+    Ok(result)
+}
+async fn restore_capture_pictures(state: &AppState, backup: &CapturePictures) -> Result<()> {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    let config = state.config.read().await.clone();
+    for (path, source) in &backup.local {
+        if !tokio::fs::try_exists(path).await? {
+            crate::media_save::commit_json_stage(source, path).await?;
+        } else if tokio::fs::read(path).await? != tokio::fs::read(source).await? {
+            return Err(ApiError::bad("恢复前本地剧集图已被修改，原图备份仍保留"));
+        }
+    }
+    for (id, (source, mime, original)) in &backup.primary {
+        let live = details(state, id, "Id,Path,ImageTags").await?;
+        if live["Id"] != original["Id"] || live["Path"] != original["Path"] {
+            return Err(ApiError::bad("原剧集图所属媒体身份变化，未覆盖当前图片"));
+        }
+        if !string(&live["ImageTags"], "Primary").is_empty() {
+            if live["ImageTags"]["Primary"] != original["ImageTags"]["Primary"] {
+                return Err(ApiError::bad("恢复前已出现新的剧集图，原图备份仍保留"));
+            }
+            continue;
+        }
+        let bytes = tokio::fs::read(source).await?;
+        let mut uploaded = false;
+        for body in [bytes.clone(), STANDARD.encode(&bytes).into_bytes()] {
+            let response = crate::emby::send(
+                state
+                    .http
+                    .post(format!(
+                        "{}/Items/{id}/Images/Primary",
+                        string(&config, "emby_server_url").trim_end_matches('/')
+                    ))
+                    .header("X-Emby-Token", string(&config, "emby_api_key"))
+                    .header(reqwest::header::CONTENT_TYPE, mime)
+                    .body(body),
+            )
+            .await?;
+            if response.status().is_success() {
+                uploaded = true;
+                break;
+            }
+        }
+        if !uploaded
+            || string(
+                &details(state, id, "Id,ImageTags").await?["ImageTags"],
+                "Primary",
+            )
+            .is_empty()
+        {
+            return Err(ApiError::bad("原剧集图尚未通过恢复回读，图片备份仍保留"));
+        }
+    }
+    Ok(())
 }
 pub async fn replace_images(
     state: &AppState,
@@ -409,72 +522,103 @@ pub async fn replace_images(
             "当前范围没有找到已入库的分集".into(),
         ));
     }
-    let config = state.config.read().await.clone();
     let mut snapshots = BTreeMap::new();
     let mut states = BTreeMap::new();
-    let mut original_sources = BTreeMap::new();
-    let mut snapshot_paths = BTreeMap::<String, Vec<PathBuf>>::new();
-    for episode in &episodes {
-        context.checkpoint().await?;
-        let episode_id = string(episode, "Id");
-        if episode_id.is_empty() || string(episode, "Path").is_empty() {
-            return Err(ApiError::bad(format!(
-                "{episode_id}：截图前媒体身份或路径缺失，已停止操作"
-            )));
+    let mut restore_targets = BTreeMap::new();
+    let mut protection = BTreeMap::new();
+    let mut pending = episodes
+        .iter()
+        .map(|episode| string(episode, "Id"))
+        .collect::<BTreeSet<_>>();
+    while let Some(id) = pending.pop_first() {
+        if protection.contains_key(&id) {
+            continue;
         }
-        let chapters =
-            crate::media_info::clean_chapters(&episode["Chapters"]).map_err(|error| {
-                ApiError::bad(format!(
-                    "{episode_id}：无法读取当前章节，已停止截图：{}",
-                    error.1
-                ))
-            })?;
-        let chapter_signature = crate::media_info::signature(&chapters)?;
-        original_sources.insert(
-            episode_id.clone(),
-            crate::media_paths::strm_target(&string(episode, "Path"))
-                .await
-                .unwrap_or_default(),
-        );
-        for path in crate::media_paths::info_candidates(
-            &string(episode, "Path"),
-            &string(&config, "local_strm_root"),
-            &string(&config, "cd2_media_root"),
-            "",
+        context.checkpoint().await?;
+        let target = media_edit::repair_target(state, &id).await?;
+        let live = details(
+            state,
+            &id,
+            "Id,Path,Type,Size,ExtraType,PartCount,Chapters,MediaSources,MediaStreams",
         )
-        .await
+        .await?;
+        if live["Id"] != id
+            || live["Path"] != target.path
+            || crate::emby::path_ignored(state, &target.path).await?
         {
+            return Err(ApiError::bad(
+                "截图前媒体身份、路径或关联库范围不一致，未开始截图",
+            ));
+        }
+        pending.extend(
+            target
+                .versions
+                .iter()
+                .map(|v| string(v, "emby_id"))
+                .filter(|id| !id.is_empty()),
+        );
+        if live["PartCount"].as_u64().unwrap_or(0) > 1 {
+            pending.extend(
+                media_edit::additional_parts(state, &id, &live)
+                    .await?
+                    .iter()
+                    .map(|part| string(part, "Id"))
+                    .filter(|id| !id.is_empty()),
+            );
+        }
+        protection.insert(id, (target, live));
+    }
+    for (episode_id, (target, live)) in protection {
+        context.checkpoint().await?;
+        let source = crate::media_paths::strm_target(&target.path).await;
+        let paths = [target.path.as_str(), source.as_deref().unwrap_or("")];
+        let mut info = crate::media_info::restore_json(&media_edit::load(state, &target).await?)?;
+        crate::media_info::preserve_live_streams(&mut info, &live, &paths)?;
+        crate::media_info::preserve_chapters(&mut info, &live["Chapters"])?;
+        crate::identity::verify(&target.asset, &info)?;
+        crate::identity::verify(&json!({"size_bytes":live["Size"]}), &info)?;
+        let bytes = serde_json::to_vec_pretty(&info).unwrap();
+        let mut found = false;
+        for path in &target.candidates {
             if let Some(path) = configured_file(state, path.to_str().unwrap_or("")).await {
-                let mut bytes = tokio::fs::read(&path).await?;
-                let mut info: Value = serde_json::from_slice(&bytes).map_err(|_| {
-                    ApiError::bad(format!(
-                        "{episode_id}：媒体信息备份 JSON 无效，无法保护当前章节"
-                    ))
-                })?;
-                if !crate::media_info::recoverable(&info) {
-                    return Err(ApiError::bad(format!(
-                        "{episode_id}：媒体信息备份不可安全恢复，已停止截图"
-                    )));
+                let previous: Value = serde_json::from_slice(&tokio::fs::read(&path).await?)
+                    .map_err(|_| ApiError::bad("截图前媒体信息 JSON 无效，未开始截图"))?;
+                if !crate::media_info::recoverable(&previous) {
+                    return Err(ApiError::bad("截图前媒体信息 JSON 不可恢复，未开始截图"));
                 }
-                let restored = crate::media_info::restore_json(&info)?;
-                if restored != info {
-                    info = restored;
-                    bytes = serde_json::to_vec_pretty(&info).unwrap();
+                crate::identity::verify(&target.asset, &previous)?;
+                if snapshots.get(&path).is_some_and(|saved| saved != &bytes) {
+                    return Err(ApiError::bad(
+                        "多个版本共用 JSON 但当前媒体信息不同，未开始截图",
+                    ));
                 }
-                let saved_chapters = crate::media_info::object(&info)
-                    .map(|root| &root["Chapters"])
-                    .and_then(|chapters| crate::media_info::signature(chapters).ok());
-                if saved_chapters.as_ref() != Some(&chapter_signature) {
-                    crate::media_info::preserve_chapters(&mut info, &chapters)?;
-                    bytes = serde_json::to_vec_pretty(&info).unwrap();
-                }
-                snapshot_paths
-                    .entry(episode_id.clone())
-                    .or_default()
-                    .push(path.clone());
-                snapshots.insert(path, bytes);
+                snapshots.insert(path, bytes.clone());
+                found = true;
             }
         }
+        if !found {
+            return Err(ApiError::bad(format!(
+                "{episode_id}：未找到可验证的本地媒体信息 JSON，未开始截图"
+            )));
+        }
+        let saved = crate::media_save::SavedTarget {
+            id: episode_id.clone(),
+            path: target.path,
+            source,
+            sha: target.sha,
+            asset: (!target.kind.is_empty()).then_some(target.asset),
+            info,
+            refresh_required: true,
+        };
+        crate::media_save::saved_details(state, &saved).await?;
+        restore_targets.insert(episode_id, saved);
+    }
+    crate::media_reload::validate_targets_scope(
+        state,
+        &restore_targets.values().cloned().collect::<Vec<_>>(),
+    )
+    .await?;
+    for episode in &episodes {
         let thumbs = episode_images(state, &string(episode, "Path"))
             .await
             .into_iter()
@@ -501,14 +645,34 @@ pub async fn replace_images(
     let mut deleted = 0;
     let mut missing = 0;
     let mut started = false;
+    let mut images_attempted = false;
     let mut complete = false;
     let mut generated = 0;
     context.checkpoint().await?;
     log_position(state).await?;
-    let outcome = crate::strm::with_settings(state, "capture", || async {
+    let recovery = state
+        .data_dir
+        .join("backups/media-info-reload")
+        .join(format!("capture-{}", uuid::Uuid::new_v4()));
+    save_recovery(&recovery, &snapshots).await?;
+    let picture_backups = capture_picture_backups(state, &episodes, &recovery).await?;
+    let confirmed = AtomicBool::new(true);
+    let outcome = crate::strm::with_settings_guarded(state, "capture", || async {
+        let captured = async {
         context.checkpoint().await?;
+        for target in restore_targets.values() {
+            let live = crate::media_save::saved_details(state, target).await?;
+            let paths = [target.path.as_str(), target.source.as_deref().unwrap_or("")];
+            if !crate::media_info::stream_differences(&target.info, &live, &paths).is_empty()
+                || !crate::media_info::chapters_restored(&crate::media_info::object(&target.info).unwrap()["Chapters"], &live["Chapters"]) {
+                return Err(ApiError::bad("截图前媒体信息或章节已变化，未开始截图"));
+            }
+        }
+        tokio::fs::write(recovery.join("image-capture.json"), serde_json::to_vec(&json!({"item_id":id,"stage":"before-submit","snapshot_ids":restore_targets.keys().collect::<Vec<_>>()})).unwrap()).await?;
+        confirmed.store(false, Ordering::Release);
         for (i, episode) in episodes.iter().enumerate() {
             // Once an image is removed, finish the accepted refresh and restoration even on stop.
+            images_attempted = true;
             match delete_image(state, &string(episode, "Id")).await {
                 Ok(true) => deleted += 1,
                 Ok(false) => missing += 1,
@@ -537,6 +701,8 @@ pub async fn replace_images(
             }
         }
         let position = log_position(state).await?;
+        tokio::fs::write(recovery.join("image-capture.json"), serde_json::to_vec(&json!({"item_id":id,"snapshot_ids":restore_targets.keys().collect::<Vec<_>>()})).unwrap()).await?;
+        crate::emby::prepare_refresh_guard(Some((&confirmed, &recovery)), id, Some(position)).await?;
         started = true;
         state
             .emby(
@@ -599,6 +765,8 @@ pub async fn replace_images(
                 .await;
             if trace.feed(id, &lines)? {
                 complete = true;
+                confirmed.store(true, Ordering::Release);
+                tokio::fs::remove_file(recovery.join("image-capture.json")).await?;
                 break;
             }
             if tokio::time::Instant::now() >= deadline {
@@ -624,170 +792,91 @@ pub async fn replace_images(
             ));
         }
         Ok(())
-    })
+        }.await;
+        if !started && images_attempted {
+            if let Err(error) = restore_capture_pictures(state, &picture_backups).await {
+                return Err(ApiError(StatusCode::CONFLICT, format!("截图提交前失败，原图片恢复尚未确认：{}；备份：{}",error.1,recovery.display())));
+            }
+            confirmed.store(true,Ordering::Release);
+            let marker=recovery.join("image-capture.json");
+            if tokio::fs::try_exists(&marker).await? {tokio::fs::remove_file(marker).await?;}
+        }
+        captured
+    }, &confirmed, &recovery)
     .await;
     if started && !complete {
-        let recovery = save_recovery(state, id, &snapshots).await?;
+        let reason = outcome
+            .as_ref()
+            .err()
+            .map(|error| error.1.as_str())
+            .unwrap_or("尚未确认截图刷新结束");
         return Err(ApiError(
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::CONFLICT,
             format!(
-                "未确认Emby刷新结束，已保留原媒体信息备份：{}；未提前覆盖正在刷新的文件",
-                recovery.display()
+                "未确认 Emby 截图刷新结束，临时配置及原快照仍保留：{}；{}",
+                recovery.display(),
+                reason
             ),
         ));
     }
     if complete {
-        let recovery_result = async {
-            let changed = snapshots
-                .iter()
-                .filter(|(path, bytes)| std::fs::read(path).ok().as_ref() != Some(bytes))
-                .collect::<Vec<_>>();
-            let changed_paths = changed
-                .iter()
-                .map(|(p, _)| (*p).clone())
-                .collect::<BTreeSet<_>>();
-            let mut protected = BTreeMap::new();
-            let mut unconfirmed_paths = BTreeSet::new();
-            for episode in &episodes {
-                // A changed STRM target must not discard the old source's backup paths.
-                let candidates = snapshot_paths.get(&string(episode, "Id")).cloned().unwrap_or_default();
-                if let Some(path) = candidates.iter().find(|p| changed_paths.contains(*p)) {
-                    let episode_id = string(episode, "Id");
-                    let live = tokio::time::timeout(Duration::from_secs(120), details(state, &episode_id, "Id,Path")).await;
-                    if !live.is_ok_and(|live| live.is_ok_and(|live| live["Id"] == episode["Id"] && live["Path"] == episode["Path"])) {
-                        unconfirmed_paths.extend(candidates.iter().filter(|path| changed_paths.contains(*path)).cloned());
-                        failures.push(format!("{episode_id}：恢复前无法确认原媒体身份及路径，未清空当前媒体信息"));
-                        continue;
-                    }
-                    let info: Value = serde_json::from_slice(&snapshots[path]).map_err(|_| {
-                        ApiError::bad("媒体信息恢复备份 JSON 无效")
-                    })?;
-                    let source = crate::media_paths::strm_target(&string(episode, "Path"))
-                        .await
-                        .unwrap_or_default();
-                    if original_sources[&episode_id] != source {
-                        unconfirmed_paths.extend(candidates.iter().filter(|path| changed_paths.contains(*path)).cloned());
-                        failures.push(format!("{episode_id}：截图期间 STRM 来源变化，未清空当前媒体信息"));
-                        continue;
-                    }
-                    protected.insert(episode_id, (episode, info, source));
-                }
+        let restoring = JobContext::for_recovery(Some(context)).await;
+        context
+            .activity(
+                "恢复媒体信息",
+                "截图刷新已完成，在恢复模式保护下还原原媒体信息并回读",
+            )
+            .await;
+        let mut cache_warnings = vec![];
+        let metadata = crate::media_save::refresh_saved(state, &restoring, || async {
+            for target in restore_targets.values() {
+                crate::media_save::saved_details(state, target).await?;
             }
-            let targets = protected.iter().map(|(id, (episode, _, _))| (id.clone(), string(episode, "Path"))).collect::<Vec<_>>();
-            let settings = if targets.is_empty() { None } else {
-                Some(crate::media_save::restoration_settings(state, &targets, false).await?)
-            };
-            let restore_files = || async {
-            for id in protected.keys() {
-                if let Err(e) = state
-                    .emby(
-                        Method::POST,
-                        &format!("Items/{id}/ClearMediaInfo"),
-                        &[],
-                        None,
-                    )
-                    .await
+            for (index, (path, _)) in snapshots.iter().enumerate() {
+                crate::media_save::commit_json_stage(&recovery.join(format!("{index}.json")), path)
+                    .await?;
+            }
+            for target in restore_targets.values() {
+                if let Err(error) =
+                    crate::media_save::cache_saved(state, target.sha.as_deref(), &target.info).await
                 {
-                    failures.push(e.1);
-                }
-            }
-            if !protected.is_empty() {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-            if !unconfirmed_paths.is_empty() {
-                let backup = snapshots.iter().filter(|(path, _)| unconfirmed_paths.contains(*path)).map(|(path, bytes)| (path.clone(), bytes.clone())).collect();
-                match save_recovery(state, id, &backup).await {
-                    Ok(path) => failures.push(format!("媒体身份或来源变化，未覆写其 JSON；原快照已另存：{}", path.display())),
-                    Err(error) => failures.push(format!("媒体身份或来源变化，未覆写其 JSON；原快照另存失败：{}", error.1)),
-                }
-            }
-            for (path, bytes) in changed {
-                if unconfirmed_paths.contains(path) { continue; }
-                if let Err(e) = atomic_write(path, bytes).await {
-                    failures.push(e.1);
-                }
-            }
-            if !protected.is_empty() {
-                let recovery_context = JobContext::for_recovery(Some(context)).await;
-                crate::emby::scheduled(state, "MediaInfoExtractTask", &recovery_context).await?;
-            }
-            Ok::<_, ApiError>(())
-            };
-            if let Some(settings) = settings {
-                crate::strm::with_changes(state, &settings, restore_files).await?;
-            } else {
-                restore_files().await?;
-            }
-            if !protected.is_empty() {
-                let mut pending = protected.keys().cloned().collect::<BTreeSet<_>>();
-                let mut reasons = BTreeMap::new();
-                let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-                let mut heartbeat = tokio::time::Instant::now();
-                'verify: while tokio::time::Instant::now() < deadline {
-                    for id in pending.clone() {
-                        let (episode, info, source) = &protected[&id];
-                        let path = string(episode, "Path");
-                        let readback = tokio::time::timeout_at(
-                            deadline,
-                            details(state, &id, "Id,Path,MediaStreams,MediaSources,Chapters"),
-                        )
-                        .await;
-                        let differences = match readback {
-                            Ok(Ok(live)) => {
-                                let mut differences = if live["Id"] != id || live["Path"] != path {
-                                    vec!["媒体身份或路径发生变化".into()]
-                                } else {
-                                    crate::media_info::stream_differences(info, &live, &[&path, source])
-                                };
-                                let chapters = &crate::media_info::object(info).unwrap()["Chapters"];
-                                if !crate::media_info::chapters_restored(chapters, &live["Chapters"]) {
-                                    differences.push("章节或片头片尾标记缺失、变化或无法读取".into());
-                                }
-                                differences
-                            }
-                            Ok(Err(error)) => vec![format!("回读失败：{}", error.1)],
-                            Err(_) => {
-                                reasons.insert(id, "回读请求超时，尚未确认恢复".into());
-                                break 'verify;
-                            }
-                        };
-                        if differences.is_empty() {
-                            pending.remove(&id);
-                            reasons.remove(&id);
-                        } else {
-                            reasons.insert(id, differences.join("；"));
-                        }
-                    }
-                    if pending.is_empty() {
-                        break;
-                    }
-                    if heartbeat.elapsed() >= Duration::from_secs(15) {
-                        context.activity("恢复媒体信息", &format!("原文件已恢复，仍有 {} 个分集的媒体流或章节未通过 Emby 回读验收", pending.len())).await;
-                        heartbeat = tokio::time::Instant::now();
-                    }
-                    tokio::time::sleep(Duration::from_secs(1).min(deadline.saturating_duration_since(tokio::time::Instant::now()))).await;
-                }
-                for id in pending {
-                    failures.push(format!(
-                        "{id}：恢复后 Emby 媒体信息或章节未一致：{}",
-                        reasons.get(&id).map(String::as_str).unwrap_or("尚未完成回读")
+                    cache_warnings.push(format!(
+                        "{}：原媒体信息文件已恢复，缓存同步一度失败：{}",
+                        target.id, error.1
                     ));
                 }
             }
-            Ok::<_, ApiError>(())
-        }
-        .await;
-        if let Err(error) = recovery_result {
-            let backup = save_recovery(state, id, &snapshots).await?;
+            Ok(restore_targets.values().cloned().collect::<Vec<_>>())
+        })
+        .await?;
+        failures.extend(cache_warnings);
+        failures.extend(
+            list(&metadata["warning_details"])
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string),
+        );
+        if metadata["state"] != "verified" {
+            let reason = list(&metadata["failures"])
+                .iter()
+                .map(|failure| string(failure, "reason"))
+                .collect::<Vec<_>>()
+                .join("；");
             return Err(ApiError(
-                error.0,
+                StatusCode::CONFLICT,
                 format!(
-                    "截图后的媒体信息恢复未完成：{}；原快照已保留：{}",
-                    error.1,
-                    backup.display()
+                    "截图后的媒体信息尚未通过恢复验收：{reason}；原快照：{}",
+                    recovery.display()
                 ),
             ));
         }
+    }
+    if confirmed.load(Ordering::Acquire)
+        && !outcome
+            .as_ref()
+            .is_err_and(|error| error.0 == StatusCode::CONFLICT)
+    {
+        tokio::fs::remove_dir_all(&recovery).await?;
     }
     outcome?;
     Ok((

@@ -392,6 +392,12 @@ async fn check_rename_scan_guard(state: &AppState, id: &str) -> Result<()> {
                     entry.path().display()
                 )));
             }
+            if tokio::fs::try_exists(entry.path().join("image-capture.json")).await? {
+                return Err(blocked(format!(
+                    "截图刷新或媒体信息恢复尚未完成，请先核对恢复目录 {}",
+                    entry.path().display()
+                )));
+            }
             let path = entry.path().join("pending-scan.json");
             if tokio::fs::try_exists(&path)
                 .await
@@ -462,12 +468,15 @@ async fn check_rename_scan_guard(state: &AppState, id: &str) -> Result<()> {
             && fields.keys().all(|key| {
                 matches!(
                     key.as_str(),
-                    "ExclusiveControlFeatures" | "PersistMediaInfoMode"
+                    "ExclusiveControlFeatures" | "PersistMediaInfoMode" | "EnableImageCapture"
                 )
             })
             && fields
                 .get("PersistMediaInfoMode")
                 .is_none_or(Value::is_string)
+            && fields
+                .get("EnableImageCapture")
+                .is_none_or(Value::is_boolean)
             && fields
                 .get("ExclusiveControlFeatures")
                 .is_some_and(|value| value.is_string() || value.is_null())
@@ -577,6 +586,12 @@ where
         .into(),
     );
     desired["ExclusiveControlFeatures"] = json!(values.join(","));
+    if mode == "capture" {
+        if !original["EnableImageCapture"].is_boolean() {
+            return Err(ApiError::bad("神医截图开关配置无效，未开始截图"));
+        }
+        desired["EnableImageCapture"] = json!(true);
+    }
     if mode == "restore_media_info" {
         if !original["PersistMediaInfoMode"].is_string() {
             return Err(ApiError::bad("神医恢复模式配置无效，未清理媒体信息"));
@@ -593,6 +608,9 @@ where
         && desired["PersistMediaInfoMode"] != original["PersistMediaInfoMode"]
     {
         restore["PersistMediaInfoMode"] = original["PersistMediaInfoMode"].clone();
+    }
+    if mode == "capture" && desired["EnableImageCapture"] != original["EnableImageCapture"] {
+        restore["EnableImageCapture"] = original["EnableImageCapture"].clone();
     }
     let changed = !restore.as_object().unwrap().is_empty();
     if let Some((_, recovery)) = guard {
@@ -613,6 +631,9 @@ where
         let mut backup = json!({"ExclusiveControlFeatures":original["ExclusiveControlFeatures"]});
         if mode == "restore_media_info" {
             backup["PersistMediaInfoMode"] = original["PersistMediaInfoMode"].clone();
+        }
+        if mode == "capture" {
+            backup["EnableImageCapture"] = original["EnableImageCapture"].clone();
         }
         file.write_all(&serde_json::to_vec_pretty(&backup).unwrap())
             .await?;
@@ -639,13 +660,13 @@ where
         && !confirmed.load(std::sync::atomic::Ordering::Acquire)
     {
         tracing::error!(
-            "[神医临时设置] 未确认媒体刷新结束，保留忽略文件变更保护，原配置说明位于 {}",
+            "[神医临时设置] 未确认媒体刷新结束，保留当前临时配置，原配置说明位于 {}",
             recovery.display()
         );
         return Err(ApiError(
             axum::http::StatusCode::CONFLICT,
             format!(
-                "尚未确认媒体刷新结束；忽略文件变更保护仍保留，恢复说明：{}",
+                "尚未确认媒体刷新结束；当前临时配置仍保留，恢复说明：{}",
                 recovery.display()
             ),
         ));

@@ -515,10 +515,19 @@ where
                 .map(|target| target.id.clone())
                 .collect::<Vec<_>>()
         );
-        report["failures"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({"reason":error.1}));
+        let failed_ids = media_edit::list(&report["failed_ids"]);
+        if failed_ids.is_empty() {
+            report["failures"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"reason":error.1}));
+        } else {
+            report["failures"].as_array_mut().unwrap().extend(
+                failed_ids
+                    .into_iter()
+                    .map(|id| json!({"item_id":id,"reason":error.1})),
+            );
+        }
     }
     if confirmed.load(Ordering::Acquire) && !keep_recovery {
         let _ = tokio::fs::remove_dir_all(&recovery).await;

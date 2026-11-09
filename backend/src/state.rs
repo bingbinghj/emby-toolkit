@@ -174,6 +174,23 @@ impl AppState {
         query: &[(&str, String)],
         body: Option<Value>,
     ) -> Result<Value> {
+        let endpoint = format!(
+            "Emby {} /{}",
+            method.as_str(),
+            path.split('?').next().unwrap_or("").trim_start_matches('/')
+        );
+        let request_error = |error: reqwest::Error| {
+            let reason = if let Some(status) = error.status() {
+                format!("返回 HTTP {status}")
+            } else if error.is_timeout() {
+                "请求超时".into()
+            } else {
+                "请求或响应读取失败".into()
+            };
+            let message = format!("{endpoint}：{reason}");
+            tracing::error!(error=%error.without_url(), "{message}");
+            ApiError(axum::http::StatusCode::BAD_GATEWAY, message)
+        };
         let cfg = self.config.read().await;
         let base = string(&cfg, "emby_server_url")
             .trim_end_matches('/')
@@ -197,15 +214,20 @@ impl AppState {
         if let Some(body) = body {
             request = request.json(&body);
         }
-        let response = crate::emby::send(request).await?.error_for_status()?;
+        let response = crate::emby::send(request)
+            .await
+            .map_err(request_error)?
+            .error_for_status()
+            .map_err(request_error)?;
         if response.status() == reqwest::StatusCode::NO_CONTENT {
             return Ok(json!({"success":true}));
         }
-        let bytes = response.bytes().await?;
+        let bytes = response.bytes().await.map_err(request_error)?;
         if bytes.is_empty() {
             return Ok(json!({"success":true}));
         }
-        serde_json::from_slice(&bytes).map_err(|_| ApiError::bad("Emby 返回了无效 JSON"))
+        serde_json::from_slice(&bytes)
+            .map_err(|_| ApiError::bad(format!("{endpoint}：返回了无效 JSON")))
     }
     pub async fn item_delay(&self, context: &crate::jobs::JobContext) -> Result<()> {
         let seconds = self.config.read().await["delay_between_items_sec"]

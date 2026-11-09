@@ -90,6 +90,7 @@ async fn check_scope(
         .collect::<BTreeSet<_>>();
     let mut members = BTreeMap::<(String, bool), BTreeSet<String>>::new();
     let mut seen = BTreeSet::new();
+    let user = string(&*state.config.read().await, "emby_user_id");
     let mut start = 0;
     loop {
         let response = state
@@ -170,7 +171,7 @@ async fn check_scope(
                 let extras = state
                     .emby(
                         Method::GET,
-                        &format!("Items/{id}/SpecialFeatures"),
+                        &format!("Users/{user}/Items/{id}/SpecialFeatures"),
                         &[],
                         None,
                     )
@@ -223,6 +224,18 @@ async fn check_scope(
         ));
     }
     Ok(members)
+}
+
+pub(crate) async fn validate_targets_scope(
+    state: &AppState,
+    targets: &[SavedTarget],
+) -> Result<()> {
+    let mut groups = BTreeSet::new();
+    for target in targets {
+        groups.insert(group(&identity_details(state, target).await?)?);
+    }
+    check_scope(state, &targets.iter().collect::<Vec<_>>(), &groups).await?;
+    Ok(())
 }
 
 struct Snapshot {

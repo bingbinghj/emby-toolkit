@@ -485,7 +485,7 @@ async fn process(
     let images = image_report["downloaded"].as_u64().unwrap_or(0);
     warning_details.extend(list(&image_report["warning_details"]));
     if state.configured().await && !pending {
-        crate::persons::update_emby(state, &cast, &payload, item).await?;
+        crate::persons::update_emby_in_job(state, &cast, &payload, item, context).await?;
         if refresh_metadata {
             tracing::info!(
                 "Emby 元数据刷新开始：《{media_name}》，Emby {}，TMDb {tmdb}",
