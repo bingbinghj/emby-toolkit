@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path as FsPath, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, SystemTime},
 };
 
@@ -1210,6 +1211,7 @@ async fn resolve_missing_fid(state: &AppState, resource: &DeleteResource) -> Res
     }
     Ok(matched.into_iter().next().unwrap_or_default())
 }
+#[derive(serde::Serialize, serde::Deserialize)]
 struct LocalSnapshot {
     stage: PathBuf,
     roots: Vec<(PathBuf, PathBuf)>,
@@ -1271,7 +1273,19 @@ impl LocalSnapshot {
         Ok(output)
     }
     async fn restore(&self, include_target: bool) -> Result<()> {
+        self.restore_inner(include_target, false).await
+    }
+    async fn restore_inner(&self, include_target: bool, missing_only: bool) -> Result<()> {
         for (root, backup) in &self.roots {
+            let mut ancestor = root.clone();
+            while !tokio::fs::try_exists(&ancestor).await? {
+                if !ancestor.pop() {
+                    return Err(ApiError::bad("无法确认版本恢复目录"));
+                }
+            }
+            if tokio::fs::canonicalize(&ancestor).await? != ancestor {
+                return Err(ApiError::bad("版本恢复目录含变化的符号链接，未覆盖文件"));
+            }
             let mut pending = vec![backup.clone()];
             while let Some(dir) = pending.pop() {
                 let mut entries = tokio::fs::read_dir(dir).await?;
@@ -1283,6 +1297,18 @@ impl LocalSnapshot {
                     } else if kind.is_file() {
                         let destination = root.join(path.strip_prefix(backup).unwrap());
                         if include_target || !self.targets.contains(&destination) {
+                            if missing_only && tokio::fs::try_exists(&destination).await? {
+                                if !tokio::fs::symlink_metadata(&destination)
+                                    .await?
+                                    .file_type()
+                                    .is_file()
+                                {
+                                    return Err(ApiError::bad(
+                                        "版本恢复目标已变化，未覆盖现有文件",
+                                    ));
+                                }
+                                continue;
+                            }
                             let modified = tokio::fs::metadata(&path).await?.modified()?;
                             let bytes = tokio::fs::read(&path).await?;
                             let unchanged = tokio::fs::symlink_metadata(&destination)
@@ -1313,12 +1339,33 @@ impl LocalSnapshot {
                                 file.set_times(std::fs::FileTimes::new().set_modified(modified))?;
                             }
                         }
+                    } else {
+                        return Err(ApiError::bad("版本备份含符号链接或特殊文件，已停止恢复"));
                     }
                 }
             }
         }
         if !include_target {
             for path in &self.targets {
+                if missing_only && tokio::fs::try_exists(path).await? {
+                    let backup = self
+                        .roots
+                        .iter()
+                        .find_map(|(root, backup)| {
+                            path.strip_prefix(root)
+                                .ok()
+                                .map(|relative| backup.join(relative))
+                        })
+                        .ok_or_else(|| ApiError::bad("已删除版本路径不在原快照范围内"))?;
+                    if !tokio::fs::symlink_metadata(path)
+                        .await?
+                        .file_type()
+                        .is_file()
+                        || tokio::fs::read(path).await? != tokio::fs::read(backup).await?
+                    {
+                        return Err(ApiError::bad("已删除版本路径出现新内容，未移除新文件"));
+                    }
+                }
                 match tokio::fs::remove_file(path).await {
                     Ok(()) => (),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
@@ -1327,6 +1374,111 @@ impl LocalSnapshot {
             }
         }
         Ok(())
+    }
+}
+pub(crate) async fn restore_version_delete_snapshot(recovery: &FsPath) -> Result<()> {
+    let snapshot: LocalSnapshot = serde_json::from_slice(
+        &tokio::fs::read(recovery.join("version-delete-snapshot.json")).await?,
+    )
+    .map_err(|_| ApiError::bad("版本删除恢复记录无效"))?;
+    let data_dir = recovery
+        .parent()
+        .and_then(FsPath::parent)
+        .ok_or_else(|| ApiError::bad("版本删除恢复目录无效"))?;
+    let stage = tokio::fs::canonicalize(&snapshot.stage).await?;
+    let expected = tokio::fs::canonicalize(data_dir).await?.join(
+        recovery
+            .file_name()
+            .ok_or_else(|| ApiError::bad("版本删除恢复目录无效"))?,
+    );
+    if stage != expected || snapshot.roots.is_empty() {
+        return Err(ApiError::bad("版本删除快照不在原恢复范围内"));
+    }
+    for (index, (root, backup)) in snapshot.roots.iter().enumerate() {
+        if !root.is_absolute()
+            || root == FsPath::new("/")
+            || root
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+            || tokio::fs::canonicalize(backup).await? != stage.join(index.to_string())
+        {
+            return Err(ApiError::bad("版本删除快照路径无效，已停止恢复"));
+        }
+    }
+    if snapshot.targets.iter().any(|path| {
+        !path.is_absolute()
+            || path
+                .components()
+                .any(|part| matches!(part, std::path::Component::ParentDir))
+            || !snapshot
+                .roots
+                .iter()
+                .any(|(root, _)| path.starts_with(root))
+    }) {
+        return Err(ApiError::bad("版本删除目标超出原快照范围"));
+    }
+    // After an interrupted scan, repair missing protected files without replacing
+    // later user edits. Only an unchanged recreation of the deleted target is removed.
+    snapshot.restore_inner(false, true).await
+}
+
+async fn wait_delete_scan(
+    state: &AppState,
+    ids: &[String],
+    position: u64,
+    snapshot: &LocalSnapshot,
+    context: &JobContext,
+    protection_delays: &[Duration],
+) -> Result<()> {
+    if ids.is_empty() {
+        return Err(ApiError::bad("版本删除后没有有效目录扫描，保护配置仍保留"));
+    }
+    let mut traces = ids
+        .iter()
+        .map(|id| (id, RefreshTrace::new(position), false))
+        .collect::<Vec<_>>();
+    let mut deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    let mut iteration = 0;
+    loop {
+        let before_checkpoint = tokio::time::Instant::now();
+        context.checkpoint().await?;
+        deadline += before_checkpoint.elapsed();
+        snapshot.restore(false).await?;
+        let query = [("Limit", "500".into())];
+        let logs = tokio::select! {
+            _ = context.cancelled() => return context.checkpoint().await,
+            result = tokio::time::timeout_at(deadline, state.emby(
+                Method::GET, "System/Logs/embyserver.txt/Lines",
+                &query, None,
+            )) => result.map_err(|_| ApiError::bad("版本删除目录扫描完成日志读取超时"))??,
+        };
+        for (id, trace, complete) in &mut traces {
+            if !*complete {
+                *complete = trace.feed(id, &logs)?;
+            }
+        }
+        if traces.iter().all(|(_, _, complete)| *complete) {
+            snapshot.restore(false).await?;
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(ApiError::bad(
+                "120秒内未确认版本删除目录扫描结束，保护配置仍保留",
+            ));
+        }
+        context
+            .activity("保护剩余版本", "等待本次目录扫描结束，保护剩余版本文件")
+            .await;
+        let delay = protection_delays
+            .get(iteration)
+            .copied()
+            .unwrap_or(Duration::from_secs(1))
+            .max(Duration::from_millis(10))
+            .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+        iteration += 1;
+        let before_sleep = tokio::time::Instant::now();
+        context.sleep(delay).await?;
+        deadline += before_sleep.elapsed().saturating_sub(delay);
     }
 }
 async fn regroup(state: &AppState, ids: &[String]) -> Result<()> {
@@ -1418,6 +1570,22 @@ pub async fn delete_version(
         resources.push(resource);
     }
     let snapshot = LocalSnapshot::create(state, targets).await?;
+    let recovery = state
+        .data_dir
+        .join("rename-recovery")
+        .join(snapshot.stage.file_name().unwrap());
+    tokio::fs::create_dir_all(&recovery).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        tokio::fs::set_permissions(&recovery, std::fs::Permissions::from_mode(0o700)).await?;
+    }
+    atomic_write(
+        &recovery.join("version-delete-snapshot.json"),
+        &serde_json::to_vec(&snapshot).unwrap(),
+    )
+    .await?;
+    let confirmed = AtomicBool::new(true);
     let remaining = versions
         .iter()
         .filter(|v| *v != id)
@@ -1428,7 +1596,7 @@ pub async fn delete_version(
     let mut committed = false;
     let mut recovery_failed = false;
     let mut warning_details = vec![];
-    let outcome=crate::strm::with_settings(state,"preserve",|| async {
+    let outcome=crate::strm::with_settings_guarded(state,"ignore_file_change",|| async {
         let result = std::panic::AssertUnwindSafe(async {
         context.checkpoint().await?;
         verify_delete_resources(state, &resources, &remaining).await?;
@@ -1450,14 +1618,24 @@ pub async fn delete_version(
             tracing::warn!("[版本删除] {warning}");
             warning_details.push(warning);
         }
-        crate::media_save::refresh(state,&snapshot.targets.iter().map(|p|p.to_string_lossy().into_owned()).collect::<Vec<_>>()).await?;
-        for (i,delay)in protection_delays.iter().enumerate(){context.update(85+(14*(i+1)/protection_delays.len())as u64,"保护剩余版本","正在安全收尾，恢复外部增量任务可能误删的剩余版本文件").await;tokio::time::sleep(*delay).await;snapshot.restore(false).await?;}
+        let position = log_position(state).await?;
+        atomic_write(&recovery.join("pending-scan.json"), &serde_json::to_vec(
+            &json!({"position":position,"ids":null})).unwrap()).await?;
+        confirmed.store(false, Ordering::Release);
+        let paths = snapshot.targets.iter().map(|p|p.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        let submitted = tokio::time::timeout(Duration::from_secs(120),
+            crate::media_save::refresh_with_ids(state,&paths)).await
+            .map_err(|_| ApiError::bad("版本删除目录扫描提交超时，保护配置仍保留"))??;
+        atomic_write(&recovery.join("pending-scan.json"), &serde_json::to_vec(
+            &json!({"position":position,"ids":submitted})).unwrap()).await?;
+        wait_delete_scan(state,&submitted,position,&snapshot,context,protection_delays).await?;
+        confirmed.store(true, Ordering::Release);
         Ok(json!({"message":format!("指定媒体版本已删除，115、STRM、媒体信息和Emby已刷新{}",if warning_details.is_empty(){String::new()}else{format!("；收尾有 {} 条警告，请查看任务结果",warning_details.len())}),"deleted_item_id":id,"remaining_item_id":remaining.first(),"warnings":warning_details.len(),"warning_details":warning_details}))
         }).catch_unwind().await.unwrap_or_else(|_| Err(ApiError::bad("版本删除执行异常")));
     if !deleted {
         state.webhooks.clear_manual_delete(&versions).await;
     }
-    if result.is_err() && (split || deleted) {
+    if result.is_err() && (split || deleted) && confirmed.load(Ordering::Acquire) {
         if let Err(e) = snapshot.restore(!committed).await {
             recovery_failed = true;
             tracing::error!(
@@ -1478,10 +1656,16 @@ pub async fn delete_version(
         }
     }
         result
-    }).await;
-    if recovery_failed {
+    }, &confirmed, &recovery).await;
+    if recovery_failed
+        || !confirmed.load(Ordering::Acquire)
+        || outcome
+            .as_ref()
+            .is_err_and(|error| error.0 == StatusCode::CONFLICT)
+    {
         return outcome;
     }
     let _ = tokio::fs::remove_dir_all(snapshot.stage).await;
+    let _ = tokio::fs::remove_dir_all(recovery).await;
     outcome
 }

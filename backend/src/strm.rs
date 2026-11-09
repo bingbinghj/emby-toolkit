@@ -435,6 +435,13 @@ async fn check_rename_scan_guard(state: &AppState, id: &str) -> Result<()> {
         }
     }
     let recovery = path.parent().unwrap();
+    let delete_snapshot =
+        tokio::fs::try_exists(recovery.join("version-delete-snapshot.json")).await?;
+    if delete_snapshot {
+        crate::media_extra::restore_version_delete_snapshot(recovery)
+            .await
+            .map_err(|error| blocked(error.1))?;
+    }
     let original: Value = serde_json::from_slice(
         &tokio::fs::read(recovery.join("original-settings.json"))
             .await
@@ -457,6 +464,17 @@ async fn check_rename_scan_guard(state: &AppState, id: &str) -> Result<()> {
             "扫描已结束且原配置已恢复，但待确认标记清理失败：{error}"
         ))
     })?;
+    if delete_snapshot {
+        let stage = state.data_dir.join(recovery.file_name().unwrap());
+        let cleanup = async {
+            tokio::fs::remove_dir_all(stage).await?;
+            tokio::fs::remove_dir_all(recovery).await
+        }
+        .await;
+        if let Err(error) = cleanup {
+            tracing::warn!("[神医临时设置] 版本删除已验收并恢复配置，备份清理失败：{error}");
+        }
+    }
     tracing::info!("[神医临时设置] 前次媒体刷新已完成验收并恢复原配置，允许继续处理");
     Ok(())
 }

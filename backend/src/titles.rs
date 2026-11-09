@@ -45,7 +45,7 @@ async fn atomic(path: &Path, data: &Value) -> Result<()> {
 }
 
 async fn verify_saved_target(state: &AppState, id: &str, snapshot: &Value) -> Result<Value> {
-    let target = media_edit::target(state, id).await?;
+    let target = media_edit::repair_target(state, id).await?;
     if target.path != snapshot["media_path"]
         || json!(target.sha) != snapshot["sha1"]
         || target.asset != snapshot["asset"]
@@ -422,7 +422,7 @@ async fn fill_inner(
                 pending.push(annotate(json!({"reason":"分段或附加内容需手动填充"})));
                 return Ok((true, 0));
             }
-            let target = media_edit::target(state, id).await?;
+            let target = media_edit::repair_target(state, id).await?;
             if target.asset["fingerprint_pending"] == true { unsafe_target = true; return Err(ApiError::bad("文件身份待校验，请先重新校验指纹")); }
             let item_path = string(&item, "Path");
             if item["Id"] != *id || item_path != target.path { unsafe_target = true; return Err(ApiError::bad("Emby身份或路径与当前媒体资产不一致，已停止填充标题")); }

@@ -1052,7 +1052,12 @@ pub async fn query_items(
     Ok(result)
 }
 pub async fn persons(state: &AppState, context: &JobContext) -> Result<Vec<Value>> {
+    let has_ignored_libraries =
+        !crate::media_edit::list(&state.config.read().await["libraries_to_ignore"]).is_empty();
     let libraries = processing_libraries(state).await?;
+    if libraries.is_empty() && has_ignored_libraries {
+        return Ok(vec![]);
+    }
     let mut ids = std::collections::BTreeSet::new();
     for library in libraries {
         for item in items(state, &library, "People", context).await? {
@@ -1065,7 +1070,22 @@ pub async fn persons(state: &AppState, context: &JobContext) -> Result<Vec<Value
         }
     }
     if ids.is_empty() {
-        return Ok(vec![]);
+        if has_ignored_libraries {
+            return Err(ApiError::bad(
+                "Emby未返回媒体库关联人物，无法确认人物处理范围；已保留忽略媒体库设置并停止全量人物回退",
+            ));
+        }
+        tracing::warn!("[人物扫描] 媒体项目未返回关联人物，兼容回退至全量Person分页扫描");
+        return query_items(
+            state,
+            &[
+                ("IncludeItemTypes", "Person".into()),
+                ("Recursive", "true".into()),
+                ("Fields", "ProviderIds,Name".into()),
+            ],
+            context,
+        )
+        .await;
     }
     let mut result = vec![];
     for chunk in ids.into_iter().collect::<Vec<_>>().chunks(500) {

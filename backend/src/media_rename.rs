@@ -631,6 +631,177 @@ async fn renamed_scan(
         .await;
     }
 }
+struct CapturedSidecar {
+    old: PathBuf,
+    new: PathBuf,
+    hash: Option<[u8; 32]>,
+}
+fn public_sidecar(path: &std::path::Path) -> bool {
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_lowercase();
+    [
+        "poster",
+        "fanart",
+        "folder",
+        "cover",
+        "banner",
+        "landscape",
+        "logo",
+        "clearlogo",
+        "clearart",
+        "disc",
+        "backdrop",
+        "background",
+        "thumb",
+        "movie",
+        "tvshow",
+        "season",
+    ]
+    .iter()
+    .any(|stem| {
+        name.strip_prefix(stem).is_some_and(|suffix| {
+            suffix
+                .trim_start_matches(|c: char| c.is_ascii_digit() || matches!(c, '-' | '_'))
+                .starts_with('.')
+        })
+    })
+}
+async fn capture_sidecars(sidecars: &[(PathBuf, PathBuf)]) -> Result<Vec<CapturedSidecar>> {
+    let mut output = vec![];
+    for (old, new) in sidecars {
+        let extension = old
+            .extension()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase();
+        let known = [
+            "json", "nfo", "srt", "ass", "ssa", "sub", "idx", "vtt", "sup", "bif", "jpg", "jpeg",
+            "png", "webp",
+        ]
+        .contains(&extension.as_str());
+        let hash = if known && !public_sidecar(old) {
+            if !tokio::fs::symlink_metadata(old)
+                .await?
+                .file_type()
+                .is_file()
+            {
+                return Err(ApiError::bad("待改名旁车不是普通文件，已停止改名"));
+            }
+            Some(Sha256::digest(tokio::fs::read(old).await?).into())
+        } else {
+            None
+        };
+        output.push(CapturedSidecar {
+            old: old.clone(),
+            new: new.clone(),
+            hash,
+        });
+    }
+    Ok(output)
+}
+async fn cleanup_stale_sidecars(
+    root: &std::path::Path,
+    old_anchor: &str,
+    sidecars: &[CapturedSidecar],
+) -> Vec<String> {
+    let mut warnings = vec![];
+    for sidecar in sidecars {
+        let Some(name) = sidecar.old.file_name() else {
+            continue;
+        };
+        let candidate = sidecar.new.with_file_name(name);
+        if candidate == sidecar.new {
+            continue;
+        }
+        let outcome = async {
+            let metadata = match tokio::fs::symlink_metadata(&candidate).await {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error.into()),
+            };
+            let hash = sidecar
+                .hash
+                .ok_or_else(|| ApiError::bad("公共或未确认类型旁车已保留"))?;
+            let new_metadata = tokio::fs::symlink_metadata(&sidecar.new).await?;
+            let candidate_real = tokio::fs::canonicalize(&candidate).await?;
+            let new_real = tokio::fs::canonicalize(&sidecar.new).await?;
+            if candidate_real == new_real {
+                return Ok(());
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if metadata.dev() == new_metadata.dev() && metadata.ino() == new_metadata.ino() {
+                    return Ok(());
+                }
+            }
+            if !metadata.file_type().is_file()
+                || !new_metadata.file_type().is_file()
+                || !candidate_real.starts_with(root)
+                || !new_real.starts_with(root)
+            {
+                return Err(ApiError::bad("旁车当前路径或文件类型已变化，未清理"));
+            }
+            let name = name.to_string_lossy();
+            let mut entries = tokio::fs::read_dir(candidate.parent().unwrap()).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let kind = entry.file_type().await?;
+                if (kind.is_file() || kind.is_symlink())
+                    && entry
+                        .path()
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("strm"))
+                {
+                    let owner = entry
+                        .path()
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    if owner != old_anchor
+                        && name
+                            .strip_prefix(&owner)
+                            .is_some_and(|suffix| suffix.starts_with(['.', '-']))
+                    {
+                        return Err(ApiError::bad("旧名旁车属于当前其他STRM版本，已保留"));
+                    }
+                }
+            }
+            if <[u8; 32]>::from(Sha256::digest(tokio::fs::read(&candidate).await?)) != hash {
+                return Err(ApiError::bad("旧名旁车含新内容，已保留"));
+            }
+            let current = tokio::fs::symlink_metadata(&candidate).await?;
+            if !current.file_type().is_file()
+                || current.len() != metadata.len()
+                || current.modified()? != metadata.modified()?
+                || !tokio::fs::canonicalize(&candidate).await?.starts_with(root)
+            {
+                return Err(ApiError::bad("旧名旁车在清理期间变化，已保留"));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if current.dev() != metadata.dev() || current.ino() != metadata.ino() {
+                    return Err(ApiError::bad("旧名旁车在清理期间被替换，已保留"));
+                }
+            }
+            tokio::fs::remove_file(&candidate).await?;
+            tracing::info!(
+                "[媒体改名] 已清理扫描后再生成的原旁车：{}",
+                candidate.display()
+            );
+            Ok::<_, ApiError>(())
+        }
+        .await;
+        if let Err(error) = outcome {
+            warnings.push(format!("{}：{}", candidate.display(), error.1));
+        }
+    }
+    warnings
+}
 async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext) -> Result<Value> {
     use std::sync::atomic::{AtomicBool, Ordering};
     context.checkpoint().await?;
@@ -692,10 +863,12 @@ async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext)
         &string(&source.item["ProviderIds"], "Tmdb"),
     )
     .await?;
+    let local_root = tokio::fs::canonicalize(&configured_root).await?;
     let recovery = state.data_dir.join("rename-recovery").join(&context.id);
     let confirmed = AtomicBool::new(true);
     let outcome = crate::strm::with_settings_guarded(state, "preserve", || async {
         context.checkpoint().await?;
+        let captured_sidecars = capture_sidecars(&sidecars).await?;
         // Resolve every cloud read before filesystem changes or database row locks.
         let mut operations = vec![];
         let mut cloud_directories = vec![];
@@ -864,7 +1037,9 @@ async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext)
         let (found, scanned) = tokio::join!(renamed_id(state, &target, &source.item["Type"]), renamed_scan(state, &submitted, position, context));
         if scanned.is_ok() { confirmed.store(true, Ordering::Release); }
         scanned?;
-        let mut warnings = vec![];
+        let mut warnings = cleanup_stale_sidecars(&local_root,
+            &source.local.file_stem().unwrap_or_default().to_string_lossy(),
+            &captured_sidecars).await;
         let found = match found { Ok(found) => found, Err(error) => { warnings.push(format!("新Emby条目查询失败：{}",error.1)); None } };
         if let Some(new_id) = &found {
             let mut transaction = state.db.begin().await?;
@@ -890,4 +1065,137 @@ async fn sample(State(state): State<AppState>, Json(body): Json<Value>) -> Resul
     Ok(Json(
         json!({"movie":if string(&body,"movie_format").trim().is_empty(){String::new()}else{rename::render(&string(&body,"movie_format"),&movie,".mkv")?},"tv":if string(&body,"tv_format").trim().is_empty(){String::new()}else{rename::render(&string(&body,"tv_format"),&tv,".mp4")?}}),
     ))
+}
+
+#[cfg(test)]
+mod stale_sidecar_tests {
+    use super::*;
+
+    async fn moved(old: &std::path::Path, new: &std::path::Path) -> Vec<CapturedSidecar> {
+        tokio::fs::write(old, b"captured old data").await.unwrap();
+        let captured = capture_sidecars(&[(old.into(), new.into())]).await.unwrap();
+        tokio::fs::rename(old, new).await.unwrap();
+        captured
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn old_name_alias_cannot_delete_the_new_sidecar() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = tokio::fs::canonicalize(directory.path()).await.unwrap();
+        let old = root.join("Old.en.srt");
+        let new = root.join("New.en.srt");
+        let captured = moved(&old, &new).await;
+        tokio::fs::hard_link(&new, &old).await.unwrap();
+        assert!(
+            cleanup_stale_sidecars(&root, "Old", &captured)
+                .await
+                .is_empty()
+        );
+        assert!(old.is_file() && new.is_file());
+    }
+
+    #[tokio::test]
+    async fn removes_only_captured_old_duplicate_and_keeps_new_sidecar() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = tokio::fs::canonicalize(directory.path()).await.unwrap();
+        let old = root.join("Old.en.srt");
+        let new = root.join("New.en.srt");
+        let captured = moved(&old, &new).await;
+        tokio::fs::write(&new, b"new sidecar references")
+            .await
+            .unwrap();
+        tokio::fs::write(&old, b"captured old data").await.unwrap();
+        assert!(
+            cleanup_stale_sidecars(&root, "Old", &captured)
+                .await
+                .is_empty()
+        );
+        assert!(!old.exists());
+        assert_eq!(
+            tokio::fs::read(&new).await.unwrap(),
+            b"new sidecar references"
+        );
+    }
+
+    #[tokio::test]
+    async fn preserves_user_changes_public_images_and_more_specific_strm_owner() {
+        for (old_name, new_name, contents, owner) in [
+            ("Old.nfo", "New.nfo", b"user new content".as_slice(), None),
+            (
+                "poster.jpg",
+                "NewPoster.jpg",
+                b"captured old data".as_slice(),
+                None,
+            ),
+            (
+                "fanart-1.jpg",
+                "NewFanart.jpg",
+                b"captured old data".as_slice(),
+                None,
+            ),
+            (
+                "Old.cut.en.srt",
+                "New.cut.en.srt",
+                b"captured old data".as_slice(),
+                Some("Old.cut.strm"),
+            ),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let root = tokio::fs::canonicalize(directory.path()).await.unwrap();
+            let old = root.join(old_name);
+            let new = root.join(new_name);
+            let captured = moved(&old, &new).await;
+            tokio::fs::write(&old, contents).await.unwrap();
+            if let Some(owner) = owner {
+                tokio::fs::write(root.join(owner), b"/source.mkv")
+                    .await
+                    .unwrap();
+            }
+            let warnings = cleanup_stale_sidecars(&root, "Old", &captured).await;
+            assert_eq!(warnings.len(), 1, "{old_name}: {warnings:?}");
+            assert_eq!(tokio::fs::read(&old).await.unwrap(), contents);
+            assert_eq!(tokio::fs::read(&new).await.unwrap(), b"captured old data");
+        }
+    }
+
+    #[tokio::test]
+    async fn directory_only_rename_never_deletes_the_new_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = tokio::fs::canonicalize(directory.path()).await.unwrap();
+        tokio::fs::create_dir(root.join("old")).await.unwrap();
+        tokio::fs::create_dir(root.join("new")).await.unwrap();
+        let old = root.join("old/Name.nfo");
+        let new = root.join("new/Name.nfo");
+        let captured = moved(&old, &new).await;
+        assert!(
+            cleanup_stale_sidecars(&root, "Name", &captured)
+                .await
+                .is_empty()
+        );
+        assert_eq!(tokio::fs::read(&new).await.unwrap(), b"captured old data");
+    }
+
+    #[tokio::test]
+    async fn unknown_video_sidecar_is_never_read_or_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = tokio::fs::canonicalize(directory.path()).await.unwrap();
+        let old = root.join("Old.mp4");
+        let new = root.join("New.mp4");
+        let captured = capture_sidecars(&[(old.clone(), new.clone())])
+            .await
+            .unwrap();
+        assert!(
+            captured[0].hash.is_none(),
+            "capture must not try to read the absent video"
+        );
+        tokio::fs::write(&old, b"unverified video").await.unwrap();
+        tokio::fs::write(&new, b"renamed video").await.unwrap();
+        assert_eq!(
+            cleanup_stale_sidecars(&root, "Old", &captured).await.len(),
+            1
+        );
+        assert!(old.exists());
+        assert!(new.exists());
+    }
 }

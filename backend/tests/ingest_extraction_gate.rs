@@ -273,6 +273,153 @@ impl Fixture {
     }
 }
 
+struct TelegramCapture {
+    messages: Arc<Mutex<Vec<Value>>>,
+    server: tokio::task::JoinHandle<()>,
+}
+impl TelegramCapture {
+    async fn attach(fixture: &mut Fixture) -> Self {
+        let messages = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let captured = messages.clone();
+        let router = Router::new().route(
+            "/botfixture/{method}",
+            post(move |Path(method): Path<String>, Json(body): Json<Value>| {
+                let messages = captured.clone();
+                async move {
+                    assert!(matches!(method.as_str(), "sendMessage" | "sendPhoto"));
+                    messages.lock().await.push(body);
+                    Json(json!({"ok":true,"result":{"message_id":1}}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let api_base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut service = emby_toolkit::notifications::Service::default();
+        service.api_base = api_base;
+        fixture.state.notifications = Arc::new(service);
+        fixture
+            .state
+            .save_config(&json!({
+                "telegram_bot_token":"fixture","telegram_channel_id":"fixture-channel",
+                "telegram_notify_types":["library_new"]
+            }))
+            .await
+            .unwrap();
+        Self { messages, server }
+    }
+    async fn finish(self) -> Vec<Value> {
+        let messages = self.messages.lock().await.clone();
+        self.server.abort();
+        messages
+    }
+}
+
+async fn configure_unmerged_movie_versions(fixture: &Fixture, years: [i64; 2]) {
+    {
+        let mut items = fixture.host.items.lock().await;
+        for (index, id) in ["101", "102"].into_iter().enumerate() {
+            let item = items.get_mut(id).unwrap();
+            item["ProviderIds"]["Tmdb"] = json!("101");
+            item["ProductionYear"] = json!(years[index]);
+        }
+    }
+    let assets = fixture.files.iter().enumerate().map(|(index, path)| {
+        json!({"emby_item_id":(101+index).to_string(),"path":path,"size_bytes":1000})
+    }).collect::<Vec<_>>();
+    // One logical metadata cache can reference independent native Movie IDs;
+    // this does not merge their Emby MediaSources or physical files.
+    sqlx::query("DELETE FROM media_metadata WHERE tmdb_id='102' AND item_type='Movie'")
+        .execute(&fixture.state.db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE media_metadata SET emby_item_ids_json=$1,asset_details_json=$2,file_sha1_json=$3,file_pickcode_json=$3 WHERE tmdb_id='101' AND item_type='Movie'")
+        .bind(json!(["101","102"])).bind(json!(assets)).bind(json!([null,null]))
+        .execute(&fixture.state.db).await.unwrap();
+}
+
+fn message_text(message: &Value) -> &str {
+    message["text"]
+        .as_str()
+        .or_else(|| message["caption"].as_str())
+        .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby and Telegram are localhost"]
+async fn moviepilot_notifies_unmerged_same_year_movie_versions_once_with_both_pending_lists() {
+    let mut fixture = Fixture::new(&["pending", "pending"], true, false).await;
+    configure_unmerged_movie_versions(&fixture, [1998, 1998]).await;
+    let telegram = TelegramCapture::attach(&mut fixture).await;
+    let job = fixture.run(true).await;
+    let native = fixture.host.items.lock().await.clone();
+    let messages = telegram.finish().await;
+    fixture.close().await;
+    let result = &job["result"];
+    assert_eq!(result["updated"], 2, "{job}");
+    let finalizations = result["finalizations"].as_array().unwrap();
+    assert_eq!(finalizations.len(), 2, "{job}");
+    let mut pending_ids = finalizations
+        .iter()
+        .flat_map(|entry| entry["report"]["title_fill"]["pending"].as_array().unwrap())
+        .map(|entry| entry["item_id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    pending_ids.sort();
+    assert_eq!(pending_ids, vec!["101", "102"]);
+    assert_eq!(native["101"]["MediaSources"][0]["ItemId"], "101");
+    assert_eq!(native["102"]["MediaSources"][0]["ItemId"], "102");
+    assert_eq!(
+        messages.len(),
+        1,
+        "one logical movie, one notification: {messages:?}"
+    );
+    let text = message_text(&messages[0]);
+    assert!(text.contains("1998"));
+    assert!(
+        text.contains("电影101"),
+        "first version pending must be retained: {text}"
+    );
+    assert!(
+        text.contains("电影102"),
+        "second version pending must be retained: {text}"
+    );
+    assert_eq!(
+        text.matches("字幕10").count(),
+        2,
+        "both pending tracks must appear: {text}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby and Telegram are localhost"]
+async fn moviepilot_keeps_different_year_movie_notices_separate_despite_same_tmdb() {
+    let mut fixture = Fixture::new(&["pending", "pending"], true, false).await;
+    configure_unmerged_movie_versions(&fixture, [1998, 1999]).await;
+    let telegram = TelegramCapture::attach(&mut fixture).await;
+    let job = fixture.run(true).await;
+    let messages = telegram.finish().await;
+    fixture.close().await;
+    assert_eq!(job["result"]["updated"], 2, "{job}");
+    assert_eq!(
+        messages.len(),
+        2,
+        "different years must not merge: {messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message_text(message).contains("1998"))
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message_text(message).contains("1999"))
+    );
+    for message in &messages {
+        assert_eq!(message_text(message).matches("字幕10").count(), 1);
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
 async fn both_ingest_entries_skip_extraction_until_titles_are_enabled_and_complete() {

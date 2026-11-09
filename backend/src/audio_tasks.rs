@@ -475,19 +475,41 @@ pub async fn repair(state: &AppState, ids: &[String], context: &JobContext) -> R
                 let target=media_edit::repair_target(state,&version).await?;let info=media_edit::load(state,&target).await?;
                 let path=target.candidates.iter().find(|p|p.is_file()).ok_or_else(||ApiError::bad("关联版本缺失媒体信息"))?;let path=tokio::fs::canonicalize(path).await?;
                 if !path.starts_with(&root)||protected(&path){return Err(ApiError::bad("关联版本媒体信息路径不可写"));}
-                if backups.iter().any(|(p,_,_)|p==&path){return Err(ApiError::bad("关联版本共用媒体信息JSON"));}
-                let backup=batch.join(format!("{version}-{}.json",path_hash(path.to_str().unwrap())));tokio::fs::copy(&path,&backup).await?;backups.push((path,backup,info));
+                if backups.iter().any(|(p,_,_,_)|p==&path){return Err(ApiError::bad("关联版本共用媒体信息JSON"));}
+                let cached: Option<Value> = if let Some(sha) = &target.sha {
+                    sqlx::query_scalar("SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1=$1").bind(sha).fetch_optional(&state.db).await?.flatten()
+                } else { None };
+                let saved = crate::media_save::SavedTarget { id:version.clone(), path:target.path.clone(), source:crate::media_paths::strm_target(&target.path).await, sha:target.sha.clone(), asset:Some(target.asset.clone()), info, refresh_required:true };
+                let backup=batch.join(format!("{version}-{}.json",path_hash(path.to_str().unwrap())));tokio::fs::copy(&path,&backup).await?;backups.push((path,backup,saved,cached));
             }
             let (repaired,_)=audio::apply(&original,report.clone());
             let body=json!({"mediainfo":repaired,"sha1":target.sha,"media_path":target.path});
             let rebuilt=BTreeMap::from([(id.clone(),body["mediainfo"].clone())]);
-            let outcome=crate::media_save::save_with_rebuilt(state,id,&body,&rebuilt,context).await;
+            let outcome=crate::media_save::save_rebuilt_files(state,id,&body,&rebuilt,context).await;
             match outcome{
-                Ok((status,value)) if status<400=>Ok(("repaired",json!({"item_id":id,"pair_count":report["pair_count"],"evidence":evidence,"result":value}))),
+                Ok((status,value)) if status<400 && value["metadata_refresh"]["state"] == "verified" && list(&value["failures"]).is_empty()=>Ok(("repaired",json!({"item_id":id,"pair_count":report["pair_count"],"evidence":evidence,"result":value}))),
                 other=>{
-                    for (path,backup,_) in backups{tokio::fs::copy(backup,path).await?;}
-                    let _=crate::media_save::refresh(state,&[target.path]).await;
-                    let reason=match other{Ok((_,v))=>string(&v,"error"),Err(e)=>e.1};Err(ApiError::bad(reason))
+                    let mut rollback_failures = vec![];
+                    let recovery = JobContext::for_recovery(Some(context)).await;
+                    if !backups.is_empty() {
+                        match crate::media_save::refresh_saved(state, &recovery, || async {
+                            let mut restored = vec![];
+                            for (path,backup,saved,cached) in backups {
+                                crate::media_save::saved_details(state, &saved).await?;
+                                if let Err(error) = tokio::fs::copy(backup,path).await { rollback_failures.push(error.to_string()); continue; }
+                                if let Err(error) = restore_cache(state, saved.sha.as_deref(), cached.as_ref()).await { rollback_failures.push(error.1); }
+                                restored.push(saved);
+                            }
+                            Ok(restored)
+                        }).await {
+                            Ok(report) if report["state"] == "verified" => (),
+                            Ok(report) => rollback_failures.extend(list(&report["failures"]).iter().map(|failure|string(failure,"reason"))),
+                            Err(error) => rollback_failures.push(error.1),
+                        }
+                    }
+                    let mut reason=match other{Ok((_,v))=>v["error"].as_str().or_else(||v["message"].as_str()).unwrap_or("音轨修复未通过验收").to_string(),Err(e)=>e.1};
+                    if !rollback_failures.is_empty() { reason.push_str(&format!("；原文件或缓存回滚未完成：{}",rollback_failures.join("；"))); }
+                    Err(ApiError::bad(reason))
                 }
             }
         }.await;
@@ -766,6 +788,7 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
     let mut unchanged = 0;
     let mut failed = 0;
     let mut failures = vec![];
+    let mut verified = 0;
     for (index, id) in seed_ids.iter().enumerate() {
         if processed.contains(id) {
             continue;
@@ -781,6 +804,11 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
             }
         };
         if crate::emby::path_ignored(state, &snapshots[0].1).await? {
+            skipped += snapshots
+                .iter()
+                .filter(|(member, _, _, _)| selected.keys().any(|(id, _)| id == member))
+                .count();
+            tracing::info!("[音轨备份还原] 跳过 Item {id}：忽略媒体库");
             continue;
         }
         let backed_members = snapshots
@@ -807,22 +835,39 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
             .iter()
             .filter(|(_, _, _, old, backup)| old == backup)
             .count();
-        if same == members.len() {
-            unchanged += same;
-            continue;
-        }
-        let paths = members
-            .iter()
-            .map(|(_, path, _, _, _)| path.clone())
-            .collect::<Vec<_>>();
         let mut stages = BTreeMap::new();
         let mut rollbacks = BTreeMap::new();
-        let mut clear_attempted = false;
+        let mut saved_targets = vec![];
+        let mut previous_caches = BTreeMap::new();
+        let mut write_attempted = false;
+        let mut prepared_complete = false;
         let mut rollback_failed = false;
         let result = async {
             let outcome = async {
-                for (member, item_path, path, original, backup) in &members {
-                    let current = media_edit::details(state, member, "Path,Type,Chapters").await?;
+                for (member, item_path, path, original, backup) in &mut members {
+                    let target = media_edit::target(state, member).await?;
+                    if target.path != *item_path {
+                        return Err(ApiError::bad("媒体绑定路径在准备还原期间变化"));
+                    }
+                    crate::identity::verify(&target.asset, backup)?;
+                    let cached: Option<Value> = if let Some(sha) = &target.sha {
+                        sqlx::query_scalar(
+                            "SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1=$1",
+                        )
+                        .bind(sha)
+                        .fetch_optional(&state.db)
+                        .await?
+                        .flatten()
+                    } else {
+                        None
+                    };
+                    previous_caches.insert(member.clone(), cached);
+                    let current = media_edit::details(
+                        state,
+                        member,
+                        "Id,Path,Type,Size,Chapters,MediaSources,MediaStreams",
+                    )
+                    .await?;
                     if string(&current, "Path") != *item_path {
                         return Err(ApiError::bad("Emby路径在准备还原期间变化，未清理Emby数据"));
                     }
@@ -834,51 +879,109 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
                             &current["Chapters"]
                         },
                     )?;
-                    let mut backup = backup.clone();
-                    let mut original = original.clone();
-                    crate::media_info::preserve_chapters(&mut backup, &current_chapters)?;
-                    crate::media_info::preserve_chapters(&mut original, &current_chapters)?;
-                    stages.insert(member.clone(), restore_stage(path, &backup).await?);
-                    rollbacks.insert(member.clone(), restore_stage(path, &original).await?);
+                    let source = crate::media_paths::strm_target(item_path).await;
+                    let paths = [&item_path[..], source.as_deref().unwrap_or("")];
+                    let already_imported = *original == *backup
+                        && crate::media_info::stream_differences(backup, &current, &paths)
+                            .is_empty()
+                        && crate::media_info::chapters_restored(
+                            &crate::media_info::object(backup).unwrap()["Chapters"],
+                            &current_chapters,
+                        );
+                    crate::media_info::preserve_chapters(backup, &current_chapters)?;
+                    crate::media_info::preserve_chapters(original, &current_chapters)?;
+                    stages.insert(member.clone(), restore_stage(path, backup).await?);
+                    rollbacks.insert(member.clone(), restore_stage(path, original).await?);
+                    saved_targets.push(crate::media_save::SavedTarget {
+                        id: member.clone(),
+                        path: item_path.clone(),
+                        source,
+                        sha: target.sha,
+                        asset: Some(target.asset),
+                        info: backup.clone(),
+                        refresh_required: !already_imported,
+                    });
                 }
-                context.checkpoint().await?;
-                clear_attempted = true;
-                let config = state.config.read().await.clone();
-                crate::emby::send(
-                    state
-                        .http
-                        .post(format!(
-                            "{}/Items/{id}/ClearMediaInfo",
-                            string(&config, "emby_server_url").trim_end_matches('/')
-                        ))
-                        .query(&[("api_key", string(&config, "emby_api_key"))])
-                        .timeout(std::time::Duration::from_secs(
-                            config["emby_api_timeout"]
-                                .as_u64()
-                                .filter(|seconds| *seconds > 0)
-                                .unwrap_or(60),
-                        )),
-                )
-                .await?
-                .error_for_status()?;
-                for (member, _, path, _, _) in &members {
-                    tokio::fs::rename(stages.remove(member).unwrap(), path).await?;
-                }
-                crate::media_save::refresh(state, &paths).await?;
-                Ok::<_, ApiError>(())
+                crate::media_save::refresh_saved(state, context, || async {
+                    context.checkpoint().await?;
+                    for saved in &saved_targets {
+                        crate::media_save::saved_details(state, saved).await?;
+                    }
+                    write_attempted = true;
+                    for (member, _, path, _, _) in &members {
+                        tokio::fs::rename(stages.remove(member).unwrap(), path).await?;
+                        let saved = saved_targets
+                            .iter()
+                            .find(|target| target.id == *member)
+                            .unwrap();
+                        crate::media_save::cache_saved(state, saved.sha.as_deref(), &saved.info)
+                            .await?;
+                    }
+                    prepared_complete = true;
+                    Ok(saved_targets.clone())
+                })
+                .await
             }
             .await;
-            if outcome.is_err() && clear_attempted {
+            let outcome = match outcome {
+                Ok(report) if !prepared_complete => Err(ApiError::bad(
+                    list(&report["failures"])
+                        .iter()
+                        .map(|failure| string(failure, "reason"))
+                        .collect::<Vec<_>>()
+                        .join("；"),
+                )),
+                other => other,
+            };
+            if outcome.is_err() && write_attempted && !prepared_complete {
                 let rollback = async {
-                    for (member, _, path, _, _) in &members {
-                        tokio::fs::rename(rollbacks.remove(member).unwrap(), path).await?;
+                    let recovery = JobContext::for_recovery(Some(context)).await;
+                    let report = crate::media_save::refresh_saved(state, &recovery, || async {
+                        for (member, _, path, original, _) in &members {
+                            let target = saved_targets
+                                .iter_mut()
+                                .find(|target| target.id == *member)
+                                .unwrap();
+                            crate::media_save::saved_details(state, target).await?;
+                            tokio::fs::rename(rollbacks.remove(member).unwrap(), path).await?;
+                            target.info = original.clone();
+                            target.refresh_required = true;
+                            restore_cache(
+                                state,
+                                target.sha.as_deref(),
+                                previous_caches[member].as_ref(),
+                            )
+                            .await?;
+                        }
+                        Ok(saved_targets.clone())
+                    })
+                    .await?;
+                    if report["state"] != "verified" {
+                        return Err(ApiError::bad(format!(
+                            "回滚后 Emby 尚未通过验收：{}",
+                            list(&report["failures"])
+                                .iter()
+                                .map(|failure| string(failure, "reason"))
+                                .collect::<Vec<_>>()
+                                .join("；")
+                        )));
                     }
-                    crate::media_save::refresh(state, &paths).await
+                    Ok(())
                 }
                 .await;
                 if let Err(error) = rollback {
                     rollback_failed = true;
                     tracing::error!("[音轨备份还原] Item {id} 无法恢复任务前状态：{}", error.1);
+                    let original = outcome
+                        .as_ref()
+                        .err()
+                        .map(|error| error.1.as_str())
+                        .unwrap_or("音轨备份还原未完成");
+                    return Err(ApiError::bad(format!(
+                        "{original}；原文件或缓存回滚未完成：{}；备份和剩余暂存已保留：{}",
+                        error.1,
+                        backups.display()
+                    )));
                 }
             }
             outcome
@@ -893,12 +996,22 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
             }
         }
         match result {
-            Ok(()) => {
+            Ok(report) => {
                 updated += members.len() - same;
                 unchanged += same;
+                let confirmed = list(&report["verified_ids"]).len();
+                verified += confirmed;
+                if report["state"] != "verified" {
+                    failed += members.len() - confirmed;
+                    failures.extend(
+                        list(&report["failures"])
+                            .iter()
+                            .map(|failure| format!("{id}: {}", string(failure, "reason"))),
+                    );
+                }
                 tracing::info!(
-                    "[音轨备份还原] Item {id} 的本地 JSON 已还原 {} 个版本，Emby 扫描通知已执行，实际接收状态见扫描日志，尚未进行回读验收，备份继续保留",
-                    members.len()
+                    "[音轨备份还原] Item {id} 的本地 JSON 与缓存已还原 {} 个版本，Emby 回读确认 {confirmed} 个，备份继续保留",
+                    members.len(),
                 );
             }
             Err(error) => {
@@ -916,13 +1029,16 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
             )
             .await;
     }
-    let message = format!(
-        "音轨备份处理结束：检查 {backup_files} 个备份，本地 JSON 还原 {updated} 个，无需还原 {unchanged} 个，跳过 {skipped} 个，失败 {failed} 个；Emby 回读状态尚未验收。"
+    let mut message = format!(
+        "音轨备份处理结束：检查 {backup_files} 个备份，本地 JSON 还原 {updated} 个，无需还原 {unchanged} 个，Emby 回读确认 {verified} 个，跳过 {skipped} 个，失败 {failed} 个。"
     );
+    if let Some(failure) = failures.first() {
+        message.push_str(&format!("；{failure}"));
+    }
     tracing::info!("[音轨备份还原] {message}");
     context.update(100, "还原音轨备份", &message).await;
     Ok(
-        json!({"backup_files":backup_files,"restored":updated,"already_restored":unchanged,"skipped":skipped,"failed":failed,"failures":failures,"message":message}),
+        json!({"backup_files":backup_files,"restored":updated,"already_restored":unchanged,"verified":verified,"skipped":skipped,"failed":failed,"failures":failures,"message":message}),
     )
 }
 async fn restore_snapshots(
@@ -1011,4 +1127,17 @@ async fn restore_stage(path: &std::path::Path, info: &Value) -> Result<PathBuf> 
     .await?;
     file.sync_all().await?;
     Ok(stage)
+}
+async fn restore_cache(state: &AppState, sha: Option<&str>, info: Option<&Value>) -> Result<()> {
+    if let Some(info) = info {
+        crate::media_save::cache_saved(state, sha, info).await
+    } else {
+        if let Some(sha) = sha {
+            sqlx::query("UPDATE p115_mediainfo_cache SET mediainfo_json=NULL WHERE sha1=$1")
+                .bind(sha)
+                .execute(&state.db)
+                .await?;
+        }
+        Ok(())
+    }
 }

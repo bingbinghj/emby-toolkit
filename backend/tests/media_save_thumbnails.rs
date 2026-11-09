@@ -20,9 +20,59 @@ mod native {
         skip_saved: Arc<AtomicBool>,
         fail_second_rename: Arc<AtomicBool>,
         reject_second_refresh: Arc<AtomicBool>,
+        import_metadata: Arc<AtomicBool>,
+        legacy_file_watcher: Arc<AtomicBool>,
+        delayed_metadata: Arc<AtomicBool>,
+        reject_config_once: Arc<AtomicBool>,
+        metadata_logs: Arc<Mutex<Vec<String>>>,
+        reject_page_save_once: Arc<AtomicBool>,
+        fail_repaired_read_once: Arc<AtomicBool>,
+        saw_repaired_cache: Arc<AtomicBool>,
+        db: sqlx::PgPool,
+        drift_size_after_refresh: Arc<AtomicBool>,
+        reject_settings_restore: Arc<AtomicBool>,
+        restore_rejections: Arc<AtomicUsize>,
     }
 
     impl Proxy {
+        async fn finish_metadata(&self, id: &str, full: bool) {
+            if full {
+                assert!(
+                    self.host.settings.lock().await["ExclusiveControlFeatures"]
+                        .as_str()
+                        .unwrap()
+                        .split(',')
+                        .any(|flag| flag == "IgnoreFileChange")
+                );
+            }
+            if self.import_metadata.load(Ordering::SeqCst)
+                && (full || self.legacy_file_watcher.load(Ordering::SeqCst))
+            {
+                for item in std::iter::once(&mut *self.host.item.lock().await)
+                    .chain(self.extra.lock().await.values_mut())
+                {
+                    if full && item["Id"] != id {
+                        continue;
+                    }
+                    let file = info_path(item);
+                    if !file.is_file() {
+                        continue;
+                    }
+                    let info: Value =
+                        serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+                    item["MediaStreams"] = info[0]["MediaSourceInfo"]["MediaStreams"].clone();
+                    item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
+                    // Existing chapter images survive metadata-only reloads.
+                }
+            }
+            if full && self.drift_size_after_refresh.swap(false, Ordering::SeqCst) {
+                let mut item = self.host.item.lock().await;
+                item["Size"] = json!(item["Size"].as_u64().unwrap() + 1);
+            }
+            self.metadata_logs.lock().await.push(format!(
+                "2026-11-09 00:00:02.000 RefreshItem Complete: {id} fixture"
+            ));
+        }
         async fn items(&self) -> Vec<Value> {
             let mut items = vec![self.host.item.lock().await.clone()];
             items.extend(self.extra.lock().await.values().cloned());
@@ -57,6 +107,16 @@ mod native {
                 .display()
         ))
     }
+    fn requested_fields(mut item: Value, query: &HashMap<String, String>) -> Value {
+        let fields = query.get("Fields").map(String::as_str).unwrap_or("");
+        if !fields.split(',').any(|field| field == "MediaStreams") {
+            item.as_object_mut().unwrap().remove("MediaStreams");
+        }
+        if !fields.split(',').any(|field| field == "MediaSources") {
+            item.as_object_mut().unwrap().remove("MediaSources");
+        }
+        item
+    }
 
     async fn proxy(State(proxy): State<Proxy>, request: Request<Body>) -> Response {
         use axum::response::IntoResponse;
@@ -66,7 +126,39 @@ mod native {
                 .into_owned()
                 .collect();
         if request.method() == axum::http::Method::GET {
+            if path == "/UI/View" && proxy.reject_config_once.swap(false, Ordering::SeqCst) {
+                return StatusCode::BAD_REQUEST.into_response();
+            }
             if path.starts_with("/Users/user/Items/") {
+                if query.get("Fields").is_some_and(|fields| {
+                    fields == "Id,Path,Type,Size,Chapters,MediaSources,MediaStreams"
+                }) && proxy.fail_repaired_read_once.load(Ordering::SeqCst)
+                {
+                    let file = info_path(&*proxy.host.item.lock().await);
+                    let info: Value =
+                        serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+                    if info[0]["MediaSourceInfo"]["MediaStreams"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|stream| stream["Type"] == "Audio")
+                        .count()
+                        == 2
+                    {
+                        proxy.fail_repaired_read_once.store(false, Ordering::SeqCst);
+                        let cached: Value = sqlx::query_scalar(
+                            "SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1=$1",
+                        )
+                        .bind(format!("{:040X}", 42))
+                        .fetch_one(&proxy.db)
+                        .await
+                        .unwrap();
+                        proxy
+                            .saw_repaired_cache
+                            .store(cached == info, Ordering::SeqCst);
+                        return StatusCode::BAD_REQUEST.into_response();
+                    }
+                }
                 if query.get("Fields").is_some_and(|fields| {
                     fields == "Id,Path,Type,Chapters,MediaSources,MediaStreams"
                 }) {
@@ -82,14 +174,21 @@ mod native {
                         std::fs::remove_file(&file).unwrap();
                         std::fs::create_dir(&file).unwrap();
                     }
-                    return Json(item).into_response();
+                    return Json(requested_fields(item, &query)).into_response();
+                }
+                if id == "61616" {
+                    return Json(requested_fields(
+                        proxy.host.item.lock().await.clone(),
+                        &query,
+                    ))
+                    .into_response();
                 }
             } else if path == "/ScheduledTasks" {
                 let native = json!({"Id":"media","Key":"MediaInfoExtractTask","State":"Idle","LastExecutionResult":{"StartTimeUtc":proxy.host.starts.load(Ordering::SeqCst).to_string(),"Status":"Completed"}});
                 return Json(json!([native, proxy.thumbnail_task.lock().await.clone()]))
                     .into_response();
             } else if path == "/System/Logs/embyserver.txt/Lines" {
-                let mut lines = vec!["2026-11-08 00:00:00.000 fixture log anchor".to_string()];
+                let mut lines = proxy.metadata_logs.lock().await.clone();
                 if proxy.thumbnail_starts.load(Ordering::SeqCst) > 0 {
                     let items = if proxy.skip_saved.load(Ordering::SeqCst) {
                         vec![]
@@ -149,49 +248,50 @@ mod native {
                 return Json(json!({"Items":found,"TotalRecordCount":found.len()})).into_response();
             }
         } else if request.method() == axum::http::Method::POST {
+            if path == "/UI/Command" && proxy.reject_page_save_once.swap(false, Ordering::SeqCst) {
+                return StatusCode::BAD_REQUEST.into_response();
+            }
+            if path == "/UI/Command" && proxy.reject_settings_restore.load(Ordering::SeqCst) {
+                let (parts, body) = request.into_parts();
+                let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
+                let command: Value = serde_json::from_slice(&bytes).unwrap();
+                let desired: Value =
+                    serde_json::from_str(command["Data"].as_str().unwrap()).unwrap();
+                if desired["ExclusiveControlFeatures"]
+                    == proxy.original_settings["ExclusiveControlFeatures"]
+                {
+                    proxy.restore_rejections.fetch_add(1, Ordering::SeqCst);
+                    return StatusCode::BAD_REQUEST.into_response();
+                }
+                return proxy
+                    .forward(Request::from_parts(parts, Body::from(bytes)))
+                    .await;
+            }
             if path.ends_with("/Refresh") {
                 let id = path.split('/').nth(2).unwrap().to_string();
                 proxy.metadata_ids.lock().await.push(id.clone());
                 if proxy.reject_refresh.load(Ordering::SeqCst)
-                    || id == "directory-two" && proxy.reject_second_refresh.load(Ordering::SeqCst)
+                    || matches!(id.as_str(), "directory-two" | "61617")
+                        && proxy.reject_second_refresh.load(Ordering::SeqCst)
                 {
                     return StatusCode::BAD_REQUEST.into_response();
                 }
-                if id == "directory" || id == "directory-two" {
-                    assert_eq!(query["Recursive"], "true");
-                    assert_eq!(query["ReplaceAllMetadata"], "false");
-                    assert_eq!(query["ReplaceAllImages"], "false");
-                    let primary = proxy.host.item.lock().await.clone();
-                    let directory = if id == "directory" {
-                        std::path::Path::new(primary["Path"].as_str().unwrap())
-                            .parent()
-                            .unwrap()
-                            .to_path_buf()
-                    } else {
-                        std::path::Path::new(
-                            proxy.extra.lock().await.values().next().unwrap()["Path"]
-                                .as_str()
-                                .unwrap(),
-                        )
-                        .parent()
-                        .unwrap()
-                        .to_path_buf()
-                    };
-                    for item in std::iter::once(&mut *proxy.host.item.lock().await)
-                        .chain(proxy.extra.lock().await.values_mut())
-                    {
-                        let file = info_path(item);
-                        if !file.is_file() || file.parent() != Some(&directory) {
-                            continue;
-                        }
-                        let info: Value =
-                            serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
-                        item["MediaStreams"] = info[0]["MediaSourceInfo"]["MediaStreams"].clone();
-                        item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
-                        // A directory refresh keeps existing chapter image tags.
-                    }
+                let full = query["MetadataRefreshMode"] == "FullRefresh";
+                assert_eq!(query["Recursive"], if full { "false" } else { "true" });
+                assert_eq!(query["ReplaceAllMetadata"], "false");
+                assert_eq!(query["ReplaceAllImages"], "false");
+                proxy.metadata_logs.lock().await.push(format!(
+                    "2026-11-09 00:00:01.000 RefreshItem Start: {id} fixture"
+                ));
+                if full && proxy.delayed_metadata.load(Ordering::SeqCst) {
+                    let copy = proxy.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        copy.finish_metadata(&id, full).await;
+                    });
+                } else {
+                    proxy.finish_metadata(&id, full).await;
                 }
-                assert_eq!(*proxy.host.settings.lock().await, proxy.original_settings);
                 return StatusCode::NO_CONTENT.into_response();
             } else if path.ends_with("/ClearMediaInfo") {
                 let id = path.split('/').nth(2).unwrap();
@@ -225,7 +325,7 @@ mod native {
                 assert_eq!(*proxy.host.settings.lock().await, proxy.original_settings);
                 let items = proxy.items().await;
                 if proxy.host.clears.load(Ordering::SeqCst) == 0 {
-                    assert_eq!(*proxy.metadata_ids.lock().await, vec!["directory"]);
+                    assert_eq!(proxy.metadata_ids.lock().await.len(), items.len());
                     assert!(
                         items
                             .iter()
@@ -313,6 +413,20 @@ mod native {
                 skip_saved: Arc::default(),
                 fail_second_rename: Arc::default(),
                 reject_second_refresh: Arc::default(),
+                import_metadata: Arc::new(AtomicBool::new(true)),
+                legacy_file_watcher: Arc::default(),
+                delayed_metadata: Arc::default(),
+                reject_config_once: Arc::default(),
+                metadata_logs: Arc::new(Mutex::new(vec![
+                    "2026-11-08 00:00:00.000 fixture log anchor".into(),
+                ])),
+                reject_page_save_once: Arc::default(),
+                fail_repaired_read_once: Arc::default(),
+                saw_repaired_cache: Arc::default(),
+                db: native.state.db.clone(),
+                drift_size_after_refresh: Arc::default(),
+                reject_settings_restore: Arc::default(),
+                restore_rejections: Arc::default(),
             };
             let app = Router::new()
                 .fallback(self::proxy)
@@ -356,7 +470,7 @@ mod native {
                 })
                 .await
                 .unwrap();
-            tokio::time::timeout(Duration::from_secs(25), async {
+            tokio::time::timeout(Duration::from_secs(80), async {
                 loop {
                     let result = self.native.state.jobs.result(&task).await.unwrap();
                     if result["is_running"] == false {
@@ -394,6 +508,86 @@ mod native {
             self.proxy.extra.lock().await.insert(id.into(), item);
             sqlx::query("INSERT INTO media_metadata(tmdb_id,item_type,emby_item_ids_json,asset_details_json,file_sha1_json,file_pickcode_json) VALUES('5646','Episode',$1,$2,$3,$3)")
                 .bind(json!([id])).bind(json!([{"emby_item_id":id,"path":path,"size_bytes":info[0]["MediaSourceInfo"]["Size"]}])).bind(json!([null])).execute(&self.native.state.db).await.unwrap();
+        }
+        async fn run_audio(&self, restore: bool) -> Value {
+            let state = self.native.state.clone();
+            let task = state
+                .jobs
+                .clone()
+                .submit("audio file refresh regression", move |context| async move {
+                    if restore {
+                        emby_toolkit::audio_tasks::restore(&state, &context).await
+                    } else {
+                        emby_toolkit::audio_tasks::repair(&state, &["61616".into()], &context).await
+                    }
+                })
+                .await
+                .unwrap();
+            tokio::time::timeout(Duration::from_secs(80), async {
+                loop {
+                    let result = self.native.state.jobs.result(&task).await.unwrap();
+                    if result["is_running"] == false {
+                        return result;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap()
+        }
+        async fn backup(&self, info: &Value) {
+            let file = self.native.directory.path().join("61616-mediainfo.json");
+            let root = self
+                .native
+                .state
+                .data_dir
+                .join("backups/truehd-core-shift/20260801-000001");
+            tokio::fs::create_dir_all(&root).await.unwrap();
+            let name = format!(
+                "61616-{}.json",
+                emby_toolkit::audio_tasks::path_hash(file.to_str().unwrap())
+            );
+            tokio::fs::write(root.join(name), serde_json::to_vec(info).unwrap())
+                .await
+                .unwrap();
+        }
+        async fn core_shift(&self) -> Value {
+            let raw = json!({"format":{"size":self.native.original[0]["MediaSourceInfo"]["Size"].to_string(),"duration":"600","format_name":"matroska"},"streams":[
+                {"codec_type":"video","codec_name":"h264","index":0},
+                {"codec_type":"audio","codec_name":"truehd","index":1,"channels":8,"sample_rate":"48000","bit_rate":"4000000","tags":{"language":"jpn","title":"日语"}},
+                {"codec_type":"audio","codec_name":"aac","index":3,"channels":2,"sample_rate":"48000","bit_rate":"128000","tags":{"language":"chi","title":"国语"}}
+            ]});
+            let reference =
+                emby_toolkit::probe::build(&raw, &json!({"fn":"61616.mkv"}), &json!([])).unwrap();
+            let mut old = reference.clone();
+            old[0]["Chapters"] = self.native.original[0]["Chapters"].clone();
+            let streams = old[0]["MediaSourceInfo"]["MediaStreams"]
+                .as_array_mut()
+                .unwrap();
+            let mut core = streams[2].clone();
+            core["Index"] = json!(2);
+            core["Codec"] = json!("ac3");
+            core["Channels"] = json!(6);
+            core["SampleRate"] = json!(48000);
+            core["BitRate"] = json!(640000);
+            streams[2].as_object_mut().unwrap().remove("Language");
+            streams[2].as_object_mut().unwrap().remove("Title");
+            streams.insert(2, core);
+            let analysis =
+                emby_toolkit::audio::analyze(&old, Some(&reference), "ffprobe 原始结构", true);
+            assert_eq!(analysis["safe"], true, "{analysis}");
+            tokio::fs::write(
+                self.native.directory.path().join("61616-mediainfo.json"),
+                serde_json::to_vec(&old).unwrap(),
+            )
+            .await
+            .unwrap();
+            let mut item = self.native.host.item.lock().await;
+            item["MediaStreams"] = old[0]["MediaSourceInfo"]["MediaStreams"].clone();
+            item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
+            sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json,raw_ffprobe_json) VALUES($1,$2,$3) ON CONFLICT(sha1) DO UPDATE SET mediainfo_json=EXCLUDED.mediainfo_json,raw_ffprobe_json=EXCLUDED.raw_ffprobe_json")
+                .bind(format!("{:040X}",42)).bind(&old).bind(raw).execute(&self.native.state.db).await.unwrap();
+            old
         }
 
         async fn split_directories(&self) {
@@ -447,8 +641,6 @@ mod native {
                 self.native.host.starts.load(Ordering::SeqCst),
                 self.native.host.config_writes.load(Ordering::SeqCst),
             );
-            self.server.abort();
-            self.native.close().await;
             if !legacy {
                 assert_eq!(
                     counts.0, 0,
@@ -458,11 +650,22 @@ mod native {
                     counts.1, 0,
                     "manual/automatic title edits must not start MediaInfoExtractTask"
                 );
-                assert_eq!(
-                    counts.2, 0,
-                    "manual/automatic title edits must not change plugin configuration"
-                );
+                if counts.2 > 0 {
+                    let pending = self.native.state.data_dir.join("rename-recovery");
+                    let protected = pending.is_dir()
+                        && std::fs::read_dir(pending)
+                            .unwrap()
+                            .any(|entry| entry.unwrap().path().join("pending-scan.json").is_file());
+                    if !protected {
+                        assert_eq!(
+                            *self.native.host.settings.lock().await,
+                            self.proxy.original_settings
+                        );
+                    }
+                }
             }
+            self.server.abort();
+            self.native.close().await;
         }
     }
 
@@ -507,7 +710,7 @@ mod native {
             1,
             "one native extraction must serve the whole successful batch"
         );
-        assert_eq!(f.proxy.metadata_ids.lock().await.len(), 1);
+        assert_eq!(f.proxy.metadata_ids.lock().await.len(), 2);
         assert_eq!(
             result["result"]["video_thumbnails"]["extraction"]["verified"], 2,
             "{result}"
@@ -607,6 +810,8 @@ mod native {
     #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
     async fn after_save_automatic_titles_do_not_duplicate_extraction() {
         let f = ThumbnailFixture::new().await;
+        // Standalone filling still models a separate configured file importer.
+        f.proxy.legacy_file_watcher.store(true, Ordering::SeqCst);
         let result = f.native.run().await;
         assert_eq!(result["state"], "completed", "{result}");
         assert_eq!(result["result"]["completed"], true, "{result}");
@@ -678,7 +883,7 @@ mod native {
             assert_eq!(flag, false, "save extraction flag must default to false");
             assert_eq!(result["result"]["media_info_saved"], true, "{result}");
             assert_eq!(
-                result["result"]["metadata_refresh"]["state"], "submitted",
+                result["result"]["metadata_refresh"]["state"], "verified",
                 "{result}"
             );
             assert_eq!(
@@ -686,7 +891,7 @@ mod native {
                 "{result}"
             );
             assert_eq!(starts, 0);
-            assert_eq!(refreshes, vec!["directory"]);
+            assert_eq!(refreshes, vec!["61616"]);
             assert_eq!(stored, cached);
             assert_eq!(
                 stored[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"],
@@ -776,13 +981,482 @@ mod native {
         );
         assert_eq!(
             refreshes,
-            vec!["directory"],
-            "failed file's separate directory must not be notified"
+            vec!["61616"],
+            "failed file's target must not be refreshed"
         );
     }
     #[tokio::test]
     #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
-    async fn after_save_partial_directory_refresh_keeps_successful_requested_ids() {
+    async fn manual_save_requires_target_refresh_and_readback_after_json_save() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("本次新标题");
+        let result = f.save(json!({"mediainfo":edited}), false).await;
+        let refreshes = f.proxy.metadata_ids.lock().await.clone();
+        f.close().await;
+        assert_eq!(
+            result["result"]["metadata_refresh"]["state"], "verified",
+            "{result}"
+        );
+        assert_eq!(refreshes, vec!["61616"]);
+        assert_eq!(
+            result["result"]["metadata_refresh"]["verified_ids"],
+            json!(["61616"])
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn manual_save_holds_ignore_through_delayed_target_refresh() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        f.proxy.delayed_metadata.store(true, Ordering::SeqCst);
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("延迟导入的新标题");
+        let result = f.save(json!({"mediainfo":edited}), false).await;
+        assert_eq!(
+            result["result"]["metadata_refresh"]["state"], "verified",
+            "{result}"
+        );
+        assert_eq!(
+            f.native.host.item.lock().await["MediaStreams"][1]["Title"],
+            "延迟导入的新标题"
+        );
+        assert_eq!(
+            *f.native.host.settings.lock().await,
+            f.proxy.original_settings
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn manual_save_reports_unverified_when_full_refresh_does_not_import_streams() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        f.proxy.import_metadata.store(false, Ordering::SeqCst);
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("仅本地保存的标题");
+        let result = f.save(json!({"mediainfo":edited}), false).await;
+        assert_eq!(result["state"], "completed_with_warnings", "{result}");
+        assert_eq!(
+            result["result"]["metadata_refresh"]["state"], "unverified",
+            "{result}"
+        );
+        assert_eq!(
+            result["result"]["metadata_refresh"]["failed_ids"],
+            json!(["61616"])
+        );
+        assert!(result["result"]["warnings"].as_u64().unwrap() > 0);
+        assert_ne!(
+            f.native.host.item.lock().await["MediaStreams"][1]["Title"],
+            "仅本地保存的标题"
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn manual_save_stops_readback_immediately_when_media_size_changes() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        f.proxy
+            .drift_size_after_refresh
+            .store(true, Ordering::SeqCst);
+        let started = tokio::time::Instant::now();
+        let result = f.save(json!({"mediainfo":f.native.original}), false).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "an identity conflict must stop without waiting the 30-second readback window"
+        );
+        assert_eq!(
+            result["result"]["metadata_refresh"]["state"], "failed",
+            "{result}"
+        );
+        assert_eq!(
+            result["result"]["metadata_refresh"]["failed_ids"],
+            json!(["61616"])
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn cancelled_manual_save_retains_ignore_until_accepted_refresh_completes() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        f.proxy.delayed_metadata.store(true, Ordering::SeqCst);
+        let state = f.native.state.clone();
+        let body = json!({"mediainfo":f.native.original});
+        let task =
+            state
+                .jobs
+                .clone()
+                .submit_response(
+                    "cancelled saved target refresh",
+                    move |context| async move {
+                        media_save::save(&state, "61616", &body, &context).await
+                    },
+                )
+                .await
+                .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while f.proxy.metadata_ids.lock().await.is_empty() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        f.native
+            .state
+            .jobs
+            .control(Some(&task), "stop")
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let result = f.native.state.jobs.result(&task).await.unwrap();
+                if result["is_running"] == false {
+                    return result;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(result["state"], "cancelled", "{result}");
+        assert!(
+            f.native.host.settings.lock().await["ExclusiveControlFeatures"]
+                .as_str()
+                .unwrap()
+                .split(',')
+                .any(|flag| flag == "IgnoreFileChange")
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !f
+                .proxy
+                .metadata_logs
+                .lock()
+                .await
+                .iter()
+                .any(|line| line.contains("RefreshItem Complete"))
+            {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        emby_toolkit::strm::with_settings(&f.native.state, "ignore_file_change", || async {
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            *f.native.host.settings.lock().await,
+            f.proxy.original_settings
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn completed_refresh_keeps_recovery_when_settings_restore_fails() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        f.proxy
+            .reject_settings_restore
+            .store(true, Ordering::SeqCst);
+        let result = f.save(json!({"mediainfo":f.native.original}), false).await;
+        assert_eq!(
+            result["result"]["metadata_refresh"]["state"], "failed",
+            "{result}"
+        );
+        assert_eq!(
+            result["result"]["metadata_refresh"]["verified_ids"],
+            json!(["61616"])
+        );
+        assert!(f.proxy.restore_rejections.load(Ordering::SeqCst) >= 3);
+        let root = f.native.state.data_dir.join("rename-recovery");
+        let recovery = std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.join("pending-scan.json").is_file())
+            .expect("accepted scan and original settings must be retained after restore failure");
+        assert!(recovery.join("original-settings.json").is_file());
+        f.proxy
+            .reject_settings_restore
+            .store(false, Ordering::SeqCst);
+        emby_toolkit::strm::with_settings(&f.native.state, "ignore_file_change", || async {
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            *f.native.host.settings.lock().await,
+            f.proxy.original_settings
+        );
+        assert!(!recovery.join("pending-scan.json").exists());
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn rebuilt_staging_does_not_change_cache_when_settings_fail_before_file_commit() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2)")
+            .bind(format!("{:040X}", 42))
+            .bind(&f.native.original)
+            .execute(&f.native.state.db)
+            .await
+            .unwrap();
+        f.proxy.reject_page_save_once.store(true, Ordering::SeqCst);
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("不应提交的缓存标题");
+        let result = f.save(json!({"mediainfo":edited}), true).await;
+        let cached: Value =
+            sqlx::query_scalar("SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1=$1")
+                .bind(format!("{:040X}", 42))
+                .fetch_one(&f.native.state.db)
+                .await
+                .unwrap();
+        let stored: Value = serde_json::from_slice(
+            &std::fs::read(f.native.directory.path().join("61616-mediainfo.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["state"], "failed", "{result}");
+        assert_eq!(cached, f.native.original);
+        assert_eq!(stored, f.native.original);
+        f.close_with_legacy(true).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn audio_repair_uses_only_exact_target_refresh_and_verifies_removed_core() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        f.core_shift().await;
+        let result = f.run_audio(false).await;
+        assert_eq!(result["state"], "completed", "{result}");
+        assert_eq!(result["result"]["repaired"], 1, "{result}");
+        let item = f.native.host.item.lock().await.clone();
+        assert_eq!(
+            item["MediaStreams"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|stream| stream["Type"] == "Audio")
+                .count(),
+            2
+        );
+        assert_eq!(*f.proxy.metadata_ids.lock().await, vec!["61616"]);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn audio_repair_failure_restores_files_and_previous_cache_before_retry_refresh() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        let original = f.core_shift().await;
+        f.proxy
+            .fail_repaired_read_once
+            .store(true, Ordering::SeqCst);
+        let result = f.run_audio(false).await;
+        let cached: Value =
+            sqlx::query_scalar("SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1=$1")
+                .bind(format!("{:040X}", 42))
+                .fetch_one(&f.native.state.db)
+                .await
+                .unwrap();
+        let stored: Value = serde_json::from_slice(
+            &std::fs::read(f.native.directory.path().join("61616-mediainfo.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["state"], "failed", "{result}");
+        assert!(
+            f.proxy.saw_repaired_cache.load(Ordering::SeqCst),
+            "the failure must occur after both the repaired JSON and cache were committed"
+        );
+        assert_eq!(cached, original);
+        assert_eq!(stored, original);
+        assert_eq!(
+            f.native.host.item.lock().await["MediaStreams"],
+            original[0]["MediaSourceInfo"]["MediaStreams"]
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn audio_backup_restore_updates_cache_and_verifies_actual_titles() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        let mut backup = f.native.original.clone();
+        backup[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("备份原标题");
+        f.backup(&backup).await;
+        let result = f.run_audio(true).await;
+        let cached: Value =
+            sqlx::query_scalar("SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1=$1")
+                .bind(format!("{:040X}", 42))
+                .fetch_one(&f.native.state.db)
+                .await
+                .unwrap();
+        let stored: Value = serde_json::from_slice(
+            &std::fs::read(f.native.directory.path().join("61616-mediainfo.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["state"], "completed", "{result}");
+        assert_eq!(result["result"]["verified"], 1);
+        assert_eq!(cached, stored);
+        assert_eq!(
+            f.native.host.item.lock().await["MediaStreams"][1]["Title"],
+            "备份原标题"
+        );
+        assert_eq!(*f.proxy.metadata_ids.lock().await, vec!["61616"]);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn matching_local_audio_backup_still_retries_when_emby_titles_are_stale() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        f.backup(&f.native.original).await;
+        f.native.host.item.lock().await["MediaStreams"][1]["Title"] = json!("尚未刷新");
+        let result = f.run_audio(true).await;
+        assert_eq!(result["state"], "completed", "{result}");
+        assert_eq!(result["result"]["restored"], 0);
+        assert_eq!(result["result"]["already_restored"], 1);
+        assert_eq!(result["result"]["verified"], 1);
+        assert_eq!(
+            f.native.host.item.lock().await["MediaStreams"][1]["Title"],
+            f.native.original[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"]
+        );
+        assert_eq!(*f.proxy.metadata_ids.lock().await, vec!["61616"]);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn matching_local_and_emby_audio_backup_does_not_repeat_full_refresh() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        f.backup(&f.native.original).await;
+        {
+            let mut item = f.native.host.item.lock().await;
+            item["MediaStreams"] = f.native.original[0]["MediaSourceInfo"]["MediaStreams"].clone();
+            item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
+        }
+        let result = f.run_audio(true).await;
+        let cached: Value =
+            sqlx::query_scalar("SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1=$1")
+                .bind(format!("{:040X}", 42))
+                .fetch_one(&f.native.state.db)
+                .await
+                .unwrap();
+        let stored: Value = serde_json::from_slice(
+            &std::fs::read(f.native.directory.path().join("61616-mediainfo.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["state"], "completed", "{result}");
+        assert_eq!(result["result"]["already_restored"], 1);
+        assert_eq!(result["result"]["verified"], 1);
+        assert_eq!(cached, stored);
+        assert!(f.proxy.metadata_ids.lock().await.is_empty());
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn ignored_library_audio_backups_are_counted_as_skipped() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        f.backup(&f.native.original).await;
+        f.native
+            .state
+            .save_config(&json!({"libraries_to_ignore":["library"]}))
+            .await
+            .unwrap();
+        let result = f.run_audio(true).await;
+        assert_eq!(result["result"]["skipped"], 1, "{result}");
+        assert_eq!(result["result"]["restored"], 0);
+        assert_eq!(result["result"]["verified"], 0);
+        assert!(f.proxy.metadata_ids.lock().await.is_empty());
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn audio_backup_cache_failure_rolls_back_files_and_previous_cache() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2)")
+            .bind(format!("{:040X}", 42))
+            .bind(&f.native.original)
+            .execute(&f.native.state.db)
+            .await
+            .unwrap();
+        sqlx::query("CREATE FUNCTION reject_backup_cache() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.mediainfo_json #>> '{0,MediaSourceInfo,MediaStreams,1,Title}' = '拒绝还原' THEN RAISE EXCEPTION 'fixture rejects backup cache'; END IF; RETURN NEW; END $$").execute(&f.native.state.db).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_backup_cache BEFORE INSERT OR UPDATE ON p115_mediainfo_cache FOR EACH ROW EXECUTE FUNCTION reject_backup_cache()").execute(&f.native.state.db).await.unwrap();
+        let mut backup = f.native.original.clone();
+        backup[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("拒绝还原");
+        f.backup(&backup).await;
+        let result = f.run_audio(true).await;
+        let cached: Value =
+            sqlx::query_scalar("SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1=$1")
+                .bind(format!("{:040X}", 42))
+                .fetch_one(&f.native.state.db)
+                .await
+                .unwrap();
+        let stored: Value = serde_json::from_slice(
+            &std::fs::read(f.native.directory.path().join("61616-mediainfo.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result["state"], "failed", "{result}");
+        assert_eq!(cached, f.native.original);
+        assert_eq!(stored, f.native.original);
+        assert_eq!(
+            f.native.host.item.lock().await["MediaStreams"],
+            f.native.original[0]["MediaSourceInfo"]["MediaStreams"]
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn audio_backup_rollback_failure_is_reported_and_backup_is_kept() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2)")
+            .bind(format!("{:040X}", 42))
+            .bind(&f.native.original)
+            .execute(&f.native.state.db)
+            .await
+            .unwrap();
+        sqlx::query("CREATE FUNCTION reject_all_cache_updates() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture rejects every cache update'; END $$").execute(&f.native.state.db).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_all_cache_updates BEFORE INSERT OR UPDATE ON p115_mediainfo_cache FOR EACH ROW EXECUTE FUNCTION reject_all_cache_updates()").execute(&f.native.state.db).await.unwrap();
+        let mut backup = f.native.original.clone();
+        backup[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("待还原备份标题");
+        f.backup(&backup).await;
+        let result = f.run_audio(true).await;
+        assert_eq!(result["state"], "failed", "{result}");
+        assert!(
+            result["result"]["failures"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|failure| failure.as_str().unwrap().contains("回滚未完成")),
+            "{result}"
+        );
+        assert!(
+            result["result"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("回滚未完成"),
+            "{result}"
+        );
+        let backup_root = f
+            .native
+            .state
+            .data_dir
+            .join("backups/truehd-core-shift/20260801-000001");
+        assert!(
+            std::fs::read_dir(backup_root).unwrap().next().is_some(),
+            "a failed restore must retain its original backup"
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn after_save_partial_target_refresh_keeps_requests_and_protection() {
         let f = ThumbnailFixture::with_flag(Some(false)).await;
         f.split_directories().await;
         f.proxy.reject_second_refresh.store(true, Ordering::SeqCst);
@@ -793,12 +1467,12 @@ mod native {
             "both files were written: {result}"
         );
         assert_eq!(
-            result["result"]["metadata_refresh"]["state"], "partial",
+            result["result"]["metadata_refresh"]["state"], "failed",
             "{result}"
         );
         assert_eq!(
             result["result"]["metadata_refresh"]["requested_ids"],
-            json!(["directory"]),
+            json!(["61616", "61617"]),
             "{result}"
         );
         assert!(

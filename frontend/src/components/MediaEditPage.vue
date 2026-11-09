@@ -1289,7 +1289,8 @@ const executeRename = async () => {
   isExecutingRename.value = true;
   try {
     const res = await axios.post(`/api/media_rename/${getRenameTargetId()}/execute`, renamePayload());
-    message.success(res.data.message || '媒体已重命名');
+    if (Number(res.data.warnings) > 0) message.warning(res.data.message || '重命名完成，仍有处理提醒');
+    else message.success(res.data.message || '媒体已重命名');
     showRenameEditor.value = false;
     const newItemId = String(res.data.item_id || '').trim();
     if (newItemId && newItemId !== String(itemId.value || '')) {
@@ -1968,16 +1969,31 @@ const saveMediaInfo = async () => {
           track_difference: `本次批量保存跳过 ${reasons.join('；')}`
         };
       });
+    }
+    const metadata = res.data.metadata_refresh || {};
+    const thumbnails = res.data.video_thumbnails || {};
+    const details = [
+      ...(Array.isArray(res.data.warning_details) ? res.data.warning_details : []),
+      ...(Array.isArray(res.data.failures) ? res.data.failures : []),
+      ...skippedReports.flatMap(report => report.skipped.map(item =>
+        `${report.item_id} · ${report.path || ''}：${item.reason}`)),
+      ...(Array.isArray(metadata.failures) ? metadata.failures.map(item =>
+        typeof item === 'string' ? item : `${item.item_id || item.path || ''}：${item.reason || '刷新未完成'}`) : []),
+    ];
+    if (metadata.state && !['verified', 'completed'].includes(metadata.state)) {
+      details.push(`Emby 刷新尚未通过验收${metadata.failed_ids?.length ? `（${metadata.failed_ids.join('、')}）` : ''}`);
+    }
+    if (Number(thumbnails.failed) > 0) details.push(thumbnails.reason || thumbnails.message || '视频缩略图处理未完成');
+    if (Number(res.data.warnings) > 0 && !details.length) details.push(res.data.message || '部分处理未完成，请检查任务结果');
+    if (details.length) {
       mediaInfoSaveFeedback.value = {
-        type: 'warning', message: res.data.message || '部分轨道未更新',
-        details: skippedReports.flatMap(report => report.skipped.map(item =>
-          `${report.item_id} · ${report.path || ''}：${item.reason}`)),
+        type: 'warning', message: '保存有提醒，请检查处理结果', details: [...new Set(details)],
       };
-      message.warning(res.data.message || "部分视频的轨道无法唯一匹配");
+      message.warning(mediaInfoSaveFeedback.value.message);
     } else {
       message.success(res.data.message || "媒体信息已更新！");
+      showMediaInfoEditor.value = false;
     }
-    if (!skippedReports.length) showMediaInfoEditor.value = false;
   } catch (e) {
     const result = e.response?.data || {};
     mediaInfoSaveFeedback.value = {
@@ -2000,15 +2016,25 @@ const repairCurrentAudioTracks = async () => {
   let repaired = false;
   try {
     const res = await axios.post(`/api/media_info/repair_truehd_core/${targetId}`);
-    repaired = Number(res.data?.result?.repaired || 0) > 0;
+    const report = res.data?.result || res.data;
+    repaired = Number(report?.repaired || 0) > 0;
+    const hasWarnings = Number(report?.warnings || res.data?.warnings || 0) > 0 || Number(report?.ambiguous || 0) > 0;
+    const summary = res.data?.message || report?.message || '';
+    const reason = report?.ambiguous_items?.[0]?.reason;
+    const feedback = [summary, reason && !summary.includes(reason) ? reason : ''].filter(Boolean).join('；');
     if (repaired) {
-      if (res.data.warnings) message.warning(res.data.message);
-      else message.success(res.data.message || '当前媒体音轨已纠正');
+      if (hasWarnings) message.warning(feedback || '音轨已纠正，仍有处理提醒');
+      else message.success(feedback || '当前媒体音轨已纠正');
+    } else if (hasWarnings) {
+      message.warning(feedback || '音轨结构尚未能唯一确认，已保留原数据');
     } else {
-      message.info(res.data.message || '当前媒体无需纠正');
+      message.info(feedback || '当前媒体无需纠正');
     }
   } catch (error) {
-    const errorMessage = error.response?.data?.error || '纠正当前媒体音轨失败';
+    const report = error.response?.data || {};
+    const summary = report.message || report.error || '纠正当前媒体音轨失败';
+    const reason = (report.result || report).failed_items?.[0]?.reason;
+    const errorMessage = [summary, reason && !summary.includes(reason) ? reason : ''].filter(Boolean).join('；');
     if (error.response?.status === 409) message.warning(errorMessage);
     else message.error(errorMessage);
   } finally {

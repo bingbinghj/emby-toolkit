@@ -193,66 +193,92 @@ async fn translate_persons(state: &AppState, context: &crate::jobs::JobContext) 
         inputs.insert(source.clone(), source.clone());
         source_map.insert(name, source);
     }
-    context
-        .activity(
-            "阶段2/3：翻译人物",
-            &format!("正在翻译 {} 个外文人物名", inputs.len()),
-        )
-        .await;
-    let (translated, warning_details) =
-        crate::ai::translate_report(state, &inputs, "fast_mode", &json!({}), &Value::Null).await?;
-    tracing::info!(
-        "[人物中文化] 请求翻译 {} 个名称，取得 {} 个结果，开始回写人物",
-        inputs.len(),
-        translated.len()
-    );
     let mut updated = 0;
     let mut failures = vec![];
-    let total = people.len();
-    for (index, person) in people.into_iter().enumerate() {
+    let mut warning_details = vec![];
+    let total = people
+        .iter()
+        .filter(|person| source_map.contains_key(&crate::state::string(person, "Name")))
+        .count();
+    let mut processed = 0;
+    let inputs = inputs.into_iter().collect::<Vec<_>>();
+    for (index, batch) in inputs.chunks(50).enumerate() {
         context.checkpoint().await?;
-        let name = crate::state::string(&person, "Name");
         context
-            .update_counted(
-                index as u64,
-                total as u64,
-                "阶段3/3：回写人物",
-                &format!("正在处理人物：{name}"),
+            .activity(
+                "阶段2/3：翻译人物",
+                &format!(
+                    "正在翻译第 {}/{} 批外文人物名，本批 {} 个",
+                    index + 1,
+                    inputs.len().div_ceil(50),
+                    batch.len()
+                ),
             )
             .await;
-        if let Some(value) = source_map.get(&name).and_then(|s| translated.get(s)) {
-            if value.is_empty() || value == &name {
+        let inputs = batch.iter().cloned().collect();
+        let (translated, warnings) =
+            crate::ai::translate_report(state, &inputs, "fast_mode", &json!({}), &Value::Null)
+                .await?;
+        warning_details.extend(warnings);
+        tracing::info!(
+            "[人物中文化] 第 {} 批请求 {} 个名称，取得 {} 个结果，开始回写人物",
+            index + 1,
+            batch.len(),
+            translated.len()
+        );
+        for person in &people {
+            let name = crate::state::string(person, "Name");
+            let Some(source) = source_map
+                .get(&name)
+                .filter(|source| inputs.contains_key(*source))
+            else {
                 continue;
-            }
-            let id = crate::state::string(&person, "Id");
-            let result = async {
-                let mut person = crate::media_edit::details(state, &id, "ProviderIds,Name").await?;
-                person["Name"] = json!(value);
-                state
-                    .emby(
-                        reqwest::Method::POST,
-                        &format!("Items/{id}"),
-                        &[],
-                        Some(person),
-                    )
-                    .await?;
-                Ok::<_, ApiError>(())
-            }
-            .await;
-            match result {
-                Ok(()) => {
-                    updated += 1;
-                    tracing::info!("[人物中文化] '{name}' → '{value}' 已更新（Item {id}）");
+            };
+            context.checkpoint().await?;
+            processed += 1;
+            context
+                .update_counted(
+                    processed as u64,
+                    total as u64,
+                    "阶段3/3：回写人物",
+                    &format!("正在处理人物：{name}"),
+                )
+                .await;
+            if let Some(value) = translated.get(source) {
+                if value.is_empty() || value == &name {
+                    continue;
                 }
-                Err(error) => {
-                    if context.is_cancelled() {
-                        return Err(error);
+                let id = crate::state::string(person, "Id");
+                let result = async {
+                    let mut person =
+                        crate::media_edit::details(state, &id, "ProviderIds,Name").await?;
+                    person["Name"] = json!(value);
+                    state
+                        .emby(
+                            reqwest::Method::POST,
+                            &format!("Items/{id}"),
+                            &[],
+                            Some(person),
+                        )
+                        .await?;
+                    Ok::<_, ApiError>(())
+                }
+                .await;
+                match result {
+                    Ok(()) => {
+                        updated += 1;
+                        tracing::info!("[人物中文化] '{name}' → '{value}' 已更新（Item {id}）");
                     }
-                    tracing::warn!(
-                        "[人物中文化] '{name}' → '{value}' 更新失败（Item {id}）：{}",
-                        error.1
-                    );
-                    failures.push(format!("{id}: {}", error.1));
+                    Err(error) => {
+                        if context.is_cancelled() {
+                            return Err(error);
+                        }
+                        tracing::warn!(
+                            "[人物中文化] '{name}' → '{value}' 更新失败（Item {id}）：{}",
+                            error.1
+                        );
+                        failures.push(format!("{id}: {}", error.1));
+                    }
                 }
             }
         }

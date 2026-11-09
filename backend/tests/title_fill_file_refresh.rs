@@ -982,6 +982,80 @@ async fn ordinary_title_json_write_failure_still_runs_final_refresh() {
 }
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn native_titles_without_etk_bindings_are_saved_and_verified() {
+    let f = Fixture::new(&["gaia"]).await;
+    f.make_movie().await;
+    sqlx::query("DELETE FROM media_metadata")
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    let task = f.start_real_finalize().await;
+    let result = f.wait_job(&task).await;
+    let saved = f.files().remove(0);
+    let refreshes = f.host.refreshes.lock().await.clone();
+    f.close().await;
+    assert_eq!(
+        result["result"]["title_fill"]["completed"], true,
+        "{result}"
+    );
+    assert_eq!(result["result"]["title_fill"]["verified_streams"], 2);
+    assert_eq!(refreshes.len(), 1);
+    assert_eq!(
+        saved[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"],
+        "日语"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn native_title_fallback_keeps_file_identity_checks() {
+    let f = Fixture::new(&["gaia"]).await;
+    f.make_movie().await;
+    sqlx::query("DELETE FROM media_metadata")
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    f.host.items.lock().await.get_mut("10001").unwrap()["Size"] = json!(999999);
+    let before = f.files();
+    let task = f.start_real_finalize().await;
+    let result = f.wait_job(&task).await;
+    let after = f.files();
+    let refreshes = f.host.refreshes.lock().await.clone();
+    f.close().await;
+    assert_eq!(result["state"], "failed", "{result}");
+    assert_eq!(before, after);
+    assert!(refreshes.is_empty());
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn fingerprint_query_failure_does_not_prevent_titles_or_final_refresh() {
+    let f = Fixture::new(&["gaia"]).await;
+    f.make_movie().await;
+    f.state
+        .save_config(&json!({"monitor_sha1_pc_search":true}))
+        .await
+        .unwrap();
+    // Fail only the global fingerprint query; native identity/JSON reads still work.
+    sqlx::query("ALTER TABLE media_metadata DROP COLUMN in_library")
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    let task = f.start_real_finalize().await;
+    let result = f.wait_job(&task).await;
+    let refreshes = f.host.refreshes.lock().await.clone();
+    f.close().await;
+    assert_eq!(
+        result["result"]["title_fill"]["completed"], true,
+        "{result}"
+    );
+    assert_eq!(result["result"]["fingerprints"]["failed"], 1, "{result}");
+    assert!(result["result"]["warnings"].as_u64().unwrap() > 0);
+    assert_eq!(refreshes.len(), 1);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
 async fn real_webhook_finalization_saves_custom_audio_titles_before_movie_refresh() {
     let f = Fixture::new(&["gaia"]).await;
     f.make_movie().await;

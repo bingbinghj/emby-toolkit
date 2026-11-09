@@ -23,6 +23,28 @@ struct EnhancedItem {
     path: String,
     expires: Instant,
 }
+type MovieNotices = BTreeMap<(String, String), (Value, Vec<Value>)>;
+fn collect_movie_notice(notices: &mut MovieNotices, item: &Value, report: &Value) {
+    let tmdb = string(&item["ProviderIds"], "Tmdb");
+    let name = string(item, "Name");
+    let key = if !tmdb.trim().is_empty() {
+        format!("tmdb:{}", tmdb.trim())
+    } else if !name.trim().is_empty() {
+        format!("name:{}", name.trim())
+    } else {
+        format!("id:{}", string(item, "Id"))
+    };
+    let year = item["ProductionYear"]
+        .as_i64()
+        .filter(|year| *year != 0)
+        .map(|year| year.to_string())
+        .unwrap_or_else(|| string(item, "ProductionYear"));
+    notices
+        .entry((key, year.trim().to_string()))
+        .or_insert_with(|| (item.clone(), vec![]))
+        .1
+        .extend(list(&report["pending"]));
+}
 
 #[derive(Default)]
 pub struct Service {
@@ -922,6 +944,49 @@ mod warning_tests {
     use super::*;
 
     #[test]
+    fn movie_notice_groups_merge_versions_and_keep_years_and_pending_separate() {
+        let mut notices = MovieNotices::new();
+        for (id, name, year) in [
+            ("1", "译名", 1998),
+            ("2", "原名", 1998),
+            ("3", "译名", 1999),
+        ] {
+            collect_movie_notice(
+                &mut notices,
+                &json!({"Id":id,"Name":name,"ProductionYear":year,"ProviderIds":{"Tmdb":"4426"}}),
+                &json!({"pending":[{"item_id":id,"reason":"待回读"}]}),
+            );
+        }
+        assert_eq!(notices.len(), 2);
+        assert_eq!(
+            notices[&("tmdb:4426".into(), "1998".into())].1,
+            json!([{"item_id":"1","reason":"待回读"},{"item_id":"2","reason":"待回读"}])
+                .as_array()
+                .unwrap()
+                .clone()
+        );
+        assert_eq!(
+            notices[&("tmdb:4426".into(), "1999".into())].1[0]["item_id"],
+            "3"
+        );
+        collect_movie_notice(
+            &mut notices,
+            &json!({"Id":"4","Name":"4426","ProductionYear":1998}),
+            &json!({}),
+        );
+        collect_movie_notice(
+            &mut notices,
+            &json!({"Id":"4426","ProductionYear":1998}),
+            &json!({}),
+        );
+        assert_eq!(
+            notices.len(),
+            4,
+            "数字片名及原生ID不能与TMDb编号混为一条通知"
+        );
+    }
+
+    #[test]
     fn ingest_summary_explains_title_failure_and_keeps_all_warnings() {
         let reason = "Emby 路径与当前媒体资产不一致，已停止填充标题";
         let title = json!({"failed":1,"pending":[{"item_id":"61588","reason":reason}]});
@@ -1341,6 +1406,7 @@ pub async fn process_moviepilot(
     let mut updated = 0;
     let mut failures = vec![];
     let mut finalizations = vec![];
+    let mut movie_notices = MovieNotices::new();
     let mut postprocessing = json!({});
     let mut automatic_series = false;
     let mut automatic_videos = false;
@@ -1554,7 +1620,16 @@ pub async fn process_moviepilot(
                         failures.push(error.1);
                     }
                     if state.config.read().await["emby_webhook_ingest_enabled"] != true {
-                        match finalize(state, &id, &episodes, !known.is_empty(), context).await {
+                        match finalize_inner(
+                            state,
+                            &id,
+                            &episodes,
+                            !known.is_empty(),
+                            context,
+                            Some(&mut movie_notices),
+                        )
+                        .await
+                        {
                             Ok(report) => {
                                 if item["Type"] == "Movie"
                                     || item["Type"] == "Series" && !episodes.is_empty()
@@ -1594,6 +1669,28 @@ pub async fn process_moviepilot(
                 );
                 failures.push(error.1);
             }
+        }
+    }
+    for (item, pending) in movie_notices.into_values() {
+        context.checkpoint().await?;
+        if let Err(error) = crate::notifications::media(
+            state,
+            &item,
+            !known.is_empty(),
+            &[],
+            &json!({"pending":pending}),
+        )
+        .await
+        {
+            if context.is_cancelled() {
+                return Err(error);
+            }
+            let reason = format!("《{}》入库通知失败：{}", string(&item, "Name"), error.1);
+            tracing::warn!("{reason}");
+            add_report_warnings(
+                &mut postprocessing,
+                &json!({"warnings":1,"warning_details":[reason]}),
+            );
         }
     }
     tracing::info!(
@@ -1642,6 +1739,16 @@ pub async fn finalize(
     updated: bool,
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
+    finalize_inner(state, id, episode_ids, updated, context, None).await
+}
+async fn finalize_inner(
+    state: &AppState,
+    id: &str,
+    episode_ids: &[String],
+    updated: bool,
+    context: &crate::jobs::JobContext,
+    movie_notices: Option<&mut MovieNotices>,
+) -> Result<Value> {
     tracing::info!(
         "入库收尾开始：Emby {id}，目标分集 {} 个，更新模式 {updated}",
         episode_ids.len()
@@ -1664,7 +1771,17 @@ pub async fn finalize(
             "入库资产指纹补齐开始：《{media_name}》，Emby {id}，目标 {} 个",
             targets.len()
         );
-        let mut report = crate::revalidation::repair_ids(state, &targets, context).await?;
+        let mut report = match crate::revalidation::repair_ids(state, &targets, context).await {
+            Ok(report) => report,
+            Err(error) if context.is_cancelled() => return Err(error),
+            Err(error) => {
+                tracing::warn!(
+                    "入库指纹补齐未完成：《{media_name}》，{}；继续标题处理及最终刷新",
+                    error.1
+                );
+                json!({"updated":0,"failed":targets.len(),"failed_ids":[],"message":format!("指纹补齐未完成：{}",error.1)})
+            }
+        };
         let failed = list(&report["failed_ids"])
             .iter()
             .filter_map(|id| id.as_str().map(str::to_string))
@@ -1677,7 +1794,17 @@ pub async fn finalize(
             context.checkpoint().await?;
             tokio::time::sleep(Duration::from_secs(5)).await;
             context.checkpoint().await?;
-            let retry = crate::revalidation::repair_ids(state, &failed, context).await?;
+            let retry = match crate::revalidation::repair_ids(state, &failed, context).await {
+                Ok(report) => report,
+                Err(error) if context.is_cancelled() => return Err(error),
+                Err(error) => {
+                    tracing::warn!(
+                        "入库指纹重试未完成：《{media_name}》，{}；继续标题处理及最终刷新",
+                        error.1
+                    );
+                    json!({"updated":0,"failed":failed.len(),"failed_ids":failed,"message":format!("指纹重试未完成：{}",error.1)})
+                }
+            };
             let updated =
                 report["updated"].as_u64().unwrap_or(0) + retry["updated"].as_u64().unwrap_or(0);
             report["updated"] = json!(updated);
@@ -1822,7 +1949,10 @@ pub async fn finalize(
         (title_warnings, title_warning_detail(&title_report)),
         (
             fingerprint_warnings,
-            format!("资产指纹：仍有 {fingerprint_warnings} 个未补齐"),
+            format!(
+                "资产指纹：仍有 {fingerprint_warnings} 个未补齐；{}",
+                string(&fingerprint_report, "message")
+            ),
         ),
         (
             audio_warnings,
@@ -1876,9 +2006,13 @@ pub async fn finalize(
         tracing::warn!("{reason}");
         warning_details.push(reason);
     }
-    if let Err(error) =
+    let notification = if let Some(notices) = movie_notices.filter(|_| item["Type"] == "Movie") {
+        collect_movie_notice(notices, &item, &title_report);
+        Ok(())
+    } else {
         crate::notifications::media(state, &item, updated, episode_ids, &title_report).await
-    {
+    };
+    if let Err(error) = notification {
         if context.is_cancelled() {
             return Err(error);
         }
