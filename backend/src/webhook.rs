@@ -1720,41 +1720,92 @@ pub async fn finalize(
     } else {
         json!({})
     };
-    context
-        .activity(
-            "首次元数据刷新",
-            &format!("《{media_name}》（媒体ID：{id}）：指纹及后处理结束，开始入库刷新验收"),
-        )
-        .await;
-    tracing::info!(
-        "入库最终元数据刷新开始：Emby {id}，名称 {}",
-        string(&item, "Name")
-    );
-    crate::emby::finalize_refresh(state, &item, context)
-        .await
-        .inspect_err(|error| {
+    let confirmed = std::sync::atomic::AtomicBool::new(true);
+    let entered = std::sync::atomic::AtomicBool::new(false);
+    let recovery = state
+        .data_dir
+        .join("rename-recovery")
+        .join(format!("titles-{}", uuid::Uuid::new_v4()));
+    let refresh_guard = (&confirmed, recovery.as_path());
+    let refresh_item = &item;
+    let refresh_name = &media_name;
+    let final_refresh = |guarded: bool| async move {
+        context
+            .activity(
+                "首次元数据刷新",
+                &format!("《{refresh_name}》（媒体ID：{id}）：指纹及后处理结束，开始入库刷新验收"),
+            )
+            .await;
+        tracing::info!(
+            "入库最终元数据刷新开始：Emby {id}，名称 {}",
+            string(refresh_item, "Name")
+        );
+        let result = if guarded {
+            crate::emby::finalize_refresh_guarded(
+                state,
+                refresh_item,
+                context,
+                refresh_guard.0,
+                refresh_guard.1,
+            )
+            .await
+        } else {
+            crate::emby::finalize_refresh(state, refresh_item, context).await
+        };
+        result.inspect_err(|error| {
             tracing::error!(
-                "入库最终元数据刷新失败：《{media_name}》，Emby {id}，{}",
+                "入库最终元数据刷新失败：《{refresh_name}》，Emby {id}，{}",
                 error.1
             )
         })?;
-    tracing::info!("入库最终元数据刷新完成：《{media_name}》，Emby {id}");
-    // Fingerprint/audio repair and the final metadata refresh may replace media-info data.
-    // Fill afterwards, then confirm the actual stream titles returned by Emby.
+        tracing::info!("入库最终元数据刷新完成：《{refresh_name}》，Emby {id}");
+        Ok::<_, ApiError>(())
+    };
+    // Prepare title JSON before the existing final refresh, then verify Emby.
     let title_report = if config["auto_fill_language_titles_on_ingest"] == true {
         tracing::info!(
             "入库音轨字幕标题填充开始：《{media_name}》，Emby {id}，目标 {} 个",
             targets.len()
         );
-        match crate::titles::fill_in_job(state, &targets, true, context).await {
-            Ok(report) => report,
-            Err(error) if context.is_cancelled() => return Err(error),
-            Err(error) => {
-                tracing::warn!("入库音轨字幕标题处理失败：《{media_name}》，{}", error.1);
+        let outcome = crate::strm::with_settings_guarded(
+            state,
+            "ignore_file_change",
+            || {
+                entered.store(true, std::sync::atomic::Ordering::Release);
+                crate::titles::fill_in_job_with_refresh(
+                    state,
+                    &targets,
+                    true,
+                    context,
+                    final_refresh(true),
+                )
+            },
+            &confirmed,
+            &recovery,
+        )
+        .await;
+        match outcome {
+            Ok(report) => {
+                let _ = tokio::fs::remove_dir_all(&recovery).await;
+                report
+            }
+            Err(error)
+                if !entered.load(std::sync::atomic::Ordering::Acquire)
+                    && !context.is_cancelled()
+                    && error.0 != StatusCode::CONFLICT =>
+            {
+                tracing::warn!(
+                    "入库标题临时配置不可用：《{media_name}》，{}；继续最终元数据刷新",
+                    error.1
+                );
+                final_refresh(false).await?;
+                let _ = tokio::fs::remove_dir_all(&recovery).await;
                 json!({"completed":false,"failed":1,"pending":[{"reason":error.1}]})
             }
+            Err(error) => return Err(error),
         }
     } else {
+        final_refresh(false).await?;
         json!({"completed":false,"skipped":true,"reason":"入库语言标题填充未启用"})
     };
     let mut warning_details = vec![];

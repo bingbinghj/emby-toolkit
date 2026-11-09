@@ -16,6 +16,8 @@ struct Host {
     title_failures: Arc<Mutex<Vec<String>>>,
     native_starts: Arc<Mutex<Vec<String>>>,
     info_runs: Arc<Mutex<u64>>,
+    logs: Arc<Mutex<Vec<String>>>,
+    configuration: Arc<Mutex<Value>>,
 }
 async fn details(
     State(host): State<Host>,
@@ -61,12 +63,37 @@ async fn items(
     Json(json!({"TotalRecordCount":items.len(),"Items":items}))
 }
 async fn refresh(State(host): State<Host>, Path(id): Path<String>) -> StatusCode {
+    host.logs.lock().await.extend([
+        format!("Info fixture: RefreshItem Start: {id} metadata"),
+        format!("Info fixture: RefreshItem Complete: {id} metadata"),
+    ]);
     if let Some(item) = host.items.lock().await.get_mut(&id) {
         let revision = item["_refresh"].as_u64().unwrap_or(0) + 1;
         item["_refresh"] = json!(revision);
         item["DateLastRefreshed"] = json!(format!("refresh-{revision}"));
     }
     StatusCode::NO_CONTENT
+}
+async fn logs(
+    State(host): State<Host>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Json<Value> {
+    let logs = host.logs.lock().await;
+    let items = if query.get("Limit").is_some_and(|limit| limit == "0") {
+        vec![]
+    } else {
+        logs.iter().rev().cloned().collect::<Vec<_>>()
+    };
+    Json(json!({"TotalRecordCount":logs.len(),"Items":items}))
+}
+async fn config_view(State(host): State<Host>) -> Json<Value> {
+    Json(json!({"EditObjectContainer":{"Object":host.configuration.lock().await.clone()}}))
+}
+async fn config_save(State(host): State<Host>, Json(body): Json<Value>) -> Json<Value> {
+    assert_eq!(body["CommandId"], "PageSave");
+    *host.configuration.lock().await =
+        serde_json::from_str(body["Data"].as_str().unwrap()).unwrap();
+    Json(json!({}))
 }
 async fn tasks(State(host): State<Host>) -> Json<Value> {
     Json(json!([
@@ -122,7 +149,12 @@ impl Fixture {
             .execute(&state.db)
             .await
             .unwrap();
-        let host = Host::default();
+        let host = Host {
+            configuration: Arc::new(Mutex::new(
+                json!({"ExclusiveControlFeatures":"ExtractOnFileChange","PersistMediaInfoMode":"Default"}),
+            )),
+            ..Host::default()
+        };
         let mut files = vec![];
         for (index, mode) in modes.iter().enumerate() {
             let id = (101 + index).to_string();
@@ -167,9 +199,10 @@ impl Fixture {
             .route("/Library/VirtualFolders", get(move || { let location = location.clone(); async move { Json(json!([{"ItemId":"library","Guid":"fixture","Locations":[location]}])) } }))
             .route("/ScheduledTasks", get(tasks))
             .route("/ScheduledTasks/Running/{id}", post(start))
-            .route("/System/Logs/embyserver.txt/Lines", get(|| async { Json(json!({"Items":["2026-01-01 00:00:00 Info fixture baseline"]})) }))
+            .route("/System/Logs/embyserver.txt/Lines", get(logs))
             .route("/web/ConfigurationPages", get(|| async { Json(json!([{"Name":"MediaInfoExtractPageView","Href":"configurationpage?PageId=fixture:MediaInfoExtractPageView"}])) }))
-            .route("/UI/View", get(|| async { Json(json!({"EditObjectContainer":{"Object":{"ExclusiveControlFeatures":"","PersistMediaInfoMode":"Default"}}})) }))
+            .route("/UI/View", get(config_view))
+            .route("/UI/Command", post(config_save))
             .route("/emby/Users/user/Views", get(|| async { StatusCode::FORBIDDEN }))
             .with_state(host.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

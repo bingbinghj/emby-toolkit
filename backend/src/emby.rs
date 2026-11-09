@@ -370,6 +370,9 @@ pub async fn refresh_item(
     context: &JobContext,
 ) -> Result<()> {
     context.checkpoint().await?;
+    submit_item_refresh(state, id, recursive).await
+}
+async fn submit_item_refresh(state: &AppState, id: &str, recursive: bool) -> Result<()> {
     state
         .emby(
             Method::POST,
@@ -720,6 +723,40 @@ async fn wait_item_refresh(
 }
 
 pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobContext) -> Result<()> {
+    finalize_refresh_inner(state, item, context, None).await
+}
+pub(crate) async fn finalize_refresh_guarded(
+    state: &AppState,
+    item: &Value,
+    context: &JobContext,
+    confirmed: &std::sync::atomic::AtomicBool,
+    recovery: &std::path::Path,
+) -> Result<()> {
+    finalize_refresh_inner(state, item, context, Some((confirmed, recovery))).await
+}
+async fn prepare_refresh_guard(
+    guard: Option<(&std::sync::atomic::AtomicBool, &std::path::Path)>,
+    id: &str,
+    position: Option<u64>,
+) -> Result<()> {
+    if let Some((confirmed, recovery)) = guard {
+        let position =
+            position.ok_or_else(|| ApiError::bad("无法记录本次刷新日志基线，已停止提交刷新"))?;
+        tokio::fs::write(
+            recovery.join("pending-scan.json"),
+            serde_json::to_vec(&serde_json::json!({"position":position,"ids":[id]})).unwrap(),
+        )
+        .await?;
+        confirmed.store(false, std::sync::atomic::Ordering::Release);
+    }
+    Ok(())
+}
+async fn finalize_refresh_inner(
+    state: &AppState,
+    item: &Value,
+    context: &JobContext,
+    guard: Option<(&std::sync::atomic::AtomicBool, &std::path::Path)>,
+) -> Result<()> {
     let id = string(item, "Id");
     let series = item["Type"] == "Series";
     let name = string(item, "Name");
@@ -734,8 +771,8 @@ pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobConte
     let details = crate::media_edit::details(state, &id, "Path,DateLastRefreshed").await?;
     let series_path = string(&details, "Path");
     let previous = string(&details, "DateLastRefreshed").trim().to_string();
-    let trace = match crate::media_extra::log_position(state).await {
-        Ok(position) => Some(crate::media_extra::RefreshTrace::new(position)),
+    let position = match crate::media_extra::log_position(state).await {
+        Ok(position) => Some(position),
         Err(error) if previous.is_empty() => {
             return Err(ApiError(
                 error.0,
@@ -744,6 +781,7 @@ pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobConte
         }
         Err(_) => None,
     };
+    let trace = position.map(crate::media_extra::RefreshTrace::new);
     context
         .activity(
             "首次元数据刷新",
@@ -754,6 +792,7 @@ pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobConte
         )
         .await;
     context.checkpoint().await?;
+    prepare_refresh_guard(guard, &id, position).await?;
     state
         .emby(
             Method::POST,
@@ -779,13 +818,20 @@ pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobConte
     wait_item_refresh(
         state,
         &id,
-        Some(&previous),
+        if guard.is_some() {
+            None
+        } else {
+            Some(&previous)
+        },
         trace,
         context,
         "首次元数据刷新",
         &label,
     )
     .await?;
+    if let Some((confirmed, _)) = guard {
+        confirmed.store(true, std::sync::atomic::Ordering::Release);
+    }
     if !series {
         return Ok(());
     }
@@ -824,10 +870,11 @@ pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobConte
         })?;
     let trace = crate::media_extra::RefreshTrace::new(position);
     context.checkpoint().await?;
+    prepare_refresh_guard(guard, &id, Some(position)).await?;
     tracing::debug!(
         "[顶层NFO扫描] {label}：仅刷新剧集根项目 {series_path}，递归否，元数据/图片使用默认刷新，全部替换否；刷新日志起始行 {position}"
     );
-    refresh_item(state, &id, false, context)
+    submit_item_refresh(state, &id, false)
         .await
         .map_err(|error| {
             ApiError(
@@ -846,6 +893,9 @@ pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobConte
         &label,
     )
     .await?;
+    if let Some((confirmed, _)) = guard {
+        confirmed.store(true, std::sync::atomic::Ordering::Release);
+    }
     context
         .activity(
             "首播年份验收",

@@ -307,7 +307,7 @@ fn matches(actual: &Value, expected: &Value) -> bool {
 }
 fn settings_mode_label(mode: &str) -> &str {
     match mode {
-        "preserve" => "忽略文件变更",
+        "preserve" | "ignore_file_change" => "忽略文件变更",
         "capture" => "图片捕获",
         _ => mode,
     }
@@ -368,7 +368,7 @@ async fn check_rename_scan_guard(state: &AppState, id: &str) -> Result<()> {
         ApiError(
             axum::http::StatusCode::CONFLICT,
             format!(
-                "前次改名扫描尚未完成验收，暂不修改神医配置；{reason}，恢复说明：{}",
+                "前次媒体刷新尚未完成验收，暂不修改神医配置；{reason}，恢复说明：{}",
                 root.display()
             ),
         )
@@ -396,7 +396,7 @@ async fn check_rename_scan_guard(state: &AppState, id: &str) -> Result<()> {
         return Ok(());
     }
     if pending.len() != 1 {
-        return Err(blocked("存在多个待确认改名记录，请核对各恢复目录".into()));
+        return Err(blocked("存在多个待确认刷新记录，请核对各恢复目录".into()));
     }
     let path = &pending[0];
     let record: Value = serde_json::from_slice(
@@ -457,7 +457,7 @@ async fn check_rename_scan_guard(state: &AppState, id: &str) -> Result<()> {
             "扫描已结束且原配置已恢复，但待确认标记清理失败：{error}"
         ))
     })?;
-    tracing::info!("[神医临时设置] 前次改名扫描已完成验收并恢复原配置，允许继续处理");
+    tracing::info!("[神医临时设置] 前次媒体刷新已完成验收并恢复原配置，允许继续处理");
     Ok(())
 }
 pub async fn with_settings<F, Fut, T>(state: &AppState, mode: &str, function: F) -> Result<T>
@@ -504,6 +504,7 @@ where
     let original = read(state, &id).await?;
     let removed: &[&str] = match mode {
         "preserve" => &["CatchAllAllow", "ExtractOnFileChange", "IgnoreFileChange"],
+        "ignore_file_change" => &["ExtractOnFileChange", "IgnoreFileChange"],
         "capture" => &[
             "CatchAllBlock",
             "ExtractOnFileChange",
@@ -520,7 +521,7 @@ where
         .map(str::to_string)
         .collect::<Vec<_>>();
     values.push(
-        if mode == "preserve" {
+        if matches!(mode, "preserve" | "ignore_file_change") {
             "IgnoreFileChange"
         } else {
             "CatchAllAllow"
@@ -580,16 +581,22 @@ where
         && !confirmed.load(std::sync::atomic::Ordering::Acquire)
     {
         tracing::error!(
-            "[神医临时设置] 未确认改名扫描结束，保留忽略文件变更保护，原配置说明位于 {}",
+            "[神医临时设置] 未确认媒体刷新结束，保留忽略文件变更保护，原配置说明位于 {}",
             recovery.display()
         );
-        return Err(ApiError::bad(format!(
-            "改名文件已保留，但尚未确认扫描结束；忽略文件变更保护仍保留，恢复说明：{}",
-            recovery.display()
-        )));
+        return Err(ApiError(
+            axum::http::StatusCode::CONFLICT,
+            format!(
+                "尚未确认媒体刷新结束；忽略文件变更保护仍保留，恢复说明：{}",
+                recovery.display()
+            ),
+        ));
     }
     if changed && !restore_settings(state, &id, &restore, mode, outcome.as_ref().err()).await {
-        return Err(ApiError::bad("神医临时设置恢复失败，请核对独占模式"));
+        return Err(ApiError(
+            axum::http::StatusCode::CONFLICT,
+            "神医临时设置恢复失败，请核对独占模式".into(),
+        ));
     }
     if let Some((_, recovery)) = guard {
         let pending = recovery.join("pending-scan.json");
@@ -598,7 +605,7 @@ where
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
             Err(error) => {
                 return Err(ApiError::bad(format!(
-                    "改名扫描已确认且神医原配置已恢复，但待确认标记清理失败：{error}，恢复说明：{}",
+                    "媒体刷新已确认且神医原配置已恢复，但待确认标记清理失败：{error}，恢复说明：{}",
                     recovery.display()
                 )));
             }

@@ -311,11 +311,15 @@ fn track_label(entry: &Value) -> String {
 }
 
 pub async fn fill(state: &AppState, ids: &[String], skip_chinese: bool) -> Value {
-    fill_inner(state, ids, skip_chinese, None)
-        .await
-        .unwrap_or_else(
-            |error| json!({"completed":false,"failed":1,"pending":[{"reason":error.1}]}),
-        )
+    fill_inner(
+        state,
+        ids,
+        skip_chinese,
+        None,
+        None::<std::future::Ready<Result<()>>>,
+    )
+    .await
+    .unwrap_or_else(|error| json!({"completed":false,"failed":1,"pending":[{"reason":error.1}]}))
 }
 pub async fn fill_in_job(
     state: &AppState,
@@ -323,14 +327,32 @@ pub async fn fill_in_job(
     skip_chinese: bool,
     context: &JobContext,
 ) -> Result<Value> {
-    fill_inner(state, ids, skip_chinese, Some(context)).await
+    fill_inner(
+        state,
+        ids,
+        skip_chinese,
+        Some(context),
+        None::<std::future::Ready<Result<()>>>,
+    )
+    .await
+}
+pub async fn fill_in_job_with_refresh(
+    state: &AppState,
+    ids: &[String],
+    skip_chinese: bool,
+    context: &JobContext,
+    refresh: impl std::future::Future<Output = Result<()>>,
+) -> Result<Value> {
+    fill_inner(state, ids, skip_chinese, Some(context), Some(refresh)).await
 }
 async fn fill_inner(
     state: &AppState,
     ids: &[String],
     skip_chinese: bool,
     context: Option<&JobContext>,
+    refresh: Option<impl std::future::Future<Output = Result<()>>>,
 ) -> Result<Value> {
+    let final_refresh = refresh.is_some();
     let config = state.config.read().await.clone();
     let root = tokio::fs::canonicalize(string(&config, "local_strm_root"))
         .await
@@ -344,15 +366,30 @@ async fn fill_inner(
                 .map(|id| json!({"item_id":id,"reason":"媒体信息目录不可读写"}))
                 .collect::<Vec<_>>()
         );
+        if let Some(refresh) = refresh {
+            refresh.await?;
+        }
         log_report(&result);
         return Ok(result);
     };
-    let mappings = crate::db::setting(&state.db, "language_mapping")
-        .await?
-        .unwrap_or(json!([]));
+    let mappings = match crate::db::setting(&state.db, "language_mapping").await {
+        Ok(mappings) => mappings.unwrap_or(json!([])),
+        Err(error) => {
+            if let Some(refresh) = refresh {
+                result["failed"] = json!(1);
+                result["pending"] = json!([{"reason":error.1}]);
+                refresh.await?;
+                result["refresh_state"] = json!("submitted");
+                log_report(&result);
+                return Ok(result);
+            }
+            return Err(error);
+        }
+    };
     let mut processed = HashSet::new();
     let mut queued = BTreeMap::new();
     let mut snapshots = BTreeMap::new();
+    let mut safety_error = None;
     for id in ids.iter().collect::<BTreeSet<_>>() {
         checkpoint(context).await?;
         if let Some(context) = context {
@@ -364,6 +401,7 @@ async fn fill_inner(
         let mut pending = vec![];
         let mut changed = 0;
         let mut changed_languages = 0;
+        let mut unsafe_target = false;
         let mut label = format!("媒体ID：{id}");
         let outcome = async {
             let item = media_edit::details(state, id, "Id,Name,Path,Size,MediaSources,MediaStreams,PartCount,ExtraType,IndexNumber,ParentIndexNumber").await?;
@@ -385,9 +423,9 @@ async fn fill_inner(
                 return Ok((true, 0));
             }
             let target = media_edit::target(state, id).await?;
-            if target.asset["fingerprint_pending"] == true { return Err(ApiError::bad("文件身份待校验，请先重新校验指纹")); }
+            if target.asset["fingerprint_pending"] == true { unsafe_target = true; return Err(ApiError::bad("文件身份待校验，请先重新校验指纹")); }
             let item_path = string(&item, "Path");
-            if item["Id"] != *id || item_path != target.path { return Err(ApiError::bad("Emby身份或路径与当前媒体资产不一致，已停止填充标题")); }
+            if item["Id"] != *id || item_path != target.path { unsafe_target = true; return Err(ApiError::bad("Emby身份或路径与当前媒体资产不一致，已停止填充标题")); }
             let source = crate::media_paths::strm_target(&target.path).await;
             let strm_source = source.clone().unwrap_or_default();
             let source_paths = [&target.path[..], &item_path[..], &strm_source[..]];
@@ -396,9 +434,10 @@ async fn fill_inner(
                 let Ok(path) = tokio::fs::canonicalize(candidate).await else { continue; };
                 if !path.starts_with(&root) || protected(&path) || processed.contains(&path) || !path.is_file() { continue; }
                 let original: Value = serde_json::from_slice(&tokio::fs::read(&path).await?).map_err(|_| ApiError::bad("媒体信息 JSON 无效"))?;
-                identity::verify(&target.asset, &original)?;
-                identity::verify(&json!({"size_bytes":item["Size"]}), &original)?;
+                identity::verify(&target.asset, &original).inspect_err(|_| unsafe_target = true)?;
+                identity::verify(&json!({"size_bytes":item["Size"]}), &original).inspect_err(|_| unsafe_target = true)?;
                 if !media_info::recoverable(&original) || !crate::media_paths::matches_container(&original, &target.path) {
+                    unsafe_target = true;
                     return Err(ApiError::bad("本地媒体信息不可恢复或与当前媒体文件格式不一致，未清理 Emby 数据"));
                 }
                 let (mut updated, report) = language::fill(&original, &mappings, skip_chinese);
@@ -417,13 +456,13 @@ async fn fill_inner(
                 let snapshot = json!({"media_path":target.path,"sha1":target.sha,"asset":target.asset,"versions":target.versions,"top_id":target.top_id,"source":source,"candidate":candidate,"json_path":path,"info":original,"skipped":skipped});
                 snapshots.insert(id.clone(), snapshot.clone());
                 if !titles.is_empty() && !mismatches(&titles, &item, &source_paths, &mappings).is_empty() {
-                    preserve_skipped_titles(&mut updated, &item, &source_paths, &skipped)?;
+                    preserve_skipped_titles(&mut updated, &item, &source_paths, &skipped).inspect_err(|_| unsafe_target = true)?;
                 }
                 if updated != original {
                     if let Some(context) = context {
                         context.activity("保存语言和标题", &format!("正在保存 {label} 的本地媒体信息，本次规范化 {count} 条轨道语言和标题")).await;
                     }
-                    verify_saved_target(state, id, &snapshot).await?;
+                    verify_saved_target(state, id, &snapshot).await.inspect_err(|_| unsafe_target = true)?;
                     atomic(&path, &updated).await?;
                     changed = count;
                     changed_languages = report["changed_languages"].as_u64().unwrap_or(0);
@@ -441,7 +480,7 @@ async fn fill_inner(
                 return Ok((true, 0));
             };
             if expected.is_empty() { return Ok((false, 0)); }
-            if mismatches(&expected, &item, &source_paths, &mappings).is_empty() {
+            if !final_refresh && mismatches(&expected, &item, &source_paths, &mappings).is_empty() {
                 if let Some(context) = context {
                     context.activity("语言和标题已一致", &format!("{label} 的 {} 条待处理轨道已通过语言和标题核对，无需提交文件刷新", expected.len())).await;
                 }
@@ -473,12 +512,19 @@ async fn fill_inner(
                     pending
                         .push(json!({"item_id":id,"reason":format!("标题填充失败: {}",error.1)}));
                 }
+                if unsafe_target {
+                    safety_error = Some(error);
+                }
             }
         }
         result["pending"].as_array_mut().unwrap().extend(pending);
         checkpoint(context).await?;
     }
-    if !queued.is_empty() {
+    if final_refresh && let Some(error) = safety_error {
+        log_report(&result);
+        return Err(error);
+    }
+    if !queued.is_empty() || final_refresh {
         checkpoint(context).await?;
         if let Some(context) = context {
             context
@@ -500,13 +546,13 @@ async fn fill_inner(
             .filter_map(|path| Path::new(path).parent())
             .collect::<BTreeSet<_>>();
         let notified = async {
-            if result["failed"].as_u64().unwrap_or(0) > 0 {
+            if !final_refresh && result["failed"].as_u64().unwrap_or(0) > 0 {
                 return Err(ApiError::bad("批次存在未能安全保存的目标，已停止通知Emby"));
             }
             for (id, snapshot) in &snapshots {
                 checkpoint(context).await?;
                 let live = verify_saved_target(state, id, snapshot).await?;
-                if !Path::new(snapshot["media_path"].as_str().unwrap_or("")).parent().is_some_and(|parent| directories.contains(parent)) {
+                if !final_refresh && !Path::new(snapshot["media_path"].as_str().unwrap_or("")).parent().is_some_and(|parent| directories.contains(parent)) {
                     continue;
                 }
                 let skipped = list(&snapshot["skipped"]);
@@ -520,9 +566,10 @@ async fn fill_inner(
                 if updated != original {
                     verify_saved_target(state, id, snapshot).await?;
                     atomic(path, &updated).await?;
-                    if let Some(sha) = snapshot["sha1"].as_str() {
-                        sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2) ON CONFLICT(sha1) DO UPDATE SET mediainfo_json=EXCLUDED.mediainfo_json")
-                            .bind(sha.to_uppercase()).bind(&updated).execute(&state.db).await?;
+                    if let Some(sha) = snapshot["sha1"].as_str()
+                        && let Err(error) = sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2) ON CONFLICT(sha1) DO UPDATE SET mediainfo_json=EXCLUDED.mediainfo_json")
+                            .bind(sha.to_uppercase()).bind(&updated).execute(&state.db).await {
+                        tracing::warn!("[语言标题] 本地 JSON 已保存，缓存同步失败：{error}");
                     }
                 }
             }
@@ -531,8 +578,18 @@ async fn fill_inner(
                 checkpoint(context).await?;
                 verify_saved_target(state, id, snapshot).await?;
             }
-            crate::media_save::refresh(state, &paths).await
+            // The ingest refresh must read the already updated JSON, just like
+            // the Python workflow. Confirm live titles only after it completes.
+            if let Some(refresh) = refresh {
+                refresh.await
+            } else {
+                crate::media_save::refresh(state, &paths).await
+            }
         }.await;
+        let notified = match notified {
+            Err(error) if final_refresh => return Err(error),
+            outcome => outcome,
+        };
         checkpoint(context).await?;
         let refresh_error = match notified {
             Ok(()) => {
