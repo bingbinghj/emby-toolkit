@@ -185,7 +185,11 @@ pub fn build(probe: &Value, node: &Value, mappings: &Value) -> Option<Value> {
                 let title = text(tags, "title", "");
                 stream["Type"] = json!(capital);
                 stream["Title"] = json!(title);
-                stream["Language"] = json!(lang);
+                stream["Language"] = if kind == "subtitle" {
+                    json!(tags["language"].as_str().unwrap_or(""))
+                } else {
+                    json!(lang)
+                };
                 stream["DisplayLanguage"] = json!(display);
                 let mut display_parts = if display.is_empty() || display == "未知" {
                     vec![]

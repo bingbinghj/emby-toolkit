@@ -6,10 +6,13 @@ static ISO: LazyLock<Value> = LazyLock::new(|| {
     serde_json::from_str(include_str!("../assets/languages.json")).expect("bundled language data")
 });
 static CHINESE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"(?i)繁|正体|正體|简|簡|中文|国语|國語|粤语|粵語|\bchinese\b|\b(?:cht|chs)\b|zh[-_](?:tw|hk|mo|hant|cn|sg|hans)").unwrap()
+    regex::Regex::new(r"(?i)繁|正体|正體|简|簡|中文|国语|國語|粤|粵|\bchinese\b|\b(?:cht|chs)\b|zh[-_](?:tw|hk|mo|hant|cn|sg|hans)").unwrap()
 });
 static TECHNICAL_PREFIX: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"(?i)^(?:hi[\s_-]*res(?:olution)?|l?pcm(?:[_-]s\d+(?:le|be)?)?|dts(?:[\s._-]*hd)?(?:[\s._-]*ma)?|truehd|e?ac[-_]?3|ddp?|aac|flac|opus|mp3|dolby(?:[\s._-]+(?:digital|plus|truehd|atmos))*|pgssub|pgs|subrip|srt|ass|ssa|\d+\.\d+(?:\s*ch)?|\d+[\s_-]*(?:kbps|khz|bit))(?:[\s._:;/|-]+|$)").unwrap()
+    regex::Regex::new(r"(?i)^(?:hi[\s_-]*res(?:olution)?|l?pcm(?:[_-]s\d+(?:le|be)?)?|dts(?:[\s._-]*hd)?(?:[\s._-]*ma)?|truehd|e?ac[-_]?3|ddp?|(?:he[\s_-]*aac|aac[\s_-]*he)(?:[\s_-]*v2)?|aac|flac|opus|mp3|dolby(?:[\s._-]+(?:digital|plus|truehd|atmos))*|pgssub|pgs|subrip|srt|ass|ssa|\d+\.\d+(?:\s*ch)?|\d+[\s_-]*(?:kbps|khz|bit))(?:[\s._:;/|-]+|$)").unwrap()
+});
+static AAC_PROFILE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?i)(?:he[\s_-]*aac|aac[\s_-]*he)(?:[\s_-]*v2)?").unwrap()
 });
 static LANGUAGE_TAG: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"(?i)\b[a-z]{2,3}(?:[-_](?:[a-z]{4}|[a-z]{2}|[0-9]{3}))+\b").unwrap()
@@ -134,6 +137,16 @@ fn title_hits(title: &str, mappings: &Value) -> Vec<(usize, usize, Value)> {
             &title.to_ascii_lowercase(),
             |captures: &regex::Captures<'_>| " ".repeat(captures[0].len()),
         )
+        .into_owned();
+    let text = AAC_PROFILE
+        .replace_all(&text, |captures: &regex::Captures<'_>| {
+            let marker = captures.get(0).unwrap();
+            if boundary(&text, marker.start(), marker.end(), marker.as_str()) {
+                " ".repeat(marker.as_str().len())
+            } else {
+                marker.as_str().to_string()
+            }
+        })
         .into_owned();
     let mut hits = vec![];
     let mut add = |alias: &str, entry: &Value| {
@@ -267,13 +280,41 @@ fn display_title(cleaned: &str, hits: &[(usize, usize, Value)], label: &str) -> 
         .join(" ")
 }
 
-fn taiwan_source(cleaned: &str) -> Option<String> {
-    TAIWAN_DUB.find(cleaned).map(|source| {
-        source
-            .as_str()
-            .replace("台湾配音", "台配")
-            .replace("臺灣配音", "台配")
-    })
+fn short_dubbing_title(cleaned: &str, mappings: &Value) -> Option<&'static str> {
+    let source = cleaned
+        .split_once('（')
+        .filter(|(label, _)| lookup(label, mappings).is_some())
+        .and_then(|(_, source)| source.strip_suffix('）'))
+        .unwrap_or(cleaned);
+    match source.trim().to_ascii_lowercase().as_str() {
+        "台" => Some("台配国语"),
+        "东和兴" => Some("东和兴国语"),
+        "福建文艺" => Some("福建文艺国语"),
+        "dvd粤" => Some("DVD粤语"),
+        "tvb粤" => Some("TVB粤语"),
+        _ => None,
+    }
+}
+
+fn mandarin_source(cleaned: &str) -> Option<String> {
+    TAIWAN_DUB
+        .find(cleaned)
+        .map(|source| {
+            source
+                .as_str()
+                .replace("台湾配音", "台配")
+                .replace("臺灣配音", "台配")
+        })
+        .or_else(|| {
+            ["东和兴", "福建文艺"]
+                .into_iter()
+                .find(|source| {
+                    cleaned
+                        .strip_prefix(source)
+                        .is_some_and(|title| title.starts_with("国语"))
+                })
+                .map(str::to_string)
+        })
 }
 fn dubbing_title(
     cleaned: &str,
@@ -283,7 +324,7 @@ fn dubbing_title(
     fallback: String,
 ) -> String {
     let source = match code(entry).as_str() {
-        "chi" => taiwan_source(cleaned),
+        "chi" => mandarin_source(cleaned),
         "yue" => hits.first().and_then(|(start, _, _)| {
             let prefix = &cleaned[..*start];
             CANTONESE_SOURCE
@@ -360,6 +401,11 @@ pub fn fill(info: &Value, mappings: &Value, skip_chinese: bool) -> (Value, Value
         while TECHNICAL_PREFIX.is_match(&cleaned) {
             cleaned = TECHNICAL_PREFIX.replace(&cleaned, "").trim().to_string();
         }
+        if kind == "Audio"
+            && let Some(title) = short_dubbing_title(&cleaned, mappings)
+        {
+            cleaned = title.into();
+        }
         let hits = title_hits(&cleaned, mappings);
         if skip_chinese
             && kind == "Subtitle"
@@ -378,7 +424,7 @@ pub fn fill(info: &Value, mappings: &Value, skip_chinese: bool) -> (Value, Value
             .then(|| display_title(&cleaned, &hits, ""));
         let ready_title = commentary.clone().or_else(|| {
             (kind == "Audio" && hits.is_empty())
-                .then(|| taiwan_source(&cleaned))
+                .then(|| mandarin_source(&cleaned))
                 .flatten()
         });
         let codes = hits

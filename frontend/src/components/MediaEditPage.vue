@@ -655,7 +655,7 @@
       </n-card>
 
       <n-space justify="end" style="margin-bottom: 12px;">
-        <n-button secondary @click="fillLanguagesToTitles">
+        <n-button secondary :loading="isFillingMediaInfoTitles" :disabled="isSavingMediaInfo || isRepairingTruehdCore || isDeletingMediaVersion" @click="fillLanguagesToTitles">
           <template #icon>
             <n-icon :component="TextIcon" />
           </template>
@@ -774,7 +774,7 @@
             <n-button :disabled="isRepairingTruehdCore" @click="showMediaInfoEditor = false">取消</n-button>
             <n-button
               type="primary"
-              :disabled="isRepairingTruehdCore"
+              :disabled="isRepairingTruehdCore || isFillingMediaInfoTitles"
               :loading="isSavingMediaInfo"
               @click="saveMediaInfo"
             ><template #icon><UiIcon name="save" /></template>
@@ -911,7 +911,6 @@ import {
   getMediaInfoLanguageAliases,
   getMediaInfoLanguageTitle,
   getMediaInfoLanguageTokens,
-  isChineseSubtitleStream,
   normalizeMediaInfoCodeToken,
   resolveMediaInfoLanguageSelection,
   isInvalidAudioProbeStream,
@@ -1059,6 +1058,7 @@ const replaceEpisodeImages = async () => {
 // =========================================================
 const showMediaInfoEditor = ref(false);
 const isSavingMediaInfo = ref(false);
+const isFillingMediaInfoTitles = ref(false);
 const isDeletingMediaVersion = ref(false);
 const isRepairingTruehdCore = ref(false);
 const isRepairingP115Orphan = ref(false);
@@ -1772,39 +1772,51 @@ const handleLanguageDoubleClick = (stream) => {
   });
 };
 
-const fillLanguagesToTitles = () => {
-  let filledCount = 0;
-  let skippedChineseSubtitleCount = 0;
-  let skippedUnknownCount = 0;
-
-  displayStreams.value.forEach((stream) => {
-    const option = getMediaInfoLanguageOption(stream);
-    const selectedLanguage = getMediaInfoLanguageSelection(stream);
-    if (isChineseSubtitleStream(stream, selectedLanguage, option?.label)) {
-      skippedChineseSubtitleCount += 1;
+const fillLanguagesToTitles = async () => {
+  if (isFillingMediaInfoTitles.value || isSavingMediaInfo.value || isRepairingTruehdCore.value || isDeletingMediaVersion.value) return;
+  const targetId = String(currentEditMediaId.value || '');
+  const sequence = mediaInfoLoadSequence;
+  const streams = [...displayStreams.value];
+  const requestStreams = JSON.parse(JSON.stringify(streams));
+  const snapshot = JSON.stringify({ streams: mediaStreams.value, selections: mediaInfoLanguageSelections.value });
+  isFillingMediaInfoTitles.value = true;
+  try {
+    const response = await axios.post('/api/media_info/fill_titles', { streams: requestStreams });
+    if (!showMediaInfoEditor.value || targetId !== String(currentEditMediaId.value || '') || sequence !== mediaInfoLoadSequence) return;
+    if (snapshot !== JSON.stringify({ streams: mediaStreams.value, selections: mediaInfoLanguageSelections.value })) {
+      message.info('编辑草稿已变化，请重新填充标题');
       return;
     }
-    const title = getMediaInfoLanguageTitle(stream.Type, option?.label, selectedLanguage);
-    if (!title) {
-      skippedUnknownCount += 1;
-      return;
+    const updated = response.data?.streams;
+    const report = response.data?.report;
+    if (!Array.isArray(updated) || updated.length !== streams.length || !report
+      || updated.some((stream, index) => stream?.Type !== streams[index].Type || stream?.Index !== streams[index].Index)) {
+      throw new Error('标题填充结果与当前轨道不一致，请重试');
     }
-    stream.Title = stripChineseScriptParenthetical(title);
-    filledCount += 1;
-  });
-
-  if (filledCount > 0) {
-    const skippedText = [
-      skippedChineseSubtitleCount > 0 ? `，已跳过 ${skippedChineseSubtitleCount} 条中文字幕` : '',
-      skippedUnknownCount > 0 ? `，已跳过 ${skippedUnknownCount} 条语言为空或未知的轨道` : '',
-    ].join('');
-    message.success(`已将语言填入 ${filledCount} 条标题${skippedText}`);
-  } else if (skippedChineseSubtitleCount > 0) {
-    message.info(`没有可填充的标题，已跳过 ${skippedChineseSubtitleCount} 条中文字幕`);
-  } else if (skippedUnknownCount > 0) {
-    message.info(`已跳过 ${skippedUnknownCount} 条语言为空或未知的轨道`);
-  } else {
-    message.warning('没有可填充的语言标签');
+    const selections = { ...mediaInfoLanguageSelections.value };
+    streams.forEach((stream, index) => {
+      const languageChanged = stream.Language !== updated[index].Language;
+      for (const field of ['Title', 'Language']) {
+        if (Object.hasOwn(updated[index], field)) stream[field] = updated[index][field];
+        else delete stream[field];
+      }
+      if (languageChanged) {
+        ensureMediaInfoLanguageOption(stream);
+        selections[getMediaInfoStreamSelectionKey(stream)] = resolveInitialMediaInfoLanguageSelection(stream);
+      }
+    });
+    mediaInfoLanguageSelections.value = selections;
+    const changed = Number(report.changed || 0);
+    const skipped = Array.isArray(report.skipped_tracks) ? report.skipped_tracks.length : 0;
+    const pending = Array.isArray(report.pending) ? report.pending.length : 0;
+    const text = `${changed ? `已填充 ${changed} 条轨道的语言和标题` : '轨道标题无需修改'}${skipped ? `，已跳过 ${skipped} 条中文字幕` : ''}${pending ? `，${pending} 条轨道语言未知或存在歧义，需手动确认` : ''}`;
+    if (pending) message.warning(text);
+    else if (changed) message.success(text);
+    else message.info(text);
+  } catch (error) {
+    message.error(error.response?.data?.error || error.response?.data?.message || error.message || '填充标题失败');
+  } finally {
+    isFillingMediaInfoTitles.value = false;
   }
 };
 
@@ -1920,6 +1932,7 @@ const deleteCurrentMediaVersion = async () => {
 
 // 3. 保存修改 (修改为使用 currentEditMediaId)
 const saveMediaInfo = async () => {
+  if (isFillingMediaInfoTitles.value) return;
   isSavingMediaInfo.value = true;
   mediaInfoSaveFeedback.value = null;
   const loadingMsg = message.loading("正在保存媒体信息并通知 Emby 重新加载...", { duration: 0 });

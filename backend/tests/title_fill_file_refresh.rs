@@ -490,6 +490,75 @@ async fn unknown_titles_keep_batch_incomplete_without_destructive_fallback() {
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn nexus_short_audio_sources_and_mislabeled_chinese_subtitles_survive_file_refresh() {
+    let f = Fixture::new(&["raw"]).await;
+    let mut backup = f.files().remove(0);
+    backup[0]["MediaSourceInfo"]["MediaStreams"] = json!([
+        {"Type":"Video","Codec":"h264","Index":0},
+        {"Type":"Audio","Codec":"ac3","Language":"chi","Title":"台","Index":1},
+        {"Type":"Audio","Codec":"aac","Language":"chi","Title":"东和兴","Index":2},
+        {"Type":"Audio","Codec":"aac","Language":"chi","Title":"福建文艺","Index":3},
+        {"Type":"Audio","Codec":"ac3","Language":"chi","Title":"TVB粤","Index":4},
+        {"Type":"Audio","Codec":"ac3","Language":"chi","Title":"日语","Index":5},
+        {"Type":"Subtitle","Codec":"ass","Language":"chi","Title":"台对","Index":6},
+        {"Type":"Audio","Codec":"ac3","Language":"ace","Title":"DVD粤","Index":7},
+        {"Type":"Subtitle","Codec":"subrip","Language":"ace","Title":"TVB粤对","Index":8},
+        {"Type":"Subtitle","Codec":"ass","Language":"jpn","Title":"日对","Index":9},
+        {"Type":"Subtitle","Codec":"pgssub","Language":"ace","Title":"DVD粤对","Index":10},
+        {"Type":"Subtitle","Codec":"subrip","Language":"eng","Title":"英文字幕","Index":11}
+    ]);
+    let streams = backup[0]["MediaSourceInfo"]["MediaStreams"].clone();
+    std::fs::write(
+        f.directory.path().join("10001-mediainfo.json"),
+        serde_json::to_vec(&backup).unwrap(),
+    )
+    .unwrap();
+    {
+        let mut items = f.host.items.lock().await;
+        let item = items.get_mut("10001").unwrap();
+        item["MediaStreams"] = streams.clone();
+        item["MediaSources"][0]["MediaStreams"] = streams;
+    }
+    let report = f.run().await;
+    let saved = f.files().remove(0);
+    let live = f.host.items.lock().await["10001"]["MediaStreams"].clone();
+    let cache: Value = sqlx::query_scalar("SELECT mediainfo_json FROM p115_mediainfo_cache")
+        .fetch_one(&f.state.db)
+        .await
+        .unwrap();
+    let refreshes = f.host.refreshes.lock().await.len();
+    f.close().await;
+    assert_eq!(report["completed"], true, "{report}");
+    assert_eq!(report["skipped_chinese_streams"], 3);
+    assert_eq!(refreshes, 1);
+    assert_eq!(saved, cache);
+    assert_eq!(saved[0]["Chapters"], backup[0]["Chapters"]);
+    let saved_streams = &saved[0]["MediaSourceInfo"]["MediaStreams"];
+    for (index, title, language) in [
+        (1, "台配国语", "chi"),
+        (2, "东和兴国语", "chi"),
+        (3, "福建文艺国语", "chi"),
+        (4, "TVB粤语", "yue"),
+        (5, "日语", "jpn"),
+        (7, "DVD粤语", "yue"),
+    ] {
+        assert_eq!(saved_streams[index]["Title"], title);
+        assert_eq!(saved_streams[index]["Language"], language);
+        assert_eq!(live[index], saved_streams[index]);
+    }
+    for index in [6, 8, 10] {
+        assert_eq!(
+            saved_streams[index],
+            backup[0]["MediaSourceInfo"]["MediaStreams"][index]
+        );
+        assert_eq!(live[index], saved_streams[index]);
+    }
+    assert_eq!(saved_streams[9]["Title"], "日文（日对）");
+    assert_eq!(saved_streams[11]["Title"], "英文");
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
 async fn failed_or_ineffective_refresh_never_claims_live_titles_are_updated() {
     for fault in ["denied", "no-import"] {
         let f = Fixture::new(&["raw", "raw"]).await;

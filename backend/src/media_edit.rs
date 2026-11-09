@@ -8,7 +8,7 @@ use axum::{
     Json, Router,
     extract::{Path, State},
     http::StatusCode,
-    routing::get,
+    routing::{get, post},
 };
 use reqwest::Method;
 use serde_json::{Value, json};
@@ -16,10 +16,29 @@ use sqlx::Row;
 use std::{collections::HashSet, path::PathBuf};
 
 pub fn router() -> Router<AppState> {
-    Router::new().route(
-        "/api/media_info/edit/{id}",
-        get(edit).post(crate::media_save::submit),
-    )
+    Router::new()
+        .route(
+            "/api/media_info/edit/{id}",
+            get(edit).post(crate::media_save::submit),
+        )
+        .route("/api/media_info/fill_titles", post(fill_titles))
+}
+
+async fn fill_titles(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>> {
+    let streams = body["streams"]
+        .as_array()
+        .filter(|streams| streams.iter().all(Value::is_object))
+        .ok_or_else(|| ApiError::bad("轨道列表必须是 JSON 对象数组"))?;
+    let mappings = crate::db::setting(&state.db, "language_mapping")
+        .await?
+        .unwrap_or(json!([]));
+    let (filled, report) = language::fill(&json!({"MediaStreams":streams}), &mappings, true);
+    Ok(Json(
+        json!({"streams":filled["MediaStreams"],"report":report}),
+    ))
 }
 pub struct Target {
     pub id: String,
