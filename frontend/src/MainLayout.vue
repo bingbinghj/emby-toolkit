@@ -21,7 +21,23 @@ const isMobile = computed(() => mdAndDown.value);
 const collapsed = computed(() => appearance.settings.value.layout === 'collapsed' && !isMobile.value);
 const notificationOpen = ref(false), themeCustomizerOpen = ref(false), avatarLoadFailed = ref(false);
 const taskControlBusy = ref(false);
-const activeMenuKey = computed(() => route.name === 'MediaCenterLibrary' ? 'Dashboard' : route.name);
+const settingsPage = computed(() => ['settings-general', 'settings-notifications'].includes(route.name));
+const contentKey = computed(() => settingsPage.value ? route.name : route.path);
+const activeMenuKey = computed(() => route.name === 'MediaCenterLibrary' ? 'Dashboard'
+  : settingsPage.value ? 'settings-general' : route.name);
+const settingsTabs = [
+  { value: 'system', title: '系统', icon: 'mdi-server-network' },
+  { value: 'directory', title: '存储 & 目录', icon: 'mdi-folder' },
+  { value: 'rule', title: '规则', icon: 'mdi-filter' },
+  { value: 'search', title: '搜索 & 下载', icon: 'mdi-magnify' },
+  { value: 'notification', title: '通知', icon: 'mdi-bell' },
+];
+const activeSettingsTab = computed(() => route.name === 'settings-notifications' ? 'notification'
+  : settingsTabs.some(tab => tab.value === route.query.tab) ? route.query.tab : 'system');
+function navigateSettings(value) {
+  router.push(value === 'notification' ? { name: 'settings-notifications' }
+    : { name: 'settings-general', query: value === 'system' ? {} : { tab: value } });
+}
 const taskPaused = computed(() => props.taskStatus?.state === 'paused');
 const taskStopping = computed(() => props.taskStatus?.stop_requested || props.taskStatus?.state === 'stopping');
 const userOptions = computed(() => [
@@ -148,8 +164,7 @@ const baseMenuOptions = computed(() => {
       {
         label: '系统', defaultLabel: '系统', key: 'group-system', icon: 'mdi-cog-outline',
         children: [
-          { label: '通用设置', defaultLabel: '通用设置', key: 'settings-general', icon: 'mdi-cog-outline' },
-          { label: '通知设置', defaultLabel: '通知设置', key: 'settings-notifications', icon: 'mdi-bell-cog-outline' },
+          { label: '设置', defaultLabel: '设置', key: 'settings-general', icon: 'mdi-cog-outline' },
           { label: '用户管理', defaultLabel: '用户管理', key: 'UserManagement', icon: 'mdi-account-group-outline' },
           { label: '任务中心', defaultLabel: '任务中心', key: 'settings-scheduler', icon: 'mdi-timer-outline' },
           { label: '封面生成', defaultLabel: '封面生成', key: 'CoverGeneratorConfig', icon: 'mdi-palette-outline' },
@@ -200,12 +215,12 @@ const syncMenuConfig = (savedTree) => {
 
       if (Array.isArray(savedGroup.children)) {
         savedGroup.children.forEach(savedChild => {
-          const key = { MediaCenter: 'Dashboard', UserCenter: 'UserManagement' }[savedChild.key] || savedChild.key;
+          const key = { MediaCenter: 'Dashboard', UserCenter: 'UserManagement', 'settings-notifications': 'settings-general' }[savedChild.key] || savedChild.key;
           const baseChild = baseMenuMap.value.get(key);
           if (!baseChild || baseChild.isGroup) return; // 废弃的子项
           if (usedKeys.has(key)) return;
           usedKeys.add(key);
-          const oldDefault = { MediaCenter: '媒体中心', UserCenter: '用户中心' }[savedChild.key];
+          const oldDefault = { MediaCenter: '媒体中心', UserCenter: '用户中心', 'settings-notifications': '通知设置', 'settings-general': '通用设置' }[savedChild.key];
           newGroup.children.push({
             key,
             label: savedChild.label && savedChild.label !== oldDefault ? savedChild.label : baseChild.defaultLabel,
@@ -468,6 +483,7 @@ const clearDragState = () => {
 
 <template>
   <DefaultLayout :menus="isMenuReady ? menuOptions : []" :active-key="String(activeMenuKey || '')"
+    :has-header-tabs="settingsPage"
     :expanded-keys="defaultExpandedKeys" :layout="appearance.settings.value.layout" @navigate="handleMenuUpdate" @update:layout="setLayout">
     <template #brand="{ rail }">
       <RouterLink :to="{ name: 'Dashboard' }" class="app-brand"><img src="./assets/logo.png" alt="Emby Toolkit" />
@@ -518,7 +534,12 @@ const clearDragState = () => {
         </VList>
       </VMenu>
     </template>
-    <RouterView v-slot="{ Component }"><component :is="Component" :key="route.path" :task-status="props.taskStatus" /></RouterView>
+    <template v-if="settingsPage" #header-tabs>
+      <VTabs :model-value="activeSettingsTab" color="primary" height="44" class="settings-header-tabs" aria-label="设置分类" @update:model-value="navigateSettings">
+        <VTab v-for="tab in settingsTabs" :key="tab.value" :value="tab.value" :prepend-icon="tab.icon">{{ tab.title }}</VTab>
+      </VTabs>
+    </template>
+    <RouterView v-slot="{ Component }"><component :is="Component" :key="contentKey" :task-status="props.taskStatus" /></RouterView>
   </DefaultLayout>
 
   <VDialog v-model="notificationOpen" max-width="1100" scrollable>
@@ -573,7 +594,7 @@ const clearDragState = () => {
 .app-brand { display: flex; align-items: center; gap: 12px; color: rgb(var(--v-theme-on-surface)); text-decoration: none; min-inline-size: 0; }
 .app-brand img { inline-size: 36px; block-size: 36px; object-fit: contain; }
 .app-brand-name { font-size: 17px; font-weight: 700; white-space: nowrap; }
-.navbar-search { color: rgba(var(--v-theme-on-surface), .65); }
+.navbar-search { color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)) !important; }
 .running-task { max-inline-size: min(280px, 30vw); min-inline-size: 0; }
 .running-task-content { display: grid; gap: 5px; min-inline-size: 0; inline-size: 100%; }
 .running-task-content strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }

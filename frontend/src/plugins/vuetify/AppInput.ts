@@ -117,7 +117,13 @@ export function createResponsiveInputAdapter(component: Component, options: Resp
         const useMobileLayout = props.mobileLayout && display.smAndDown.value && hasDisplayText(label)
 
         if (!useMobileLayout) {
-          return h(component, { ...attrs, ref: controlRef }, slots)
+          const controlAttrs: Record<string, unknown> = { ...attrs, ref: controlRef }
+          // Vuetify 3.7 otherwise announces selectors as "Open", hiding the
+          // configured field name from keyboard and screen-reader navigation.
+          if (['Select', 'Autocomplete', 'Combobox'].includes(options.name) && hasDisplayText(label)) {
+            controlAttrs['aria-label'] ??= String(label)
+          }
+          return h(component, controlAttrs, slots)
         }
 
         const hint = attrs.hint

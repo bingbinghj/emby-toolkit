@@ -10,6 +10,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     routing::post,
 };
+use futures_util::FutureExt;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -172,6 +173,12 @@ async fn enqueue(state: &AppState, key: String, event: Value) {
             .filter_map(|v| v.as_str().map(str::to_string))
             .collect::<std::collections::BTreeSet<_>>();
         old["episode_ids"] = json!(ids);
+        old["history_ids"] = json!(
+            list(&old["history_ids"])
+                .into_iter()
+                .chain(list(&event["history_ids"]))
+                .collect::<Vec<_>>()
+        );
         tracing::info!(
             "Webhook 排队合并：任务 {key}，目标分集 {} 个",
             list(&old["episode_ids"]).len()
@@ -222,29 +229,48 @@ async fn enqueue(state: &AppState, key: String, event: Value) {
                         string(&event, "id"),
                         list(&event["episode_ids"]).len()
                     );
-                    if event["source"] == "moviepilot" {
-                        let result = process_moviepilot(&work, &event, &context).await;
-                        if let Err(error) = &result {
-                            tracing::error!("MoviePilot Webhook 任务失败：{}", error.1);
+                    let result = std::panic::AssertUnwindSafe(async {
+                        if event["source"] == "moviepilot" {
+                            let result = process_moviepilot(&work, &event, &context).await;
+                            if let Err(error) = &result {
+                                tracing::error!("MoviePilot Webhook 任务失败：{}", error.1);
+                            }
+                            if result.as_ref().map_or(true, |v| {
+                                v["failures"].as_array().is_some_and(|f| !f.is_empty())
+                            }) && let Some(key) = event["batch_key"].as_str()
+                            {
+                                work.webhooks.batches.lock().await.remove(key);
+                            }
+                            result
+                        } else {
+                            process_emby(&work, &event, &context)
+                                .await
+                                .inspect_err(|error| {
+                                    tracing::error!(
+                                        "Emby Webhook 任务失败：Emby {}，{}",
+                                        string(&event, "id"),
+                                        error.1
+                                    )
+                                })
                         }
-                        if result.as_ref().map_or(true, |v| {
-                            v["failures"].as_array().is_some_and(|f| !f.is_empty())
-                        }) && let Some(key) = event["batch_key"].as_str()
-                        {
-                            work.webhooks.batches.lock().await.remove(key);
+                    })
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(ApiError(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "任务执行异常".into(),
+                        ))
+                    });
+                    if let Err(error) =
+                        crate::media_organize_history::finish(&work, &event, &result).await
+                    {
+                        tracing::error!("入库处理记录未能保存：{}", error.1);
+                        if result.is_ok() {
+                            return Err(error);
                         }
-                        result
-                    } else {
-                        process_emby(&work, &event, &context)
-                            .await
-                            .inspect_err(|error| {
-                                tracing::error!(
-                                    "Emby Webhook 任务失败：Emby {}，{}",
-                                    string(&event, "id"),
-                                    error.1
-                                )
-                            })
                     }
+                    result
                 })
                 .await
             {
@@ -363,10 +389,13 @@ async fn emby(
     } else {
         &top
     };
+    let history_ids =
+        crate::media_organize_history::begin_emby(&state, &event, item, &path, library.as_ref())
+            .await?;
     enqueue(
         &state,
         format!("emby:{queue_id}:{event}"),
-        json!({"source":"emby","id":top,"episode_ids":ids,"event":event,"original":item}),
+        json!({"source":"emby","id":top,"episode_ids":ids,"event":event,"original":item,"history_ids":history_ids}),
     )
     .await;
     Ok((StatusCode::ACCEPTED, Json(json!({"status":"accepted"}))))
@@ -747,6 +776,14 @@ async fn moviepilot(
     body["source"] = json!("moviepilot");
     body["batch_key"] = json!(key);
     body["files"] = json!(files);
+    body["history_ids"] = match crate::media_organize_history::begin_moviepilot(&state, &body).await
+    {
+        Ok(ids) => json!(ids),
+        Err(error) => {
+            state.webhooks.batches.lock().await.remove(&key);
+            return Err(error);
+        }
+    };
     tracing::info!(
         "MoviePilot Webhook 已接受：批次 {key}，有效文件 {} 个，根路径 {root}",
         files.len()
@@ -763,7 +800,12 @@ pub async fn process_emby(
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
     let id = string(event, "id");
-    let item = details(state, &id, "Id,Type,Name,Path,MediaSources,MediaStreams").await?;
+    let item = details(
+        state,
+        &id,
+        "Id,Type,Name,Path,ImageTags,ProductionYear,MediaSources,MediaStreams",
+    )
+    .await?;
     let media_name = string(&item, "Name");
     if crate::emby::path_ignored(state, &string(&item, "Path")).await? {
         return Ok(json!({"updated":0,"status":"ignored_library"}));
@@ -792,7 +834,7 @@ pub async fn process_emby(
                 details(
                     state,
                     &original_id,
-                    "Id,Type,Name,Path,SeriesId,ParentId,ExtraType,MediaSources,MediaStreams",
+                    "Id,Type,Name,Path,SeriesId,SeriesName,SeriesPrimaryImageTag,ImageTags,ProductionYear,ParentIndexNumber,IndexNumber,ParentId,ExtraType,MediaSources,MediaStreams",
                 )
                 .await?,
             );
@@ -806,11 +848,15 @@ pub async fn process_emby(
                 details(
                     state,
                     episode,
-                    "Id,Type,Name,Path,SeriesId,ParentId,ExtraType,MediaSources,MediaStreams",
+                    "Id,Type,Name,Path,SeriesId,SeriesName,SeriesPrimaryImageTag,ImageTags,ProductionYear,ParentIndexNumber,IndexNumber,ParentId,ExtraType,MediaSources,MediaStreams",
                 )
                 .await?,
             );
         }
+    }
+    for member in &members {
+        crate::media_organize_history::bind_item(state, event, &string(member, "Path"), member)
+            .await?;
     }
     // A prepared member is consumed once. Different batches in the same series
     // cannot inherit its shortcut, and a failed finalization leaves no claimed marker.
@@ -1267,7 +1313,7 @@ async fn moviepilot_item(state: &AppState, path: &str) -> Result<Option<Value>> 
                 ("IncludeItemTypes", "Movie,Episode,Video".into()),
                 (
                     "Fields",
-                    "Id,Type,SeriesId,ParentId,ExtraType,ProviderIds,Path,MediaSources,MediaStreams"
+                    "Id,Type,Name,SeriesId,SeriesName,SeriesPrimaryImageTag,ImageTags,ProductionYear,ParentIndexNumber,IndexNumber,ParentId,ExtraType,ProviderIds,Path,MediaSources,MediaStreams"
                         .into(),
                 ),
             ],
@@ -1488,6 +1534,7 @@ pub async fn process_moviepilot(
             );
             return Err(ApiError::bad(format!("尚未找到Emby入库项目：{path}")));
         };
+        crate::media_organize_history::bind_item(state, event, path, &item).await?;
         tracing::debug!(
             "MoviePilot 入库项目已找到：Emby {}，名称 {}，文件 {}",
             string(&item, "Id"),

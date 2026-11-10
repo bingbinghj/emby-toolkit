@@ -65,28 +65,42 @@ async fn statistics(state: &AppState, user: &str) -> Value {
 }
 
 async fn recent(state: &AppState, user: &str) -> Result<Value> {
-    let response = state.emby(Method::GET, &format!("Users/{user}/Items"), &[
-        ("IncludeItemTypes", "Movie,Series,Episode,MusicAlbum".into()),
-        ("Recursive", "true".into()), ("SortBy", "DateCreated".into()),
-        ("SortOrder", "Descending".into()), ("Limit", "24".into()),
-        ("Fields", "DateCreated,ImageTags,PrimaryImageAspectRatio,SeriesName,SeriesId,SeriesPrimaryImageTag,ParentIndexNumber,IndexNumber,ProductionYear".into()),
-        ("ImageTypeLimit", "1".into()),
-    ], None).await?;
-    let items = response["Items"]
+    // MoviePilot Emby.get_latest uses Latest's native grouping: a newly added
+    // episode surfaces its series, rather than filling the dashboard with episodes.
+    let response = state
+        .emby(
+            Method::GET,
+            &format!("Users/{user}/Items/Latest"),
+            &[
+                ("MediaTypes", "Video".into()),
+                ("Limit", "100".into()),
+                (
+                    "Fields",
+                    "ProductionYear,ImageTags,PrimaryImageAspectRatio".into(),
+                ),
+                ("ImageTypeLimit", "1".into()),
+            ],
+            None,
+        )
+        .await?;
+    let items = response
         .as_array()
         .ok_or_else(|| ApiError::bad("Emby 最新入库响应无效"))?;
     let mut seen = HashSet::new();
     let mut result = vec![];
     for item in items {
+        if !matches!(string(item, "Type").as_str(), "Movie" | "Series") {
+            continue;
+        }
         let id = string(item, "Id");
         if !valid_id(&id) || !seen.insert(id.clone()) {
             return Err(ApiError::bad("Emby 最新入库包含无效或重复媒体 ID"));
         }
         result.push(json!({"id":id,"name":item["Name"],"item_type":item["Type"],
-            "production_year":item["ProductionYear"],"image_tag":item["ImageTags"]["Primary"],
-            "series_id":item["SeriesId"],"series_image_tag":item["SeriesPrimaryImageTag"],
-            "series_name":item["SeriesName"],"season_number":item["ParentIndexNumber"],
-            "episode_number":item["IndexNumber"],"date_created":item["DateCreated"]}));
+            "production_year":item["ProductionYear"],"image_tag":item["ImageTags"]["Primary"]}));
+        if result.len() == 100 {
+            break;
+        }
     }
     Ok(json!(result))
 }
@@ -120,6 +134,41 @@ async fn libraries(state: &AppState, user: &str) -> Result<Value> {
             json!({"id":id,"name":item["Name"],"collection_type":item["CollectionType"],
             "image_tag":item["ImageTags"]["Primary"]}),
         );
+    }
+    let counts = futures_util::future::join_all(result.iter().map(|library| async {
+        let kind = match string(library, "collection_type").as_str() {
+            "movies" | "movie" => "Movie",
+            "tvshows" | "tv" => "Series",
+            "music" => "MusicAlbum",
+            _ => "Movie,Series",
+        };
+        let response = state
+            .emby(
+                Method::GET,
+                &format!("Users/{user}/Items"),
+                &[
+                    ("ParentId", string(library, "id")),
+                    ("IncludeItemTypes", kind.into()),
+                    ("Recursive", "true".into()),
+                    ("Limit", "0".into()),
+                    ("EnableTotalRecordCount", "true".into()),
+                ],
+                None,
+            )
+            .await?;
+        response["TotalRecordCount"]
+            .as_u64()
+            .ok_or_else(|| ApiError::bad("Emby 未返回有效媒体库数量"))
+    }))
+    .await;
+    for (library, count) in result.iter_mut().zip(counts) {
+        match count {
+            Ok(count) => library["item_count"] = json!(count),
+            Err(error) => {
+                library["item_count"] = Value::Null;
+                library["count_error"] = json!(error.1);
+            }
+        }
     }
     Ok(json!(result))
 }

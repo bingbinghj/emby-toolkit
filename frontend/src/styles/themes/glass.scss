@@ -6,6 +6,10 @@
 @use 'glass-v3';
 
 html[data-theme='plain'] {
+  .v-chip--variant-tonal:not(.media-card .v-chip, .playing-card .v-chip) .v-chip__content {
+    color: rgb(var(--v-theme-on-surface));
+  }
+
   body,
   body *,
   body *::before,
@@ -2056,4 +2060,48 @@ html[data-theme='glass'][data-glass-color-scheme='light'] body[data-theme='glass
   .plugin-card__banner .text-gray-200 {
     color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)) !important;
   }
+}
+
+// Bright wallpapers need the same reading emphasis used by MP's popup surfaces.
+// Keep the original palette, image materials and semantic status colors intact.
+html[data-theme='glass'][data-glass-color-scheme='dark'] body[data-theme='glass'] {
+  .layout-page-content .v-card:not(.media-card, .playing-card, .bg-primary, .bg-success, .bg-info, .bg-warning, .bg-error),
+  .layout-navbar,
+  .layout-vertical-nav,
+  .layout-navbar .v-theme--glass,
+  .layout-vertical-nav .v-theme--glass {
+    --v-medium-emphasis-opacity: 0.9;
+    --v-high-emphasis-opacity: 1;
+  }
+
+  .navbar-search {
+    color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)) !important;
+  }
+
+  .v-chip--variant-tonal:not(.media-card .v-chip, .playing-card .v-chip) .v-chip__content {
+    color: rgb(var(--v-theme-on-surface));
+  }
+}
+
+// Frosted's white control fill can lift a bright wallpaper above readable contrast.
+// Reuse the existing dark control material; the light-theme material stays separate.
+html[data-theme='glass'][data-glass-color-scheme='dark'][data-glass-appearance='frosted'] {
+  --glass-frosted-rgb: var(--glass-card-rgb);
+  --glass-control: rgba(var(--glass-material-rgb), 52%);
+  --glass-control-prominent: rgba(var(--glass-material-rgb), 52%);
+  --glass-control-prominent-focus: color-mix(in srgb, rgba(var(--glass-material-rgb), 60%) 84%, rgba(var(--v-theme-primary), 24%));
+}
+
+// Optical high quality exposes more wallpaper detail behind the fixed reading bar.
+// Strengthen its existing material layer, preserving the same tint, sheen and shape.
+html[data-theme='glass'][data-glass-color-scheme='dark'][data-glass-quality='high']
+  body[data-theme='glass'] .layout-navbar {
+  --glass-v3-card-background:
+    linear-gradient(128deg, rgba(255, 255, 255, var(--glass-v3-sheen)), transparent 38%),
+    linear-gradient(135deg,
+      rgba(var(--glass-material-accent-rgb, var(--v-theme-primary)), var(--glass-v3-card-tint)),
+      rgba(var(--glass-material-accent-rgb, var(--v-theme-primary)), calc(var(--glass-v3-card-tint) * 0.35))),
+    linear-gradient(180deg, rgba(var(--glass-v3-ink), 0.5), rgba(var(--glass-v3-ink), 0.555));
+  --glass-popup-surface: rgba(var(--glass-popup-rgb), 0.52);
+  --glass-navbar-scrim: linear-gradient(rgba(var(--glass-shell-rgb), 0.52), rgba(var(--glass-shell-rgb), 0.52));
 }

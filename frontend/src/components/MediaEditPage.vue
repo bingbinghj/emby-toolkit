@@ -9,11 +9,11 @@
       <div v-for="(detail, index) in mediaOperationFeedback.details" :key="index" class="text-wrap">{{ detail }}</div>
     </VAlert>
 
-    <VAlert v-if="mediaRecoveryState.pending || mediaRecoveryError" type="warning" :title="mediaRecoveryState.pending ? '媒体信息需要恢复' : '恢复状态未确认'" variant="tonal" class="mb-4" data-testid="media-recovery-alert">
-      <p>完成恢复验收后才能继续保存媒体信息。</p>
+    <VAlert v-if="mediaRecoveryState.pending || mediaRecoveryError" type="warning" :title="mediaRecoveryState.pending ? (mediaRecoveryCleanupOnly ? '恢复备份待清理' : '媒体信息需要恢复') : '恢复状态未确认'" variant="tonal" class="mb-4" data-testid="media-recovery-alert">
+      <p>{{ mediaRecoveryCleanupOnly ? '媒体信息与原神医配置已通过验收，恢复备份尚未删除。' : '完成恢复验收与备份清理后才能继续保存媒体信息。' }}</p>
       <div v-for="record in mediaRecoveryState.records" :key="record.id" class="mt-3">
         <div class="text-wrap">{{ record.reason }}</div><div class="text-break">恢复目录：{{ record.directory }}</div>
-        <VBtn class="mt-2" color="warning" variant="flat" prepend-icon="mdi-restore" :loading="isRecoveringMediaInfo" :disabled="!record.can_recover || isCheckingMediaRecovery || isConfirmingMediaRecovery" :data-testid="`media-recovery-${record.id}`" @click="confirmMediaRecovery(record)">恢复媒体信息</VBtn>
+        <VBtn class="mt-2" color="warning" variant="flat" :prepend-icon="record.kind === 'verified-cleanup' ? 'mdi-delete-outline' : 'mdi-restore'" :loading="isRecoveringMediaInfo" :disabled="!record.can_recover || isCheckingMediaRecovery || isConfirmingMediaRecovery" :data-testid="`media-recovery-${record.id}`" @click="confirmMediaRecovery(record)">{{ record.kind === 'verified-cleanup' ? '清理恢复备份' : '恢复媒体信息' }}</VBtn>
       </div>
       <div v-if="mediaRecoveryError" class="mt-3 text-wrap">{{ mediaRecoveryError }}</div>
       <VBtn class="mt-3" variant="text" :loading="isCheckingMediaRecovery" :disabled="isRecoveringMediaInfo" @click="loadMediaRecovery">重新检查恢复状态</VBtn>
@@ -203,15 +203,15 @@
       </VCard>
     </VDialog>
 
-    <VDialog :model-value="showMediaInfoEditor" max-width="1100" scrollable @update:model-value="value => { if (!value) closeMediaInfoEditor(); }">
+    <VDialog :model-value="showMediaInfoEditor" :retain-focus="!isConfirmingMediaRecovery" max-width="1100" scrollable @update:model-value="value => { if (!value) closeMediaInfoEditor(); }">
       <VCard>
         <VCardTitle class="d-flex align-center"><span class="flex-grow-1">编辑媒体信息 (音轨/字幕)</span><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭媒体信息编辑器" @click="closeMediaInfoEditor" /></VCardTitle>
         <VCardText>
-          <VAlert v-if="mediaRecoveryState.pending || mediaRecoveryError" type="warning" :title="mediaRecoveryState.pending ? '媒体信息需要恢复' : '恢复状态未确认'" variant="tonal" class="mb-4" data-testid="media-recovery-alert">
-            <p>完成恢复验收后才能继续保存媒体信息。</p>
+          <VAlert v-if="mediaRecoveryState.pending || mediaRecoveryError" type="warning" :title="mediaRecoveryState.pending ? (mediaRecoveryCleanupOnly ? '恢复备份待清理' : '媒体信息需要恢复') : '恢复状态未确认'" variant="tonal" class="mb-4" data-testid="media-recovery-alert">
+            <p>{{ mediaRecoveryCleanupOnly ? '媒体信息与原神医配置已通过验收，恢复备份尚未删除。' : '完成恢复验收与备份清理后才能继续保存媒体信息。' }}</p>
             <div v-for="record in mediaRecoveryState.records" :key="record.id" class="mt-3">
               <div class="text-wrap">{{ record.reason }}</div><div class="text-break">恢复目录：{{ record.directory }}</div>
-              <VBtn class="mt-2" color="warning" variant="flat" prepend-icon="mdi-restore" :loading="isRecoveringMediaInfo" :disabled="!record.can_recover || isCheckingMediaRecovery || isConfirmingMediaRecovery" :data-testid="`media-recovery-${record.id}`" @click="confirmMediaRecovery(record)">恢复媒体信息</VBtn>
+              <VBtn class="mt-2" color="warning" variant="flat" :prepend-icon="record.kind === 'verified-cleanup' ? 'mdi-delete-outline' : 'mdi-restore'" :loading="isRecoveringMediaInfo" :disabled="!record.can_recover || isCheckingMediaRecovery || isConfirmingMediaRecovery" :data-testid="`media-recovery-${record.id}`" @click="confirmMediaRecovery(record)">{{ record.kind === 'verified-cleanup' ? '清理恢复备份' : '恢复媒体信息' }}</VBtn>
             </div>
             <div v-if="mediaRecoveryError" class="mt-3 text-wrap">{{ mediaRecoveryError }}</div>
             <VBtn class="mt-3" variant="text" :loading="isCheckingMediaRecovery" :disabled="isRecoveringMediaInfo" @click="loadMediaRecovery">重新检查恢复状态</VBtn>
@@ -562,6 +562,7 @@ const mediaStreams = ref([]);
 const mediaInfoContext = ref({});
 const mediaInfoSaveFeedback = ref(null);
 const mediaRecoveryState = ref({ pending: false, records: [] });
+const mediaRecoveryCleanupOnly = computed(() => mediaRecoveryState.value.records.length > 0 && mediaRecoveryState.value.records.every(record => record.kind === 'verified-cleanup'));
 const mediaRecoveryError = ref('');
 const isCheckingMediaRecovery = ref(false);
 const isRecoveringMediaInfo = ref(false);
@@ -617,11 +618,19 @@ const recoverMediaInfo = async (record) => {
   isRecoveringMediaInfo.value = true;
   mediaRecoveryError.value = '';
   try {
-    const { data } = await axios.post('/api/media_info/recovery', { recovery_id: record.id });
+    const { data, status } = await axios.post('/api/media_info/recovery', { recovery_id: record.id });
     if (session !== mediaRecoverySession) return;
-    if (data?.recovered_id !== record.id || data.pending !== false) throw new Error(data?.error || data?.message || '恢复任务尚未通过验收');
+    if (data?.recovered_id !== record.id || typeof data.pending !== 'boolean' || typeof data.backup_deleted !== 'boolean') throw new Error(data?.error || data?.message || '恢复或备份清理尚未通过验收');
     if (!await loadMediaRecovery() || session !== mediaRecoverySession) return;
     const warnings = mediaOperationDetails(Array.isArray(data.warning_details) ? data.warning_details : []);
+    if (status === 207 || !data.backup_deleted) {
+      if (!warnings.length) warnings.push(data.message || `恢复备份尚未删除：${record.directory}`);
+      mediaRecoveryError.value = warnings.join('；');
+      mediaOperationFeedback.value = { type: 'warning', message: '恢复备份尚未删除，请重试清理', details: warnings };
+      if (sequence === mediaInfoLoadSequence && targetId === String(currentEditMediaId.value || '')) mediaInfoSaveFeedback.value = mediaOperationFeedback.value;
+      message.warning(mediaOperationFeedback.value.message);
+      return;
+    }
     if (Number(data.warnings) > 0 && !warnings.length) warnings.push(data.message || `恢复已验收，备份收尾尚未完成：${record.directory}`);
     if (warnings.length) mediaOperationFeedback.value = { type: 'warning', message: '恢复已通过验收，仍有收尾提醒', details: warnings };
     if (mediaRecoveryState.value.pending) {
@@ -629,8 +638,11 @@ const recoverMediaInfo = async (record) => {
       if (warnings.length && sequence === mediaInfoLoadSequence) mediaInfoSaveFeedback.value = mediaOperationFeedback.value;
       return;
     }
+    if (mediaOperationFeedback.value?.message === '恢复备份尚未删除，请重试清理') mediaOperationFeedback.value = null;
+    if (mediaInfoSaveFeedback.value?.message === '恢复备份尚未删除，请重试清理') mediaInfoSaveFeedback.value = null;
     if (warnings.length) message.warning(mediaOperationFeedback.value.message);
-    else message.success(data.message || '媒体信息已恢复，原神医配置已通过回读验收');
+    else message.success(data.message || (record.kind === 'verified-cleanup' ? '恢复备份已清理' : '媒体信息与原神医配置已验收，恢复备份已删除'));
+    if (record.kind === 'verified-cleanup') return;
     if (showMediaInfoEditor.value && sequence === mediaInfoLoadSequence && targetId === String(currentEditMediaId.value || '')) {
       const preserveDraft = draftSnapshot !== mediaInfoLoadedSnapshot || draftSnapshot !== JSON.stringify(mediaInfoData.value);
       if (!preserveDraft) {
@@ -656,9 +668,11 @@ const confirmMediaRecovery = (record) => {
   if (isConfirmingMediaRecovery.value || isRecoveringMediaInfo.value || !record.can_recover) return;
   const session = mediaRecoverySession;
   isConfirmingMediaRecovery.value = true;
+  const cleanup = record.kind === 'verified-cleanup';
   mediaRecoveryDialog = dialog.warning({
-    title: '恢复媒体信息', content: `将核对备份与 Emby 数据并恢复原神医配置。当前未保存的草稿会保留。\n恢复目录：${record.directory}`,
-    positiveText: '开始恢复', negativeText: '取消',
+    title: cleanup ? '清理恢复备份' : '恢复媒体信息',
+    content: cleanup ? `媒体信息与原神医配置已通过验收。本次将删除已验收的恢复备份。当前编辑草稿会保留。\n备份目录：${record.directory}` : `将核对备份与 Emby 数据并恢复原神医配置，验收成功后删除备份。当前未保存的草稿会保留。\n恢复目录：${record.directory}`,
+    positiveText: cleanup ? '开始清理' : '开始恢复', negativeText: '取消',
     onPositiveClick: () => session === mediaRecoverySession ? recoverMediaInfo(record) : undefined,
     onClose: () => { isConfirmingMediaRecovery.value = false; mediaRecoveryDialog = null; },
   });

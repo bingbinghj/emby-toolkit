@@ -36,7 +36,7 @@ async function expectConnectedDefinitions(page) {
   })).toBe(true);
 }
 
-test('one global wallpaper instance owns the initial image preload', async ({ page }) => {
+test('one global wallpaper instance owns the initial display preload and shares tone decoding', async ({ page }) => {
   await page.emulateMedia({ colorScheme: 'light', reducedMotion: 'reduce' });
   await page.addInitScript(() => {
     const OriginalImage = window.Image;
@@ -47,7 +47,7 @@ test('one global wallpaper instance owns the initial image preload', async ({ pa
       Object.defineProperty(image, 'src', {
         get: () => source.get.call(image),
         set: value => {
-          window.__wallpaperPreloads.push(value);
+          window.__wallpaperPreloads.push({ url: value, crossOrigin: image.crossOrigin });
           source.set.call(image, value);
         },
       });
@@ -58,11 +58,19 @@ test('one global wallpaper instance owns the initial image preload', async ({ pa
   await page.goto('/user-management', { waitUntil: 'domcontentloaded' });
   await expect(page.getByRole('heading', { name: '用户管理', exact: true })).toBeVisible();
   await expect(page.locator('.wallpaper-background')).toHaveCount(1);
-  await expect.poll(() => page.evaluate(() => window.__wallpaperPreloads.filter(url => url === '/wallpapers/dusk.svg').length)).toBe(1);
+  await expect.poll(() => page.evaluate(() => window.__wallpaperPreloads.filter(image => image.url === '/wallpapers/dusk.svg' && image.crossOrigin !== 'anonymous').length)).toBe(1);
 });
 
-test('glass definitions bind the real shell and reacquire navigation after layout changes', async ({ page }) => {
+test('glass definitions bind the real shell and reacquire navigation after layout changes', async ({ page, api }) => {
+  api.respond('GET', '/api/portal/users', { users: Array.from({ length: 24 }, (_, index) => ({
+    id: index === 0 ? 'ui-test-user' : index.toString(16).padStart(32, '0'),
+    name: index === 0 ? 'UI Test' : `Scrolling Member ${index}`,
+    is_administrator: index === 0, is_disabled: false,
+    notes: '', telegram_chat_id: '', profile_image_tag: null,
+    last_activity_date: '2026-11-10T01:00:00Z', last_login_date: '2026-11-10T00:00:00Z',
+  })) });
   await initializeGlass(page);
+  await expect(page.locator('.user-card')).toHaveCount(24);
   await expectConnectedDefinitions(page);
   await expect.poll(() => page.locator('svg.glass-panel-refraction-defs filter').count()).toBeGreaterThan(0);
 
@@ -84,6 +92,7 @@ test('glass definitions bind the real shell and reacquire navigation after layou
 
   await page.setViewportSize({ width: 1440, height: 650 });
   await page.evaluate(() => window.scrollTo(0, 200));
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThanOrEqual(200);
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(12);
   await expect(page.locator('.etk-default-layout')).toHaveClass(/layout-navbar-away-from-top/);
   await expectConnectedDefinitions(page);

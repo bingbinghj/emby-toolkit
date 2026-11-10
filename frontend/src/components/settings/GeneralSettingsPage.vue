@@ -1,52 +1,16 @@
 <!-- frontend/src/components/settings/GeneralSettingsPage.vue -->
 <template>
   <VContainer fluid class="mp-page settings-page settings-container pa-0">
-    <header class="settings-header">
-      <h1 class="text-h5 font-weight-medium">通用设置</h1>
-      <p class="text-body-2 text-medium-emphasis mt-1">配置媒体处理、服务连接和通知</p>
-    </header>
+    <h1 class="sr-only">设置</h1>
     <div class="d-flex ga-3 flex-column">
       <!-- ★★★ 最终修正: v-if, v-else-if, v-else 现在是正确的同级兄弟关系 ★★★ -->
       <div v-if="configModel">
         <VForm ref="formRef" @submit.prevent>
-          <VTabs v-model="activeSettingsTab" class="settings-tabs mb-6" show-arrows>
-            <VTab value="general">
-              <span class="mp-title-with-icon">
-                <UiIcon name="settings" :size="16" />
-                通用设置
-              </span>
-            </VTab>
-            <VTab value="115_drive">
-              <span class="mp-title-with-icon">
-                <UiIcon name="key" :size="16" />
-                115 网盘
-              </span>
-            </VTab>
-            <VTab value="emby">
-              <span class="mp-title-with-icon">
-                <UiIcon name="media" :size="16" />
-                Emby
-              </span>
-            </VTab>
-            <VTab value="services">
-              <span class="mp-title-with-icon">
-                <UiIcon name="language" :size="16" />
-                智能服务
-              </span>
-            </VTab>
-            <VTab value="advanced">
-              <span class="mp-title-with-icon">
-                <UiIcon name="options" :size="16" />
-                高级
-              </span>
-            </VTab>
-          </VTabs>
-          <VWindow v-model="activeSettingsTab" :touch="false">
-            <VWindowItem value="general" eager>
+          <VWindow :model-value="activeSettingsTab" class="settings-content-window disable-tab-transition" :touch="false">
+            <VWindowItem value="system" eager>
               <VRow class="mp-aligned-grid settings-card-grid settings-grid">
-                <!-- 左侧列 -->
                 <VCol cols="12">
-                  <CollapsibleSettingCard class="dashboard-card" title="基础设置" subtitle="媒体处理与语言显示" icon="mdi-tune" :default-collapsed="false">
+                  <SettingCard class="dashboard-card" title="基础设置" subtitle="媒体处理与语言显示">
                     <template #status>
                       <VChip v-for="status in settingCardStatus['basic']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
 
@@ -202,150 +166,363 @@
                         </VBtn>
                       </div>
                     </template>
-                  </CollapsibleSettingCard>
+                  </SettingCard>
                 </VCol>
-                <!-- 第二列：实时监控 -->
                 <VCol cols="12">
-                  <CollapsibleSettingCard class="dashboard-card" title="实时监控" subtitle="自动发现本地媒体变化" icon="mdi-folder-eye-outline">
+                  <SettingCard class="dashboard-card" title="媒体服务器" subtitle="媒体服务器与媒体库">
                     <template #status>
-                      <VChip v-for="status in settingCardStatus['monitor']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
+                      <VChip v-for="status in settingCardStatus['emby']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
 
                     </template>
 
                     <VCardText class="settings-card-body">
-                      <div class="settings-field" data-field="monitor_enabled">
-                        <VSwitch v-model="configModel.monitor_enabled" label="启用文件系统监控"></VSwitch>
-                      </div>
-                      <div class="settings-field" data-field="monitor_paths">
-                        <div class="settings-input-group d-flex align-start ga-2">
-                          <VCombobox
-                            v-model="configModel.monitor_paths"
-                            multiple
-                            placeholder="输入路径并回车，或点击右侧选择"
-                            :items="[]"
-                            style="flex: 1"
-                            item-title="label"
-                            item-value="value"
-                            :return-object="false"
-                            chips
-                            closable-chips
-                            label="监控路径"
-                          ></VCombobox>
-                          <VBtn
-                            color="primary"
-                            aria-label="选择监控路径"
-                            @click="openLocalFolderSelector('monitor_paths', true)"
-                            variant="outlined"
-                            icon
-                          >
-                            <template #default><VIcon :icon="FolderIcon" /></template>
-                          </VBtn>
-                        </div>
-                        <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
-                            请保持和 Emby 媒体库路径映射一致。
-                          </span>
-                        </div>
-                      </div>
-                      <div class="settings-field" data-field="monitor_exclude_dirs">
-                        <div class="settings-input-group d-flex align-start ga-2">
-                          <VCombobox
-                            v-model="configModel.monitor_exclude_dirs"
-                            multiple
-                            placeholder="输入路径并回车，或点击右侧选择"
-                            :items="[]"
-                            style="flex: 1"
-                            item-title="label"
-                            item-value="value"
-                            :return-object="false"
-                            chips
-                            closable-chips
-                            label="排除路径"
-                          ></VCombobox>
-                          <VBtn
-                            color="primary"
-                            aria-label="选择排除路径"
-                            @click="openLocalFolderSelector('monitor_exclude_dirs', true)"
-                            variant="outlined"
-                            icon
-                          >
-                            <template #default><VIcon :icon="FolderIcon" /></template>
-                          </VBtn>
-                        </div>
-                        <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
-                            命中这些路径的文件将
-                            <b>跳过刮削流程</b>
-                            ，仅刷新。
-                            <br />
-                          </span>
-                        </div>
-                      </div>
-                      <!-- 排除刷新延迟 -->
-                      <div class="settings-field" data-field="monitor_exclude_refresh_delay">
-                        <VNumberInput
-                          v-model="configModel.monitor_exclude_refresh_delay"
-                          :min="0"
-                          :step="10"
-                          placeholder="0"
-                          style="width: 100%"
-                          label="排除刷新延迟"
-                        >
-                          <template #append-inner>秒</template>
-                        </VNumberInput>
-                        <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
-                            仅对
-                            <b>排除路径</b>
-                            生效。设为 0 则立即刷新。
-                            <br />
-                          </span>
-                        </div>
-                      </div>
-                      <div class="settings-field" data-field="monitor_extensions">
-                        <VCombobox
-                          v-model="configModel.monitor_extensions"
-                          multiple
-                          placeholder="输入扩展名并回车"
-                          :items="[]"
-                          item-title="label"
-                          item-value="value"
-                          :return-object="false"
-                          chips
-                          closable-chips
-                          label="监控扩展名"
-                        ></VCombobox>
-                        <!-- 注意：options 设为空数组配合 tag 模式允许用户自由输入 -->
-                        <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
-                            仅处理这些后缀的文件，输入扩展名并回车添加新的监控文件类型。
-                          </span>
-                        </div>
-                      </div>
-                      <div class="settings-field" data-field="tmdb_image_language_preference">
-                        <VRadioGroup
-                          v-model="configModel.tmdb_image_language_preference"
-                          name="image_lang_group"
-                          label="图片语言偏好"
-                          inline
-                        >
-                          <div class="d-flex ga-3 flex-wrap align-center">
-                            <VRadio value="zh"><template #label>简体中文优先</template></VRadio>
-                            <VRadio value="original"><template #label>原语言优先</template></VRadio>
+                      <!-- ★★★ 调整点1: 恢复双列，但减小间距 x-gap="12" ★★★ -->
+                      <VRow class="settings-grid">
+                        <!-- 1. Emby URL (左) -->
+                        <!-- ★★★ 调整点2: label-width="100" 覆盖全局的200，让输入框更长、更紧凑 ★★★ -->
+                        <VCol cols="12" md="6">
+                          <div class="settings-field" data-field="emby_server_url">
+                            <VTextField
+                              v-model="configModel.emby_server_url"
+                              prepend-inner-icon="mdi-server"
+                              hint="服务端地址，格式：http(s)://ip:port"
+                              persistent-hint
+                              placeholder="http(s)://ip:port"
+                              label="地址"
+                            ></VTextField>
                           </div>
-                        </VRadioGroup>
-                        <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
-                            控制下载 海报 等图片时的语言优先级。
-                          </span>
-                        </div>
+                        </VCol>
+                        <!-- 2. 外网访问 URL (右) -->
+                        <VCol cols="12" md="6">
+                          <div class="settings-field" data-field="emby_public_url">
+                            <VTextField
+                              v-model="configModel.emby_public_url"
+                              prepend-inner-icon="mdi-play-network"
+                              hint="跳转播放页面使用的地址，格式：http(s)://domain:port"
+                              persistent-hint
+                              placeholder="http(s)://domain:port"
+                              label="外网播放地址"
+                            ></VTextField>
+                          </div>
+                        </VCol>
+                        <!-- 3. API Key (左) -->
+                        <VCol cols="12" md="6">
+                          <div class="settings-field" data-field="emby_api_key">
+                            <VTextField
+                              v-model="configModel.emby_api_key"
+                              prepend-inner-icon="mdi-key"
+                              hint="Emby设置->高级->API密钥中生成的密钥"
+                              persistent-hint
+                              placeholder="输入 API Key"
+                              :type="revealedPasswords['emby_api_key'] ? 'text' : 'password'"
+                              :append-inner-icon="
+                                revealedPasswords['emby_api_key'] ? 'mdi-eye-off-outline' : 'mdi-eye-outline'
+                              "
+                              @click:append-inner="
+                                revealedPasswords['emby_api_key'] = !revealedPasswords['emby_api_key']
+                              "
+                              label="API密钥"
+                            ></VTextField>
+                          </div>
+                        </VCol>
+
+                        <VCol cols="12" md="6">
+                          <div class="settings-field" data-field="emby_webhook_secret">
+                            <VTextField
+                              v-model="configModel.emby_webhook_secret"
+                              placeholder="用于 /webhook/emby?token=..."
+                              :type="revealedPasswords['emby_webhook_secret'] ? 'text' : 'password'"
+                              :append-inner-icon="
+                                revealedPasswords['emby_webhook_secret'] ? 'mdi-eye-off-outline' : 'mdi-eye-outline'
+                              "
+                              @click:append-inner="
+                                revealedPasswords['emby_webhook_secret'] = !revealedPasswords['emby_webhook_secret']
+                              "
+                              label="Webhook密钥"
+                            ></VTextField>
+                          </div>
+                        </VCol>
+                        <VCol cols="12">
+                          <div class="settings-field" data-field="emby_webhook_ingest_enabled">
+                            <VSwitch v-model="configModel.emby_webhook_ingest_enabled" label="Webhook入库"></VSwitch>
+                            <div class="settings-hint">
+                              <span style="font-size: 0.8em" class="text-medium-emphasis">
+                                关闭后忽略 Emby 的 item.add 和 library.new
+                                入库事件；MoviePilot完成通知、元数据更新和删除通知不受影响。
+                              </span>
+                            </div>
+                          </div>
+                        </VCol>
+                        <!-- 4. 用户 ID (右) -->
+                        <VCol cols="12" md="6">
+                          <div class="settings-field" data-field="emby_user_id">
+                            <VTextField
+                              v-model="configModel.emby_user_id"
+                              placeholder="32位用户ID"
+                              label="用户ID"
+                              :rules="embyUserIdValidation"
+                            ></VTextField>
+                            <div class="settings-hint">
+                              <div v-if="isInvalidUserId" style="color: var(--ui-error-color); font-size: 12px">
+                                格式错误！ID应为32位。
+                              </div>
+                            </div>
+                          </div>
+                        </VCol>
+                        <!-- 分割线 (占满一行) -->
+                        <VCol cols="12">
+                          <div
+                            style="margin: 8px 0; font-size: 0.9em; color: var(--ui-text-muted)"
+                            class="settings-divider text-body-2 text-medium-emphasis"
+                          >
+                            管理员凭证 (选填)
+                            <VDivider class="mt-2" />
+                          </div>
+                        </VCol>
+                        <!-- 5. 管理员用户 (左) -->
+                        <VCol cols="12" md="6">
+                          <div class="settings-field" data-field="emby_admin_user">
+                            <VTextField
+                              v-model="configModel.emby_admin_user"
+                              prepend-inner-icon="mdi-account"
+                              hint="登录用户名"
+                              persistent-hint
+                              placeholder="管理员用户名"
+                              label="用户名"
+                            ></VTextField>
+                          </div>
+                        </VCol>
+                        <!-- 6. 管理员密码 (右) -->
+                        <VCol cols="12" md="6">
+                          <div class="settings-field" data-field="emby_admin_pass">
+                            <VTextField
+                              v-model="configModel.emby_admin_pass"
+                              prepend-inner-icon="mdi-lock"
+                              hint="登录密码"
+                              persistent-hint
+                              placeholder="管理员密码"
+                              :type="revealedPasswords['emby_admin_pass'] ? 'text' : 'password'"
+                              :append-inner-icon="
+                                revealedPasswords['emby_admin_pass'] ? 'mdi-eye-off-outline' : 'mdi-eye-outline'
+                              "
+                              @click:append-inner="
+                                revealedPasswords['emby_admin_pass'] = !revealedPasswords['emby_admin_pass']
+                              "
+                              label="密码"
+                            ></VTextField>
+                          </div>
+                        </VCol>
+                        <!-- 7. 超时时间 (占满一行，保持长标签) -->
+                        <VCol cols="12">
+                          <div class="settings-field" data-field="emby_api_timeout">
+                            <VNumberInput
+                              v-model="configModel.emby_api_timeout"
+                              :min="15"
+                              :step="5"
+                              placeholder="建议 30-90"
+                              style="width: 100%"
+                              label="Emby API 超时时间 (秒)"
+                            ></VNumberInput>
+                          </div>
+                        </VCol>
+                        <VCol cols="12">
+                          <div class="settings-field">
+                            <VAutocomplete v-model="configModel.libraries_to_ignore" :items="availableLibraries" item-title="Name" item-value="Id"
+                              label="排除媒体库" chips multiple clearable prepend-inner-icon="mdi-library" :loading="loadingLibraries"
+                              :disabled="loadingLibraries || Boolean(libraryError) || !availableLibraries.length"
+                              hint="选中的媒体库不会参与处理；不选则处理全部媒体库。" persistent-hint />
+                            <VBtn class="mt-2" size="small" variant="text" prepend-icon="mdi-refresh" :loading="loadingLibraries" @click="fetchEmbyLibrariesInternal">刷新媒体库</VBtn>
+                            <VAlert v-if="libraryError" type="warning" variant="tonal" density="compact" class="mt-2">{{ libraryError }}</VAlert>
+                          </div>
+                        </VCol>
+                      </VRow>
+                    </VCardText>
+                    <template #actions>
+                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
+                        <VBtn
+                          color="primary"
+                          :loading="savingCard === 'emby'"
+                          :disabled="savingConfig"
+                          aria-label="保存媒体服务器"
+                          @click="saveCard('emby')"
+                        >
+                          <template #prepend><VIcon :icon="SaveIcon" /></template>
+                          保存
+                        </VBtn>
                       </div>
-                      <div class="settings-field" data-field="monitor_sha1_pc_search">
-                        <VSwitch v-model="configModel.monitor_sha1_pc_search" label="SHA1检测"></VSwitch>
-                        <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
-                            文件SHA1查询，非115网盘勿启用。
-                          </span>
+                    </template>
+                  </SettingCard>
+                </VCol>
+                <VCol cols="12">
+                  <SettingCard class="dashboard-card" title="AI 增强" subtitle="翻译服务与处理策略">
+                    <template #status>
+                      <VChip v-for="status in settingCardStatus['ai']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
+
+                    </template>
+
+                    <template #append>
+                      <div class="d-flex ga-3 flex-wrap align-center">
+                        <VBtn color="info" @click="openPromptModal" variant="outlined" size="x-small">
+                          <template #prepend><UiIcon name="language" /></template>
+                          配置提示词
+                        </VBtn>
+                        <VBtn
+                          color="primary"
+                          @click="testAI"
+                          :loading="isTestingAI"
+                          :disabled="!configModel.ai_api_key"
+                          variant="outlined"
+                          size="x-small"
+                        >
+                          <template #prepend><UiIcon name="link" /></template>
+                          测试连接
+                        </VBtn>
+                      </div>
+                    </template>
+                    <VCardText class="settings-card-body">
+                      <!-- 移除 content-disabled 类，因为不再有总开关控制禁用 -->
+                      <div class="ai-settings-wrapper">
+                        <!-- 1. 基础配置 (上移，因为它们是前提) -->
+                        <div class="settings-field" data-field="ai_provider">
+                          <VSelect
+                            v-model="configModel.ai_provider"
+                            prepend-inner-icon="mdi-robot"
+                            hint="选择使用的LLM服务提供商"
+                            persistent-hint
+                            :items="aiProviderOptions"
+                            item-title="label"
+                            item-value="value"
+                            :return-object="false"
+                            label="LLM提供商"
+                          ></VSelect>
+                        </div>
+                        <div class="settings-field" data-field="ai_api_key">
+                          <VTextField
+                            v-model="configModel.ai_api_key"
+                            prepend-inner-icon="mdi-key-variant"
+                            hint="LLM服务提供商的API密钥，用于身份验证"
+                            persistent-hint
+                            placeholder="输入你的 API Key"
+                            :type="revealedPasswords['ai_api_key'] ? 'text' : 'password'"
+                            :append-inner-icon="
+                              revealedPasswords['ai_api_key'] ? 'mdi-eye-off-outline' : 'mdi-eye-outline'
+                            "
+                            @click:append-inner="revealedPasswords['ai_api_key'] = !revealedPasswords['ai_api_key']"
+                            label="LLM API密钥"
+                          ></VTextField>
+                        </div>
+                        <div class="settings-field" data-field="ai_model_name">
+                          <VCombobox v-model="configModel.ai_model_name" :items="aiModelSelectOptions" :loading="isFetchingAIModels" clearable
+                            item-title="label" item-value="value" :return-object="false" label="LLM模型名称"
+                            placeholder="请输入或选择LLM模型名称" hint="指定使用的LLM模型，可刷新模型目录或手动输入。" persistent-hint prepend-inner-icon="mdi-brain">
+                            <template #append-inner>
+                              <VBtn icon="mdi-refresh" variant="text" size="small" aria-label="刷新LLM模型" :loading="isFetchingAIModels" :disabled="!configModel.ai_api_key" @click="refreshAIModels" />
+                            </template>
+                          </VCombobox>
+                        </div>
+                        <div class="settings-field" data-field="ai_base_url">
+                          <VTextField
+                            v-model="configModel.ai_base_url"
+                            prepend-inner-icon="mdi-link"
+                            hint="LLM API的基础URL地址，用于自定义API端点"
+                            persistent-hint
+                            placeholder="用于代理或第三方兼容服务"
+                            label="LLM基础URL"
+                          ></VTextField>
+                        </div>
+                        <VRow class="settings-grid">
+                          <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
+                            <div class="settings-field" data-field="ai_request_timeout">
+                              <VNumberInput
+                                v-model="configModel.ai_request_timeout"
+                                :min="30"
+                                :max="1800"
+                                :step="30"
+                                style="width: 100%"
+                                label="AI 翻译超时时间（秒）"
+                              ></VNumberInput>
+                            </div>
+                </VCol>
+                          <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
+                            <div
+                              v-if="configModel.ai_provider === 'openai'"
+                              class="settings-field"
+                              data-field="ai_max_retries"
+                            >
+                              <VNumberInput
+                                v-model="configModel.ai_max_retries"
+                                :min="0"
+                                :precision="0"
+                                :step="1"
+                                style="width: 100%"
+                                label="失败重试次数"
+                              ></VNumberInput>
+                              <div class="settings-hint">
+                                0 表示不重试。超时或临时请求失败后重试当前请求；已成功翻译的词条会使用缓存。
+                              </div>
+                            </div>
+                </VCol>
+                          <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
+                            <div class="settings-field" data-field="ai_translation_batch_size">
+                              <VNumberInput
+                                v-model="configModel.ai_translation_batch_size"
+                                :min="1"
+                                :max="100"
+                                :step="1"
+                                style="width: 100%"
+                                label="单批最大翻译词条数"
+                              ></VNumberInput>
+                            </div>
+                </VCol>
+                        </VRow>
+                        <div
+                          style="margin: 10px 0; font-size: 0.9em; color: var(--ui-text-muted)"
+                          class="settings-divider text-body-2 text-medium-emphasis"
+                        >
+                          功能开关
+                          <VDivider class="mt-2" />
+                        </div>
+                        <!-- 2. 功能细分开关 -->
+                        <div class="settings-field">
+                          <div class="settings-field-label text-body-2 font-weight-medium mb-2">启用功能</div>
+                          <VRow class="settings-grid">
+                            <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
+                              <VCheckbox v-model="configModel.ai_translate_actor_role" label="翻译演员与角色" />
+                  </VCol>
+                            <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
+                              <VCheckbox v-model="configModel.ai_translate_on_sync" label="同步媒体数据时翻译" />
+                  </VCol>
+                            <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
+                              <VCheckbox v-model="configModel.ai_translate_title" label="翻译片名" />
+                  </VCol>
+                            <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
+                              <VCheckbox v-model="configModel.ai_translate_overview" label="翻译简介" />
+                  </VCol>
+                            <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
+                              <VCheckbox v-model="configModel.ai_translate_episode_overview" label="翻译分集简介" />
+                  </VCol>
+                            <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
+                              <VCheckbox v-model="configModel.ai_joke_fallback" label="无简介小笑话占位" />
+                  </VCol>
+                          </VRow>
+                        </div>
+                        <!-- 3. 高级选项 -->
+                        <div
+                          v-if="configModel.ai_translate_actor_role || configModel.ai_translate_title_overview"
+                          class="settings-field"
+                          data-field="ai_translation_mode"
+                        >
+                          <VRadioGroup
+                            v-model="configModel.ai_translation_mode"
+                            name="ai_translation_mode"
+                            label="翻译模式"
+                            inline
+                          >
+                            <div class="d-flex ga-3 flex-column">
+                              <VRadio value="fast"><template #label>快速模式 (仅翻译)</template></VRadio>
+                              <VRadio value="quality"><template #label>顾问模式 (结合剧情上下文)</template></VRadio>
+                            </div>
+                          </VRadioGroup>
                         </div>
                       </div>
                     </VCardText>
@@ -353,80 +530,52 @@
                       <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
                           color="primary"
-                          :loading="savingCard === 'monitor'"
+                          :loading="savingCard === 'ai'"
                           :disabled="savingConfig"
-                          aria-label="保存实时监控"
-                          @click="saveCard('monitor')"
+                          aria-label="保存AI 增强"
+                          @click="saveCard('ai')"
                         >
                           <template #prepend><VIcon :icon="SaveIcon" /></template>
                           保存
                         </VBtn>
                       </div>
                     </template>
-                  </CollapsibleSettingCard>
+                  </SettingCard>
                 </VCol>
                 <VCol cols="12">
-                  <CollapsibleSettingCard class="dashboard-card" title="数据源与API" subtitle="元数据服务与访问凭据" icon="mdi-database-outline">
+                  <SettingCard class="dashboard-card" title="日志配置" subtitle="日志保留与文件大小">
                     <template #status>
-                      <VChip v-for="status in settingCardStatus['sources']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
+                      <VChip v-for="status in settingCardStatus['logs']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
 
                     </template>
 
                     <VCardText class="settings-card-body">
-                      <div class="settings-field" data-field="tmdb_api_key">
-                        <VTextField
-                          v-model="configModel.tmdb_api_key"
-                          placeholder="输入你的 TMDB API Key"
-                          :type="revealedPasswords['tmdb_api_key'] ? 'text' : 'password'"
-                          :append-inner-icon="
-                            revealedPasswords['tmdb_api_key'] ? 'mdi-eye-off-outline' : 'mdi-eye-outline'
-                          "
-                          @click:append-inner="revealedPasswords['tmdb_api_key'] = !revealedPasswords['tmdb_api_key']"
-                          label="TMDB API Key"
-                        ></VTextField>
-                      </div>
-                      <div class="settings-field" data-field="tmdb_api_base_url">
-                        <VTextField
-                          v-model="configModel.tmdb_api_base_url"
-                          placeholder="https://api.themoviedb.org/3"
-                          label="TMDB API Base URL"
-                        ></VTextField>
+                      <div class="settings-field" data-field="log_rotation_size_mb">
+                        <VNumberInput
+                          v-model="configModel.log_rotation_size_mb"
+                          :min="1"
+                          :step="1"
+                          placeholder="例如: 5"
+                          label="单个日志文件大小 (MB)"
+                        ></VNumberInput>
                         <div class="settings-hint">
                           <span style="font-size: 0.8em" class="text-medium-emphasis">
-                            TMDb API的基础URL，通常不需要修改。
+                            设置 app.log 文件的最大体积，超限后会轮转。
                           </span>
                         </div>
                       </div>
-                      <div class="settings-field" data-field="douban_enable_online_api">
-                        <div class="d-flex ga-3 flex-wrap align-center">
-                          <VSwitch v-model="configModel.douban_enable_online_api" label="启用豆瓣辅助"></VSwitch>
-                          <span style="font-size: 0.9em; margin-left: 8px" class="text-medium-emphasis">
-                            从豆瓣补充缺失的演员以及部分中文角色名。
-                          </span>
-                        </div>
-                      </div>
-                      <div class="settings-field" data-field="api_douban_default_cooldown_seconds">
+                      <div class="settings-field" data-field="log_rotation_backup_count">
                         <VNumberInput
-                          v-model="configModel.api_douban_default_cooldown_seconds"
-                          :min="0.1"
-                          :step="0.1"
-                          placeholder="例如: 1.0"
-                          label="豆瓣API冷却时间 (秒)"
+                          v-model="configModel.log_rotation_backup_count"
+                          :min="1"
+                          :step="1"
+                          placeholder="例如: 10"
+                          label="日志备份数量"
                         ></VNumberInput>
-                      </div>
-                      <div class="settings-field" data-field="douban_cookie">
-                        <VTextField
-                          v-model="configModel.douban_cookie"
-                          placeholder="从浏览器开发者工具中获取"
-                          :type="revealedPasswords['douban_cookie'] ? 'text' : 'password'"
-                          :append-inner-icon="
-                            revealedPasswords['douban_cookie'] ? 'mdi-eye-off-outline' : 'mdi-eye-outline'
-                          "
-                          @click:append-inner="revealedPasswords['douban_cookie'] = !revealedPasswords['douban_cookie']"
-                          label="豆瓣登录 Cookie"
-                        ></VTextField>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">非必要不用配置，作用有限。</span>
+                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                            保留最近的日志文件数量 (app.log.1, app.log.2 ...)。
+                          </span>
                         </div>
                       </div>
                     </VCardText>
@@ -434,24 +583,127 @@
                       <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
                           color="primary"
-                          :loading="savingCard === 'sources'"
+                          :loading="savingCard === 'logs'"
                           :disabled="savingConfig"
-                          aria-label="保存数据源与API"
-                          @click="saveCard('sources')"
+                          aria-label="保存日志配置"
+                          @click="saveCard('logs')"
                         >
                           <template #prepend><VIcon :icon="SaveIcon" /></template>
                           保存
                         </VBtn>
                       </div>
                     </template>
-                  </CollapsibleSettingCard>
+                  </SettingCard>
                 </VCol>
-              </VRow>
+                <VCol cols="12">
+                  <SettingCard class="dashboard-card" title="数据管理" subtitle="备份、还原与缓存维护">
+                    <template #status>
+                      <VChip v-for="status in settingCardStatus['data']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
+
+                    </template>
+
+                    <VCardText class="settings-card-body">
+                      <div class="d-flex ga-3 flex-column">
+                        <div class="data-action-grid">
+                          <VBtn @click="showExportModal" :loading="isExporting" class="action-button" color="secondary">
+                            <template #prepend><VIcon :icon="ExportIcon" /></template>
+                            导出数据
+                          </VBtn>
+                          <VFileInput
+                            :model-value="importFiles"
+                            @update:model-value="handleImportFileSelection"
+                            accept=".json.gz"
+                            label="导入备份文件"
+                            prepend-icon="mdi-cloud-upload"
+                            hide-details
+                            :loading="isPreviewingImport"
+                            :disabled="isImporting || isPreviewingImport"
+                            class="backup-file-input"
+                          />
+                          <VBtn
+                            @click="showClearTablesModal"
+                            :loading="isClearing"
+                            class="action-button"
+                            color="error"
+                            variant="outlined"
+                          >
+                            <template #prepend><VIcon :icon="ClearIcon" /></template>
+                            清空指定表
+                          </VBtn>
+                          <VBtn
+                            color="warning"
+                            :loading="isCleaningOfflineMedia"
+                            class="action-button"
+                            @click="
+                              confirmSettingAction(
+                                '确定要清理离线媒体数据吗？ 这将删除所有 不在库 的元数据缓存。 此操作用于数据库瘦身，不会影响已入库媒体项。',
+                                handleCleanupOfflineMedia,
+                                '确认',
+                              )
+                            "
+                            variant="outlined"
+                          >
+                            <template #prepend><VIcon :icon="ClearIcon" /></template>
+                            清理离线媒体
+                          </VBtn>
+                          <VBtn
+                            color="warning"
+                            :loading="isCorrecting"
+                            class="action-button"
+                            @click="
+                              confirmSettingAction(
+                                '确定要校准所有表的ID自增计数器吗？ 这是一个安全的操作，用于修复导入数据后无法新增条目的问题。',
+                                handleCorrectSequences,
+                                '确认',
+                              )
+                            "
+                            variant="outlined"
+                          >
+                            <template #prepend><VIcon :icon="BuildIcon" /></template>
+                            校准ID计数器
+                          </VBtn>
+                          <!-- ### 重置演员映射表 ### -->
+                          <VBtn
+                            color="warning"
+                            :loading="isResettingMappings"
+                            class="action-button"
+                            @click="showResetMappingsModal"
+                            variant="outlined"
+                          >
+                            <template #prepend><VIcon :icon="SyncIcon" /></template>
+                            重置Emby数据
+                          </VBtn>
+                        </div>
+                        <p class="description-text">
+                          <b>导出：</b>
+                          将数据库中的一个或多个表备份为 JSON.GZ 文件。
+                          <br />
+                          <b>导入：</b>
+                          从 JSON.GZ 备份文件中恢复数据。
+                          <br />
+                          <b>清空：</b>
+                          删除指定表中的所有数据，此操作不可逆。
+                          <br />
+                          <b>清理离线：</b>
+                          移除已不在库的残留元数据记录，给数据库瘦身。
+                          <br />
+                          <b>校准：</b>
+                          修复导入数据可能引起的自增序号错乱的问题。
+                          <br />
+                          <b>重置：</b>
+                          在重建 Emby 媒体库后，使用此功能清空所有旧的 Emby
+                          关联数据（用户、播放状态等），并保留核心元数据，以便后续重新扫描和关联。
+                        </p>
+                      </div>
+                    </VCardText>
+                  </SettingCard>
+                </VCol>
+                        </VRow>
             </VWindowItem>
-            <VWindowItem value="115_drive" eager>
+            <VWindowItem value="directory" eager>
               <VRow class="mp-aligned-grid settings-card-grid settings-grid">
                 <VCol cols="12">
-                  <CollapsibleSettingCard class="dashboard-card" title="账户与连接" subtitle="115 授权方式与连接状态" icon="mdi-cloud-key-outline">
+                  <SettingCard class="dashboard-card" title="存储" subtitle="115 授权方式与连接状态">
                     <template #status>
                       <VChip v-for="status in settingCardStatus['p115Account']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
                       <span v-if="p115Info?.user_info?.user_name" class="text-body-2">{{ p115Info.user_info.user_name }}</span>
@@ -649,7 +901,7 @@
                           color="primary"
                           :loading="savingCard === 'p115Account'"
                           :disabled="savingConfig"
-                          aria-label="保存账户与连接"
+                          aria-label="保存存储"
                           @click="saveCard('p115Account')"
                         >
                           <template #prepend><VIcon :icon="SaveIcon" /></template>
@@ -657,16 +909,20 @@
                         </VBtn>
                       </div>
                     </template>
-                  </CollapsibleSettingCard>
+                  </SettingCard>
                 </VCol>
                 <VCol cols="12">
-                  <CollapsibleSettingCard class="dashboard-card" title="指纹与缓存" subtitle="媒体目录与文件身份" icon="mdi-fingerprint">
+                  <SettingCard class="dashboard-card" title="目录" subtitle="媒体目录与文件身份">
                     <template #status>
                       <VChip v-for="status in settingCardStatus['fingerprints']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
 
                     </template>
 
                     <VCardText class="settings-card-body">
+                      <div class="settings-field" data-field="emby_metadata_path">
+                        <LocalPathField v-model="configModel.emby_metadata_path" label="媒体元数据目录" placeholder="选择工具内的 Emby 元数据目录" hint="选择已挂载的 Emby metadata 文件夹；与 Emby 使用相同路径时可留空。" persistent-hint />
+                      </div>
+
                       <div class="settings-field" data-field="local_strm_root">
                         <div class="settings-input-group d-flex align-start ga-2">
                           <VTextField
@@ -753,7 +1009,7 @@
                           color="primary"
                           :loading="savingCard === 'fingerprints'"
                           :disabled="savingConfig"
-                          aria-label="保存指纹与缓存"
+                          aria-label="保存目录"
                           @click="saveCard('fingerprints')"
                         >
                           <template #prepend><VIcon :icon="SaveIcon" /></template>
@@ -761,442 +1017,153 @@
                         </VBtn>
                       </div>
                     </template>
-                  </CollapsibleSettingCard>
+                  </SettingCard>
                 </VCol>
-              </VRow>
+                        </VRow>
             </VWindowItem>
-            <VWindowItem value="emby" eager>
-              <VRow class="settings-grid">
-                <!-- ########## 左侧卡片: Emby 连接设置 ########## -->
+            <VWindowItem value="rule" eager>
+              <VRow class="mp-aligned-grid settings-card-grid settings-grid">
                 <VCol cols="12">
-                  <CollapsibleSettingCard class="dashboard-card" title="Emby 连接设置" subtitle="媒体服务器与媒体库" icon="mdi-plex">
+                  <SettingCard class="dashboard-card" title="实时监控" subtitle="自动发现本地媒体变化">
                     <template #status>
-                      <VChip v-for="status in settingCardStatus['emby']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
+                      <VChip v-for="status in settingCardStatus['monitor']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
 
                     </template>
 
                     <VCardText class="settings-card-body">
-                      <!-- ★★★ 调整点1: 恢复双列，但减小间距 x-gap="12" ★★★ -->
-                      <VRow class="settings-grid">
-                        <!-- 1. Emby URL (左) -->
-                        <!-- ★★★ 调整点2: label-width="100" 覆盖全局的200，让输入框更长、更紧凑 ★★★ -->
-                        <VCol cols="12" md="6">
-                          <div class="settings-field" data-field="emby_server_url">
-                            <VTextField
-                              v-model="configModel.emby_server_url"
-                              placeholder="http://localhost:8096"
-                              label="Emby URL"
-                            ></VTextField>
-                          </div>
-                        </VCol>
-                        <!-- 2. 外网访问 URL (右) -->
-                        <VCol cols="12" md="6">
-                          <div class="settings-field" data-field="emby_public_url">
-                            <VTextField
-                              v-model="configModel.emby_public_url"
-                              placeholder="留空则不开启"
-                              label="外网URL"
-                            ></VTextField>
-                          </div>
-                        </VCol>
-                        <!-- 3. API Key (左) -->
-                        <VCol cols="12" md="6">
-                          <div class="settings-field" data-field="emby_api_key">
-                            <VTextField
-                              v-model="configModel.emby_api_key"
-                              placeholder="输入 API Key"
-                              :type="revealedPasswords['emby_api_key'] ? 'text' : 'password'"
-                              :append-inner-icon="
-                                revealedPasswords['emby_api_key'] ? 'mdi-eye-off-outline' : 'mdi-eye-outline'
-                              "
-                              @click:append-inner="
-                                revealedPasswords['emby_api_key'] = !revealedPasswords['emby_api_key']
-                              "
-                              label="APIKey"
-                            ></VTextField>
-                          </div>
-                        </VCol>
-                        <VCol cols="12" md="6">
-                          <div class="settings-field" data-field="emby_metadata_path">
-                            <VTextField
-                              v-model="configModel.emby_metadata_path"
-                              placeholder="工具内的 Emby 元数据目录；相同路径可留空"
-                              label="元数据目录"
-                            ></VTextField>
-                          </div>
-                        </VCol>
-                        <VCol cols="12" md="6">
-                          <div class="settings-field" data-field="emby_webhook_secret">
-                            <VTextField
-                              v-model="configModel.emby_webhook_secret"
-                              placeholder="用于 /webhook/emby?token=..."
-                              :type="revealedPasswords['emby_webhook_secret'] ? 'text' : 'password'"
-                              :append-inner-icon="
-                                revealedPasswords['emby_webhook_secret'] ? 'mdi-eye-off-outline' : 'mdi-eye-outline'
-                              "
-                              @click:append-inner="
-                                revealedPasswords['emby_webhook_secret'] = !revealedPasswords['emby_webhook_secret']
-                              "
-                              label="Webhook密钥"
-                            ></VTextField>
-                          </div>
-                        </VCol>
-                        <VCol cols="12">
-                          <div class="settings-field" data-field="emby_webhook_ingest_enabled">
-                            <VSwitch v-model="configModel.emby_webhook_ingest_enabled" label="Webhook入库"></VSwitch>
-                            <div class="settings-hint">
-                              <span style="font-size: 0.8em" class="text-medium-emphasis">
-                                关闭后忽略 Emby 的 item.add 和 library.new
-                                入库事件；MoviePilot完成通知、元数据更新和删除通知不受影响。
-                              </span>
-                            </div>
-                          </div>
-                        </VCol>
-                        <!-- 4. 用户 ID (右) -->
-                        <VCol cols="12" md="6">
-                          <div class="settings-field" data-field="emby_user_id">
-                            <VTextField
-                              v-model="configModel.emby_user_id"
-                              placeholder="32位用户ID"
-                              label="用户ID"
-                              :rules="embyUserIdValidation"
-                            ></VTextField>
-                            <div class="settings-hint">
-                              <div v-if="isInvalidUserId" style="color: var(--ui-error-color); font-size: 12px">
-                                格式错误！ID应为32位。
-                              </div>
-                            </div>
-                          </div>
-                        </VCol>
-                        <!-- 分割线 (占满一行) -->
-                        <VCol cols="12">
-                          <div
-                            style="margin: 8px 0; font-size: 0.9em; color: var(--ui-text-muted)"
-                            class="settings-divider text-body-2 text-medium-emphasis"
-                          >
-                            管理员凭证 (选填)
-                            <VDivider class="mt-2" />
-                          </div>
-                        </VCol>
-                        <!-- 5. 管理员用户 (左) -->
-                        <VCol cols="12" md="6">
-                          <div class="settings-field" data-field="emby_admin_user">
-                            <VTextField
-                              v-model="configModel.emby_admin_user"
-                              placeholder="管理员用户名"
-                              label="用户名"
-                            ></VTextField>
-                          </div>
-                        </VCol>
-                        <!-- 6. 管理员密码 (右) -->
-                        <VCol cols="12" md="6">
-                          <div class="settings-field" data-field="emby_admin_pass">
-                            <VTextField
-                              v-model="configModel.emby_admin_pass"
-                              placeholder="管理员密码"
-                              :type="revealedPasswords['emby_admin_pass'] ? 'text' : 'password'"
-                              :append-inner-icon="
-                                revealedPasswords['emby_admin_pass'] ? 'mdi-eye-off-outline' : 'mdi-eye-outline'
-                              "
-                              @click:append-inner="
-                                revealedPasswords['emby_admin_pass'] = !revealedPasswords['emby_admin_pass']
-                              "
-                              label="密码"
-                            ></VTextField>
-                          </div>
-                        </VCol>
-                        <!-- 7. 超时时间 (占满一行，保持长标签) -->
-                        <VCol cols="12">
-                          <div class="settings-field" data-field="emby_api_timeout">
-                            <VNumberInput
-                              v-model="configModel.emby_api_timeout"
-                              :min="15"
-                              :step="5"
-                              placeholder="建议 30-90"
-                              style="width: 100%"
-                              label="Emby API 超时时间 (秒)"
-                            ></VNumberInput>
-                          </div>
-                        </VCol>
-                        <!-- 分割线 -->
-                        <VCol cols="12">
-                          <div style="margin-top: 10px" class="settings-divider text-body-2 text-medium-emphasis">
-                            选择要忽略的媒体库
-                            <VDivider class="mt-2" />
-                          </div>
-                        </VCol>
-                        <!-- 8. 媒体库选择 -->
-                        <VCol cols="12">
-                          <div class="settings-field">
-                            <div class="settings-loading">
-                              <VProgressLinear v-if="loadingLibraries" indeterminate color="primary" class="mb-3" />
-                              <div style="margin-bottom: 12px" class="d-flex ga-3 flex-wrap align-center">
-                                <VBtn
-                                  size="small"
-                                  :disabled="!availableLibraries.length"
-                                  @click="configModel.libraries_to_ignore = availableLibraries.map((lib) => lib.Id)"
-                                  color="secondary"
-                                >
-                                  <template #prepend><VIcon :icon="SelectAllIcon" /></template>
-                                  全选
-                                </VBtn>
-                                <VBtn
-                                  size="small"
-                                  :disabled="!configModel.libraries_to_ignore?.length"
-                                  @click="configModel.libraries_to_ignore = []"
-                                  color="secondary"
-                                >
-                                  <template #prepend><VIcon :icon="ClearIcon" /></template>
-                                  清空
-                                </VBtn>
-                                <span class="text-medium-emphasis">
-                                  默认不选，处理全部媒体库；勾选后忽略对应媒体库。
-                                </span>
-                              </div>
-                              <div class="settings-choice-group">
-                                <div class="d-flex ga-3 flex-wrap align-center">
-                                  <VCheckbox
-                                    v-for="lib in availableLibraries"
-                                    :key="lib.Id"
-                                    :value="lib.Id"
-                                    :label="lib.Name"
-                                    v-model="configModel.libraries_to_ignore"
-                                    multiple
-                                  ></VCheckbox>
-                                </div>
-                              </div>
-                              <span
-                                v-if="
-                                  !loadingLibraries &&
-                                  availableLibraries.length === 0 &&
-                                  configModel.emby_server_url &&
-                                  configModel.emby_api_key
-                                "
-                                class="text-medium-emphasis"
-                              >
-                                未找到媒体库。请检查 Emby URL 和 API Key。
-                              </span>
-                              <div v-if="libraryError" style="color: red; margin-top: 5px">{{ libraryError }}</div>
-                            </div>
-                          </div>
-                        </VCol>
-                      </VRow>
-                    </VCardText>
-                    <template #actions>
-                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
-                        <VBtn
-                          color="primary"
-                          :loading="savingCard === 'emby'"
-                          :disabled="savingConfig"
-                          aria-label="保存Emby 连接设置"
-                          @click="saveCard('emby')"
-                        >
-                          <template #prepend><VIcon :icon="SaveIcon" /></template>
-                          保存
-                        </VBtn>
+                      <div class="settings-field" data-field="monitor_enabled">
+                        <VSwitch v-model="configModel.monitor_enabled" label="启用文件系统监控"></VSwitch>
                       </div>
-                    </template>
-                  </CollapsibleSettingCard>
-                </VCol>
-              </VRow>
-            </VWindowItem>
-            <VWindowItem value="services" eager>
-              <VRow class="settings-grid">
-                <!-- 左侧: AI翻译 -->
-                <VCol cols="12">
-                  <CollapsibleSettingCard class="dashboard-card" title="AI 增强" subtitle="翻译服务与处理策略" icon="mdi-robot-outline">
-                    <template #status>
-                      <VChip v-for="status in settingCardStatus['ai']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
-
-                    </template>
-
-                    <template #append>
-                      <div class="d-flex ga-3 flex-wrap align-center">
-                        <VBtn color="info" @click="openPromptModal" variant="outlined" size="x-small">
-                          <template #prepend><UiIcon name="language" /></template>
-                          配置提示词
-                        </VBtn>
-                        <VBtn
-                          color="primary"
-                          @click="testAI"
-                          :loading="isTestingAI"
-                          :disabled="!configModel.ai_api_key"
-                          variant="outlined"
-                          size="x-small"
-                        >
-                          <template #prepend><UiIcon name="link" /></template>
-                          测试连接
-                        </VBtn>
-                      </div>
-                    </template>
-                    <VCardText class="settings-card-body">
-                      <!-- 移除 content-disabled 类，因为不再有总开关控制禁用 -->
-                      <div class="ai-settings-wrapper">
-                        <!-- 1. 基础配置 (上移，因为它们是前提) -->
-                        <div class="settings-field" data-field="ai_provider">
-                          <VSelect
-                            v-model="configModel.ai_provider"
-                            :items="aiProviderOptions"
+                      <div class="settings-field" data-field="monitor_paths">
+                        <div class="settings-input-group d-flex align-start ga-2">
+                          <VCombobox
+                            v-model="configModel.monitor_paths"
+                            multiple
+                            placeholder="输入路径并回车，或点击右侧选择"
+                            :items="[]"
+                            style="flex: 1"
                             item-title="label"
                             item-value="value"
                             :return-object="false"
-                            label="AI 服务商"
-                          ></VSelect>
-                        </div>
-                        <div class="settings-field" data-field="ai_api_key">
-                          <VTextField
-                            v-model="configModel.ai_api_key"
-                            placeholder="输入你的 API Key"
-                            :type="revealedPasswords['ai_api_key'] ? 'text' : 'password'"
-                            :append-inner-icon="
-                              revealedPasswords['ai_api_key'] ? 'mdi-eye-off-outline' : 'mdi-eye-outline'
-                            "
-                            @click:append-inner="revealedPasswords['ai_api_key'] = !revealedPasswords['ai_api_key']"
-                            label="API Key"
-                          ></VTextField>
-                        </div>
-                        <div class="settings-field" data-field="ai_model_name">
-                          <div class="settings-input-group d-flex align-start ga-2">
-                            <VCombobox
-                              v-model="configModel.ai_model_name"
-                              :items="aiModelSelectOptions"
-                              clearable
-                              placeholder="点击右侧刷新后选择，或手动输入模型名"
-                              style="flex: 1"
-                              item-title="label"
-                              item-value="value"
-                              :return-object="false"
-                              label="模型名称"
-                            ></VCombobox>
-                            <VBtn
-                              color="primary"
-                              @click="refreshAIModels"
-                              :loading="isFetchingAIModels"
-                              :disabled="!configModel.ai_api_key"
-                              variant="outlined"
-                            >
-                              <template #prepend><VIcon :icon="RefreshIcon" /></template>
-                              刷新
-                            </VBtn>
-                          </div>
-                          <div class="settings-hint">
-                            <span style="font-size: 0.8em" class="text-medium-emphasis">
-                              从当前 AI 服务商的 models 接口读取，刷新后可直接下拉选择；仍支持手动输入。
-                            </span>
-                          </div>
-                        </div>
-                        <div class="settings-field" data-field="ai_base_url">
-                          <VTextField
-                            v-model="configModel.ai_base_url"
-                            placeholder="用于代理或第三方兼容服务"
-                            label="API Base URL (可选)"
-                          ></VTextField>
-                        </div>
-                        <VRow class="settings-grid">
-                          <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
-                            <div class="settings-field" data-field="ai_request_timeout">
-                              <VNumberInput
-                                v-model="configModel.ai_request_timeout"
-                                :min="30"
-                                :max="1800"
-                                :step="30"
-                                style="width: 100%"
-                                label="AI 翻译超时时间（秒）"
-                              ></VNumberInput>
-                            </div>
-                          </VCol>
-                          <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
-                            <div
-                              v-if="configModel.ai_provider === 'openai'"
-                              class="settings-field"
-                              data-field="ai_max_retries"
-                            >
-                              <VNumberInput
-                                v-model="configModel.ai_max_retries"
-                                :min="0"
-                                :precision="0"
-                                :step="1"
-                                style="width: 100%"
-                                label="失败重试次数"
-                              ></VNumberInput>
-                              <div class="settings-hint">
-                                0 表示不重试。超时或临时请求失败后重试当前请求；已成功翻译的词条会使用缓存。
-                              </div>
-                            </div>
-                          </VCol>
-                          <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
-                            <div class="settings-field" data-field="ai_translation_batch_size">
-                              <VNumberInput
-                                v-model="configModel.ai_translation_batch_size"
-                                :min="1"
-                                :max="100"
-                                :step="1"
-                                style="width: 100%"
-                                label="单批最大翻译词条数"
-                              ></VNumberInput>
-                            </div>
-                          </VCol>
-                        </VRow>
-                        <div
-                          style="margin: 10px 0; font-size: 0.9em; color: var(--ui-text-muted)"
-                          class="settings-divider text-body-2 text-medium-emphasis"
-                        >
-                          功能开关
-                          <VDivider class="mt-2" />
-                        </div>
-                        <!-- 2. 功能细分开关 -->
-                        <div class="settings-field">
-                          <div class="settings-field-label text-body-2 font-weight-medium mb-2">启用功能</div>
-                          <VRow class="settings-grid">
-                            <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
-                              <VCheckbox v-model:checked="configModel.ai_translate_actor_role">
-                                <template #label>翻译演员与角色</template>
-                              </VCheckbox>
-                            </VCol>
-                            <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
-                              <VCheckbox v-model:checked="configModel.ai_translate_on_sync">
-                                <template #label>同步媒体数据时翻译</template>
-                              </VCheckbox>
-                            </VCol>
-                            <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
-                              <VCheckbox v-model:checked="configModel.ai_translate_title">
-                                <template #label>翻译片名</template>
-                              </VCheckbox>
-                            </VCol>
-                            <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
-                              <VCheckbox v-model:checked="configModel.ai_translate_overview">
-                                <template #label>翻译简介</template>
-                              </VCheckbox>
-                            </VCol>
-                            <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
-                              <VCheckbox v-model:checked="configModel.ai_translate_episode_overview">
-                                <template #label>翻译分集简介</template>
-                              </VCheckbox>
-                            </VCol>
-                            <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
-                              <VCheckbox v-model:checked="configModel.ai_joke_fallback">
-                                <template #label>无简介小笑话占位</template>
-                              </VCheckbox>
-                            </VCol>
-                          </VRow>
-                        </div>
-                        <!-- 3. 高级选项 -->
-                        <div
-                          v-if="configModel.ai_translate_actor_role || configModel.ai_translate_title_overview"
-                          class="settings-field"
-                          data-field="ai_translation_mode"
-                        >
-                          <VRadioGroup
-                            v-model="configModel.ai_translation_mode"
-                            name="ai_translation_mode"
-                            label="翻译模式"
-                            inline
+                            chips
+                            closable-chips
+                            label="监控路径"
+                          ></VCombobox>
+                          <VBtn
+                            color="primary"
+                            aria-label="选择监控路径"
+                            @click="openLocalFolderSelector('monitor_paths', true)"
+                            variant="outlined"
+                            icon
                           >
-                            <div class="d-flex ga-3 flex-column">
-                              <VRadio value="fast"><template #label>快速模式 (仅翻译)</template></VRadio>
-                              <VRadio value="quality"><template #label>顾问模式 (结合剧情上下文)</template></VRadio>
-                            </div>
-                          </VRadioGroup>
+                            <template #default><VIcon :icon="FolderIcon" /></template>
+                          </VBtn>
+                        </div>
+                        <div class="settings-hint">
+                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                            请保持和 Emby 媒体库路径映射一致。
+                          </span>
+                        </div>
+                      </div>
+                      <div class="settings-field" data-field="monitor_exclude_dirs">
+                        <div class="settings-input-group d-flex align-start ga-2">
+                          <VCombobox
+                            v-model="configModel.monitor_exclude_dirs"
+                            multiple
+                            placeholder="输入路径并回车，或点击右侧选择"
+                            :items="[]"
+                            style="flex: 1"
+                            item-title="label"
+                            item-value="value"
+                            :return-object="false"
+                            chips
+                            closable-chips
+                            label="排除路径"
+                          ></VCombobox>
+                          <VBtn
+                            color="primary"
+                            aria-label="选择排除路径"
+                            @click="openLocalFolderSelector('monitor_exclude_dirs', true)"
+                            variant="outlined"
+                            icon
+                          >
+                            <template #default><VIcon :icon="FolderIcon" /></template>
+                          </VBtn>
+                        </div>
+                        <div class="settings-hint">
+                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                            命中这些路径的文件将
+                            <b>跳过刮削流程</b>
+                            ，仅刷新。
+                            <br />
+                          </span>
+                        </div>
+                      </div>
+                      <!-- 排除刷新延迟 -->
+                      <div class="settings-field" data-field="monitor_exclude_refresh_delay">
+                        <VNumberInput
+                          v-model="configModel.monitor_exclude_refresh_delay"
+                          :min="0"
+                          :step="10"
+                          placeholder="0"
+                          style="width: 100%"
+                          label="排除刷新延迟"
+                        >
+                          <template #append-inner>秒</template>
+                        </VNumberInput>
+                        <div class="settings-hint">
+                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                            仅对
+                            <b>排除路径</b>
+                            生效。设为 0 则立即刷新。
+                            <br />
+                          </span>
+                        </div>
+                      </div>
+                      <div class="settings-field" data-field="monitor_extensions">
+                        <VCombobox
+                          v-model="configModel.monitor_extensions"
+                          multiple
+                          placeholder="输入扩展名并回车"
+                          :items="[]"
+                          item-title="label"
+                          item-value="value"
+                          :return-object="false"
+                          chips
+                          closable-chips
+                          label="监控扩展名"
+                        ></VCombobox>
+                        <!-- 注意：options 设为空数组配合 tag 模式允许用户自由输入 -->
+                        <div class="settings-hint">
+                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                            仅处理这些后缀的文件，输入扩展名并回车添加新的监控文件类型。
+                          </span>
+                        </div>
+                      </div>
+                      <div class="settings-field" data-field="tmdb_image_language_preference">
+                        <VRadioGroup
+                          v-model="configModel.tmdb_image_language_preference"
+                          name="image_lang_group"
+                          label="图片语言偏好"
+                          inline
+                        >
+                          <div class="d-flex ga-3 flex-wrap align-center">
+                            <VRadio value="zh"><template #label>简体中文优先</template></VRadio>
+                            <VRadio value="original"><template #label>原语言优先</template></VRadio>
+                          </div>
+                        </VRadioGroup>
+                        <div class="settings-hint">
+                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                            控制下载 海报 等图片时的语言优先级。
+                          </span>
+                        </div>
+                      </div>
+                      <div class="settings-field" data-field="monitor_sha1_pc_search">
+                        <VSwitch v-model="configModel.monitor_sha1_pc_search" label="SHA1检测"></VSwitch>
+                        <div class="settings-hint">
+                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                            文件SHA1查询，非115网盘勿启用。
+                          </span>
                         </div>
                       </div>
                     </VCardText>
@@ -1204,79 +1171,20 @@
                       <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
                           color="primary"
-                          :loading="savingCard === 'ai'"
+                          :loading="savingCard === 'monitor'"
                           :disabled="savingConfig"
-                          aria-label="保存AI 增强"
-                          @click="saveCard('ai')"
+                          aria-label="保存实时监控"
+                          @click="saveCard('monitor')"
                         >
                           <template #prepend><VIcon :icon="SaveIcon" /></template>
                           保存
                         </VBtn>
                       </div>
                     </template>
-                  </CollapsibleSettingCard>
+                  </SettingCard>
                 </VCol>
-              </VRow>
-            </VWindowItem>
-            <VWindowItem value="advanced" eager>
-              <VRow class="mp-aligned-grid settings-card-grid settings-grid">
-                <!-- 卡片 1: 日志配置 -->
                 <VCol cols="12">
-                  <CollapsibleSettingCard class="dashboard-card" title="日志配置" subtitle="日志保留与文件大小" icon="mdi-file-document-outline">
-                    <template #status>
-                      <VChip v-for="status in settingCardStatus['logs']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
-
-                    </template>
-
-                    <VCardText class="settings-card-body">
-                      <div class="settings-field" data-field="log_rotation_size_mb">
-                        <VNumberInput
-                          v-model="configModel.log_rotation_size_mb"
-                          :min="1"
-                          :step="1"
-                          placeholder="例如: 5"
-                          label="单个日志文件大小 (MB)"
-                        ></VNumberInput>
-                        <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
-                            设置 app.log 文件的最大体积，超限后会轮转。
-                          </span>
-                        </div>
-                      </div>
-                      <div class="settings-field" data-field="log_rotation_backup_count">
-                        <VNumberInput
-                          v-model="configModel.log_rotation_backup_count"
-                          :min="1"
-                          :step="1"
-                          placeholder="例如: 10"
-                          label="日志备份数量"
-                        ></VNumberInput>
-                        <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
-                            保留最近的日志文件数量 (app.log.1, app.log.2 ...)。
-                          </span>
-                        </div>
-                      </div>
-                    </VCardText>
-                    <template #actions>
-                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
-                        <VBtn
-                          color="primary"
-                          :loading="savingCard === 'logs'"
-                          :disabled="savingConfig"
-                          aria-label="保存日志配置"
-                          @click="saveCard('logs')"
-                        >
-                          <template #prepend><VIcon :icon="SaveIcon" /></template>
-                          保存
-                        </VBtn>
-                      </div>
-                    </template>
-                  </CollapsibleSettingCard>
-                </VCol>
-                <!-- 卡片 2: 入库自动处理 -->
-                <VCol cols="12">
-                  <CollapsibleSettingCard class="dashboard-card" title="入库自动处理" subtitle="新媒体入库后的增强任务" icon="mdi-folder-plus-outline">
+                  <SettingCard class="dashboard-card" title="入库自动处理" subtitle="新媒体入库后的增强任务">
                     <template #status>
                       <VChip v-for="status in settingCardStatus['ingest']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
 
@@ -1353,11 +1261,10 @@
                         </VBtn>
                       </div>
                     </template>
-                  </CollapsibleSettingCard>
+                  </SettingCard>
                 </VCol>
-                <!-- 卡片 3: 媒体重命名格式 -->
                 <VCol cols="12">
-                  <CollapsibleSettingCard class="dashboard-card" title="媒体重命名格式" subtitle="电影与电视剧的目录和文件名" icon="mdi-file-edit-outline">
+                  <SettingCard class="dashboard-card" title="整理 & 刮削" subtitle="电影与电视剧的目录和文件名">
                     <template #status>
                       <VChip v-for="status in settingCardStatus['rename']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
 
@@ -1373,7 +1280,7 @@
                               auto-grow
                               rows="3"
                               max-rows="8"
-                              label="电影格式"
+                              label="电影重命名格式"
                             ></VTextarea>
                             <div class="settings-hint">
                               <span style="font-size: 0.8em" class="text-medium-emphasis">
@@ -1419,7 +1326,7 @@
                               auto-grow
                               rows="3"
                               max-rows="8"
-                              label="电视剧格式"
+                              label="电视剧重命名格式"
                             ></VTextarea>
                             <div class="settings-hint">
                               <span style="font-size: 0.8em" class="text-medium-emphasis">
@@ -1465,7 +1372,7 @@
                           color="primary"
                           :loading="savingCard === 'rename'"
                           :disabled="savingConfig"
-                          aria-label="保存媒体重命名格式"
+                          aria-label="保存整理与刮削"
                           @click="saveCard('rename')"
                         >
                           <template #prepend><VIcon :icon="SaveIcon" /></template>
@@ -1473,115 +1380,102 @@
                         </VBtn>
                       </div>
                     </template>
-                  </CollapsibleSettingCard>
+                  </SettingCard>
                 </VCol>
-                <!-- 卡片 3: 数据管理 (左下) -->
+                        </VRow>
+            </VWindowItem>
+            <VWindowItem value="search" eager>
+              <VRow class="mp-aligned-grid settings-card-grid settings-grid">
                 <VCol cols="12">
-                  <CollapsibleSettingCard class="dashboard-card" title="数据管理" subtitle="备份、还原与缓存维护" icon="mdi-database-cog-outline">
+                  <SettingCard class="dashboard-card" title="数据源与API" subtitle="元数据服务与访问凭据">
                     <template #status>
-                      <VChip v-for="status in settingCardStatus['data']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
+                      <VChip v-for="status in settingCardStatus['sources']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
 
                     </template>
 
                     <VCardText class="settings-card-body">
-                      <div class="d-flex ga-3 flex-column">
-                        <div class="data-action-grid">
-                          <VBtn @click="showExportModal" :loading="isExporting" class="action-button" color="secondary">
-                            <template #prepend><VIcon :icon="ExportIcon" /></template>
-                            导出数据
-                          </VBtn>
-                          <VFileInput
-                            :model-value="importFiles"
-                            @update:model-value="handleImportFileSelection"
-                            accept=".json.gz"
-                            label="导入备份文件"
-                            prepend-icon="mdi-cloud-upload"
-                            hide-details
-                            :loading="isPreviewingImport"
-                            :disabled="isImporting || isPreviewingImport"
-                            class="backup-file-input"
-                          />
-                          <VBtn
-                            @click="showClearTablesModal"
-                            :loading="isClearing"
-                            class="action-button"
-                            color="error"
-                            variant="outlined"
-                          >
-                            <template #prepend><VIcon :icon="ClearIcon" /></template>
-                            清空指定表
-                          </VBtn>
-                          <VBtn
-                            color="warning"
-                            :loading="isCleaningOfflineMedia"
-                            class="action-button"
-                            @click="
-                              confirmSettingAction(
-                                '确定要清理离线媒体数据吗？ 这将删除所有 不在库 的元数据缓存。 此操作用于数据库瘦身，不会影响已入库媒体项。',
-                                handleCleanupOfflineMedia,
-                                '确认',
-                              )
-                            "
-                            variant="outlined"
-                          >
-                            <template #prepend><VIcon :icon="ClearIcon" /></template>
-                            清理离线媒体
-                          </VBtn>
-                          <VBtn
-                            color="warning"
-                            :loading="isCorrecting"
-                            class="action-button"
-                            @click="
-                              confirmSettingAction(
-                                '确定要校准所有表的ID自增计数器吗？ 这是一个安全的操作，用于修复导入数据后无法新增条目的问题。',
-                                handleCorrectSequences,
-                                '确认',
-                              )
-                            "
-                            variant="outlined"
-                          >
-                            <template #prepend><VIcon :icon="BuildIcon" /></template>
-                            校准ID计数器
-                          </VBtn>
-                          <!-- ### 重置演员映射表 ### -->
-                          <VBtn
-                            color="warning"
-                            :loading="isResettingMappings"
-                            class="action-button"
-                            @click="showResetMappingsModal"
-                            variant="outlined"
-                          >
-                            <template #prepend><VIcon :icon="SyncIcon" /></template>
-                            重置Emby数据
-                          </VBtn>
+                      <div class="settings-field" data-field="tmdb_api_key">
+                        <VTextField
+                          v-model="configModel.tmdb_api_key"
+                          prepend-inner-icon="mdi-key"
+                          hint="设置 TheMovieDb API Key"
+                          persistent-hint
+                          placeholder="输入你的 TMDB API Key"
+                          :type="revealedPasswords['tmdb_api_key'] ? 'text' : 'password'"
+                          :append-inner-icon="
+                            revealedPasswords['tmdb_api_key'] ? 'mdi-eye-off-outline' : 'mdi-eye-outline'
+                          "
+                          @click:append-inner="revealedPasswords['tmdb_api_key'] = !revealedPasswords['tmdb_api_key']"
+                          label="TMDB API Key"
+                        ></VTextField>
+                      </div>
+                      <div class="settings-field" data-field="tmdb_api_base_url">
+                        <VTextField
+                          v-model="configModel.tmdb_api_base_url"
+                          prepend-inner-icon="mdi-api"
+                          hint="自定义 TheMovieDb API域名或代理地址"
+                          persistent-hint
+                          placeholder="https://api.themoviedb.org/3"
+                          label="TMDB API服务地址"
+                        ></VTextField>
+                        <div class="settings-hint">
+                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                            TMDb API的基础URL，通常不需要修改。
+                          </span>
                         </div>
-                        <p class="description-text">
-                          <b>导出：</b>
-                          将数据库中的一个或多个表备份为 JSON.GZ 文件。
-                          <br />
-                          <b>导入：</b>
-                          从 JSON.GZ 备份文件中恢复数据。
-                          <br />
-                          <b>清空：</b>
-                          删除指定表中的所有数据，此操作不可逆。
-                          <br />
-                          <b>清理离线：</b>
-                          移除已不在库的残留元数据记录，给数据库瘦身。
-                          <br />
-                          <b>校准：</b>
-                          修复导入数据可能引起的自增序号错乱的问题。
-                          <br />
-                          <b>重置：</b>
-                          在重建 Emby 媒体库后，使用此功能清空所有旧的 Emby
-                          关联数据（用户、播放状态等），并保留核心元数据，以便后续重新扫描和关联。
-                        </p>
+                      </div>
+                      <div class="settings-field" data-field="douban_enable_online_api">
+                        <div class="d-flex ga-3 flex-wrap align-center">
+                          <VSwitch v-model="configModel.douban_enable_online_api" label="启用豆瓣辅助"></VSwitch>
+                          <span style="font-size: 0.9em; margin-left: 8px" class="text-medium-emphasis">
+                            从豆瓣补充缺失的演员以及部分中文角色名。
+                          </span>
+                        </div>
+                      </div>
+                      <div class="settings-field" data-field="api_douban_default_cooldown_seconds">
+                        <VNumberInput
+                          v-model="configModel.api_douban_default_cooldown_seconds"
+                          :min="0.1"
+                          :step="0.1"
+                          placeholder="例如: 1.0"
+                          label="豆瓣API冷却时间 (秒)"
+                        ></VNumberInput>
+                      </div>
+                      <div class="settings-field" data-field="douban_cookie">
+                        <VTextField
+                          v-model="configModel.douban_cookie"
+                          placeholder="从浏览器开发者工具中获取"
+                          :type="revealedPasswords['douban_cookie'] ? 'text' : 'password'"
+                          :append-inner-icon="
+                            revealedPasswords['douban_cookie'] ? 'mdi-eye-off-outline' : 'mdi-eye-outline'
+                          "
+                          @click:append-inner="revealedPasswords['douban_cookie'] = !revealedPasswords['douban_cookie']"
+                          label="豆瓣登录 Cookie"
+                        ></VTextField>
+                        <div class="settings-hint">
+                          <span style="font-size: 0.8em" class="text-medium-emphasis">非必要不用配置，作用有限。</span>
+                        </div>
                       </div>
                     </VCardText>
-                  </CollapsibleSettingCard>
+                    <template #actions>
+                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
+                        <VBtn
+                          color="primary"
+                          :loading="savingCard === 'sources'"
+                          :disabled="savingConfig"
+                          aria-label="保存数据源与API"
+                          @click="saveCard('sources')"
+                        >
+                          <template #prepend><VIcon :icon="SaveIcon" /></template>
+                          保存
+                        </VBtn>
+                      </div>
+                    </template>
+                  </SettingCard>
                 </VCol>
-              </VRow>
+                        </VRow>
             </VWindowItem>
-          </VWindow>
+                    </VWindow>
         </VForm>
       </div>
       <VAlert v-else-if="configError" title="加载配置失败" type="error" variant="tonal">{{ configError }}</VAlert>
@@ -2262,7 +2156,9 @@ import { ref, reactive, watch, computed, onMounted, onUnmounted, nextTick } from
 import { useMessage, useDialog } from '@/composables/useFeedback';
 import { useDisplay } from 'vuetify';
 import SettingsQrCode from './general/SettingsQrCode.vue';
-import CollapsibleSettingCard from './general/CollapsibleSettingCard.vue';
+import SettingCard from './general/SettingCard.vue';
+import LocalPathField from './general/LocalPathField.vue';
+import { useRoute } from 'vue-router';
 const ExportIcon = 'mdi-download';
 const ImportIcon = 'mdi-cloud-upload';
 const ClearIcon = 'mdi-delete-outline';
@@ -2279,7 +2175,8 @@ const SelectAllIcon = 'mdi-select-all';
 import { useConfig } from '../../composables/useConfig.js';
 import axios from 'axios';
 
-const activeSettingsTab = ref('general');
+const route = useRoute();
+const activeSettingsTab = computed(() => ['system', 'directory', 'rule', 'search'].includes(route.query.tab) ? route.query.tab : 'system');
 const activePromptTab = ref('fast_mode');
 const revealedPasswords = reactive({});
 const importFiles = ref([]);
@@ -3170,7 +3067,7 @@ const settingCardStatus = computed(() => {
   return {
     basic: [{ label: '媒体处理参数', color: 'primary', icon: 'mdi-tune' }],
     monitor: [enabled('监控', config.monitor_enabled)],
-    sources: [configured('TMDb ', Boolean(config.tmdb_api_key)), enabled('豆瓣辅助', config.douban_enable_online_api)],
+    sources: [configured('TMDB ', Boolean(config.tmdb_api_key)), enabled('豆瓣辅助', config.douban_enable_online_api)],
     p115Account: [p115ConnectionStatus.value],
     fingerprints: [{ label: config.local_strm_root || config.cd2_media_root ? '媒体目录已配置' : '媒体目录未配置', color: 'info', icon: 'mdi-folder-outline' }],
     emby: [configured('Emby ', Boolean(config.emby_server_url && config.emby_api_key))],
@@ -3194,8 +3091,8 @@ const cardFields = {
   monitor: ['monitor_enabled', 'monitor_paths', 'monitor_exclude_dirs', 'monitor_exclude_refresh_delay', 'monitor_extensions', 'tmdb_image_language_preference', 'monitor_sha1_pc_search'],
   sources: ['tmdb_api_key', 'tmdb_api_base_url', 'douban_enable_online_api', 'api_douban_default_cooldown_seconds', 'douban_cookie'],
   p115Account: ['p115_auth_method', 'p115_app_id', 'p115_api_priority', 'p115_request_interval'],
-  fingerprints: ['local_strm_root', 'cd2_media_root', 'p115_fingerprint_media_root_cid', 'p115_fingerprint_media_root_path', 'p115_generate_mediainfo', 'p115_enable_sync_delete'],
-  emby: ['emby_server_url', 'emby_public_url', 'emby_api_key', 'emby_webhook_secret', 'emby_webhook_ingest_enabled', 'emby_user_id', 'emby_metadata_path', 'emby_admin_user', 'emby_admin_pass', 'emby_api_timeout', 'libraries_to_ignore'],
+  fingerprints: ['emby_metadata_path', 'local_strm_root', 'cd2_media_root', 'p115_fingerprint_media_root_cid', 'p115_fingerprint_media_root_path', 'p115_generate_mediainfo', 'p115_enable_sync_delete'],
+  emby: ['emby_server_url', 'emby_public_url', 'emby_api_key', 'emby_webhook_secret', 'emby_webhook_ingest_enabled', 'emby_user_id', 'emby_admin_user', 'emby_admin_pass', 'emby_api_timeout', 'libraries_to_ignore'],
   ai: ['ai_provider', 'ai_api_key', 'ai_model_name', 'ai_base_url', 'ai_request_timeout', 'ai_max_retries', 'ai_translation_batch_size', 'ai_translate_actor_role', 'ai_translate_on_sync', 'ai_translate_title', 'ai_translate_overview', 'ai_translate_episode_overview', 'ai_joke_fallback', 'ai_translation_mode'],
   logs: ['log_rotation_size_mb', 'log_rotation_backup_count'],
   ingest: ['auto_repair_truehd_core_on_ingest', 'auto_fill_language_titles_on_ingest', 'auto_extract_intro_fingerprint_on_ingest', 'auto_extract_video_thumbnails_on_ingest', 'extract_video_thumbnails_after_save'],

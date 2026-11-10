@@ -93,6 +93,45 @@ fn recovery_bif_times(bytes: &[u8]) -> Result<Value> {
     Ok(json!(times))
 }
 
+fn recovery_chapter_ticks(path: &Path, info: &Value) -> Result<u64> {
+    let invalid = || conflict("旧记录无法确定原章节图片对应时间，备份已保留");
+    let stem = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .ok_or_else(invalid)?;
+    // Emby 4.10.2 ThumbnailGenerator.GetChapterImagePath names saved images
+    // <DateModified Unix seconds>_<StartPositionTicks>.jpg. The suffix is the
+    // original tick value, not an ordinal or an extraction time in milliseconds.
+    let time = if let Some((modified, ticks)) = stem.split_once('_') {
+        let unix_seconds = modified.parse::<i64>().map_err(|_| invalid())?;
+        if modified != unix_seconds.to_string() {
+            return Err(invalid());
+        }
+        ticks
+    } else {
+        stem
+    };
+    if time.is_empty() || !time.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    let ticks = time
+        .parse::<u64>()
+        .ok()
+        .filter(|ticks| *ticks <= i64::MAX as u64)
+        .ok_or_else(invalid)?;
+    if !media_info::object(info)
+        .and_then(|bundle| bundle["Chapters"].as_array())
+        .is_some_and(|chapters| {
+            chapters
+                .iter()
+                .any(|chapter| chapter["StartPositionTicks"].as_u64() == Some(ticks))
+        })
+    {
+        return Err(conflict("旧记录章节图片时间与恢复 JSON 不一致，备份已保留"));
+    }
+    Ok(ticks)
+}
+
 pub(crate) async fn recover_record(
     state: &AppState,
     recovery: &Path,
@@ -232,11 +271,8 @@ pub(crate) async fn recover_record(
                 .map_err(|_| conflict("原有章节图片恢复备份无效"))?;
             for id in &ids {
                 if record["observations"][id].is_null() {
-                    let ticks = path
-                        .file_stem()
-                        .and_then(|name| name.to_str())
-                        .and_then(|name| name.parse::<u64>().ok())
-                        .ok_or_else(|| conflict("旧记录无法确定原章节图片对应时间，备份已保留"))?;
+                    let target = targets.iter().find(|target| target.id == *id).unwrap();
+                    let ticks = recovery_chapter_ticks(&path, &target.info)?;
                     image_times.entry(id.clone()).or_default().insert(ticks);
                 }
             }
@@ -1524,4 +1560,62 @@ pub(crate) async fn reload(
         );
     }
     outcome
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+
+    fn original_chapters() -> Value {
+        json!([{"Chapters":[{"StartPositionTicks":0_u64},{"StartPositionTicks":897560000_u64},
+            {"StartPositionTicks":4649640000_u64}]}])
+    }
+
+    #[test]
+    fn emby_native_chapter_names_preserve_exact_ticks_in_legacy_recovery() {
+        let info = original_chapters();
+        for ticks in [0_u64, 897560000, 4649640000] {
+            let path = PathBuf::from(format!("/metadata/chapters/1762645565_{ticks}.jpg"));
+            assert_eq!(recovery_chapter_ticks(&path, &info).unwrap(), ticks);
+        }
+    }
+
+    #[test]
+    fn historical_plain_tick_names_remain_recoverable() {
+        let path = Path::new("/metadata/chapters/897560000.jpg");
+        assert_eq!(
+            recovery_chapter_ticks(path, &original_chapters()).unwrap(),
+            897560000
+        );
+    }
+
+    #[test]
+    fn unknown_or_ambiguous_chapter_names_never_supply_a_guessed_time() {
+        for name in [
+            "chapter_0.jpg",
+            "1762645565_0_extra.jpg",
+            "1762645565_.jpg",
+            "+1762645565_0.jpg",
+            "1762645565_-1.jpg",
+            "1762645565_9223372036854775808.jpg",
+        ] {
+            assert!(
+                recovery_chapter_ticks(&PathBuf::from(name), &original_chapters()).is_err(),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn chapter_ordinals_and_unrecorded_ticks_cannot_bypass_recovery_verification() {
+        for name in ["1.jpg", "1762645565_1.jpg", "1762645565_89756.jpg"] {
+            let error =
+                recovery_chapter_ticks(&PathBuf::from(name), &original_chapters()).unwrap_err();
+            assert!(
+                error.1.contains("与恢复 JSON 不一致"),
+                "{name}: {}",
+                error.1
+            );
+        }
+    }
 }

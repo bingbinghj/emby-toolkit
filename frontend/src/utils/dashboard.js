@@ -1,7 +1,7 @@
 export const dashboardModules = [
-  { id: 'storage', title: '115 存储空间', icon: 'mdi-harddisk', width: 'summary' },
+  { id: 'storage', title: '存储空间', icon: 'mdi-harddisk', width: 'summary' },
   { id: 'statistics', title: '媒体统计', icon: 'mdi-chart-box-outline', width: 'statistics' },
-  { id: 'recent', title: '最新入库 · Emby', icon: 'mdi-clock-outline', width: 'full' },
+  { id: 'recent', title: '最新入库 - Emby', icon: 'mdi-clock-outline', width: 'full' },
   { id: 'libraries', title: '我的媒体库', icon: 'mdi-folder-multiple-outline', width: 'full' },
 ];
 
@@ -12,6 +12,26 @@ export function normalizeDashboardLayout(value) {
     order: [...order, ...ids.filter(id => !order.includes(id))],
     hidden: Array.isArray(value?.hidden) ? [...new Set(value.hidden.filter(id => ids.includes(id)))] : [],
   };
+}
+
+export function dashboardLayoutProfile(width) {
+  return width <= 640 ? 'mobile' : width <= 960 ? 'tablet' : 'desktop';
+}
+
+export function dashboardColumns(profile) {
+  return profile === 'mobile' ? 1 : profile === 'tablet' ? 6 : 12;
+}
+
+export function normalizeDashboardProfile(value, profile = 'desktop') {
+  const columns = dashboardColumns(profile);
+  const items = {};
+  for (const { id } of dashboardModules) {
+    const item = value?.items?.[id];
+    if (!item || !['x', 'y', 'w', 'h'].every(key => Number.isInteger(item[key]))) continue;
+    if (item.x < 0 || item.y < 0 || item.y > 10000 || item.w < 1 || item.w > columns || item.x + item.w > columns || item.h < 1 || item.h > 1000) continue;
+    items[id] = { x: item.x, y: item.y, w: item.w, h: item.h, manualHeight: item.manualHeight === true };
+  }
+  return { ...normalizeDashboardLayout(value), items, ...(Number.isSafeInteger(value?.updatedAt) && value.updatedAt >= 0 ? { updatedAt: value.updatedAt } : {}) };
 }
 
 export function reorderVisibleDashboard(order, visibleOrder) {
@@ -99,7 +119,7 @@ export function projectDashboardItems(items, library = false) {
   if (!Array.isArray(items) || items.some(item => typeof item?.id !== 'string' || !/^[\w-]{1,128}$/.test(item.id) || typeof item.name !== 'string')) {
     throw new Error(library ? '媒体库响应未确认' : '最新入库响应未确认');
   }
-  const fields = library ? ['id', 'name', 'collection_type', 'image_tag'] : [
+  const fields = library ? ['id', 'name', 'collection_type', 'image_tag', 'item_count', 'count_error'] : [
     'id', 'name', 'item_type', 'production_year', 'image_tag', 'series_id', 'series_image_tag',
     'series_name', 'season_number', 'episode_number', 'date_created',
   ];

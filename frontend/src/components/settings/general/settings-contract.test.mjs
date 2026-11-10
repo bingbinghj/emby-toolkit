@@ -51,6 +51,7 @@ function fixture(overrides = {}) {
     clearTimeout: id => timeouts.delete(id),
     window: { innerWidth: 1200, location: { origin: 'https://etk.test' }, screen: { width: 1200, height: 800 }, open: overrides.open || (() => null), removeEventListener() {} },
     useDisplay: () => ({ smAndDown: { value: false } }),
+    useRoute: () => ({ query: { tab: 'system' } }),
     useMessage: () => toast, useDialog: () => ({ warning() {}, success() {}, error() {} }),
     useConfig: () => ({
       configModel: { value: model }, loadingConfig: { value: false }, savingConfig: { value: false }, configError: { value: '' },

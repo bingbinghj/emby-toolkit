@@ -1,10 +1,7 @@
 <template>
   <VContainer fluid class="mp-page cover-page pa-0">
     <div class="d-flex flex-wrap align-center justify-space-between ga-4 mb-6">
-      <div>
-        <h1 class="text-h5 font-weight-bold text-high-emphasis">媒体库封面生成</h1>
-        <p class="text-body-2 text-medium-emphasis mt-1 mb-0">选择封面样式并配置媒体库标题</p>
-      </div>
+      <MpPageTitle title="媒体库封面生成" subtitle="选择封面样式并配置媒体库标题" />
       <VBtn prepend-icon="mdi-image-multiple-outline" :loading="isGenerating" :disabled="isLoading || !isConfigReady" @click="runGenerateAllTask">
         生成全部封面
       </VBtn>
@@ -115,7 +112,7 @@
             </VWindowItem>
 
             <VWindowItem value="single-tab">
-              <VAlert type="info" variant="tonal" class="mb-5">若字体无法下载，建议在主程序的网络设置中配置GitHub代理，或手动下载字体后填写本地路径。</VAlert>
+              <VAlert type="info" variant="tonal" class="mb-5">可填写字体下载链接，或上传字体到服务器后填写本地路径；本地路径优先于下载链接。</VAlert>
               <VRow>
                 <VCol v-for="field in singleFields" :key="field.key" cols="12" md="6">
                   <VNumberInput v-if="field.type === 'number'" v-model="configData[field.key]" :label="field.label" :placeholder="field.placeholder" :step="field.step || 1" :hint="field.hint" :persistent-hint="!!field.hint" />
@@ -152,6 +149,7 @@
 </template>
 
 <script setup>
+import MpPageTitle from './MpPageTitle.vue';
 import { computed, ref, onMounted, onBeforeUnmount, watch } from 'vue';
 import axios from 'axios';
 import { useMessage } from '@/composables/useFeedback';
@@ -500,12 +498,13 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.cover-config-cards { display: grid; gap: 24px; }
+.cover-config-cards { display: grid; gap: 24px; min-width: 0; }
+.cover-page :deep(.v-card-title), .cover-page :deep(.v-card-subtitle) { white-space: normal; overflow-wrap: anywhere; }
 .library-selection { min-width: 0; border: 0; padding: 0; }
 .cover-style-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 16px; }
 .style-card { min-width: 0; cursor: pointer; }
 .style-card.is-selected { border-color: rgb(var(--v-theme-primary)); box-shadow: 0 0 0 1px rgb(var(--v-theme-primary)); }
-.style-card-label { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; }
+.style-card-label { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; }
 .title-config-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) 44px; align-items: start; gap: 12px; }
 .title-config-remove { justify-self: end; }
 @media (max-width: 680px) {

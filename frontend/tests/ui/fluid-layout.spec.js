@@ -5,7 +5,10 @@ for (const width of [1920, 1440, 390]) {
     await page.setViewportSize({ width, height: 900 });
     for (const path of ['/dashboard', '/settings/general']) {
       await page.goto(path);
-      await expect(page.locator('h1')).toBeVisible();
+      if (path === '/settings/general') {
+        await expect(page.getByRole('tab', { name: '系统', exact: true })).toHaveAttribute('aria-selected', 'true');
+        await expect(page.locator('.setting-card').first()).toBeVisible();
+      } else await expect(page.locator('h1')).toBeVisible();
       await expect.poll(() => page.locator('.layout-page-content').evaluate(element => {
         const style = getComputedStyle(element);
         const child = element.querySelector('.main-content-wrapper');

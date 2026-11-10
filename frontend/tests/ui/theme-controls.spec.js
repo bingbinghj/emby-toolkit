@@ -80,7 +80,7 @@ test('glass preview cancels without writes and saved quality survives reload', a
 
 test('custom middle-gray accents keep readable text on visible plain buttons', async ({ page }) => {
   await page.goto('/settings/general', { waitUntil: 'domcontentloaded' });
-  await expect(page.getByRole('heading', { name: '通用设置', exact: true })).toBeVisible();
+  await expect(page.getByRole('tab', { name: '系统', exact: true })).toHaveAttribute('aria-selected', 'true');
   const { panel } = await openAppearance(page);
   await panel.locator('.theme-customizer-glass-toggle input').uncheck({ force: true });
   await panel.locator('input[type="color"]').evaluate(input => {
@@ -90,8 +90,7 @@ test('custom middle-gray accents keep readable text on visible plain buttons', a
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'plain');
   await expect.poll(() => page.evaluate(key => JSON.parse(localStorage.getItem(key))?.primaryColor, THEME_KEY)).toBe('#999999');
   await page.keyboard.press('Escape');
-  await page.getByRole('tab', { name: /115/ }).click();
-  await page.getByRole('button', { name: '账户与连接', exact: true }).click();
+  await page.getByRole('tab', { name: '存储 & 目录', exact: true }).click();
   const button = page.getByRole('button', { name: '扫码获取', exact: true });
   await expect(button).toBeVisible();
   const colors = await button.evaluate(element => {

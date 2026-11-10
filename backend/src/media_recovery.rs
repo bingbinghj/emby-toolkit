@@ -6,7 +6,10 @@ use crate::{
 };
 use axum::{Json, extract::State, http::StatusCode};
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
+use std::{
+    future::Future,
+    path::{Path, PathBuf},
+};
 
 struct Record {
     id: String,
@@ -28,6 +31,112 @@ pub(crate) async fn read_json(path: &Path) -> Result<Value> {
         .map_err(|_| ApiError::bad(format!("恢复材料 JSON 无效：{}", path.display())))
 }
 
+fn cleanup_marker(directory: &Path) -> Result<PathBuf> {
+    let name = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| ApiError::bad("恢复目录名称无效，备份仍保留"))?;
+    Ok(directory.with_file_name(format!("{name}.cleanup.json")))
+}
+
+async fn cleanup_manifest(directory: &Path, marker: &Path) -> Result<Value> {
+    for ancestor in directory.ancestors() {
+        match tokio::fs::symlink_metadata(ancestor).await {
+            Ok(metadata) if !metadata.is_dir() => {
+                return Err(ApiError::bad(
+                    "待清理备份或父目录不是原普通目录，未删除备份",
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let value = read_json(marker).await?;
+    let name = directory
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let ids = value["target_ids"].as_array();
+    if value["kind"] != "verified-cleanup"
+        || value["version"] != 1
+        || value["directory_name"] != name
+        || !ids.is_some_and(|ids| {
+            !ids.is_empty()
+                && ids.iter().all(|id| {
+                    id.as_str().is_some_and(|id| {
+                        !id.is_empty()
+                            && id.bytes().all(|byte| {
+                                byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+                            })
+                    })
+                })
+        })
+        || value["completed_at"]
+            .as_str()
+            .is_none_or(|time| chrono::DateTime::parse_from_rfc3339(time).is_err())
+    {
+        return Err(ApiError::bad("已验收备份的清理记录无效，未删除备份"));
+    }
+    Ok(value)
+}
+
+async fn mark_verified(directory: &Path, target_ids: &Value) -> Result<PathBuf> {
+    let marker = cleanup_marker(directory)?;
+    let stage = marker.with_file_name(format!(
+        ".cleanup-stage-{}.json",
+        uuid::Uuid::new_v4().simple()
+    ));
+    let value = json!({"kind":"verified-cleanup", "version":1, "directory_name":directory.file_name().and_then(|name| name.to_str()),
+        "target_ids":target_ids, "completed_at":chrono::Utc::now().to_rfc3339()});
+    tokio::fs::write(&stage, serde_json::to_vec(&value).unwrap()).await?;
+    tokio::fs::File::open(&stage).await?.sync_all().await?;
+    tokio::fs::rename(&stage, &marker).await?;
+    tokio::fs::File::open(directory.parent().unwrap())
+        .await?
+        .sync_all()
+        .await?;
+    Ok(marker)
+}
+
+async fn cleanup_verified_with<F, Fut>(directory: &Path, marker: &Path, remove: F) -> Result<()>
+where
+    F: FnOnce(PathBuf) -> Fut,
+    Fut: Future<Output = std::io::Result<()>>,
+{
+    cleanup_manifest(directory, marker).await?;
+    match remove(directory.to_path_buf()).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(ApiError::bad(format!(
+                "媒体已恢复，备份未删除：{error}；请重试清理 {}",
+                directory.display()
+            )));
+        }
+    }
+    if tokio::fs::try_exists(directory).await? {
+        return Err(ApiError::bad("媒体已恢复，备份未删除，请重试清理"));
+    }
+    let parent = directory.parent().unwrap();
+    let finish = async {
+        tokio::fs::File::open(parent).await?.sync_all().await?;
+        tokio::fs::remove_file(marker).await?;
+        tokio::fs::File::open(parent).await?.sync_all().await
+    }
+    .await;
+    if let Err(error) = finish {
+        return Err(ApiError::bad(format!(
+            "媒体已恢复，备份清理记录未删除：{error}；请重试清理"
+        )));
+    }
+    Ok(())
+}
+
+async fn cleanup_verified(directory: &Path, marker: &Path) -> Result<()> {
+    cleanup_verified_with(directory, marker, tokio::fs::remove_dir_all).await
+}
+
 async fn records(state: &AppState) -> Result<Vec<Record>> {
     let mut records = vec![];
     for (prefix, root) in [
@@ -42,6 +151,31 @@ async fn records(state: &AppState) -> Result<Vec<Record>> {
         while let Some(entry) = entries.next_entry().await? {
             let directory = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(directory_name) = name.strip_suffix(".cleanup.json") {
+                if matches!(directory_name, "" | "." | "..") {
+                    return Err(ApiError::bad("备份清理记录的目录名称无效，未删除备份"));
+                }
+                let restored = root.join(directory_name);
+                let material = cleanup_manifest(&restored, &directory).await;
+                records.push(Record {
+                    id: format!("{prefix}:{directory_name}"),
+                    directory: restored,
+                    kind: "verified-cleanup",
+                    target_ids: material
+                        .as_ref()
+                        .map(|value| value["target_ids"].clone())
+                        .unwrap_or(json!([])),
+                    reason: material
+                        .as_ref()
+                        .map(|_| "媒体及原配置已验收，备份清理尚未完成，可重试删除".into())
+                        .unwrap_or_else(|error| error.1.clone()),
+                    can_recover: material.is_ok(),
+                });
+                continue;
+            }
+            if tokio::fs::try_exists(cleanup_marker(&directory)?).await? {
+                continue;
+            }
             if !entry.file_type().await?.is_dir() {
                 if entry.file_type().await?.is_symlink() {
                     records.push(Record {
@@ -158,7 +292,11 @@ pub async fn recover(state: &AppState, id: &str, context: &JobContext) -> Result
     if !record.can_recover {
         return Err(ApiError(StatusCode::CONFLICT, record.reason));
     }
-    if !pending.is_empty() {
+    if record.kind != "verified-cleanup"
+        && pending
+            .iter()
+            .any(|pending| pending.kind != "verified-cleanup" || !pending.can_recover)
+    {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "存在多份待恢复记录，无法确定原配置顺序，请核对恢复目录".into(),
@@ -170,38 +308,135 @@ pub async fn recover(state: &AppState, id: &str, context: &JobContext) -> Result
             &format!("正在核对 {}", record.directory.display()),
         )
         .await;
-    {
+    let marker = if record.kind == "verified-cleanup" {
+        cleanup_marker(&record.directory)?
+    } else {
         let original = read_json(&record.directory.join("original-settings.json")).await?;
         crate::strm::finish_media_recovery(state, &original, || async {
             crate::media_reload::recover_record(state, &record.directory, context).await
         })
         .await?;
-        // Remove the blocking markers only after media and the recorded
-        // original configuration have both passed readback.
-        let pending = record.directory.join("pending-scan.json");
-        if tokio::fs::try_exists(&pending).await? {
-            tokio::fs::remove_file(pending).await?;
-        }
-        let marker = record.directory.join("media-reload.json");
-        if tokio::fs::try_exists(&marker).await? {
-            tokio::fs::remove_file(marker).await?;
-        }
-        tokio::fs::File::open(&record.directory)
-            .await?
-            .sync_all()
-            .await?;
-    }
-    let warnings = match tokio::fs::remove_dir_all(&record.directory).await {
-        Ok(()) => vec![],
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => vec![],
-        Err(error) => vec![format!(
-            "媒体与原配置已恢复，ETK恢复暂存清理失败：{error}；仍保留：{}",
-            record.directory.display()
-        )],
+        // Keep the proof outside the directory: a partial recursive deletion
+        // must not remove the only record that allows a cleanup-only retry.
+        mark_verified(&record.directory, &record.target_ids).await?
     };
+    if let Err(error) = cleanup_verified(&record.directory, &marker).await {
+        tracing::warn!("[媒体恢复] 媒体已通过验收，恢复备份清理未完成：{}", error.1);
+        let backup_deleted = !tokio::fs::try_exists(&record.directory).await?;
+        let pending = tokio::fs::try_exists(&marker).await?;
+        return Ok((
+            StatusCode::MULTI_STATUS.as_u16(),
+            json!({"message":error.1, "recovered_id":id,
+            "pending":pending, "backup_deleted":backup_deleted,
+            "warnings":1, "warning_details":[error.1]}),
+        ));
+    }
     Ok((
         StatusCode::OK.as_u16(),
-        json!({"message":"媒体恢复及原配置回读验收通过，可以继续保存", "recovered_id":id,"pending":false,
-        "warnings":warnings.len(),"warning_details":warnings}),
+        json!({"message":"媒体恢复及原配置回读验收通过，备份已删除，可以继续保存", "recovered_id":id,"pending":!records(state).await?.is_empty(),
+        "backup_deleted":true, "warnings":0,"warning_details":[]}),
     ))
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn failed_backup_deletion_retains_a_durable_cleanup_only_retry_record() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("saved-verified");
+        tokio::fs::create_dir(&directory).await.unwrap();
+        tokio::fs::write(directory.join("requested.json"), b"original backup")
+            .await
+            .unwrap();
+        let marker = mark_verified(&directory, &json!(["61616"])).await.unwrap();
+        let error = cleanup_verified_with(&directory, &marker, |_| async {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "fixture deletion denied",
+            ))
+        })
+        .await
+        .unwrap_err();
+        assert!(error.1.contains("媒体已恢复，备份未删除"));
+        assert_eq!(
+            tokio::fs::read(directory.join("requested.json"))
+                .await
+                .unwrap(),
+            b"original backup"
+        );
+        assert_eq!(
+            cleanup_manifest(&directory, &marker).await.unwrap()["kind"],
+            "verified-cleanup"
+        );
+        cleanup_verified(&directory, &marker).await.unwrap();
+        assert!(!directory.exists());
+        assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn partial_backup_deletion_does_not_destroy_the_cleanup_retry_evidence() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("saved-partial");
+        tokio::fs::create_dir(&directory).await.unwrap();
+        let marker = mark_verified(&directory, &json!(["61616"])).await.unwrap();
+        // Emulate deletion of the directory followed by failure before unlinking
+        // the sibling completion record (e.g. process interruption).
+        tokio::fs::remove_dir(&directory).await.unwrap();
+        assert!(cleanup_manifest(&directory, &marker).await.is_ok());
+        cleanup_verified(&directory, &marker).await.unwrap();
+        assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn invalid_cleanup_proof_does_not_delete_a_backup() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("saved-invalid");
+        tokio::fs::create_dir(&directory).await.unwrap();
+        let marker = cleanup_marker(&directory).unwrap();
+        tokio::fs::write(&marker, br#"{"verified":true}"#)
+            .await
+            .unwrap();
+        assert!(cleanup_verified(&directory, &marker).await.is_err());
+        assert!(directory.exists());
+        assert!(marker.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn changed_backup_directory_symlink_cannot_delete_an_external_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("saved-symlink");
+        let outside = temporary.path().join("outside");
+        tokio::fs::create_dir(&directory).await.unwrap();
+        tokio::fs::create_dir(&outside).await.unwrap();
+        let marker = mark_verified(&directory, &json!(["61616"])).await.unwrap();
+        tokio::fs::write(outside.join("keep.json"), b"unrelated")
+            .await
+            .unwrap();
+        tokio::fs::remove_dir(&directory).await.unwrap();
+        std::os::unix::fs::symlink(&outside, &directory).unwrap();
+        assert!(cleanup_verified(&directory, &marker).await.is_err());
+        assert_eq!(
+            tokio::fs::read(outside.join("keep.json")).await.unwrap(),
+            b"unrelated"
+        );
+        assert!(marker.exists());
+        let child = outside.join("saved-parent-link");
+        tokio::fs::create_dir(&child).await.unwrap();
+        let child_marker = mark_verified(&child, &json!(["61616"])).await.unwrap();
+        let parent_link = temporary.path().join("parent-link");
+        std::os::unix::fs::symlink(&outside, &parent_link).unwrap();
+        assert!(
+            cleanup_verified(
+                &parent_link.join("saved-parent-link"),
+                &parent_link.join("saved-parent-link.cleanup.json")
+            )
+            .await
+            .is_err()
+        );
+        assert!(child.exists());
+        assert!(child_marker.exists());
+    }
 }

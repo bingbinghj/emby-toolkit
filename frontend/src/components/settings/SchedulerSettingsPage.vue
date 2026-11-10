@@ -1,8 +1,7 @@
 <template>
   <section class="mp-page scheduler-page">
     <div class="mp-page-header mb-6">
-      <h1 class="text-h5 font-weight-semibold">任务中心</h1>
-      <p class="text-body-2 text-medium-emphasis mt-1">查看任务说明并执行媒体维护</p>
+      <MpPageTitle title="任务中心" subtitle="查看任务说明并执行媒体维护" />
     </div>
     <div v-if="isLoading" class="center-container"><VProgressCircular indeterminate color="primary" size="48" /></div>
     <VAlert v-else-if="configError" type="error" variant="tonal">{{ configError }}</VAlert>
@@ -83,6 +82,7 @@
   </section>
 </template>
 <script setup>
+import MpPageTitle from '../MpPageTitle.vue';
 import { ref, onMounted, onBeforeUnmount, watch, nextTick, computed } from 'vue';
 import { useMessage } from '@/composables/useFeedback';
 import { useConfig } from '../../composables/useConfig.js';
@@ -315,10 +315,11 @@ watch([configModel, availableTasksForTgMenu], ([newConfig, tgMenuTasks]) => {
 .temp-task-groups { display: grid; gap: 24px; }
 .temp-task-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr)); gap: 16px; }
 .task-card { min-width: 0; }
+.scheduler-page :deep(.v-card-title), .scheduler-page :deep(.v-card-subtitle) { white-space: normal; overflow-wrap: anywhere; }
 .temp-task-item { display: flex; justify-content: space-between; align-items: center; gap: 12px; min-height: 120px; }
 .temp-task-copy { min-width: 0; flex: 1; }
 .temp-task-name { font-weight: 600; line-height: 1.6; overflow-wrap: anywhere; }
-.temp-task-description { margin: 6px 0 0; font-size: 12px; line-height: 1.6; color: rgb(var(--v-theme-on-surface)); opacity: .7; }
+.temp-task-description { margin: 6px 0 0; font-size: 12px; line-height: 1.6; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); }
 .temp-task-item > *:last-child { flex-shrink: 0; }
 .task-chain-list { display: grid; gap: 8px; }
 .task-chain-item { display: flex; align-items: center; gap: 12px; padding: 8px 12px; background: rgba(var(--v-theme-on-surface), .04); border: 1px solid rgba(var(--v-theme-on-surface), .12); border-radius: 8px; }
@@ -329,5 +330,5 @@ watch([configModel, availableTasksForTgMenu], ([newConfig, tgMenuTasks]) => {
 .task-tooltip-content { max-width: 320px; line-height: 1.6; white-space: normal; }
 .sync-mode-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 16px; }
 @media (max-width: 899px) { .scheduler-overview { grid-template-columns: minmax(0, 1fr); } }
-@media (max-width: 540px) { .sync-mode-actions { flex-direction: column; align-items: stretch; } .temp-task-item { align-items: flex-start; } }
+@media (max-width: 540px) { .sync-mode-actions { flex-direction: column; align-items: stretch; } .temp-task-item { align-items: flex-start; flex-wrap: wrap; } .temp-task-copy { flex-basis: 100%; } }
 </style>

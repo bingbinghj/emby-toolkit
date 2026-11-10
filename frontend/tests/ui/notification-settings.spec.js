@@ -2,7 +2,7 @@ import { test, expect } from './fixtures.js';
 
 test('notification settings preserve Telegram fields and save only their configuration scope', async ({ page, api }) => {
   await page.goto('/settings/notifications');
-  await expect(page.getByRole('heading', { name: '通知设置', exact: true })).toBeVisible();
+  await expect(page.getByRole('tab', { name: '通知', exact: true })).toHaveAttribute('aria-selected', 'true');
   const token = page.getByLabel('Telegram Bot Token', { exact: true });
   await expect(token).toHaveAttribute('type', 'password');
   await token.fill('notification-fixture-token');

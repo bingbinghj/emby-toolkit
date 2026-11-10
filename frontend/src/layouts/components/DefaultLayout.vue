@@ -19,6 +19,7 @@ const props = defineProps({
   activeKey: String,
   layout: { type: String, default: 'vertical' },
   expandedKeys: { type: Array, default: () => [] },
+  hasHeaderTabs: Boolean,
 });
 const emit = defineEmits(['navigate', 'update:layout']);
 const route = useRoute();
@@ -138,7 +139,7 @@ onBeforeUnmount(() => { window.removeEventListener('scroll', updateScroll); canc
     </VNavigationDrawer>
 
     <VAppBar class="layout-navbar" :class="{ 'layout-navbar--horizontal': horizontal }" flat
-      :height="horizontal ? 104 : 72" :style="horizontal ? { '--shell-navbar-scroll-progress': scrollProgress } : undefined">
+      :height="(horizontal ? 104 : 64) + (hasHeaderTabs ? 44 : 0)" :style="horizontal ? { '--shell-navbar-scroll-progress': scrollProgress } : undefined">
       <div class="navbar-content-container">
         <div class="theme-navbar-row">
           <slot v-if="horizontal" name="brand" :rail="false" />
@@ -167,6 +168,7 @@ onBeforeUnmount(() => { window.removeEventListener('scroll', updateScroll); canc
               class="theme-horizontal-nav__item" @click="navigate(group.key)">{{ group.label }}</VBtn>
           </template>
         </nav>
+        <slot name="header-tabs" />
       </div>
     </VAppBar>
 

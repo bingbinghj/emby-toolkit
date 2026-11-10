@@ -5,17 +5,15 @@
         <div class="d-flex align-center ga-3 min-width-0">
           <VBtn v-if="libraryId" icon="mdi-arrow-left" variant="text" color="default"
             aria-label="返回仪表盘" title="返回我的媒体库" @click="goToLibraries" />
-          <div class="min-width-0">
-            <h1 class="text-h5 font-weight-bold text-truncate">{{ libraryId ? (library?.name || '媒体库') : '我的媒体库' }}</h1>
-            <p class="text-body-2 text-medium-emphasis mt-1">{{ libraryId ? `浏览${mediaTypeLabel} · ${total} 项媒体` : '浏览和管理 Emby 媒体库' }}</p>
-          </div>
+          <MpPageTitle :title="libraryId ? (library?.name || '媒体库') : '我的媒体库'"
+            :subtitle="libraryId ? `浏览${mediaTypeLabel} · ${total} 项媒体` : '浏览和管理 Emby 媒体库'" />
         </div>
         <VBtn icon="mdi-refresh" variant="text" color="default" aria-label="刷新" title="刷新"
           :loading="loading" @click="refresh" />
       </header>
       <VTextField v-if="libraryId" v-model="search" class="library-search"
         :placeholder="`搜索当前${mediaTypeLabel}`" label="搜索媒体" prepend-inner-icon="mdi-magnify"
-        clearable density="compact" hide-details
+        clearable variant="solo" flat rounded="pill" density="compact" hide-details
         @update:model-value="onSearchInput" @keyup.enter="searchItems" @click:clear="searchItems">
         <template #append-inner>
           <VBtn icon="mdi-magnify" variant="text" size="small" aria-label="搜索" title="搜索"
@@ -25,6 +23,7 @@
     </div>
 
     <VAlert v-if="error" type="error" variant="tonal" closable class="my-4" @click:close="error = ''">{{ error }}</VAlert>
+    <VAlert v-if="navigationNotice" type="info" variant="tonal" closable class="my-4" @click:close="navigationNotice = ''">{{ navigationNotice }}</VAlert>
 
     <div v-if="!libraryId" class="library-grid" v-show="!loading || libraries.length">
       <VCard v-for="item in libraries" :key="item.id" tag="button" type="button"
@@ -82,10 +81,10 @@
           <VIcon icon="mdi-movie-search-outline" size="54" color="secondary" />
           <p class="text-body-1 text-medium-emphasis mt-4">{{ emptyDescription }}</p>
         </VCard>
-        <nav class="alphabet-nav" :style="alphabetStyle" aria-label="按首字母筛选">
+        <nav class="alphabet-nav" :style="alphabetStyle" aria-label="按首字母定位">
           <VBtn v-for="letter in letters" :key="letter" :variant="selectedLetter === letter ? 'tonal' : 'text'"
             :color="selectedLetter === letter ? 'primary' : 'default'" size="x-small"
-            :title="letter === '#' ? '全部' : `按首字母 ${letter} 筛选`" :aria-pressed="selectedLetter === letter"
+            :title="letter === '#' ? '返回开头' : `定位首字母 ${letter}`" :aria-label="letter === '#' ? '返回开头' : `定位首字母 ${letter}`" :aria-pressed="selectedLetter === letter"
             @click="selectLetter(letter)">{{ letter }}</VBtn>
         </nav>
       </div>
@@ -95,9 +94,11 @@
 </template>
 
 <script setup>
+import MpPageTitle from './MpPageTitle.vue';
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import axios from 'axios';
+import { libraryViewport, visibleLibraryPageStarts } from '../utils/mediaLibraryNavigation.js';
 
 const route = useRoute();
 const router = useRouter();
@@ -114,9 +115,11 @@ const alphabetStyle = ref({});
 const letters = ['#', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'];
 const loading = ref(false);
 const error = ref('');
+const navigationNotice = ref('');
 let requestVersion = 0;
 let scrollContainer = null;
 let scrollContainers = [];
+let scrollTargets = [];
 let searchTimer = null;
 let gridResizeObserver;
 const itemsByIndex = ref({});
@@ -169,6 +172,7 @@ const posterIsLoaded = item => loadedPosterUrls.value.has(absolutePosterUrl(item
 const loadLibraries = async () => {
   loading.value = true;
   error.value = '';
+  navigationNotice.value = '';
   try {
     const response = await axios.get('/api/media_center/libraries');
     libraries.value = response.data.libraries || [];
@@ -195,6 +199,7 @@ const loadPage = async (startIndex, { reset = false, target = null } = {}) => {
   loading.value = true;
   loadingDirection.value = target === 'before' ? 'before' : target === 'after' ? 'after' : 'reset';
   error.value = '';
+  if (reset) navigationNotice.value = '';
   try {
     const response = await axios.get(`/api/media_center/libraries/${encodeURIComponent(libraryId.value)}/items`, {
       params: {
@@ -210,6 +215,10 @@ const loadPage = async (startIndex, { reset = false, target = null } = {}) => {
     const pageItems = response.data.items || [];
     const responseStart = Number(response.data.start_index || 0);
     if (reset) {
+      if (response.data.anchor_found === false) {
+        navigationNotice.value = `没有可定位到 ${selectedLetter.value} 的媒体，已返回媒体库开头`;
+        selectedLetter.value = '#';
+      }
       total.value = Math.max(Number(response.data.total || 0), responseStart + pageItems.length);
       targetIndex.value = Number(response.data.anchor_index ?? responseStart);
       itemsByIndex.value = {};
@@ -231,6 +240,7 @@ const loadPage = async (startIndex, { reset = false, target = null } = {}) => {
       pendingPageStarts.delete(normalizedStart);
       loading.value = false;
       loadingDirection.value = '';
+      if (reset && !error.value) await nextTick(() => loadVisiblePages());
     }
   }
 };
@@ -238,8 +248,14 @@ const loadPage = async (startIndex, { reset = false, target = null } = {}) => {
 const openLibrary = (id) => router.push({ name: 'MediaCenterLibrary', params: { libraryId: id } });
 const goToLibraries = () => router.push({ name: 'Dashboard' });
 const openMedia = (id) => router.push({ name: 'MediaEditPage', params: { itemId: id } });
+const navbarHeight = () => Math.ceil(document.querySelector('.layout-navbar')?.getBoundingClientRect().height || 64);
+const findScrollContainer = () => scrollContainer || document.scrollingElement;
 const resetBrowserPosition = () => {
-  mediaPage.value?.scrollTo({ top: 0, behavior: 'auto' });
+  const container = findScrollContainer();
+  const top = container === document.scrollingElement
+    ? Math.max((mediaPage.value?.getBoundingClientRect().top || 0) + container.scrollTop - navbarHeight(), 0)
+    : 0;
+  container?.scrollTo({ top, behavior: 'auto' });
 };
 const searchItems = () => {
   clearTimeout(searchTimer);
@@ -261,15 +277,17 @@ const selectLetter = (letter) => {
 const refresh = () => libraryId.value ? loadPage(0, { reset: true }) : loadLibraries();
 const scrollToIndex = (index) => {
   if (!index) return resetBrowserPosition();
-  const container = mediaPage.value;
+  const container = findScrollContainer();
   const element = mediaGrid.value?.querySelector(`[data-media-index="${index}"]`);
   if (!container || !element) return;
-  const top = element.getBoundingClientRect().top - container.getBoundingClientRect().top
-    + container.scrollTop - (stickyControls.value?.offsetHeight || 0) - 16;
+  const viewport = libraryViewport(container, document.scrollingElement, window.innerHeight);
+  const top = element.getBoundingClientRect().top - viewport.top
+    + viewport.scrollTop - (stickyControls.value?.offsetHeight || 0)
+    - (container === document.scrollingElement ? navbarHeight() : 0) - 16;
   container.scrollTo({ top: Math.max(top, 0), behavior: 'auto' });
 };
 const loadVisiblePages = (event) => {
-  const container = event?.currentTarget || scrollContainer;
+  const container = event?.currentTarget === window ? document.scrollingElement : (event?.currentTarget || scrollContainer);
   if (!container || loading.value) return;
   scrollContainer = container;
   const grid = mediaGrid.value;
@@ -279,18 +297,18 @@ const loadVisiblePages = (event) => {
   const rowHeight = firstSlot?.getBoundingClientRect().height
     ? firstSlot.getBoundingClientRect().height + parseFloat(getComputedStyle(grid).rowGap || '0')
     : 270;
-  const containerRect = container.getBoundingClientRect();
-  const gridTop = grid.getBoundingClientRect().top - containerRect.top + container.scrollTop;
-  const firstRow = Math.max(Math.floor(Math.max(container.scrollTop - gridTop, 0) / rowHeight) - 1, 0);
-  const lastRow = Math.ceil((container.scrollTop + container.clientHeight - gridTop) / rowHeight) + 1;
+  const viewport = libraryViewport(container, document.scrollingElement, window.innerHeight);
+  const gridTop = grid.getBoundingClientRect().top - viewport.top + viewport.scrollTop;
+  const firstRow = Math.max(Math.floor(Math.max(viewport.scrollTop - gridTop, 0) / rowHeight) - 1, 0);
+  const lastRow = Math.ceil((viewport.scrollTop + viewport.height - gridTop) / rowHeight) + 1;
   const firstIndex = firstRow * columns;
   const lastIndex = Math.min(lastRow * columns, total.value - 1);
-  for (let index = firstIndex; index <= lastIndex; index += pageSize) {
-    const pageStart = Math.floor(index / pageSize) * pageSize;
+  for (const pageStart of visibleLibraryPageStarts(firstIndex, lastIndex, pageSize)) {
     if (!loadedPageStarts.has(pageStart) && !pendingScrollLoads.has(pageStart)) {
       pendingScrollLoads.add(pageStart);
+      const version = requestVersion;
       loadPage(pageStart, { target: pageStart < targetIndex.value ? 'before' : 'after' })
-        .finally(() => pendingScrollLoads.delete(pageStart));
+        .finally(() => { if (version === requestVersion) pendingScrollLoads.delete(pageStart); });
     }
   }
 };
@@ -312,7 +330,7 @@ watch(libraryId, () => {
 
 const setupScrollListeners = () => {
   gridResizeObserver?.disconnect();
-  scrollContainers.forEach((container) => container.removeEventListener('scroll', loadVisiblePages));
+  scrollTargets.forEach((container) => container.removeEventListener('scroll', loadVisiblePages));
   scrollContainers = [];
   const sentinel = mediaGrid.value;
   if (!sentinel) return;
@@ -324,18 +342,21 @@ const setupScrollListeners = () => {
     }
     current = current.parentElement;
   }
-  if (!scrollContainers.length && document.scrollingElement) {
-    scrollContainers = [document.scrollingElement];
+  if (document.scrollingElement && !scrollContainers.includes(document.scrollingElement)) {
+    scrollContainers.push(document.scrollingElement);
   }
-  scrollContainer = scrollContainers.find((container) => container.scrollHeight > container.clientHeight)
-    || scrollContainers[0]
+  scrollContainer = scrollContainers.find((container) => container !== document.scrollingElement && container.scrollHeight > container.clientHeight)
     || document.scrollingElement;
-  scrollContainers.forEach((container) => container.addEventListener('scroll', loadVisiblePages, { passive: true }));
+  scrollTargets = scrollContainers.map(container => container === document.scrollingElement ? window : container);
+  scrollTargets.forEach((container) => container.addEventListener('scroll', loadVisiblePages, { passive: true }));
   gridResizeObserver = new ResizeObserver(() => {
     const controlsHeight = stickyControls.value?.offsetHeight || 0;
+    const topInset = scrollContainer === document.scrollingElement ? navbarHeight() : 0;
+    const viewportHeight = libraryViewport(scrollContainer, document.scrollingElement, window.innerHeight).height;
+    mediaPage.value?.style.setProperty('--library-navbar-height', `${topInset}px`);
     alphabetStyle.value = {
-      top: `${controlsHeight + 16}px`,
-      maxHeight: `${Math.max((mediaPage.value?.clientHeight || 0) - controlsHeight - 32, 32)}px`,
+      top: `${topInset + controlsHeight + 16}px`,
+      maxHeight: `${Math.max(viewportHeight - topInset - controlsHeight - 48, 32)}px`,
     };
     loadVisiblePages();
   });
@@ -346,23 +367,22 @@ const setupScrollListeners = () => {
 
 watch(mediaGrid, setupScrollListeners, { flush: 'post' });
 onMounted(() => {
-  document.querySelector('.page-content-inner-wrapper')?.classList.add('media-center-layout');
   setupScrollListeners();
+  window.addEventListener('resize', setupScrollListeners);
 });
 
 onBeforeUnmount(() => {
   requestVersion += 1;
   clearTimeout(searchTimer);
   gridResizeObserver?.disconnect();
-  scrollContainers.forEach((container) => container.removeEventListener('scroll', loadVisiblePages));
-  document.querySelector('.page-content-inner-wrapper')?.classList.remove('media-center-layout');
+  scrollTargets.forEach((container) => container.removeEventListener('scroll', loadVisiblePages));
+  window.removeEventListener('resize', setupScrollListeners);
 });
 </script>
 
 <style scoped>
-.media-center-page { position:relative; height:100%; min-height:0; overflow-y:auto; padding:0 4px 24px 0; }
-:global(.page-content-inner-wrapper.media-center-layout) { height:100%; overflow:visible; }
-.media-center-sticky-controls { position:sticky; z-index:4; top:0; padding:0 0 16px; background:rgba(var(--v-theme-background),.84); backdrop-filter:blur(12px); }
+.media-center-page { position:relative; min-height:0; padding:0 4px 24px 0; }
+.media-center-sticky-controls { position:sticky; z-index:4; top:var(--library-navbar-height,64px); padding:12px 0 16px; background:rgb(var(--v-theme-surface)); border-radius:12px; }
 .min-width-0 { min-width:0; }
 .library-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,220px),1fr)); gap:24px; margin-top:20px; }
 .library-card { min-width:0; width:100%; text-align:left; cursor:pointer; }
@@ -370,7 +390,7 @@ onBeforeUnmount(() => {
 .library-count { position:absolute; top:12px; right:12px; }
 .library-search { width:min(480px,100%); }
 .media-browser { position:relative; display:grid; grid-template-columns:minmax(0,1fr) 34px; gap:16px; align-items:start; }
-.media-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,148px),1fr)); gap:24px 18px; margin-top:16px; }
+.media-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,144px),1fr)); gap:16px; margin-top:16px; }
 .media-card-hover-area { min-width:0; height:100%; }
 .media-card { min-width:0; width:100%; height:100%; text-align:left; cursor:pointer; }
 .media-poster-wrap { position:relative; background:rgba(var(--v-theme-on-surface),.06); }

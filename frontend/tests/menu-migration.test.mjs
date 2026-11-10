@@ -8,7 +8,7 @@ const end = source.indexOf('\n};', start) + 3;
 function merge(saved) {
   const groups = [
     { key: 'group-discovery', defaultLabel: '发现', children: [{ key: 'Dashboard', defaultLabel: '仪表盘' }] },
-    { key: 'group-system', defaultLabel: '系统', children: [{ key: 'UserManagement', defaultLabel: '用户管理' }, { key: 'settings-general', defaultLabel: '通用设置' }] },
+    { key: 'group-system', defaultLabel: '系统', children: [{ key: 'UserManagement', defaultLabel: '用户管理' }, { key: 'settings-general', defaultLabel: '设置' }] },
   ];
   const map = new Map();
   for (const group of groups) {
@@ -29,6 +29,16 @@ test('legacy user entry is not duplicated when the missing system group is fille
   assert.deepEqual(children.map(child => child.key), ['Dashboard', 'UserManagement', 'settings-general']);
   assert.equal(children.filter(child => child.key === 'UserManagement').length, 1);
   assert.deepEqual(children.find(child => child.key === 'UserManagement'), { key: 'UserManagement', label: '我的用户', visible: false });
+});
+
+test('notification and general legacy menus migrate to one MP settings entry', () => {
+  const result = merge([{ key: 'group-system', children: [
+    { key: 'settings-notifications', label: '通知设置' },
+    { key: 'settings-general', label: '通用设置' },
+  ] }]);
+  const settings = result.flatMap(group => group.children).filter(child => child.key === 'settings-general');
+  assert.equal(settings.length, 1);
+  assert.equal(settings[0].label, '设置');
 });
 
 test('canonical and legacy entries still produce one key across existing groups', () => {

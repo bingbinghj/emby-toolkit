@@ -11,6 +11,7 @@ use axum::{
     http::StatusCode,
     routing::post,
 };
+use futures_util::FutureExt;
 use serde_json::{Value, json};
 
 pub fn router() -> Router<AppState> {
@@ -43,6 +44,7 @@ async fn reorganize(
             ids.push(id.to_string());
         }
     }
+    let history_ids = crate::media_organize_history::selected_history(&state, &body, &ids).await?;
     let work = state.clone();
     let task = state.jobs.submit_response("媒体重新整理", move |context| async move {
         let total = ids.len();
@@ -57,9 +59,16 @@ async fn reorganize(
                 return Err(error);
             }
             context.update_counted(index as u64, total as u64, "媒体重新整理", &format!("重新执行 ETK 流程：媒体 {id}")).await;
+            crate::media_organize_history::begin_reorganize(&work,&history_ids,id).await?;
             // The empty reason runs the complete rebuilding and scrape flow, rather
             // than the missing-media-info shortcut used by review retries.
-            match reprocess_inner(&work, id, "", &context, true).await {
+            let report = std::panic::AssertUnwindSafe(reprocess_inner(&work, id, "", &context, true)).catch_unwind().await
+                .unwrap_or_else(|_|Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR,"任务执行异常".into())));
+            if let Err(error) = crate::media_organize_history::finish_reorganize(&work,&history_ids,id,&report).await {
+                warnings += 1;
+                warning_details.push(json!(format!("{id}：入库处理记录未能保存，{}",crate::logs::redact(&error.1))));
+            }
+            match report {
                 Ok(report) => {
                     let mut errors = crate::media_edit::list(&report["failures"]);
                     if let Some(error) = report["error"].as_str().filter(|error| !error.is_empty()) {

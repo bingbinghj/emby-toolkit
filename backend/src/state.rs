@@ -31,6 +31,9 @@ impl AppState {
         db::initialize(&db)
             .await
             .map_err(|e| anyhow::anyhow!(e.1))?;
+        crate::media_organize_history::interrupt_unfinished(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.1))?;
         let mut config: Value =
             serde_json::from_str(include_str!("../assets/config_defaults.json"))?;
         if let Some(Value::Object(stored)) = db::setting(&db, "dynamic_app_config")

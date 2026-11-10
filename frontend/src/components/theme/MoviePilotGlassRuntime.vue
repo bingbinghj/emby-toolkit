@@ -43,9 +43,11 @@ const previousImage = computed(() => backdropEnabled.value ? wallpaper.previousI
 const shouldRender = computed(() => enabled.value && optical.value.quality !== 'css' && Boolean(activeImage.value))
 const tintColor = computed(() => normalizeThemeMaterialAccent(theme.global.current.value.colors.primary)?.hex ?? '#8D51F9')
 const layers = computed(() => activeImage.value ? [
-  { key: 'front' as const, role: 'active' as const, url: activeImage.value, src: activeImage.value, style: {} },
+  { key: 'front' as const, role: 'active' as const, url: activeImage.value, src: activeImage.value,
+    style: { '--glass-wallpaper-brightness': String((glass.value.glassAppearance === 'frosted' ? 0.82 : glass.value.glassAppearance === 'tinted' ? 0.85 : 0.86) * wallpaper.activeExposure.value) } },
   { key: 'back' as const, role: previousImage.value ? 'previous' as const : 'standby' as const,
-    url: previousImage.value, src: previousImage.value, style: {} },
+    url: previousImage.value, src: previousImage.value,
+    style: { '--glass-wallpaper-brightness': String((glass.value.glassAppearance === 'frosted' ? 0.82 : glass.value.glassAppearance === 'tinted' ? 0.85 : 0.86) * wallpaper.previousExposure.value) } },
 ] : [])
 provideGlassFixedShellBackplate({ layers, transitionDurationMs: 900 })
 

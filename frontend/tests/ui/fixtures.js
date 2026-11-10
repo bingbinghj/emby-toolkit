@@ -63,10 +63,21 @@ export const test = base.extend({
       { id: 'ui-test-user', name: 'UI Test', is_administrator: true, is_disabled: false, notes: '', telegram_chat_id: '', profile_image_tag: null },
       { id: 'member', name: 'Media Member', is_administrator: false, is_disabled: true, notes: '原备注', telegram_chat_id: '123', profile_image_tag: null },
     ] });
-    respond('POST', '/api/portal/users/member', { message: '用户资料已保存', id: 'member' });
+    respond('POST', '/api/portal/users/member', request => ({ message: 'Emby 用户资料已保存', id: 'member', user: { id: 'member', ...request.body } }));
+    respond('POST', '/api/portal/users/member/password', { message: 'Emby 用户密码已更新', id: 'member' });
     respond('POST', '/api/portal/telegram-chat-id', request => ({ telegram_chat_id: request.body.telegram_chat_id, message: '通知设置已保存' }));
     respond('GET', '/api/portal/telegram-bot-info', { username: 'fixture_bot' });
     respond('GET', '/api/media_center/libraries', { libraries: [library] });
+    respond('GET', '/api/media_organize/history', {
+      items: [{ id: 'history-101', item_id: '101', name: mediaDetails.item_name, item_type: 'Movie',
+        production_year: 2026, image_tag: 'fixture', library_name: '电影', source: 'emby',
+        status: 'success', message: '入库处理完成', created_at: '2026-11-10T01:00:00Z', completed_at: '2026-11-10T01:01:00Z' }],
+      total: 1, page: 1, page_size: 24, tracking_since: '2026-11-10T00:00:00Z',
+    });
+    for (const profile of ['desktop', 'tablet', 'mobile']) {
+      respond('GET', `/api/dashboard/layout/${profile}`, { layout: null });
+      respond('POST', `/api/dashboard/layout/${profile}`, request => ({ layout: request.body.layout }));
+    }
     respond('GET', '/api/dashboard/media', {
       statistics: { movie_count: { count: 1 }, tv_count: { count: 0 }, episode_count: { count: 0 }, music_count: { count: 0 } },
       recent: [{ id: '101', name: mediaDetails.item_name, item_type: 'Movie', production_year: 2026, image_tag: 'fixture' }],

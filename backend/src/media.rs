@@ -112,17 +112,25 @@ fn number(params: &HashMap<String, String>, key: &str, default: i64) -> Result<i
         v.parse().map_err(|_| ApiError::bad("分页参数无效"))
     })
 }
-async fn anchor(state: &AppState, common: &[(&str, String)], letter: &str) -> Result<u64> {
+fn item_total(response: &Value) -> Result<u64> {
+    response["TotalRecordCount"]
+        .as_u64()
+        .ok_or_else(|| ApiError(StatusCode::BAD_GATEWAY, "Emby 未返回有效的媒体总数".into()))
+}
+async fn anchor(state: &AppState, common: &[(&str, String)], letter: &str) -> Result<Option<u64>> {
     let mut query = common.to_vec();
     query.push(("Limit", "0".into()));
-    let total = items(state, &query).await?["TotalRecordCount"]
-        .as_u64()
-        .unwrap_or(0);
+    query.push(("EnableTotalRecordCount", "true".into()));
+    let total = item_total(&items(state, &query).await?)?;
     query.push(("NameStartsWithOrGreater", letter.into()));
-    let after = items(state, &query).await?["TotalRecordCount"]
-        .as_u64()
-        .unwrap_or(0);
-    Ok(total.saturating_sub(after))
+    let after = item_total(&items(state, &query).await?)?;
+    if after > total {
+        return Err(ApiError(
+            StatusCode::BAD_GATEWAY,
+            "Emby 媒体数量已变化，请重新定位".into(),
+        ));
+    }
+    Ok((after > 0).then_some(total - after))
 }
 async fn library_items(
     State(state): State<AppState>,
@@ -151,10 +159,20 @@ async fn library_items(
         query.push(("SearchTerm", search.trim().into()));
     }
     let letter = params.get("letter").map_or("", String::as_str).trim();
+    if !letter.is_empty() && (letter.len() != 1 || !letter.as_bytes()[0].is_ascii_alphabetic()) {
+        return Err(ApiError::bad("定位字母必须是 A 到 Z"));
+    }
+    let mut anchor_found = true;
     let anchor_index = if explicit_start {
         number(&params, "start_index", 0)?.max(0) as u64
     } else if !letter.is_empty() {
-        anchor(&state, &query, letter).await.unwrap_or(0)
+        match anchor(&state, &query, &letter.to_ascii_uppercase()).await? {
+            Some(index) => index,
+            None => {
+                anchor_found = false;
+                0
+            }
+        }
     } else {
         0
     };
@@ -163,7 +181,7 @@ async fn library_items(
     } else {
         anchor_index / size * size
     };
-    query.extend([("StartIndex",start.to_string()),("Limit",size.to_string()),("Fields","PrimaryImageAspectRatio,ImageTags,BackdropImageTags,Name,Type,ProductionYear,ProviderIds,ChildCount,CommunityRating,OfficialRating".into())]);
+    query.extend([("StartIndex",start.to_string()),("Limit",size.to_string()),("EnableTotalRecordCount","true".into()),("Fields","PrimaryImageAspectRatio,ImageTags,BackdropImageTags,Name,Type,ProductionYear,ProviderIds,ChildCount,CommunityRating,OfficialRating".into())]);
     let response = items(&state, &query).await?;
     let list = response["Items"]
         .as_array()
@@ -171,8 +189,8 @@ async fn library_items(
         .ok_or_else(|| ApiError(StatusCode::BAD_GATEWAY, "Emby 媒体项响应无效".into()))?;
     Ok(Json(
         json!({"library":{"id":library["Id"],"name":library["Name"],"collection_type":library["CollectionType"],"media_type_filter":filter(&library)},
-        "next_start_index":start+list.len() as u64,"items":list,"total":response["TotalRecordCount"].as_u64().unwrap_or(0),"start_index":start,
-        "anchor_index":anchor_index,"anchor_item_id":"","page":page,"page_size":size}),
+        "next_start_index":start+list.len() as u64,"items":list,"total":item_total(&response)?,"start_index":start,
+        "anchor_index":anchor_index,"anchor_found":anchor_found,"anchor_item_id":"","page":page,"page_size":size}),
     ))
 }
 async fn user_views(

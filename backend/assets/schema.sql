@@ -214,3 +214,22 @@ CREATE INDEX IF NOT EXISTS idx_mm_type_parent ON media_metadata (item_type, pare
 CREATE INDEX IF NOT EXISTS idx_mm_episode_parent_season_ep_library ON media_metadata(parent_series_tmdb_id, season_number, episode_number) WHERE item_type='Episode' AND in_library=TRUE;
 
 ALTER TABLE emby_users_extended ADD COLUMN IF NOT EXISTS telegram_chat_id TEXT;
+
+-- File-level ETK admission events; processed_log is a mutable review cache,
+-- so it cannot supply an admission history or preserve individual episodes.
+CREATE TABLE IF NOT EXISTS media_organize_history (
+    id TEXT PRIMARY KEY,
+    source TEXT NOT NULL,
+    source_identity TEXT NOT NULL,
+    item_id TEXT,
+    item_json JSONB NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('processing', 'success', 'warning', 'failed')),
+    message TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    completed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_media_organize_history_created ON media_organize_history(created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_media_organize_history_item ON media_organize_history(item_id) WHERE status='processing';
+INSERT INTO app_settings(setting_key, value_json)
+VALUES('media_organize_history_started_at', to_jsonb(NOW()))
+ON CONFLICT(setting_key) DO NOTHING;

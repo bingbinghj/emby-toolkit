@@ -1,8 +1,8 @@
 <!-- Media presentation follows MoviePilot v3 cards and Vuetify tables; actions use ETK APIs. -->
 <template>
-  <div class="review-page">
-    <header class="d-flex align-center justify-space-between ga-3 mb-6">
-      <div><h1 class="text-h5 font-weight-bold">手动处理</h1><p class="text-body-2 text-medium-emphasis mt-1">搜索媒体或检查待复核项目</p></div>
+  <div class="mp-page review-page">
+    <header class="d-flex flex-wrap align-center justify-space-between ga-3 mb-6">
+      <MpPageTitle title="手动处理" subtitle="搜索媒体或检查待复核项目" />
       <VBtnToggle v-if="!compactList" v-model="displayMode" mandatory divided variant="outlined" density="compact" aria-label="显示方式">
         <VBtn value="table" icon="mdi-format-list-bulleted" title="表格视图" aria-label="表格视图" />
         <VBtn value="cards" icon="mdi-view-grid-outline" title="卡片视图" aria-label="卡片视图" />
@@ -18,7 +18,7 @@
         </VAlert>
         <div class="review-toolbar">
           <VTextField v-model="searchQuery" label="搜索媒体" placeholder="输入媒体名称搜索整个 Emby 库..."
-            prepend-inner-icon="mdi-magnify" clearable hide-details density="compact" class="review-search-field"
+            prepend-inner-icon="mdi-magnify" clearable hide-details density="compact" variant="solo" flat rounded="pill" class="review-search-field"
             autocomplete="off" @keyup.enter="handleSearch" @update:model-value="handleSearchQueryChange" @click:clear="clearSearch">
             <template #append-inner><VBtn icon="mdi-magnify" variant="text" size="small" aria-label="搜索" title="搜索" @click.stop="handleSearch" /></template>
           </VTextField>
@@ -109,6 +109,7 @@
 </template>
 
 <script setup>
+import MpPageTitle from './MpPageTitle.vue';
 import { useRouter } from 'vue-router';
 import { ref, onMounted, onUnmounted, computed, watch, h } from 'vue';
 import axios from 'axios';
@@ -458,12 +459,12 @@ onUnmounted(() => listObserver?.disconnect());
 .review-card-detail { flex:1; min-width:0; }
 .review-item-title { max-width:100%; height:auto; min-height:24px; justify-content:flex-start; font-weight:600; text-align:left; }
 .review-item-title :deep(.v-btn__content) { white-space:normal; text-align:left; overflow-wrap:anywhere; }
-.review-item-meta { margin:6px 0; color:rgba(var(--v-theme-on-surface),.6); font-size:12px; overflow-wrap:anywhere; }
+.review-item-meta { margin:6px 0; color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity)); font-size:12px; overflow-wrap:anywhere; }
 .review-item-reason { margin:12px 0; overflow-wrap:anywhere; }
 :deep(.review-actions) { display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:12px; }
 .review-results :deep(.v-data-table .review-actions) { margin:8px 0; }
 .review-result-cover { width:56px; padding:0; margin:8px 0; cursor:pointer; }
-.review-poster-fallback { display:flex; justify-content:center; align-items:center; width:100%; height:100%; color:rgba(var(--v-theme-on-surface),.4); background:rgba(var(--v-theme-on-surface),.06); }
+.review-poster-fallback { display:flex; justify-content:center; align-items:center; width:100%; height:100%; color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity)); background:rgba(var(--v-theme-on-surface),.06); }
 .review-table-reason { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; max-width:24rem; }
 .review-pagination { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:16px; }
 .review-page-size { flex:0 0 120px; }

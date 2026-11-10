@@ -5,12 +5,12 @@ const privateRoutes = [
   ['/user-management', '用户管理'],
   ['/user-center', '用户管理'],
   ['/media-organize', '媒体整理'],
-  ['/settings/notifications', '通知设置'],
+  ['/settings/notifications', '通知'],
   ['/review', '手动处理'],
   ['/media-center', '仪表盘'],
   ['/media-center/library/movies', '电影'],
   ['/library/movies', '电影'],
-  ['/settings/general', '通用设置'],
+  ['/settings/general', '设置'],
   ['/settings/scheduler', '任务中心'],
   ['/settings/cover-generator', '媒体库封面生成'],
   ['/edit-media/101', '手动编辑媒体信息'],
@@ -19,7 +19,11 @@ const privateRoutes = [
 for (const [path, heading] of privateRoutes) {
   test(`authenticated route renders ${path}`, async ({ page }) => {
     await page.goto(path);
-    await expect(page.getByRole('heading', { name: heading, exact: true }).first()).toBeVisible();
+    const title = page.getByRole('heading', { name: heading, exact: true }).first();
+    if (heading === '设置' || heading === '通知') {
+      await expect(title).toBeAttached();
+      await expect(page.getByRole('tab', { name: heading === '设置' ? '系统' : '通知', exact: true })).toHaveAttribute('aria-selected', 'true');
+    } else await expect(title).toBeVisible();
     await expect(page.locator('.v-application')).toBeVisible();
   });
 }
@@ -58,9 +62,10 @@ test.describe('ordinary account', () => {
   test('account details remain available and management navigation stays hidden', async ({ page, api }) => {
     await page.goto('/user-management');
     await expect(page.getByRole('heading', { name: '用户管理', exact: true })).toBeVisible();
-    await expect(page.getByText('普通用户', { exact: true }).first()).toBeVisible();
+    await expect(page.getByText('用户管理需要管理员权限。', { exact: true })).toBeVisible();
+    expect(api.requests.some(request => request.path === '/api/portal/users')).toBe(false);
     await expect(page.getByRole('button', { name: '通知中心', exact: true })).toHaveCount(0);
-    await expect(page.locator('.v-navigation-drawer').getByText('通用设置', { exact: true })).toHaveCount(0);
+    await expect(page.locator('.v-navigation-drawer').getByText('设置', { exact: true })).toHaveCount(0);
     expect(api.requests.some(request => request.path === '/api/status')).toBe(false);
   });
 });
@@ -72,17 +77,17 @@ test('menu order changes through accessible controls and is saved', async ({ pag
   const dialog = page.locator('.v-overlay--active').filter({ has: page.getByRole('button', { name: '保存并应用', exact: true }) });
   const firstGroup = dialog.locator('.menu-editor-group').nth(2);
   const items = firstGroup.locator('.menu-editor-item');
-  await expect(items).toHaveCount(5);
+  await expect(items).toHaveCount(4);
   await items.nth(1).getByRole('button', { name: '上移菜单', exact: true }).click();
-  await expect(items.nth(0).getByLabel('菜单名称', { exact: true })).toHaveValue('通知设置');
+  await expect(items.nth(0).getByLabel('菜单名称', { exact: true })).toHaveValue('用户管理');
   await dialog.getByRole('button', { name: '保存并应用', exact: true }).click();
   await expect.poll(() => api.requests.some(request => request.method === 'POST' && request.path === '/api/system/menu_config')).toBe(true);
   const saved = api.requests.find(request => request.method === 'POST' && request.path === '/api/system/menu_config').body;
-  expect(saved[2].children.map(item => item.key)).toEqual(['settings-notifications', 'settings-general', 'UserManagement', 'settings-scheduler', 'CoverGeneratorConfig']);
+  expect(saved[2].children.map(item => item.key)).toEqual(['UserManagement', 'settings-general', 'settings-scheduler', 'CoverGeneratorConfig']);
   await page.reload();
   await page.getByRole('button', { name: 'UI Test 的用户菜单', exact: true }).click();
   await page.getByText('自定义导航', { exact: true }).click();
-  await expect(page.locator('.menu-editor-group').nth(2).locator('.menu-editor-item').first().getByLabel('菜单名称', { exact: true })).toHaveValue('通知设置');
+  await expect(page.locator('.menu-editor-group').nth(2).locator('.menu-editor-item').first().getByLabel('菜单名称', { exact: true })).toHaveValue('用户管理');
 });
 
 test('mobile navigation opens without horizontal page overflow', async ({ page }) => {
@@ -94,8 +99,8 @@ test('mobile navigation opens without horizontal page overflow', async ({ page }
   await expect(toggle).toHaveAttribute('aria-expanded', 'true');
   const drawer = page.locator('.v-navigation-drawer');
   await expect(drawer.getByRole('button', { name: '关闭导航', exact: true })).toBeVisible();
-  await drawer.getByText('通用设置', { exact: true }).click();
+  await drawer.getByText('设置', { exact: true }).click();
   await expect(page).toHaveURL(/\/settings\/general$/);
-  await expect(page.getByRole('heading', { name: '通用设置', exact: true })).toBeVisible();
+  await expect(page.getByRole('tab', { name: '系统', exact: true })).toHaveAttribute('aria-selected', 'true');
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(392);
 });

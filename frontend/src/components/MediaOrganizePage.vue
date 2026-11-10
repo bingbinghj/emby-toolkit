@@ -1,54 +1,72 @@
 <template>
   <div class="mp-page media-organize-page">
     <header class="d-flex flex-wrap align-center justify-space-between ga-3 mb-6">
-      <div>
-        <h1 class="text-h4 mb-1">媒体整理</h1>
-        <p class="text-body-2 text-medium-emphasis mb-0">选择在库媒体，重新执行 ETK 媒体信息与元数据处理流程。</p>
-      </div>
-      <VBtn color="primary" prepend-icon="mdi-refresh" :disabled="!selectedItems.length || processing" :loading="processing" data-testid="organize-selected" @click="openConfirmation">重新整理 {{ selectedItems.length || '' }}</VBtn>
+      <MpPageTitle title="媒体整理" subtitle="查看入库处理记录，选择电影或剧集重新整理。" />
+      <VBtn color="primary" prepend-icon="mdi-refresh" :disabled="!canReorganize" :loading="processing" data-testid="organize-selected" @click="openConfirmation">重新整理 {{ selectedMediaCount || '' }}</VBtn>
     </header>
 
-    <VAlert v-if="librariesError" type="error" variant="tonal" class="mb-4">
-      {{ librariesError }}<VBtn variant="text" :loading="loadingLibraries" @click="loadLibraries">重新读取媒体库</VBtn>
-    </VAlert>
     <VCard class="mb-4">
       <VCardText>
-        <VRow align="center">
-          <VCol cols="12" md="4"><VSelect v-model="libraryId" :items="libraries" item-title="name" item-value="id" label="媒体库" :loading="loadingLibraries" :disabled="loadingLibraries || processing" :hide-details="true" data-testid="organize-library" /></VCol>
-          <VCol cols="12" md="5"><VTextField v-model="search" label="搜索媒体" placeholder="按名称查找" prepend-inner-icon="mdi-magnify" clearable :hide-details="true" :disabled="!libraryId || processing" @keyup.enter="searchItems" /></VCol>
-          <VCol cols="12" md="3"><VBtn block variant="tonal" prepend-icon="mdi-magnify" :loading="loadingItems" :disabled="!libraryId || processing" @click="searchItems">搜索</VBtn></VCol>
-        </VRow>
+        <div class="organize-toolbar">
+          <VTextField v-model="search" label="搜索入库记录" placeholder="按名称查找" prepend-inner-icon="mdi-magnify" clearable variant="solo" flat rounded="pill" hide-details class="organize-search" :disabled="processing" @keyup.enter="searchItems" />
+          <VSelect v-model="statusFilter" :items="statusOptions" item-title="title" item-value="value" label="处理状态" hide-details class="organize-filter" :disabled="processing" />
+          <VBtn variant="tonal" prepend-icon="mdi-magnify" :loading="loadingItems" :disabled="processing" @click="searchItems">搜索</VBtn>
+          <VBtn icon="mdi-refresh" variant="text" aria-label="刷新入库记录" :loading="loadingItems" :disabled="processing" @click="loadItems" />
+        </div>
       </VCardText>
     </VCard>
 
     <VAlert v-if="selectedItems.length" type="info" variant="tonal" class="mb-4" data-testid="organize-selection">
-      <div class="d-flex flex-wrap align-center ga-3"><span>已选择 {{ selectedItems.length }} 项，跨分页和媒体库保留选择。</span><VBtn size="small" variant="text" :disabled="processing" @click="selectedItems = []">清空选择</VBtn></div>
-      <div class="d-flex flex-wrap ga-2 mt-2"><VChip v-for="item in selectedItems" :key="item.Id" size="small" closable :disabled="processing" @click:close="removeSelection(item.Id)">{{ item.LibraryName }} · {{ item.Name }}</VChip></div>
+      <div class="d-flex flex-wrap align-center ga-3"><span>已选择 {{ selectedItems.length }} 条记录，对应 {{ selectedMediaCount }} 项媒体，跨分页保留选择。</span><VBtn size="small" variant="text" :disabled="processing" @click="selectedItems = []">清空选择</VBtn></div>
+      <div class="d-flex flex-wrap ga-2 mt-2"><VChip v-for="item in selectedItems" :key="item.id" size="small" closable :disabled="processing" @click:close="removeSelection(item.id)">{{ itemTitle(item) }}{{ episodeLabel(item) ? ` · ${episodeLabel(item)}` : '' }} · {{ statusPresentation(item).title }}</VChip></div>
     </VAlert>
 
     <VAlert v-if="itemsError" type="error" variant="tonal" class="mb-4" data-testid="organize-load-error">{{ itemsError }}<VBtn variant="text" :loading="loadingItems" @click="loadItems">重新读取</VBtn></VAlert>
     <VAlert v-if="feedback" :type="feedback.type" :title="feedback.message" variant="tonal" class="mb-4" data-testid="organize-result">
       <div v-for="(detail, index) in feedback.details" :key="index" class="text-wrap">{{ detail }}</div>
     </VAlert>
+    <VAlert v-if="trackingSince && !itemsError" type="info" variant="tonal" class="mb-4" data-testid="organize-tracking">入库记录从 {{ formatDate(trackingSince) }} 起持续记录，此前入库的历史记录不可用。</VAlert>
 
     <VCard>
-      <VCardItem :title="loadedLibrary?.name || '在库媒体'" subtitle="电影包括关联版本；电视剧按 ETK 现有在库季集范围处理。" />
-      <VDataTable :headers="headers" :items="items" item-value="Id" show-select :model-value="selectedIds" :items-per-page="pageSize" :loading="loadingItems" :item-selectable="canSelectItems" hide-default-footer data-testid="organize-items" @update:model-value="updateSelection">
-        <template #item.Name="{ item }">
-          <div class="d-flex align-center ga-3 py-2"><VAvatar rounded size="42"><VImg v-if="poster(item)" :src="poster(item)" :alt="item.Name" cover /><VIcon v-else icon="mdi-movie-open-outline" /></VAvatar><VBtn variant="text" class="media-title px-0" :to="`/edit-media/${encodeURIComponent(item.Id)}`">{{ item.Name }}</VBtn></div>
+      <VCardItem title="整理记录" subtitle="按处理开始时间从新到旧显示入库电影和单集。" />
+      <div v-if="smAndDown" class="history-cards pa-3" data-testid="organize-items-mobile">
+        <VProgressLinear v-if="loadingItems" indeterminate />
+        <VCard v-for="item in items" :key="item.id" variant="outlined" class="history-card">
+          <VCardText class="history-card-body">
+            <VCheckboxBtn :model-value="selectedIds.includes(item.id)" :disabled="!canSelectRecord(item)" :aria-label="`选择 ${itemTitle(item)}`" @update:model-value="toggleSelection(item, $event)" />
+            <VAvatar rounded width="48" height="72"><VImg v-if="poster(item)" :src="poster(item)" :alt="itemTitle(item)" cover /><VIcon v-else icon="mdi-movie-open-outline" /></VAvatar>
+            <div class="organize-media-copy">
+              <VBtn v-if="item.item_id" variant="text" color="default" class="media-title text-none px-0" :to="`/edit-media/${encodeURIComponent(item.item_id)}`">{{ itemTitle(item) }}</VBtn>
+              <div v-else class="font-weight-medium">{{ itemTitle(item) }}</div>
+              <div v-if="episodeLabel(item)" class="text-caption text-medium-emphasis">{{ episodeLabel(item) }}</div>
+              <div class="text-caption text-medium-emphasis mt-1">{{ formatDate(item.created_at) }}</div>
+              <div class="text-caption text-medium-emphasis">{{ item.library_name || '—' }} · {{ item.item_type === 'Movie' ? '电影' : '剧集' }}</div>
+              <VChip size="small" variant="tonal" :color="statusPresentation(item).color" class="mt-2">{{ statusPresentation(item).title }}</VChip>
+              <div v-if="item.message" class="text-body-2 mt-2 history-message">{{ item.message }}</div>
+              <div v-if="!item.item_id" class="text-caption text-medium-emphasis mt-1">尚未关联媒体，暂不能重新整理。</div>
+            </div>
+          </VCardText>
+        </VCard>
+        <div v-if="!items.length && !loadingItems" class="py-8 text-center text-medium-emphasis">{{ emptyText }}</div>
+      </div>
+      <VDataTable v-else :headers="headers" :items="items" item-value="id" show-select :model-value="selectedIds" :items-per-page="pageSize" :loading="loadingItems" :item-selectable="canSelectRecord" hide-default-footer data-testid="organize-items" @update:model-value="updateSelection">
+        <template #item.name="{ item }">
+          <div class="d-flex align-center ga-3 py-2"><VAvatar rounded width="42" height="63"><VImg v-if="poster(item)" :src="poster(item)" :alt="itemTitle(item)" cover /><VIcon v-else icon="mdi-movie-open-outline" /></VAvatar><div class="organize-media-copy"><VBtn v-if="item.item_id" variant="text" color="default" class="media-title text-none px-0" :to="`/edit-media/${encodeURIComponent(item.item_id)}`">{{ itemTitle(item) }}</VBtn><div v-else class="font-weight-medium">{{ itemTitle(item) }}</div><div v-if="episodeLabel(item)" class="text-caption text-medium-emphasis">{{ episodeLabel(item) }}</div><div v-if="!item.item_id" class="text-caption text-medium-emphasis">尚未关联媒体</div></div></div>
         </template>
-        <template #item.Type="{ item }"><VChip size="small" variant="tonal" :color="item.Type === 'Movie' ? 'primary' : 'success'">{{ item.Type === 'Movie' ? '电影' : '电视剧' }}</VChip></template>
-        <template #no-data><div class="py-8 text-medium-emphasis">{{ libraryId ? '当前条件下没有媒体' : '请选择媒体库' }}</div></template>
+        <template #item.item_type="{ item }"><VChip size="small" variant="tonal" :color="item.item_type === 'Movie' ? 'primary' : 'success'">{{ item.item_type === 'Movie' ? '电影' : '剧集' }}</VChip></template>
+        <template #item.created_at="{ item }">{{ formatDate(item.created_at) }}</template>
+        <template #item.status="{ item }"><VChip size="small" variant="tonal" :color="statusPresentation(item).color">{{ statusPresentation(item).title }}</VChip><div v-if="item.message" class="text-body-2 mt-1 history-message">{{ item.message }}</div></template>
+        <template #no-data><div class="py-8 text-medium-emphasis">{{ emptyText }}</div></template>
       </VDataTable>
-      <VCardActions class="d-flex flex-wrap justify-space-between"><span class="text-body-2 text-medium-emphasis">{{ total === null ? '总数未确认' : `共 ${total} 项` }}</span><VPagination v-if="pages > 1" v-model="page" :length="pages" :total-visible="5" :disabled="loadingItems || processing" @update:model-value="loadItems" /></VCardActions>
+      <VCardActions class="d-flex flex-wrap justify-space-between"><span class="text-body-2 text-medium-emphasis">{{ total === null ? '总数未确认' : `共 ${total} 条记录` }}</span><VPagination v-if="pages > 1" v-model="page" :length="pages" :total-visible="5" :disabled="loadingItems || processing" @update:model-value="loadItems" /></VCardActions>
     </VCard>
 
     <VDialog v-model="confirmationOpen" max-width="640" :persistent="processing">
       <VCard>
-        <VCardTitle>确认重新整理 {{ confirmationItems.length }} 项</VCardTitle>
+        <VCardTitle class="text-wrap">确认重新整理 {{ confirmationMediaCount }} 项媒体</VCardTitle>
         <VCardText>
-          <p>将重新执行媒体信息重建、回读验收和元数据增强。电影包含关联版本，电视剧包含当前在库季集。</p>
-          <VList bg-color="transparent" density="compact"><VListItem v-for="item in confirmationItems" :key="item.Id" :title="item.Name" :subtitle="`${item.LibraryName} · ${item.Type === 'Movie' ? '电影' : '电视剧'} · ${item.Id}`" /></VList>
+          <p>将重新执行媒体信息重建、回读验收和元数据增强。电影包含关联版本，剧集只处理所选单集。同一媒体的多条记录合并为一次整理。</p>
+          <VList bg-color="transparent" density="compact"><VListItem v-for="item in confirmationItems" :key="item.id" :title="itemTitle(item)" :subtitle="`${episodeLabel(item) || (item.item_type === 'Movie' ? '电影' : '剧集')} · ${item.item_id}`" /></VList>
         </VCardText>
         <VCardActions><VSpacer /><VBtn variant="text" :disabled="processing" @click="confirmationOpen = false">取消</VBtn><VBtn color="warning" :loading="processing" data-testid="organize-confirm" @click="reorganize">开始重新整理</VBtn></VCardActions>
       </VCard>
@@ -57,84 +75,99 @@
 </template>
 
 <script setup>
+import MpPageTitle from './MpPageTitle.vue';
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { useDisplay } from 'vuetify';
 import axios from 'axios';
 import { useMessage } from '@/composables/useFeedback';
 
 const message = useMessage();
-const libraries = ref([]), libraryId = ref(''), loadedLibrary = ref(null);
-const loadingLibraries = ref(false), librariesError = ref('');
-const items = ref([]), search = ref(''), appliedSearch = ref(''), page = ref(1), total = ref(null);
+const { smAndDown } = useDisplay();
+const items = ref([]), search = ref(''), appliedSearch = ref(''), statusFilter = ref('all'), page = ref(1), total = ref(null), trackingSince = ref('');
+const statusOptions = [{ title: '全部状态', value: 'all' }, { title: '成功', value: 'success' }, { title: '失败', value: 'failed' }, { title: '有提醒', value: 'warning' }, { title: '正在处理', value: 'processing' }];
 const pageSize = 24;
 const selectedItems = ref([]), confirmationItems = ref([]), confirmationOpen = ref(false);
 const loadingItems = ref(false), itemsError = ref(''), processing = ref(false), feedback = ref(null);
-let active = true, librarySequence = 0, itemSequence = 0;
-const selectedIds = computed(() => selectedItems.value.map(item => item.Id));
+let active = true, itemSequence = 0;
+const loadedQuery = ref('');
+const queryKey = () => JSON.stringify([page.value, appliedSearch.value, statusFilter.value]);
+const selectedIds = computed(() => selectedItems.value.map(item => item.id));
+const selectedMediaCount = computed(() => new Set(selectedItems.value.filter(item => item.item_id).map(item => item.item_id)).size);
+const canReorganize = computed(() => !processing.value && selectedItems.value.length > 0 && selectedItems.value.every(isReadyRecord));
+const confirmationMediaCount = computed(() => new Set(confirmationItems.value.map(item => item.item_id)).size);
 const pages = computed(() => Math.max(1, Math.ceil((total.value || 0) / pageSize)));
-const canSelectItems = () => !processing.value && !loadingItems.value && !itemsError.value && loadedLibrary.value?.id === libraryId.value;
-const headers = [{ title: '媒体', key: 'Name', sortable: false }, { title: '类型', key: 'Type', sortable: false }, { title: '年份', key: 'ProductionYear', sortable: false }];
-const poster = item => item.ImageTags?.Primary ? `/image_proxy/Items/${encodeURIComponent(item.Id)}/Images/Primary?tag=${encodeURIComponent(item.ImageTags.Primary)}&quality=90` : '';
-
-const loadLibraries = async () => {
-  const sequence = ++librarySequence;
-  loadingLibraries.value = true;
-  try {
-    const { data } = await axios.get('/api/media_center/libraries');
-    if (!active || sequence !== librarySequence) return;
-    if (!Array.isArray(data?.libraries)) throw new Error('媒体库响应无效');
-    libraries.value = data.libraries.filter(item => item.id && !['music', 'playlists', 'boxsets'].includes(String(item.collection_type || '').toLowerCase()));
-    librariesError.value = '';
-    if (!libraryId.value && libraries.value.length) libraryId.value = libraries.value[0].id;
-  } catch (error) {
-    if (active && sequence === librarySequence) librariesError.value = error.response?.data?.error || error.message || '读取媒体库失败';
-  } finally {
-    if (active && sequence === librarySequence) loadingLibraries.value = false;
-  }
+const emptyText = computed(() => itemsError.value ? '入库处理记录尚未读取成功' : '当前条件下没有入库处理记录');
+const canSelectItems = () => !processing.value && !loadingItems.value && !itemsError.value && loadedQuery.value === queryKey();
+const isReadyRecord = item => ['Movie', 'Episode'].includes(item.item_type) && typeof item.item_id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(item.item_id) && ['success', 'warning', 'failed'].includes(item.status);
+const canSelectRecord = item => canSelectItems() && isReadyRecord(item);
+const headers = [{ title: '媒体', key: 'name', sortable: false }, { title: '媒体库', key: 'library_name', sortable: false }, { title: '类型', key: 'item_type', sortable: false }, { title: '处理开始时间', key: 'created_at', sortable: false }, { title: '状态', key: 'status', sortable: false }];
+const itemTitle = item => (item.item_type === 'Episode' ? item.series_name || item.name : item.name) || '未知媒体';
+const episodeLabel = item => {
+  if (item.item_type !== 'Episode') return '';
+  const season = Number.isInteger(item.season_number) ? `S${String(item.season_number).padStart(2, '0')}` : '';
+  const episode = Number.isInteger(item.episode_number) ? `E${String(item.episode_number).padStart(2, '0')}` : '';
+  return [[season, episode].join(''), item.name !== item.series_name ? item.name : ''].filter(Boolean).join(' · ');
+};
+const statusPresentation = item => ({ success: { title: '成功', color: 'success' }, warning: { title: '有提醒', color: 'warning' }, failed: { title: '失败', color: 'error' }, processing: { title: '正在处理', color: 'primary' } }[item.status] || { title: '未知', color: 'secondary' });
+const formatDate = value => {
+  if (!value) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', { hour12: false });
+};
+const poster = item => {
+  const seriesPoster = item.item_type === 'Episode' && item.series_id && item.series_image_tag;
+  const id = seriesPoster ? item.series_id : item.item_id, tag = seriesPoster ? item.series_image_tag : item.image_tag;
+  return id && tag ? `/image_proxy/Items/${encodeURIComponent(id)}/Images/Primary?tag=${encodeURIComponent(tag)}&quality=90` : '';
 };
 
 const loadItems = async () => {
-  if (!libraryId.value) return;
-  const sequence = ++itemSequence, target = libraryId.value;
+  const sequence = ++itemSequence, targetQuery = queryKey();
   loadingItems.value = true;
   try {
-    const { data } = await axios.get(`/api/media_center/libraries/${encodeURIComponent(target)}/items`, {
-      params: { page: page.value, page_size: pageSize, start_index: (page.value - 1) * pageSize, search: appliedSearch.value },
+    const { data } = await axios.get('/api/media_organize/history', {
+      params: { page: page.value, page_size: pageSize, search: appliedSearch.value, status: statusFilter.value },
     });
-    if (!active || sequence !== itemSequence || target !== libraryId.value) return;
-    if (!Array.isArray(data?.items) || typeof data?.total !== 'number' || data.total < 0) throw new Error('媒体列表或分页总数无效');
-    const library = libraries.value.find(item => item.id === target);
-    loadedLibrary.value = { id: target, name: data.library?.name || library?.name || target };
-    items.value = data.items.filter(item => item.Id && ['Movie', 'Series'].includes(item.Type));
+    if (!active || sequence !== itemSequence || targetQuery !== queryKey()) return;
+    if (!Array.isArray(data?.items) || !Number.isInteger(data?.total) || data.total < data.items.length) throw new Error('入库处理记录或分页总数无效');
+    const validItems = data.items.every(item => ((typeof item.id === 'string' && item.id.length > 0) || Number.isSafeInteger(item.id)) && ['Movie', 'Episode'].includes(item.item_type));
+    if (!validItems || new Set(data.items.map(item => item.id)).size !== data.items.length) throw new Error('入库处理记录身份或类型无效');
+    items.value = data.items;
+    const refreshed = new Map(data.items.map(item => [item.id, item]));
+    selectedItems.value = selectedItems.value.map(item => refreshed.get(item.id) || item);
     total.value = data.total;
+    trackingSince.value = typeof data.tracking_since === 'string' ? data.tracking_since : '';
+    loadedQuery.value = targetQuery;
     itemsError.value = '';
   } catch (error) {
-    if (active && sequence === itemSequence) itemsError.value = error.response?.data?.error || error.message || '读取媒体失败，已保留此前选择';
+    if (active && sequence === itemSequence) itemsError.value = error.response?.data?.error || error.message || '读取入库处理记录失败，已保留此前选择';
   } finally {
     if (active && sequence === itemSequence) loadingItems.value = false;
   }
 };
 
 const searchItems = () => { appliedSearch.value = search.value?.trim() || ''; page.value = 1; loadItems(); };
-const removeSelection = id => { if (!processing.value) selectedItems.value = selectedItems.value.filter(item => item.Id !== id); };
+const removeSelection = id => { if (!processing.value) selectedItems.value = selectedItems.value.filter(item => item.id !== id); };
 const updateSelection = ids => {
   if (!canSelectItems()) return;
-  const current = new Set(items.value.map(item => item.Id)), next = new Set(ids);
-  selectedItems.value = selectedItems.value.filter(item => !current.has(item.Id) || next.has(item.Id));
+  const current = new Set(items.value.map(item => item.id)), next = new Set(ids);
+  selectedItems.value = selectedItems.value.filter(item => !current.has(item.id) || next.has(item.id));
   for (const item of items.value) {
-    if (next.has(item.Id) && !selectedItems.value.some(selected => selected.Id === item.Id)) selectedItems.value.push({ ...item, LibraryName: loadedLibrary.value.name });
+    if (next.has(item.id) && canSelectRecord(item) && !selectedItems.value.some(selected => selected.id === item.id)) selectedItems.value.push({ ...item });
   }
 };
+const toggleSelection = (item, enabled) => updateSelection(enabled ? [...selectedIds.value, item.id] : selectedIds.value.filter(id => id !== item.id));
 const openConfirmation = () => {
-  if (processing.value || !selectedItems.value.length) return;
+  if (processing.value || !selectedItems.value.length || !selectedItems.value.every(isReadyRecord)) return;
   confirmationItems.value = selectedItems.value.map(item => ({ ...item }));
   confirmationOpen.value = true;
 };
 const reorganize = async () => {
   if (processing.value || !confirmationItems.value.length) return;
-  const ids = confirmationItems.value.map(item => item.Id);
+  const ids = [...new Set(confirmationItems.value.map(item => item.item_id))];
+  const historyIds = confirmationItems.value.map(item => item.id);
   processing.value = true;
   try {
-    const response = await axios.post('/api/actions/reorganize', { item_ids: ids });
+    const response = await axios.post('/api/actions/reorganize', { item_ids: ids, history_ids: historyIds });
     if (!active) return;
     const result = response.data || {};
     const failures = Array.isArray(result.failures) ? result.failures : [];
@@ -150,6 +183,7 @@ const reorganize = async () => {
     feedback.value = { type, message: verified || failed ? result.message || result.error || '媒体重新整理完成' : '媒体整理结果尚未确认', details };
     message[type](feedback.value.message);
     confirmationOpen.value = false;
+    if (verified) await loadItems();
   } catch (error) {
     if (!active) return;
     const result = error.response?.data || {};
@@ -161,13 +195,24 @@ const reorganize = async () => {
   }
 };
 
-watch(libraryId, () => { page.value = 1; search.value = ''; appliedSearch.value = ''; loadItems(); });
-onMounted(loadLibraries);
-onBeforeUnmount(() => { active = false; ++librarySequence; ++itemSequence; });
+watch(statusFilter, () => { page.value = 1; loadItems(); });
+onMounted(loadItems);
+onBeforeUnmount(() => { active = false; ++itemSequence; });
 </script>
 
 <style scoped>
 .media-organize-page { width: 100%; min-width: 0; }
+.organize-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.organize-search { flex: 1 1 280px; min-width: 0; }
+.organize-filter { flex: 0 1 170px; min-width: 0; }
+.organize-media-copy { min-width: 0; flex: 1; }
 .media-title { max-width: 100%; height: auto; min-height: 36px; white-space: normal; text-align: start; }
-.media-title :deep(.v-btn__content) { white-space: normal; }
+.media-title :deep(.v-btn__content) { white-space: normal; overflow-wrap: anywhere; }
+.media-organize-page :deep(.v-card-title), .media-organize-page :deep(.v-card-subtitle) { white-space: normal; overflow-wrap: anywhere; }
+.history-message { white-space: pre-wrap; overflow-wrap: anywhere; }
+.history-cards { display: grid; gap: 12px; }
+.history-card { min-width: 0; }
+.history-card-body { display: flex; align-items: flex-start; gap: 12px; }
+.history-card-body > .v-selection-control { flex: 0 0 auto; }
+@media (max-width: 540px) { .media-organize-page :deep(.v-card-actions .v-pagination) { width: 100%; } }
 </style>

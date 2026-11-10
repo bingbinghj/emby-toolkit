@@ -1,9 +1,6 @@
 <template>
   <div class="mp-page notification-settings-page">
-    <header class="mb-6">
-      <h1 class="text-h4 mb-1">通知设置</h1>
-      <p class="text-body-2 text-medium-emphasis mb-0">配置通知渠道、通知类型和个人接收账号。</p>
-    </header>
+    <h1 class="sr-only">通知</h1>
 
     <VAlert v-if="configError || accountError" type="error" variant="tonal" class="mb-4">
       <div v-if="configError">{{ configError }}</div><div v-if="accountError">{{ accountError }}</div>
@@ -11,10 +8,8 @@
     </VAlert>
 
     <VForm @submit.prevent="saveChatId">
-      <VCard class="mb-6">
-        <VCardItem title="通知渠道" subtitle="通过 Telegram 接收入库、拦截和识别失败通知。" prepend-icon="mdi-bell-outline">
-          <template #append><VChip size="small" variant="tonal" :color="channelStatus.color">{{ channelStatus.text }}</VChip></template>
-        </VCardItem>
+      <SettingCard class="mb-6" title="通知渠道" subtitle="通过 Telegram 接收入库、拦截和识别失败通知。">
+        <template #status><VChip size="small" variant="tonal" :color="channelStatus.color">{{ channelStatus.text }}</VChip></template>
         <VProgressLinear v-if="loadingConfig" indeterminate />
         <VCardText v-if="configModel">
           <VRow>
@@ -27,20 +22,23 @@
               <VTextField v-model="configModel.telegram_channel_id" label="全局通知频道" placeholder="频道链接、@频道名或 Chat ID" :disabled="busy || loadingConfig" />
             </VCol>
           </VRow>
-          <div class="text-body-2 font-weight-medium mb-2">通知类型</div>
-          <div class="d-flex flex-wrap ga-3">
-            <VCheckbox v-model="configModel.telegram_notify_types" multiple value="library_new" label="入库通知" :disabled="busy" />
-            <VCheckbox v-model="configModel.telegram_notify_types" multiple value="intercept_notify" label="拦截通知" :disabled="busy" />
-            <VCheckbox v-model="configModel.telegram_notify_types" multiple value="recognize_fail" label="识别失败" :disabled="busy" />
-          </div>
+
         </VCardText>
         <VCardText v-else><VSkeletonLoader v-if="loadingConfig" type="list-item-two-line" /><VAlert v-else type="warning" variant="tonal">尚未读取通知配置，请重新读取后保存。</VAlert></VCardText>
-      </VCard>
+      </SettingCard>
 
-      <VCard>
-        <VCardItem title="个人通知" :subtitle="`接收账号：${authStore.username}`" prepend-icon="mdi-account-outline" />
+      <SettingCard title="通知发送范围" :subtitle="`接收账号：${authStore.username}`">
         <VProgressLinear v-if="loading" indeterminate />
         <VCardText>
+          <div v-if="configModel">
+            <div class="text-body-2 font-weight-medium mb-2">消息类型</div>
+            <div class="d-flex flex-wrap ga-3">
+              <VCheckbox v-model="configModel.telegram_notify_types" multiple value="library_new" label="入库通知" :disabled="busy" />
+              <VCheckbox v-model="configModel.telegram_notify_types" multiple value="intercept_notify" label="拦截通知" :disabled="busy" />
+              <VCheckbox v-model="configModel.telegram_notify_types" multiple value="recognize_fail" label="识别失败" :disabled="busy" />
+            </div>
+            <VDivider class="my-4" />
+          </div>
           <VTextField v-model="telegramChatId" label="Telegram 用户ID（私聊ID）" placeholder="例如 123456789"
             hint="先向 Telegram 机器人发送 /start，再填写私聊ID，用于接收个人通知。" persistent-hint :disabled="busy || loading || Boolean(accountError)" />
           <div v-if="globalChannelLink" class="global-notification-link mt-4">
@@ -54,7 +52,7 @@
           <VSpacer />
           <VBtn type="submit" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSavingChatId" :disabled="busy || !canSave">保存通知设置</VBtn>
         </VCardActions>
-      </VCard>
+      </SettingCard>
     </VForm>
   </div>
 </template>
@@ -65,6 +63,7 @@ import axios from 'axios';
 import { useAuthStore } from '@/stores/auth';
 import { useConfig } from '@/composables/useConfig';
 import { useMessage } from '@/composables/useFeedback';
+import SettingCard from './general/SettingCard.vue';
 
 const authStore = useAuthStore();
 const message = useMessage();
@@ -79,7 +78,7 @@ const canSave = computed(() => Boolean(configModel.value) && !loadingConfig.valu
 const canTest = computed(() => canSave.value && Boolean(configModel.value.telegram_bot_token?.trim()) && Boolean(telegramChatId.value.trim() || configModel.value.telegram_channel_id?.trim()));
 const channelStatus = computed(() => configError.value ? { text: configModel.value ? '保存未确认' : '读取失败', color: 'error' }
   : loadingConfig.value ? { text: '正在读取', color: 'secondary' }
-  : configModel.value?.telegram_bot_token?.trim() ? { text: '已配置', color: 'success' } : { text: '未配置', color: 'secondary' });
+  : configModel.value?.telegram_bot_token?.trim() ? { text: '已配置', color: 'info' } : { text: '未配置', color: 'secondary' });
 const globalChannelLink = computed(() => {
   const id = authStore.accountInfo?.telegram_channel_id?.trim();
   if (!id) return '';

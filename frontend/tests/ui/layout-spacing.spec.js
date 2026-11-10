@@ -1,7 +1,7 @@
 import { test, expect } from './fixtures.js';
 
 async function expectTitleBelowNavbar(page, title) {
-  const heading = page.getByRole('heading', { name: title, exact: true });
+  const heading = title === '基础设置' ? page.getByText(title, { exact: true }) : page.getByRole('heading', { name: title, exact: true });
   await expect(heading).toBeVisible();
   await expect.poll(async () => {
     const navbar = await page.locator('.layout-navbar').boundingBox();
@@ -15,7 +15,7 @@ async function expectTitleBelowNavbar(page, title) {
 
 const routes = [
   { path: '/dashboard', title: '仪表盘' },
-  { path: '/settings/general', title: '通用设置' },
+  { path: '/settings/general', title: '基础设置' },
 ];
 for (const colorScheme of ['light', 'dark']) {
   for (const width of [1440, 390]) {

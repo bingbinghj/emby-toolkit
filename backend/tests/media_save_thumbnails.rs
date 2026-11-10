@@ -125,6 +125,146 @@ mod native {
         f.close().await;
     }
 
+    async fn legacy_chapter_filename_recovery(filename_kind: &str) {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        *f.proxy.protocol_fault.lock().await = "sync-failed".into();
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("原生命名旧备份验收");
+        f.save(json!({"mediainfo":edited.clone()}), false).await;
+        let recovery = reload_recovery(&f);
+        let marker = recovery.join("media-reload.json");
+        let mut legacy: Value =
+            serde_json::from_slice(&tokio::fs::read(&marker).await.unwrap()).unwrap();
+        for key in ["targets", "observations", "thumbnail_times"] {
+            legacy.as_object_mut().unwrap().remove(key);
+        }
+        let chapter = legacy["files"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|file| {
+                PathBuf::from(file["path"].as_str().unwrap())
+                    .components()
+                    .any(|part| part.as_os_str() == "chapters")
+            })
+            .unwrap();
+        let old_path = PathBuf::from(chapter["path"].as_str().unwrap());
+        let ticks = old_path
+            .file_stem()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        let name = match filename_kind {
+            "native" => format!("1762645565_{ticks}.jpg"),
+            "unrecorded" => format!("1762645565_{}.jpg", ticks + 1),
+            _ => "chapter_0.jpg".into(),
+        };
+        let original_image = old_path.with_file_name(name);
+        tokio::fs::copy(chapter["backup"].as_str().unwrap(), &original_image)
+            .await
+            .unwrap();
+        chapter["path"] = json!(original_image);
+        tokio::fs::write(&marker, serde_json::to_vec(&legacy).unwrap())
+            .await
+            .unwrap();
+        f.proxy.finish_sync("61616", edited).await;
+        let before = f.native.host.item.lock().await.clone();
+        let temporary = f.native.host.settings.lock().await.clone();
+        let status = recovery_status(&f.native.state).await;
+        let outcome = recover_from_editor(
+            &f.native.state,
+            status["records"][0]["id"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(*f.native.host.item.lock().await, before);
+        assert_eq!(*f.proxy.metadata_ids.lock().await, vec!["61616"]);
+        if filename_kind == "native" {
+            assert_eq!(outcome["state"], "completed", "{outcome}");
+            assert_eq!(
+                *f.native.host.settings.lock().await,
+                f.proxy.original_settings
+            );
+            assert!(!recovery.exists());
+            assert!(original_image.is_file());
+            assert_eq!(recovery_status(&f.native.state).await["pending"], false);
+        } else {
+            assert_eq!(outcome["state"], "failed", "{outcome}");
+            assert_eq!(*f.native.host.settings.lock().await, temporary);
+            assert!(marker.is_file());
+            assert!(recovery.join("original-settings.json").is_file());
+            assert_eq!(recovery_status(&f.native.state).await["pending"], true);
+        }
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn editor_recovery_accepts_emby_timestamp_tick_image_names_and_removes_verified_backups()
+    {
+        legacy_chapter_filename_recovery("native").await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn editor_recovery_keeps_legacy_backups_when_chapter_filename_evidence_is_invalid() {
+        for kind in ["unrecorded", "unknown"] {
+            legacy_chapter_filename_recovery(kind).await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn editor_recovery_retries_verified_backup_cleanup_without_importing_or_changing_settings()
+     {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        let root = f.native.state.data_dir.join("backups/media-info-reload");
+        let directory = root.join("saved-cleanup-retry");
+        tokio::fs::create_dir_all(&directory).await.unwrap();
+        // A failed recursive deletion may already have removed the original
+        // restoration materials; cleanup must use its sibling completion fact.
+        tokio::fs::write(
+            directory.join("media-reload.json"),
+            b"partially removed backup",
+        )
+        .await
+        .unwrap();
+        let marker = root.join("saved-cleanup-retry.cleanup.json");
+        tokio::fs::write(
+            &marker,
+            serde_json::to_vec(&json!({"kind":"verified-cleanup", "version":1,
+            "directory_name":"saved-cleanup-retry", "target_ids":["61616"],
+            "completed_at":"2026-11-10T10:56:32Z"}))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let before = f.native.host.item.lock().await.clone();
+        let settings = f.native.host.settings.lock().await.clone();
+        let status = recovery_status(&f.native.state).await;
+        assert_eq!(status["records"].as_array().unwrap().len(), 1);
+        assert_eq!(status["records"][0]["kind"], "verified-cleanup");
+        assert_eq!(status["records"][0]["can_recover"], true);
+        let outcome = recover_from_editor(
+            &f.native.state,
+            status["records"][0]["id"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(outcome["state"], "completed", "{outcome}");
+        assert_eq!(outcome["result"]["backup_deleted"], true);
+        assert_eq!(outcome["result"]["pending"], false);
+        assert_eq!(*f.native.host.item.lock().await, before);
+        assert_eq!(*f.native.host.settings.lock().await, settings);
+        assert!(f.proxy.metadata_ids.lock().await.is_empty());
+        assert!(f.proxy.refresh_ids.lock().await.is_empty());
+        assert_eq!(f.native.host.clears.load(Ordering::SeqCst), 0);
+        assert!(!directory.exists());
+        assert!(!marker.exists());
+        assert_eq!(recovery_status(&f.native.state).await["pending"], false);
+        f.close().await;
+    }
+
     #[tokio::test]
     #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
     async fn editor_recovery_keeps_the_guard_and_original_settings_when_resource_evidence_is_missing()

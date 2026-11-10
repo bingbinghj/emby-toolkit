@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dashboardModules, normalizeDashboardLayout, reorderVisibleDashboard, storageFrom115, formatDashboardBytes, embyDashboardImage, formatDashboardCount, dashboardSnapshot, projectDashboardItems, projectDashboardStatistics } from '../src/utils/dashboard.js';
+import { dashboardModules, normalizeDashboardLayout, normalizeDashboardProfile, dashboardLayoutProfile, dashboardColumns, reorderVisibleDashboard, storageFrom115, formatDashboardBytes, embyDashboardImage, formatDashboardCount, dashboardSnapshot, projectDashboardItems, projectDashboardStatistics } from '../src/utils/dashboard.js';
 
 const response = rt_space_info => ({ data: { valid: true, user_info: { rt_space_info } } });
 
@@ -125,4 +125,29 @@ test('statistics replace atomically only when the whole widget has a confirmed s
   assert.deepEqual(projectDashboardStatistics(valid), valid);
   assert.throws(() => projectDashboardStatistics({ ...valid, movie_count: { count: 0, error: '未确认' } }));
   assert.throws(() => projectDashboardStatistics({ ...valid, episode_count: { count: null } }));
+});
+
+
+test('library snapshots retain confirmed zero and error counts without persisting private fields', () => {
+  assert.deepEqual(projectDashboardItems([{ id: 'movies', name: '电影', item_count: 0, token: 'private' }], true), [{ id: 'movies', name: '电影', item_count: 0 }]);
+  assert.deepEqual(projectDashboardItems([{ id: 'movies', name: '电影', item_count: null, count_error: '数量读取失败' }], true), [{ id: 'movies', name: '电影', item_count: null, count_error: '数量读取失败' }]);
+});
+
+
+test('GridStack profiles keep MP desktop, tablet and mobile columns and reject invalid geometry', () => {
+  assert.equal(dashboardLayoutProfile(1920), 'desktop');
+  assert.equal(dashboardLayoutProfile(960), 'tablet');
+  assert.equal(dashboardLayoutProfile(640), 'mobile');
+  assert.deepEqual(['desktop', 'tablet', 'mobile'].map(dashboardColumns), [12, 6, 1]);
+  const legacy = { order: ['libraries', 'recent'], hidden: ['statistics'] };
+  assert.deepEqual(normalizeDashboardProfile(legacy, 'desktop'), { ...normalizeDashboardLayout(legacy), items: {} });
+  const value = { items: { storage: { x: 0, y: 2, w: 4, h: 12, manualHeight: true }, statistics: { x: 10, y: 0, w: 6, h: 8 }, recent: { x: -1, y: 0, w: 12, h: 8 }, libraries: { x: 0, y: 0, w: 1, h: 2000 } } };
+  assert.deepEqual(normalizeDashboardProfile(value, 'desktop').items, { storage: { x: 0, y: 2, w: 4, h: 12, manualHeight: true } });
+  assert.deepEqual(normalizeDashboardProfile(value, 'mobile').items, {});
+});
+
+
+test('dashboard profile timestamps survive canonical projection and malformed timestamps do not', () => {
+  assert.equal(normalizeDashboardProfile({ updatedAt: 123456 }).updatedAt, 123456);
+  for (const updatedAt of [-1, NaN, Infinity, '123', 1.5, Number.MAX_SAFE_INTEGER + 1]) assert.equal(normalizeDashboardProfile({ updatedAt }).updatedAt, undefined);
 });

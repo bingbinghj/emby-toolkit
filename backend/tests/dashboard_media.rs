@@ -9,19 +9,41 @@ async fn fixture(failure: &str) -> (Value, Vec<HashMap<String, String>>) {
     let observed = requests.clone();
     let failure = failure.to_string();
     let mode = failure.clone();
+    let count_failure = failure.clone();
     let app = Router::new()
         .route("/Users/admin/Items", get(move |Query(query): Query<HashMap<String,String>>| {
-            let requests = requests.clone(); let failure = failure.clone();
+            let requests = requests.clone(); let failure = count_failure.clone();
             async move {
                 requests.lock().await.push(query.clone());
                 if query.get("Limit").is_some_and(|v| v == "0") {
+                    if query.contains_key("ParentId") {
+                        if failure == "library-count" { return Json(json!({"TotalRecordCount":null})); }
+                        return Json(json!({"Items":[],"TotalRecordCount":17}));
+                    }
                     let kind = query.get("IncludeItemTypes").unwrap();
                     if failure == "count" && kind == "Episode" { return Json(json!({"TotalRecordCount":"bad"})); }
                     return Json(json!({"Items":[],"TotalRecordCount":match kind.as_str(){"Movie"=>11,"Series"=>7,"Episode"=>42,_=>3}}));
                 }
-                if failure == "recent" { return Json(json!({"Items":false})); }
-                let id = if failure == "unsafe-id" { "../bad" } else { "101" };
-                Json(json!({"Items":[{"Id":id,"Name":"新入库电影","Type":"Movie","DateCreated":"2026-11-10T01:00:00Z","ImageTags":{"Primary":"emby-poster"},"Path":"must-not-reach-ui","ProviderIds":{"Tmdb":"999"}}]}))
+                Json(json!({"Items":[]}))
+            }
+        }))
+        .route("/Users/admin/Items/Latest", get({
+            let failure = failure.clone(); let observed = observed.clone();
+            move |Query(query): Query<HashMap<String,String>>| {
+                let failure = failure.clone(); let observed = observed.clone();
+                async move {
+                    observed.lock().await.push(query);
+                    if failure == "recent" { return Json(json!({"Items":false})); }
+                    if failure == "wide-dashboard" {
+                        return Json(json!((0..100).map(|index| json!({"Id":format!("new-{index}"),"Name":format!("新入库 {index}"),"Type":"Movie"})).collect::<Vec<_>>()));
+                    }
+                    let id = if failure == "unsafe-id" { "../bad" } else { "101" };
+                    Json(json!([
+                        {"Id":id,"Name":"新入库电影","Type":"Movie","ProductionYear":2026,"ImageTags":{"Primary":"emby-poster"},"Path":"must-not-reach-ui","ProviderIds":{"Tmdb":"999"}},
+                        {"Id":"series-1","Name":"刚更新的剧集","Type":"Series","ProductionYear":2025},
+                        {"Id":"episode-1","Name":"默认聚合外的单集","Type":"Episode"}
+                    ]))
+                }
             }
         }))
         .route("/Users/admin/Views", get(move || {
@@ -88,18 +110,40 @@ async fn dashboard_reads_emby_counts_latest_and_library_primary_artwork() {
     assert!(value["recent"][0].get("ProviderIds").is_none());
     assert_eq!(value["libraries"].as_array().unwrap().len(), 1);
     assert_eq!(value["libraries"][0]["image_tag"], "emby-library-composite");
-    let recent = requests.iter().find(|q| q.get("SortBy").is_some()).unwrap();
-    assert_eq!(recent["SortBy"], "DateCreated");
-    assert_eq!(recent["SortOrder"], "Descending");
-    assert_eq!(recent["Limit"], "24");
+    assert_eq!(value["libraries"][0]["item_count"], 17);
+    assert_eq!(value["recent"].as_array().unwrap().len(), 2);
+    assert_eq!(value["recent"][1]["item_type"], "Series");
+    let recent = requests
+        .iter()
+        .find(|q| q.get("MediaTypes").is_some())
+        .unwrap();
+    assert_eq!(recent["MediaTypes"], "Video");
+    assert_eq!(recent["Limit"], "100");
+    assert!(!recent.contains_key("GroupItems"));
     assert_eq!(
         requests
             .iter()
             .filter(|q| q.get("Limit").is_some_and(|v| v == "0"))
             .count(),
-        4
+        5
     );
     assert_eq!(value["errors"], json!({}));
+}
+
+#[tokio::test]
+async fn failed_library_counts_remain_unknown_with_actionable_error() {
+    let (value, _) = fixture("library-count").await;
+    assert!(value["libraries"][0]["item_count"].is_null());
+    assert!(value["libraries"][0]["count_error"].is_string());
+    assert_eq!(value["libraries"][0]["image_tag"], "emby-library-composite");
+    assert_eq!(value["statistics"]["movie_count"]["count"], 11);
+}
+
+#[tokio::test]
+async fn latest_candidates_support_moviepilots_wide_dashboard_capacity() {
+    let (value, _) = fixture("wide-dashboard").await;
+    assert_eq!(value["recent"].as_array().unwrap().len(), 100);
+    assert_eq!(value["recent"][99]["id"], "new-99");
 }
 
 #[tokio::test]

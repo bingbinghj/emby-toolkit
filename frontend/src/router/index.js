@@ -88,6 +88,7 @@ const routes = [
   },
   {
     path: '/settings/general',
+    alias: '/setting',
     name: 'settings-general',
     component: GeneralSettingsPage,
     meta: { requiresAuth: true },
@@ -142,6 +143,11 @@ const router = createRouter({
 
 // --- 3. 路由守卫 (核心修改) ---
 router.beforeEach(async (to, from, next) => {
+  // MoviePilot setting links carry the category in query.tab.
+  if (to.name === 'settings-general' && to.query.tab === 'notification') {
+    next({ name: 'settings-notifications', query: { ...to.query, tab: undefined }, replace: true });
+    return;
+  }
   const authStore = useAuthStore();
 
   // 1. 如果是公共页面 (Login, Setup)，直接放行

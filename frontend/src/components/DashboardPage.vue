@@ -1,24 +1,23 @@
 <template>
   <div class="dashboard-page mp-page">
     <header class="d-flex flex-wrap align-center justify-space-between ga-3 mb-4">
-      <div><h1 class="text-h5 font-weight-medium mb-1">仪表盘</h1><p class="text-body-2 text-medium-emphasis mb-0">115 网盘与 Emby 媒体概览</p></div>
+      <MpPageTitle title="仪表盘" subtitle="115 网盘与 Emby 媒体概览" />
       <div class="d-flex flex-wrap ga-2">
         <VBtn variant="text" prepend-icon="mdi-refresh" :loading="loadingMedia || loadingStorage" @click="refresh">刷新</VBtn>
-        <VBtn variant="tonal" prepend-icon="mdi-view-dashboard-edit-outline" @click="isLayoutEditing = !isLayoutEditing">{{ isLayoutEditing ? '完成调整' : '调整布局' }}</VBtn>
-        <VBtn variant="text" prepend-icon="mdi-eye-outline" @click="showModules = true">显示模块</VBtn>
       </div>
     </header>
     <VAlert v-if="layoutError" type="warning" variant="tonal" class="mb-4">{{ layoutError }}</VAlert>
-    <VAlert v-if="isLayoutEditing" type="info" variant="tonal" class="mb-4">拖动卡片右上角调整位置，也可在“显示模块”中调整顺序。布局自动保存到当前浏览器。</VAlert>
-    <VAlert v-if="!visibleModules.length" type="info" variant="tonal">所有模块均已隐藏，可点击“显示模块”重新开启。</VAlert>
-    <Draggable v-model="visibleModules" item-key="id" tag="div" class="dashboard-grid" handle=".dashboard-drag-handle" direction="vertical" :force-fallback="true" :fallback-on-body="true" :disabled="!isLayoutEditing" :animation="180">
-      <template #item="{ element }">
-        <section :class="['dashboard-module', `dashboard-module-${element.width}`]" :data-dashboard-module="element.id">
-          <VCard class="dashboard-card h-100">
+    <VAlert v-if="layoutSyncError" type="warning" variant="tonal" class="mb-4">{{ layoutSyncError }}<VBtn variant="text" size="small" class="ml-2" @click="loadRemoteLayout(layoutProfile)">重试布局同步</VBtn></VAlert>
+    <VAlert v-if="isLayoutEditing" type="info" variant="tonal" class="mb-4">拖动卡片右上角调整位置，点击右下角勾选按钮保存布局。</VAlert>
+    <VAlert v-if="!visibleModules.length" type="info" variant="tonal">所有模块均已隐藏，可点击右下角设置按钮重新开启。</VAlert>
+    <div ref="gridRef" class="grid-stack dashboard-grid" :class="{ 'is-editing': isLayoutEditing }" :data-layout-profile="layoutProfile">
+        <section v-for="element in visibleModules" :key="element.id" class="grid-stack-item dashboard-module" :class="{ 'is-manual-height': layout.items[element.id]?.manualHeight }" :data-dashboard-module="element.id" :gs-id="element.id" :gs-x="widgetFor(element.id).x" :gs-y="widgetFor(element.id).y" :gs-w="widgetFor(element.id).w" :gs-h="widgetFor(element.id).h">
+          <div class="grid-stack-item-content">
+          <VCard class="dashboard-card">
             <VCardItem>
               <VCardTitle class="dashboard-card-title">{{ element.title }}</VCardTitle>
               <template #append>
-                <VBtn v-if="isLayoutEditing" class="dashboard-drag-handle" icon="mdi-drag" variant="text" size="small" :aria-label="`拖动${element.title}`" />
+                <span v-if="isLayoutEditing" class="dashboard-drag-handle" role="button" tabindex="0" :aria-label="`拖动${element.title}`"><VIcon icon="mdi-drag" size="small" /></span>
                 <VBtn v-else :icon="moduleError(element.id) ? undefined : 'mdi-refresh'" :prepend-icon="moduleError(element.id) ? 'mdi-refresh' : undefined" variant="text" size="small" :aria-label="`${moduleError(element.id) ? '重试' : '刷新'}${element.title}`" :loading="element.id === 'storage' ? loadingStorage : loadingMedia" @click="element.id === 'storage' ? loadStorage() : loadMedia()">{{ moduleError(element.id) ? '重试' : undefined }}</VBtn>
               </template>
             </VCardItem>
@@ -26,10 +25,10 @@
               <VSkeletonLoader v-if="loadingStorage && !storage" type="heading, text, text" />
               <template v-else-if="storage">
                 <div class="storage-number">{{ storage.totalText }}</div>
-                <div class="text-body-2 text-medium-emphasis mt-1">{{ storage.percent === null ? '使用比例未知' : `已使用 ${storage.percent}%` }}</div>
+                <div class="text-body-2 text-medium-emphasis mt-1">{{ storage.percent === null ? '使用比例未知' : `已使用 ${storage.percent.toFixed(1)}%` }}</div>
                 <VProgressLinear v-if="storage.percent !== null" :model-value="storage.percent" height="6" rounded class="my-3" />
-                <div class="text-caption text-medium-emphasis mt-3">可用 {{ storage.availableText }} / 已用 {{ storage.usedText }}</div>
-                <VIcon icon="mdi-harddisk" class="storage-icon" size="58" color="primary" />
+                <div class="storage-caption text-medium-emphasis">可用 {{ storage.availableText }} / 总容量 {{ storage.totalText }}</div>
+                <VImg :src="storageImage" class="storage-icon" />
               </template>
               <div v-else class="text-body-2 text-medium-emphasis">空间信息未知</div>
               <VAlert v-if="storageError" type="warning" variant="tonal" class="mt-2" density="compact">{{ storageError }}；{{ staleMessage(storageSavedAt) }}</VAlert>
@@ -37,8 +36,8 @@
             <VCardText v-else-if="element.id === 'statistics'">
               <div class="dashboard-stat-grid">
                 <div v-for="item in statisticTypes" :key="item.key" class="dashboard-stat-item">
-                  <VAvatar :color="item.color" size="44" variant="tonal"><VIcon :icon="item.icon" size="24" /></VAvatar>
-                  <div><span class="text-caption text-medium-emphasis">{{ item.label }}</span><div class="dashboard-number" :data-testid="`dashboard-${item.key}`">{{ formatDashboardCount(statistics[item.key]?.count) }}</div><div v-if="statistics[item.key]?.error" class="text-caption text-warning">读取未确认</div></div>
+                  <VAvatar :color="item.color" size="46"><VIcon :icon="item.icon" size="24" /></VAvatar>
+                  <div class="dashboard-stat-copy"><span class="dashboard-stat-label">{{ item.label }}</span><div class="dashboard-number" :data-testid="`dashboard-${item.key}`">{{ formatDashboardCount(statistics[item.key]?.count) }}</div><div v-if="statistics[item.key]?.error" class="text-caption text-warning">读取未确认</div></div>
                 </div>
               </div>
               <VAlert v-if="mediaErrors.statistics" type="warning" variant="tonal" class="mt-3" density="compact">{{ mediaErrors.statistics }}；{{ staleMessage(snapshotTimes.statistics) }}</VAlert>
@@ -47,15 +46,25 @@
               <VAlert v-if="mediaErrors.recent" type="warning" variant="tonal" class="mb-3" density="compact">{{ mediaErrors.recent }}；{{ staleMessage(snapshotTimes.recent) }}</VAlert>
               <VSkeletonLoader v-if="loadingMedia && recent === null" type="image" />
               <div v-else-if="recent?.length" class="dashboard-poster-grid">
-                <VCard v-for="item in recent" :key="item.id" class="dashboard-media-card app-hover-lift-card" :to="`/edit-media/${encodeURIComponent(item.id)}`" :aria-label="`编辑${item.name}`" variant="flat">
-                  <VImg :src="embyDashboardImage(item) || undefined" aspect-ratio="0.6666667" cover>
-                    <template #error><div class="dashboard-art-fallback"><VIcon :icon="mediaIcon(item.item_type)" size="40" /></div></template>
-                    <VChip class="dashboard-media-type" size="x-small" variant="flat" :color="item.item_type === 'Movie' ? 'primary' : 'info'">{{ mediaType(item.item_type) }}</VChip>
-                  </VImg>
-                  <div class="dashboard-poster-copy"><div class="text-body-2 text-truncate">{{ item.name }}</div><div class="text-caption text-medium-emphasis">{{ item.item_type === 'Episode' ? `S${item.season_number ?? '?'} · E${item.episode_number ?? '?'}` : item.production_year || 'Emby 新入库' }}</div></div>
-                </VCard>
+                <VHover v-for="item in visibleRecent" :key="item.id">
+                  <template #default="hover">
+                    <div v-bind="hover.props" class="dashboard-poster-hover-area">
+                      <VCard class="dashboard-media-card app-hover-lift-card" :class="{ 'app-hover-lift-card--hovering': hover.isHovering, 'dashboard-poster-fallback': failedPosterImages.has(item.id) }" :to="`/edit-media/${encodeURIComponent(item.id)}`" :aria-label="`编辑${item.name}`" variant="flat">
+                        <VImg class="dashboard-poster-image" :src="embyDashboardImage(item) || undefined" aspect-ratio="0.6666667" cover @error="failedPosterImages.add(item.id)" @load="failedPosterImages.delete(item.id)">
+                          <template #placeholder><VSkeletonLoader type="image" class="h-100" /></template>
+                          <template #error><div class="dashboard-art-fallback"><VIcon :icon="mediaIcon(item.item_type)" size="40" /></div></template>
+                        </VImg>
+                        <VChip class="dashboard-media-type" size="small" variant="flat" :color="item.item_type === 'Movie' ? '#2563eb' : '#6366f1'">{{ mediaType(item.item_type) }}</VChip>
+                        <div class="dashboard-poster-overlay" :class="{ 'is-visible': hover.isHovering }">
+                          <span class="dashboard-poster-subtitle" :title="String(item.production_year || 'Emby 新入库')">{{ String(item.production_year || 'Emby 新入库') }}</span>
+                          <h3 class="dashboard-poster-title" :title="item.name">{{ item.name }}</h3>
+                        </div>
+                      </VCard>
+                    </div>
+                  </template>
+                </VHover>
               </div>
-              <p v-else-if="recent !== null" class="text-body-2 text-medium-emphasis mb-0">暂无入库媒体</p>
+              <p v-else-if="recent !== null" class="text-body-2 text-medium-emphasis mb-0">暂无最近入库记录</p>
               <p v-else class="text-body-2 text-medium-emphasis mb-0">最新入库未知</p>
             </VCardText>
             <VCardText v-else class="pt-1">
@@ -65,71 +74,256 @@
                 <VCard v-for="library in libraries" :key="library.id" :to="`/library/${encodeURIComponent(library.id)}`" class="dashboard-library-card app-hover-lift-card" :aria-label="`打开${library.name}`" variant="flat">
                   <VImg :src="embyDashboardImage(library, true) || undefined" :aspect-ratio="16 / 9" cover>
                     <template #error><div class="dashboard-art-fallback"><VIcon :icon="mediaIcon(library.collection_type)" size="44" /></div></template>
+                    <span class="dashboard-library-count" :aria-label="`媒体数量 ${formatDashboardCount(library.item_count)}`" :title="library.count_error || '媒体数量'">{{ formatDashboardCount(library.item_count) }}</span>
                   </VImg>
                   <div class="dashboard-library-title text-truncate">{{ library.name }}</div>
                 </VCard>
               </div>
-              <p v-else-if="libraries !== null" class="text-body-2 text-medium-emphasis mb-0">Emby 暂无媒体库</p>
+              <p v-else-if="libraries !== null" class="text-body-2 text-medium-emphasis mb-0">暂无媒体库数据</p>
               <p v-else class="text-body-2 text-medium-emphasis mb-0">媒体库信息未知</p>
             </VCardText>
           </VCard>
+          </div>
         </section>
-      </template>
-    </Draggable>
-    <VDialog v-model="showModules" max-width="560">
-      <VCard title="仪表盘模块" subtitle="选择显示模块，并调整显示顺序。">
+    </div>
+    <VDialog v-model="showModules" max-width="560" :fullscreen="width < 960" scrollable>
+      <VCard class="dashboard-settings-card">
+        <VCardItem><VCardTitle><VIcon icon="mdi-tune" size="small" class="me-2" />仪表盘设置</VCardTitle><template #append><VBtn icon="mdi-close" variant="text" aria-label="关闭仪表盘设置" @click="showModules = false" /></template></VCardItem>
+        <VDivider />
         <VCardText>
-          <div v-for="(id, index) in layout.order" :key="id" class="d-flex align-center ga-2">
-            <VCheckbox :model-value="!layout.hidden.includes(id)" :label="moduleById(id).title" hide-details class="flex-grow-1" @update:model-value="toggleModule(id, $event)" />
-            <VBtn icon="mdi-arrow-up" variant="text" size="small" :disabled="index === 0" :aria-label="`上移${moduleById(id).title}`" @click="moveModule(index, -1)" />
-            <VBtn icon="mdi-arrow-down" variant="text" size="small" :disabled="index === layout.order.length - 1" :aria-label="`下移${moduleById(id).title}`" @click="moveModule(index, 1)" />
+          <p class="text-body-2 text-medium-emphasis mb-4">选择仪表盘中显示的内容，位置与大小可通过右下角布局按钮调整。</p>
+          <div class="dashboard-settings-grid">
+            <button v-for="element in dashboardModules" :key="element.id" type="button" class="dashboard-setting-item" :class="{ enabled: !settingsHidden.includes(element.id) }" :aria-pressed="!settingsHidden.includes(element.id)" @click="toggleSettingsModule(element.id)">
+              <VIcon :icon="settingsHidden.includes(element.id) ? 'mdi-circle-outline' : 'mdi-check-circle'" :color="settingsHidden.includes(element.id) ? undefined : 'primary'" size="small" />
+              <span>{{ element.title }}</span>
+            </button>
           </div>
         </VCardText>
-        <VCardActions><VBtn variant="text" @click="layout = normalizeDashboardLayout(null)">恢复默认布局</VBtn><VSpacer /><VBtn variant="flat" @click="showModules = false">完成</VBtn></VCardActions>
+        <VCardActions class="app-dialog-actions"><VSpacer /><VBtn variant="flat" prepend-icon="mdi-content-save" @click="saveModules">保存</VBtn></VCardActions>
       </VCard>
     </VDialog>
+    <Teleport to="body">
+      <div ref="fabStack" class="compact-fab-stack dashboard-fab-stack" :class="{ 'is-expanded': fabExpanded }">
+        <div class="compact-fab compact-fab--secondary"><VBtn icon="mdi-tune" color="info" variant="tonal" aria-label="仪表盘设置" title="仪表盘设置" @click="showModules = true" /></div>
+        <div v-if="isLayoutEditing" class="compact-fab compact-fab--secondary"><VBtn icon="mdi-restore" color="warning" variant="tonal" aria-label="恢复默认布局" title="恢复默认布局" @click="resetLayout" /></div>
+        <div class="compact-fab compact-fab--primary"><VBtn :icon="isLayoutEditing ? 'mdi-check' : 'mdi-view-dashboard-edit'" color="primary" :aria-label="isLayoutEditing ? '完成调整' : '调整布局'" :title="isLayoutEditing ? '完成调整' : '调整布局'" @click="toggleLayoutEditing" /></div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { useDisplay } from 'vuetify';
+import { GridStack } from 'gridstack';
+import 'gridstack/dist/gridstack.min.css';
 import axios from 'axios';
-import Draggable from 'vuedraggable';
+import MpPageTitle from './MpPageTitle.vue';
+import storageImage from '@/assets/mp-storage.png';
 import { useAuthStore } from '@/stores/auth';
-import { dashboardModules, normalizeDashboardLayout, reorderVisibleDashboard, storageFrom115, embyDashboardImage, formatDashboardCount, dashboardSnapshot, projectDashboardItems, projectDashboardStatistics } from '@/utils/dashboard';
+import { dashboardModules, normalizeDashboardProfile, dashboardLayoutProfile, dashboardColumns, storageFrom115, embyDashboardImage, formatDashboardCount, dashboardSnapshot, projectDashboardItems, projectDashboardStatistics } from '@/utils/dashboard';
 
-const layoutKey = 'etk-dashboard-layout-v1';
+const authStore = useAuthStore();
+const snapshotUserId = String(authStore.user?.id || '');
+const { width } = useDisplay();
+const layoutProfile = computed(() => dashboardLayoutProfile(width.value));
+const layoutKey = profile => `etk-dashboard-layout-v2:${snapshotUserId}:${profile}`;
 const layoutError = ref('');
-const readLayout = () => {
-  try { return normalizeDashboardLayout(JSON.parse(localStorage.getItem(layoutKey) || 'null')); }
-  catch { return normalizeDashboardLayout(null); }
+const profileDrafts = new Map();
+const confirmedProfiles = new Map();
+const layoutSyncErrors = ref({});
+const layoutSyncError = computed(() => layoutSyncErrors.value[layoutProfile.value] || '');
+let profileSaveQueue = Promise.resolve();
+let applyingLayout = 0;
+let layoutRevision = 0;
+const layoutReadSequences = new Map();
+const readLayout = profile => {
+  try { return normalizeDashboardProfile(JSON.parse(localStorage.getItem(layoutKey(profile)) || localStorage.getItem('etk-dashboard-layout-v1') || 'null'), profile); }
+  catch { return normalizeDashboardProfile(null, profile); }
 };
-const layout = ref(readLayout());
-const moduleById = id => dashboardModules.find(item => item.id === id);
-const visibleModules = computed({
-  get: () => layout.value.order.filter(id => !layout.value.hidden.includes(id)).map(moduleById),
-  set: value => { layout.value.order = reorderVisibleDashboard(layout.value.order, value.map(item => item.id)); },
-});
-watch(layout, value => {
-  try { localStorage.setItem(layoutKey, JSON.stringify(value)); layoutError.value = ''; }
-  catch { layoutError.value = '当前浏览器无法保存布局，刷新后将使用默认布局'; }
-}, { deep: true });
-const showModules = ref(false);
+const layout = ref(readLayout(layoutProfile.value));
 const isLayoutEditing = ref(false);
-const toggleModule = (id, shown) => { layout.value.hidden = shown ? layout.value.hidden.filter(item => item !== id) : [...new Set([...layout.value.hidden, id])]; };
-const moveModule = (index, direction) => {
-  const order = [...layout.value.order];
-  [order[index], order[index + direction]] = [order[index + direction], order[index]];
-  layout.value.order = order;
+const moduleById = id => dashboardModules.find(item => item.id === id);
+const visibleModules = computed(() => layout.value.order.filter(id => !layout.value.hidden.includes(id)).map(moduleById));
+const queueRemoteLayout = (value, profile) => {
+  profileSaveQueue = profileSaveQueue.catch(() => {}).then(async () => {
+    if (String(authStore.user?.id || '') !== snapshotUserId) return;
+    try {
+      const { data } = await axios.post(`/api/dashboard/layout/${profile}`, { layout: value });
+      const comparable = input => {
+        const result = normalizeDashboardProfile(input, profile);
+        return JSON.stringify({ ...result, hidden: [...result.hidden].sort() });
+      };
+      if (!data?.layout || comparable(data.layout) !== comparable(value)) throw new Error('布局保存未确认');
+      if (active && confirmedProfiles.get(profile)?.updatedAt === value.updatedAt) delete layoutSyncErrors.value[profile];
+    } catch (error) {
+      if (active) layoutSyncErrors.value[profile] = `布局同步失败：${error.response?.data?.error || error.message || '请重试'}`;
+    }
+  });
+  return profileSaveQueue;
+};
+const saveLayout = (value, profile = layoutProfile.value) => {
+  const saved = { ...normalizeDashboardProfile(value, profile), updatedAt: Date.now() };
+  confirmedProfiles.set(profile, saved);
+  try { localStorage.setItem(layoutKey(profile), JSON.stringify(saved)); layoutError.value = ''; }
+  catch { layoutError.value = '当前浏览器无法保存布局，刷新后将使用服务器布局'; }
+  return queueRemoteLayout(saved, profile);
+};
+watch(layout, value => {
+  if (applyingLayout) return;
+  ++layoutRevision;
+  if (!isLayoutEditing.value) saveLayout(value);
+}, { deep: true });
+const applyLayout = async value => {
+  ++applyingLayout;
+  layout.value = JSON.parse(JSON.stringify(value));
+  await nextTick();
+  --applyingLayout;
+};
+const loadRemoteLayout = async profile => {
+  await nextTick();
+  if (!isCurrentDashboard() || profile !== layoutProfile.value) return;
+  const sequence = (layoutReadSequences.get(profile) || 0) + 1;
+  layoutReadSequences.set(profile, sequence);
+  const revision = layoutRevision;
+  try {
+    const { data } = await axios.get(`/api/dashboard/layout/${profile}`);
+    if (!isCurrentDashboard() || sequence !== layoutReadSequences.get(profile)) return;
+    if (!data || !Object.hasOwn(data, 'layout') || (data.layout !== null && (typeof data.layout !== 'object' || Array.isArray(data.layout)))) throw new Error('布局响应无效');
+    const local = confirmedProfiles.get(profile) || readLayout(profile);
+    const remote = data.layout === null ? null : normalizeDashboardProfile(data.layout, profile);
+    let hasLocal = confirmedProfiles.has(profile);
+    try { hasLocal ||= !!(localStorage.getItem(layoutKey(profile)) || localStorage.getItem('etk-dashboard-layout-v1')); } catch {}
+    if (hasLocal && (!remote || (local.updatedAt || 0) > (remote.updatedAt || 0))) {
+      if (!local.updatedAt) await saveLayout(local, profile);
+      else await queueRemoteLayout(local, profile);
+      return;
+    }
+    delete layoutSyncErrors.value[profile];
+    if (!remote || profile !== layoutProfile.value || isLayoutEditing.value || revision !== layoutRevision) return;
+    confirmedProfiles.set(profile, remote);
+    try { localStorage.setItem(layoutKey(profile), JSON.stringify(remote)); } catch {}
+    await applyLayout(remote);
+    await rebuildGrid();
+  } catch (error) {
+    if (isCurrentDashboard() && sequence === layoutReadSequences.get(profile)) layoutSyncErrors.value[profile] = `布局读取失败：${error.response?.data?.error || error.message || '请重试'}`;
+  }
+};
+const gridRef = ref(null);
+let dashboardGrid;
+let contentObserver;
+let resizeFrame;
+let gridGeneration = 0;
+const resizeStartHeights = new Map();
+const widgetFor = id => {
+  if (layout.value.items[id]) return layout.value.items[id];
+  const columns = dashboardColumns(layoutProfile.value);
+  let x = 0, y = 0, rowHeight = 0;
+  for (const module of visibleModules.value) {
+    const w = module.width === 'full' || columns === 1 ? columns : Math.round(columns * (module.width === 'summary' ? 1 / 3 : 2 / 3));
+    const h = module.width === 'full' ? 20 : 8;
+    if (x + w > columns) { x = 0; y += rowHeight; rowHeight = 0; }
+    if (module.id === id) return { x, y, w, h };
+    x += w; rowHeight = Math.max(rowHeight, h);
+  }
+  return { x: 0, y: 0, w: columns, h: 8 };
+};
+const captureGrid = () => {
+  if (!dashboardGrid) return;
+  for (const node of dashboardGrid.engine.nodes) {
+    layout.value.items[node.id] = { x: node.x, y: node.y, w: node.w, h: node.h, manualHeight: layout.value.items[node.id]?.manualHeight === true };
+  }
+};
+const resizeToContent = () => {
+  if (resizeFrame) cancelAnimationFrame(resizeFrame);
+  resizeFrame = requestAnimationFrame(() => {
+    resizeFrame = undefined;
+    if (!dashboardGrid) return;
+    const posterGrid = gridRef.value.querySelector('.dashboard-poster-grid');
+    if (posterGrid) recentCapacity.value = Math.max(1, Math.floor((posterGrid.clientWidth + 16) / 160)) * (width.value < 960 ? 3 : 2);
+    if (isLayoutEditing.value) return;
+    dashboardGrid.batchUpdate();
+    for (const node of dashboardGrid.engine.nodes) {
+      if (layout.value.items[node.id]?.manualHeight) continue;
+      const card = node.el.querySelector('.dashboard-card');
+      const h = Math.max(4, Math.ceil((card.getBoundingClientRect().height + 16) / 16));
+      if (node.h !== h) dashboardGrid.update(node.el, { h });
+    }
+    dashboardGrid.batchUpdate(false);
+  });
+};
+const rebuildGrid = async () => {
+  const generation = ++gridGeneration;
+  contentObserver?.disconnect();
+  dashboardGrid?.destroy(false);
+  dashboardGrid = undefined;
+  await nextTick();
+  if (generation !== gridGeneration || !gridRef.value) return;
+  // GridStack mutates attributes outside Vue; always restore the current profile before registration.
+  gridRef.value.querySelectorAll('[data-dashboard-module]').forEach(element => {
+    for (const [key, value] of Object.entries(widgetFor(element.dataset.dashboardModule))) {
+      if (['x', 'y', 'w', 'h'].includes(key)) element.setAttribute(`gs-${key}`, String(value));
+    }
+  });
+  // MP GridStack uses a 16px cell, 8px margins and separate device profiles.
+  dashboardGrid = GridStack.init({ animate: false, cellHeight: 16, margin: 8, column: dashboardColumns(layoutProfile.value), float: false, draggable: { cancel: 'input,textarea,button,select,option,a', handle: '.dashboard-drag-handle' }, resizable: { handles: 'e,s,se' }, staticGrid: !isLayoutEditing.value }, gridRef.value);
+  dashboardGrid.on('dragstop', captureGrid);
+  dashboardGrid.on('resizestart', (_event, element) => resizeStartHeights.set(element.gridstackNode.id, element.gridstackNode.h));
+  dashboardGrid.on('resizestop', (_event, element) => {
+    const node = element.gridstackNode;
+    layout.value.items[node.id] = { ...widgetFor(node.id), manualHeight: layout.value.items[node.id]?.manualHeight === true || node.h !== resizeStartHeights.get(node.id) };
+    resizeStartHeights.delete(node.id);
+    captureGrid();
+  });
+  contentObserver = new ResizeObserver(resizeToContent);
+  gridRef.value.querySelectorAll('.dashboard-card').forEach(card => contentObserver.observe(card));
+  resizeToContent();
+};
+watch(() => layout.value.order.join(',') + '|' + layout.value.hidden.join(','), rebuildGrid, { flush: 'post' });
+watch(layoutProfile, async (profile, previous) => {
+  if (isLayoutEditing.value) { captureGrid(); profileDrafts.set(previous, JSON.parse(JSON.stringify(layout.value))); }
+  await applyLayout(profileDrafts.get(profile) || confirmedProfiles.get(profile) || readLayout(profile));
+  await rebuildGrid();
+  loadRemoteLayout(profile);
+}, { flush: 'post' });
+const fabStack = ref(null);
+const fabExpanded = ref(false);
+const handleFabClick = event => {
+  if (window.matchMedia('(hover: hover) and (pointer: fine)').matches) return;
+  if (!fabStack.value?.contains(event.target)) { fabExpanded.value = false; return; }
+  if (fabExpanded.value) return;
+  event.preventDefault();
+  event.stopPropagation();
+  fabExpanded.value = true;
+};
+const showModules = ref(false);
+const settingsHidden = ref([]);
+watch(showModules, shown => { if (shown) settingsHidden.value = [...layout.value.hidden]; });
+const toggleSettingsModule = id => { settingsHidden.value = settingsHidden.value.includes(id) ? settingsHidden.value.filter(item => item !== id) : [...settingsHidden.value, id]; };
+const saveModules = () => { layout.value.hidden = [...settingsHidden.value]; showModules.value = false; };
+const resetLayout = () => { layout.value = normalizeDashboardProfile(null, layoutProfile.value); rebuildGrid(); };
+const toggleLayoutEditing = async () => {
+  if (isLayoutEditing.value) {
+    ++applyingLayout;
+    try {
+      captureGrid();
+      for (const [profile, draft] of profileDrafts) saveLayout(draft, profile);
+      profileDrafts.clear();
+      saveLayout(layout.value);
+      isLayoutEditing.value = false;
+      await nextTick();
+    } finally { --applyingLayout; }
+  } else { isLayoutEditing.value = true; await nextTick(); }
+  dashboardGrid?.setStatic(!isLayoutEditing.value);
+  if (isLayoutEditing.value) { dashboardGrid?.enableMove(true); dashboardGrid?.enableResize(true); }
+  else resizeToContent();
 };
 const statisticTypes = [
   { key: 'movie_count', label: '电影', icon: 'mdi-movie-roll', color: 'primary' },
-  { key: 'tv_count', label: '电视剧', icon: 'mdi-television', color: 'success' },
+  { key: 'tv_count', label: '电视剧', icon: 'mdi-television-box', color: 'success' },
   { key: 'episode_count', label: '剧集', icon: 'mdi-television-classic', color: 'warning' },
-  { key: 'music_count', label: '音乐（歌曲）', icon: 'mdi-music', color: 'info' },
+  { key: 'music_count', label: '音乐', icon: 'mdi-music-box-multiple', color: 'info' },
 ];
-const authStore = useAuthStore();
-const snapshotUserId = String(authStore.user?.id || '');
 const projections = { statistics: projectDashboardStatistics, recent: value => projectDashboardItems(value), libraries: value => projectDashboardItems(value, true) };
 const snapshots = Object.fromEntries(Object.keys(projections).map(key => [key, dashboardSnapshot(snapshotUserId, key)]));
 const readSnapshot = key => {
@@ -142,6 +336,9 @@ const initialSnapshots = Object.fromEntries(Object.keys(projections).map(key => 
 const snapshotTimes = ref(Object.fromEntries(Object.keys(projections).map(key => [key, initialSnapshots[key]?.savedAt])));
 const statistics = ref(initialSnapshots.statistics?.value || {});
 const recent = ref(initialSnapshots.recent?.value ?? null);
+const recentCapacity = ref(24);
+const failedPosterImages = ref(new Set());
+const visibleRecent = computed(() => recent.value?.slice(0, recentCapacity.value) || []);
 const libraries = ref(initialSnapshots.libraries?.value ?? null);
 const mediaErrors = ref({});
 const storage = ref(null);
@@ -198,43 +395,84 @@ const loadStorage = async () => {
 const refresh = () => { loadStorage(); loadMedia(); };
 const mediaType = type => ({ Movie: '电影', Series: '电视剧', Episode: '剧集', MusicAlbum: '音乐' }[type] || '媒体');
 const mediaIcon = type => /music|Audio|Music/.test(type || '') ? 'mdi-music' : /tv|Series|Episode/.test(type || '') ? 'mdi-television' : 'mdi-movie-outline';
-onMounted(refresh);
-onBeforeUnmount(() => { active = false; ++mediaSequence; ++storageSequence; });
+onMounted(() => { refresh(); rebuildGrid(); loadRemoteLayout(layoutProfile.value); document.addEventListener('click', handleFabClick, true); });
+onBeforeUnmount(() => { active = false; ++mediaSequence; ++storageSequence; ++gridGeneration; contentObserver?.disconnect(); dashboardGrid?.destroy(false); if (resizeFrame) cancelAnimationFrame(resizeFrame); document.removeEventListener('click', handleFabClick, true); });
 </script>
 
 <style scoped>
-.dashboard-grid { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 20px; }
+.dashboard-grid { margin: -8px; }
 .dashboard-module { min-width: 0; }
-.dashboard-module-summary { grid-column: span 4; }
-.dashboard-module-statistics { grid-column: span 8; }
-.dashboard-module-full { grid-column: span 12; }
-.dashboard-card-title { font-size: 1rem; font-weight: 500; }
-.dashboard-card { border-radius: var(--v-card-border-radius, 12px); }
-.dashboard-drag-handle { cursor: grab; touch-action: none; }
-.storage-content { position: relative; min-height: 114px; padding-top: 0; }
-.storage-number { font-size: clamp(1.5rem, 1.8vw, 1.75rem); font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums; padding-right: 70px; }
-.storage-icon { position: absolute; right: 24px; top: 0; opacity: 0.8; }
+.dashboard-grid > .dashboard-module > .grid-stack-item-content { overflow: visible; }
+.dashboard-card { display: flex; flex-direction: column; container-type: inline-size; }
+.dashboard-grid.is-editing .dashboard-card, .dashboard-module.is-manual-height .dashboard-card { height: 100%; min-height: 0; }
+.dashboard-grid.is-editing .dashboard-card > :deep(.v-card-text), .dashboard-module.is-manual-height .dashboard-card > :deep(.v-card-text) { overflow: auto; min-height: 0; flex: 1 1 auto; }
+.dashboard-grid :deep(.ui-resizable-handle) { z-index: 11; }
+.dashboard-grid.is-editing :deep(.ui-resizable-se) { width: 24px; height: 24px; right: -4px; bottom: -4px; }
+.dashboard-card-title { font-size: .92rem; font-weight: 650; }
+.dashboard-card { border: var(--app-surface-border); border-radius: var(--app-surface-radius); box-shadow: var(--app-surface-shadow); }
+.dashboard-drag-handle { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; cursor: move; touch-action: none; }
+.storage-content { position: static; min-height: 114px; padding-top: 0; }
+.storage-number { color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); font-size: clamp(1.5rem, 1.8vw, 1.75rem); font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums; padding-right: 70px; }
+.storage-icon { position: absolute; right: 1.35rem; top: 2.7rem; width: clamp(3.6rem, 18%, 4.5rem); filter: hue-rotate(225deg) saturate(.72); }
+.storage-caption { padding-right: 4.75rem; font-size: .68rem; margin-top: .35rem; line-height: 1.5; overflow-wrap: anywhere; }
 .dashboard-stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); min-height: 98px; align-items: center; }
 .dashboard-stat-item { display: flex; gap: 12px; align-items: center; padding: 0 18px; min-width: 0; }
 .dashboard-stat-item:first-child { padding-left: 0; }
 .dashboard-stat-item + .dashboard-stat-item { border-left: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
-.dashboard-number { color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); font-size: 1.2rem; font-weight: 700; font-variant-numeric: tabular-nums; }
-.dashboard-poster-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 16px; }
-.dashboard-library-row { display: flex; gap: 21px; overflow-x: auto; padding-bottom: 8px; scroll-snap-type: x proximity; scrollbar-width: thin; }
-.dashboard-media-card, .dashboard-library-card { min-width: 0; background: transparent; }
-.dashboard-library-card { flex: 0 0 clamp(154px, 14vw, 245px); scroll-snap-align: start; }
-.dashboard-library-card :deep(.v-img) { border-radius: 9px; }
-.dashboard-media-type { position: absolute; top: 8px; left: 8px; }
-.dashboard-poster-copy { padding-top: 8px; }
-.dashboard-library-title { padding-top: 8px; text-align: center; font-size: .9rem; font-weight: 400; line-height: 1.4; }
-.dashboard-art-fallback { height: 100%; width: 100%; display: flex; align-items: center; justify-content: center; background: rgba(var(--v-theme-on-surface), 0.08); }
-@media (max-width: 1200px) { .dashboard-module-summary, .dashboard-module-statistics { grid-column: span 12; } }
-@media (max-width: 740px) {
-  .dashboard-grid { gap: 16px; }
+.dashboard-stat-copy { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
+.dashboard-stat-label { color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: .72rem; }
+.dashboard-number { color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); font-size: 1.15rem; font-weight: 700; line-height: 1.4; font-variant-numeric: tabular-nums; }
+.dashboard-poster-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(144px, 1fr)); gap: 16px; padding: 4px 0; }
+.dashboard-library-row { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 20px; padding: 4px 0 8px; }
+.dashboard-media-card, .dashboard-library-card { min-width: 0; background: transparent; border: 0; box-shadow: none; }
+.dashboard-library-card { border-radius: 0; overflow: visible; }
+.dashboard-media-card { aspect-ratio: 2 / 3; border: var(--app-surface-border); border-radius: var(--app-surface-radius); box-shadow: var(--app-surface-shadow); overflow: hidden; }
+.dashboard-poster-hover-area { width: 100%; height: 100%; }
+.dashboard-poster-image { height: 100%; width: 100%; }
+.dashboard-library-card :deep(.v-img) { border-radius: 9px; overflow: hidden; }
+.dashboard-media-type { position: absolute; top: 8px; left: 8px; color: #fff !important; font-weight: 700; }
+.dashboard-media-type :deep(.v-chip__content) { color: #fff !important; }
+.dashboard-poster-overlay { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: flex-end; padding: 8px 8px 20px; background: linear-gradient(rgba(45, 55, 72, .4) 0%, rgba(45, 55, 72, .9) 100%); opacity: 0; transition: opacity .18s ease; pointer-events: none; }
+.dashboard-poster-overlay.is-visible, .dashboard-media-card:focus-visible .dashboard-poster-overlay, .dashboard-poster-fallback .dashboard-poster-overlay { opacity: 1; }
+@media (hover: none) { .dashboard-poster-overlay { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .dashboard-poster-overlay { transition: none; } }
+.dashboard-library-count { position: absolute; top: 6px; right: 6px; min-width: 24px; height: 24px; padding: 0 5px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: #52b54b; color: #fff; font-size: .75rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.dashboard-poster-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; margin: 0 0 4px; color: #fff !important; font-size: 18px; font-weight: 700; line-height: 1.5; }
+.dashboard-poster-subtitle { color: #fff !important; font-size: 14px; font-weight: 600; line-height: 1.5; }
+.dashboard-library-title { padding: 8px 4px 4px; text-align: center; font-size: .9rem; font-weight: 400; line-height: 1.5; }
+.dashboard-settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.dashboard-setting-item { display: flex; align-items: center; gap: 8px; min-height: 48px; border: 1px solid rgba(var(--v-theme-on-surface), .1); border-radius: 10px; background: rgba(var(--v-theme-on-surface), .04); padding: 10px 12px; color: rgba(var(--v-theme-on-surface), .72); text-align: start; font-size: .9rem; font-weight: 550; line-height: 1.35; cursor: pointer; }
+.dashboard-setting-item.enabled { border-color: rgba(var(--v-theme-primary), .45); background: rgba(var(--v-theme-primary), .08); }
+.dashboard-setting-item:focus-visible { outline: 2px solid rgb(var(--v-theme-primary)); outline-offset: 2px; }
+@media (max-width: 599px) { .dashboard-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@container (max-width: 680px) {
   .dashboard-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 8px; }
   .dashboard-stat-item { padding: 0 8px; gap: 10px; }
   .dashboard-stat-item:nth-child(odd) { border-left: 0; padding-left: 0; }
-  .dashboard-poster-grid { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 12px; }
-  .dashboard-library-row { gap: 11px; }
+}
+@container (max-width: 280px) {
+  .dashboard-stat-grid { grid-template-columns: minmax(0, 1fr); }
+  .dashboard-stat-item { border-left: 0; padding: 0; }
+}
+@container (max-width: 160px) {
+  .dashboard-stat-item :deep(.v-avatar) { display: none; }
+  .dashboard-stat-item { gap: 0; }
+}
+@container (max-width: 380px) {
+  .storage-icon { display: none; }
+  .storage-number, .storage-caption { padding-right: 0; }
+  .storage-number { overflow-wrap: anywhere; }
+}
+@container (max-width: 180px) { .storage-number { font-size: 1.25rem; } }
+@container (max-width: 1440px) { .dashboard-library-row { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
+@container (max-width: 1190px) { .dashboard-library-row { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
+@container (max-width: 840px) { .dashboard-library-row { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@container (max-width: 600px) { .dashboard-library-row { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@container (max-width: 480px) { .dashboard-library-row { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@container (max-width: 280px) { .dashboard-library-row { grid-template-columns: minmax(0, 1fr); } }
+.dashboard-art-fallback { height: 100%; width: 100%; display: flex; align-items: center; justify-content: center; background: rgba(var(--v-theme-on-surface), 0.08); }
+@media (max-width: 740px) {
+  .dashboard-poster-grid { grid-template-columns: repeat(auto-fill, minmax(144px, 1fr)); gap: 16px; }
+  .dashboard-library-row { gap: 12px; }
 }
 </style>

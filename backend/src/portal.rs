@@ -6,7 +6,7 @@ use crate::{
 use axum::{
     Json, Router,
     extract::{Multipart, Path, State},
-    http::HeaderMap,
+    http::{HeaderMap, header},
     routing::{get, post},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -16,6 +16,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/portal/account-info", get(account))
         .route("/api/portal/users", get(users))
         .route("/api/portal/users/{id}", post(save_user_details))
+        .route("/api/portal/users/{id}/password", post(save_user_password))
         .route("/api/portal/telegram-chat-id", post(chat_id))
         .route("/api/portal/telegram-bot-info", get(bot_info))
         .route(
@@ -58,59 +59,184 @@ async fn users(State(state): State<AppState>) -> Result<Json<Value>> {
             "registration_date":extra.map(|detail|&detail["registration_date"]),
             "expiration_date":extra.map(|detail|&detail["expiration_date"]),
             "notes":extra.map(|detail|&detail["notes"]),
-            "telegram_chat_id":extra.map(|detail|&detail["telegram_chat_id"])
+            "has_password":user["HasPassword"]
         }));
     }
     Ok(Json(json!({"users":users})))
 }
+fn valid_user_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+async fn native_user(state: &AppState, id: &str) -> Result<Value> {
+    let native = state
+        .emby(reqwest::Method::GET, &format!("Users/{id}"), &[], None)
+        .await?;
+    if native["Id"] != id || string(&native, "Name").is_empty() {
+        return Err(ApiError::bad("Emby 未返回对应用户，未保存资料"));
+    }
+    if native["Policy"]["IsAdministrator"].as_bool().is_none()
+        || native["Policy"]["IsDisabled"].as_bool().is_none()
+    {
+        return Err(ApiError::bad("Emby 用户权限和启用状态尚未确认"));
+    }
+    Ok(native)
+}
+async fn cache_native_user(state: &AppState, native: &Value) -> Result<()> {
+    sqlx::query("INSERT INTO emby_users(id,name,is_administrator,profile_image_tag,policy_json,last_updated_at) VALUES($1,$2,$3,$4,$5,NOW()) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,is_administrator=EXCLUDED.is_administrator,profile_image_tag=EXCLUDED.profile_image_tag,policy_json=EXCLUDED.policy_json,last_updated_at=NOW()")
+        .bind(string(native,"Id")).bind(string(native,"Name"))
+        .bind(native["Policy"]["IsAdministrator"].as_bool().unwrap_or(false))
+        .bind(native["PrimaryImageTag"].as_str()).bind(&native["Policy"]).execute(&state.db).await?;
+    Ok(())
+}
 async fn save_user_details(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<(HeaderMap, Json<Value>)> {
+    if !valid_user_id(&id)
+        || body.as_object().is_none_or(|fields| {
+            fields
+                .keys()
+                .any(|key| !matches!(key.as_str(), "name" | "is_administrator" | "is_disabled"))
+        })
+    {
+        return Err(ApiError::bad("无效 Emby 用户资料"));
+    }
+    let name = body["name"]
+        .as_str()
+        .ok_or_else(|| ApiError::bad("用户名必须是文本"))?
+        .trim();
+    let administrator = body["is_administrator"]
+        .as_bool()
+        .ok_or_else(|| ApiError::bad("用户角色必须是布尔值"))?;
+    let disabled = body["is_disabled"]
+        .as_bool()
+        .ok_or_else(|| ApiError::bad("用户状态必须是布尔值"))?;
+    if name.is_empty() || name.chars().count() > 128 || name.chars().any(char::is_control) {
+        return Err(ApiError::bad("用户名需为 1–128 个可显示字符"));
+    }
+    let session = state
+        .sessions
+        .from_headers(&headers)
+        .ok_or_else(ApiError::forbidden)?;
+    if session.user_id == id && (!administrator || disabled) {
+        return Err(ApiError::bad("不能禁用当前登录用户或取消自己的管理员权限"));
+    }
+    let native = native_user(&state, &id).await?;
+    if disabled && (administrator || native["Policy"]["IsAdministrator"] == true) {
+        return Err(ApiError::bad("请先保存取消管理员权限，再禁用该用户"));
+    }
+    if native["Name"] != name && !native["Configuration"].is_object() {
+        return Err(ApiError::bad("Emby 用户配置尚未确认，未修改用户名"));
+    }
+    let result: Result<()> = async {
+        if native["Name"] != name {
+            // Emby's update endpoint also replaces Configuration, even for a rename.
+            let mut profile = native.clone();
+            profile["Name"] = json!(name);
+            state
+                .emby(
+                    reqwest::Method::POST,
+                    &format!("Users/{id}"),
+                    &[],
+                    Some(profile),
+                )
+                .await?;
+        }
+        if native["Policy"]["IsAdministrator"] != administrator
+            || native["Policy"]["IsDisabled"] != disabled
+        {
+            // Merge the two edited fields into Emby's current policy; retain access and playback permissions.
+            let mut policy = native["Policy"].clone();
+            policy["IsAdministrator"] = json!(administrator);
+            policy["IsDisabled"] = json!(disabled);
+            state
+                .emby(
+                    reqwest::Method::POST,
+                    &format!("Users/{id}/Policy"),
+                    &[],
+                    Some(policy),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+    .await;
+    // A transport error can arrive after Emby applied a write. Reconcile the current native state,
+    // and never turn partial or unverified changes into a successful response.
+    let saved = native_user(&state, &id).await.map_err(|error| {
+        ApiError(
+            error.0,
+            format!("Emby 用户资料尚未确认，请刷新核对当前状态：{}", error.1),
+        )
+    })?;
+    cache_native_user(&state, &saved).await?;
+    if let Err(error) = result {
+        return Err(ApiError(
+            error.0,
+            format!("用户资料未完整保存，请刷新核对 Emby 当前状态：{}", error.1),
+        ));
+    }
+    if saved["Name"] != name
+        || saved["Policy"]["IsAdministrator"] != administrator
+        || saved["Policy"]["IsDisabled"] != disabled
+    {
+        return Err(ApiError::bad("Emby 用户资料未完整生效，请刷新核对当前状态"));
+    }
+    let mut response_headers = HeaderMap::new();
+    if session.user_id == id && session.name != name {
+        let mut updated = session;
+        updated.name = name.to_string();
+        response_headers.insert(
+            header::SET_COOKIE,
+            crate::auth::cookie(&state.sessions.sign_administrator(&updated))
+                .parse()
+                .map_err(|_| ApiError::bad("登录资料更新失败"))?,
+        );
+    }
+    Ok((
+        response_headers,
+        Json(json!({
+            "message":"Emby 用户资料已保存","id":id,
+            "user":{"id":id,"name":saved["Name"],"is_administrator":administrator,"is_disabled":disabled,"profile_image_tag":saved["PrimaryImageTag"],"last_activity_date":saved["LastActivityDate"],"last_login_date":saved["LastLoginDate"],"has_password":saved["HasPassword"]}
+        })),
+    ))
+}
+async fn save_user_password(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>> {
-    if id.is_empty()
-        || id.len() > 128
-        || !id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-        || body.as_object().is_none_or(|fields| {
-            fields
-                .keys()
-                .any(|key| !matches!(key.as_str(), "notes" | "telegram_chat_id"))
-        })
+    if !valid_user_id(&id)
+        || body
+            .as_object()
+            .is_none_or(|fields| fields.keys().any(|key| key != "new_password"))
     {
-        return Err(ApiError::bad("无效用户资料，Emby 权限只在 Emby 中管理"));
+        return Err(ApiError::bad("无效密码请求"));
     }
-    let notes = body["notes"]
+    let password = body["new_password"]
         .as_str()
-        .ok_or_else(|| ApiError::bad("备注必须是文本"))?
-        .trim();
-    let chat = body["telegram_chat_id"]
-        .as_str()
-        .ok_or_else(|| ApiError::bad("Telegram 私聊 ID 必须是文本"))?
-        .trim();
-    if notes.chars().count() > 2000 || chat.len() > 128 {
-        return Err(ApiError::bad("用户备注或 Telegram 私聊 ID 过长"));
+        .ok_or_else(|| ApiError::bad("密码必须是文本"))?;
+    if password.is_empty() || password.len() > 1024 {
+        return Err(ApiError::bad("请输入不超过 1024 字节的新密码"));
     }
-    let user = state
-        .emby(reqwest::Method::GET, &format!("Users/{id}"), &[], None)
+    native_user(&state, &id).await?;
+    state
+        .emby(
+            reqwest::Method::POST,
+            &format!("Users/{id}/Password"),
+            &[],
+            Some(json!({"Id":id,"NewPw":password,"ResetPassword":false})),
+        )
         .await?;
-    if user["Id"] != id || string(&user, "Name").is_empty() {
-        return Err(ApiError::bad("Emby 未返回对应用户，未保存资料"));
-    }
-    let administrator = user["Policy"]["IsAdministrator"]
-        .as_bool()
-        .ok_or_else(|| ApiError::bad("Emby 用户角色尚未确认，未保存资料"))?;
-    let mut transaction = state.db.begin().await?;
-    sqlx::query("INSERT INTO emby_users(id,name,is_administrator,profile_image_tag,policy_json,last_updated_at) VALUES($1,$2,$3,$4,$5,NOW()) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,is_administrator=EXCLUDED.is_administrator,profile_image_tag=EXCLUDED.profile_image_tag,policy_json=EXCLUDED.policy_json,last_updated_at=NOW()")
-        .bind(&id).bind(string(&user,"Name")).bind(administrator)
-        .bind(user["PrimaryImageTag"].as_str()).bind(&user["Policy"]).execute(&mut *transaction).await?;
-    sqlx::query("INSERT INTO emby_users_extended(emby_user_id,notes,telegram_chat_id,created_by) VALUES($1,$2,$3,'admin') ON CONFLICT(emby_user_id) DO UPDATE SET notes=EXCLUDED.notes,telegram_chat_id=EXCLUDED.telegram_chat_id")
-        .bind(&id).bind(if notes.is_empty(){None}else{Some(notes)}).bind(if chat.is_empty(){None}else{Some(chat)})
-        .execute(&mut *transaction).await?;
-    transaction.commit().await?;
-    Ok(Json(json!({"message":"用户备注和通知资料已保存","id":id})))
+    Ok(Json(json!({"message":"Emby 用户密码已更新","id":id})))
 }
+
 fn user(state: &AppState, headers: &HeaderMap) -> Result<String> {
     Ok(state
         .sessions
@@ -228,15 +354,6 @@ async fn avatar(
         let key = string(&config, "emby_api_key");
         drop(config);
         let endpoint = format!("{}/Users/{id}/Images/Primary", url.trim_end_matches('/'));
-        let _ = crate::emby::send(
-            state
-                .http
-                .delete(&endpoint)
-                .header("X-Emby-Token", &key)
-                .header("Content-Type", &mime)
-                .timeout(std::time::Duration::from_secs(10)),
-        )
-        .await;
         crate::emby::send(
             state
                 .http

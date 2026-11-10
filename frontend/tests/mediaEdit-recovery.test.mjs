@@ -6,7 +6,8 @@ import vm from 'node:vm';
 const page = readFileSync(new URL('../src/components/MediaEditPage.vue', import.meta.url), 'utf8');
 const record = { id: 'saved-recovery', directory: '/config/backups/media-info-reload/saved-recovery', target_ids: ['101'], reason: '前次媒体刷新尚未完成验收', can_recover: true };
 const pendingState = () => ({ pending: true, records: [structuredClone(record)] });
-const result = { message: '恢复已通过验收', recovered_id: record.id, pending: false };
+const result = { message: '恢复已通过验收', recovered_id: record.id, pending: false, backup_deleted: true };
+const cleanupRecord = { ...record, kind: 'verified-cleanup', reason: '媒体与原配置已验收，备份清理尚未完成，可重试删除' };
 const functionSource = name => {
   const start = page.indexOf(`const ${name} = `);
   assert.ok(start >= 0, `missing actual ${name} handler`);
@@ -90,15 +91,54 @@ test('other pending records retain the restriction after one record is restored'
   assert.deepEqual(f.reloads, []);
 });
 
-test('recovery cleanup warnings retain their directory while verified status allows saving', async () => {
+test('recovery cleanup warning rechecks status and retains the cleanup action', async () => {
   const warning = `临时备份清理失败，恢复材料仍保留：${record.directory}`;
-  const f = fixture({ post: async () => ({ data: { ...result, warnings: 1, warning_details: [warning] } }) });
+  const f = fixture({
+    post: async () => ({ status: 207, data: { ...result, pending: true, backup_deleted: false, warnings: 1, warning_details: [warning] } }),
+    get: async () => ({ data: { pending: true, records: [cleanupRecord] } }),
+  });
   await f.context.recover(record);
-  assert.equal(f.context.mediaRecoveryState.value.pending, false);
+  assert.equal(f.context.mediaRecoveryState.value.pending, true);
+  assert.equal(f.context.mediaRecoveryState.value.records[0].kind, 'verified-cleanup');
   assert.equal(f.messages.at(-1).type, 'warning');
+  assert.deepEqual(f.requests.map(request => request.method), ['POST', 'GET']);
   assert.equal(f.context.mediaOperationFeedback.value.details[0], warning);
   assert.equal(f.context.mediaInfoSaveFeedback.value.details[0], warning);
-  assert.deepEqual(f.reloads, ['101']);
+  assert.equal(f.context.mediaRecoveryError.value, warning);
+  assert.deepEqual(f.reloads, []);
+});
+
+test('verified cleanup confirmation only asks to delete already verified backups', () => {
+  const f = fixture();
+  f.context.mediaRecoveryState.value.records = [cleanupRecord];
+  f.context.confirm(cleanupRecord);
+  assert.equal(f.dialogs[0].title, '清理恢复备份');
+  assert.equal(f.dialogs[0].positiveText, '开始清理');
+  assert.match(f.dialogs[0].content, /原神医配置已通过验收/);
+  assert.match(f.dialogs[0].content, /删除已验收的恢复备份/);
+});
+
+test('retrying cleanup deletes the backup without reloading or replacing a media draft', async () => {
+  let attempts = 0;
+  const warning = '备份删除失败：目录不可写';
+  const f = fixture({
+    post: async () => ++attempts === 1
+      ? { status: 207, data: { ...result, pending: true, backup_deleted: false, warnings: 1, warning_details: [warning] } }
+      : { status: 200, data: { ...result, message: '恢复备份已清理' } },
+    get: async () => ({ data: attempts === 1 ? { pending: true, records: [cleanupRecord] } : { pending: false, records: [] } }),
+  });
+  const draft = JSON.stringify(f.context.mediaInfoData.value);
+  await f.context.recover(record);
+  await f.context.recover(f.context.mediaRecoveryState.value.records[0]);
+  assert.equal(f.context.mediaRecoveryState.value.pending, false);
+  assert.equal(f.context.mediaRecoveryError.value, '');
+  assert.equal(f.context.mediaOperationFeedback.value, null);
+  assert.equal(f.context.mediaInfoSaveFeedback.value, null);
+  assert.deepEqual(f.requests.map(request => request.method), ['POST', 'GET', 'POST', 'GET']);
+  assert.equal(f.requests[0].body.recovery_id, f.requests[2].body.recovery_id);
+  assert.deepEqual(f.reloads, []);
+  assert.equal(JSON.stringify(f.context.mediaInfoData.value), draft);
+  assert.equal(f.messages.at(-1).type, 'success');
 });
 
 test('failed final task keeps recovery entry and the actual failure', async () => {

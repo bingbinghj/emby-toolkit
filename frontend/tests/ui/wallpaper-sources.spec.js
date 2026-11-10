@@ -100,13 +100,13 @@ for (const [theme, glass] of [['light', false], ['dark', true]]) {
     await page.addInitScript(([theme, glass]) => localStorage.setItem('moviepilot-theme-customizer', JSON.stringify({ theme, glassEnabled: glass })), [theme, glass]);
     await appearance(page, api);
     await expect(page.locator('link#moviepilot-fonts')).toHaveAttribute('href', /family=Inter:.*family=Noto\+Sans\+SC.*display=swap/);
-    const styles = await page.getByRole('heading', { name: '通用设置', exact: true }).evaluate(element => {
+    const styles = await page.getByText('基础设置', { exact: true }).evaluate(element => {
       const css = getComputedStyle(element);
       return { font: css.fontFamily, color: css.color };
     });
     expect(styles.font).toContain('Inter');
     expect(styles.font).toContain('Noto Sans SC');
     expect(styles.color).not.toMatch(/^rgba\(.*?,\s*0\)$/);
-    await expect(page.getByRole('heading', { name: '通用设置', exact: true })).toBeVisible();
+    await expect(page.getByText('基础设置', { exact: true })).toBeVisible();
   });
 }
