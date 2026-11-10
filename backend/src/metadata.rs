@@ -7,7 +7,7 @@ use crate::{
 };
 use serde_json::{Value, json};
 use sqlx::{Postgres, Row, Transaction};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub async fn row(state: &AppState, id: &str, kind: &str) -> Result<Option<Value>> {
     Ok(sqlx::query_scalar(
@@ -39,7 +39,7 @@ pub(crate) struct WriteReport {
 }
 
 pub(crate) async fn sync_upsert(state: &AppState, records: &mut [Value]) -> Result<WriteReport> {
-    write(state, records, true, false).await
+    write(state, records, true, true).await
 }
 async fn write(
     state: &AppState,
@@ -61,7 +61,6 @@ async fn write(
             "保留其他子项绑定"
         }
     );
-    let record_count = records.len();
     let mut written_records = 0;
     let mut failures = vec![];
     let mut transaction = state.db.begin().await?;
@@ -155,12 +154,29 @@ async fn write(
     for (kind, id) in work {
         versions::lock(&mut transaction, &kind, &id, "").await?;
     }
-    if replace_children {
+    let mut sync_records;
+    let records = if replace_children && preserve_top_title {
+        sync_records = preserve_sync_child_keys(&mut transaction, records).await?;
+        sync_records.as_mut_slice()
+    } else {
+        records
+    };
+    let record_count = records.len();
+    if replace_children && !preserve_top_title {
         tracing::info!("元数据库子项绑定迁移开始：记录 {record_count} 条");
         replace_child_bindings(&mut transaction, records).await?;
         tracing::info!("元数据库子项绑定迁移完成：记录 {record_count} 条");
     }
     for record in records {
+        if preserve_top_title {
+            sqlx::query("SAVEPOINT sync_record")
+                .execute(&mut *transaction)
+                .await?;
+            if replace_children {
+                // Moving the native binding must roll back with a failed destination write.
+                replace_child_bindings(&mut transaction, std::slice::from_mut(record)).await?;
+            }
+        }
         let id = string(record, "tmdb_id");
         let kind = string(record, "item_type");
         let type_label = match kind.as_str() {
@@ -219,11 +235,6 @@ async fn write(
         let query = format!(
             "INSERT INTO media_metadata ({columns},last_synced_at) SELECT {columns},NOW() FROM jsonb_populate_record(NULL::media_metadata,$1::jsonb) ON CONFLICT(tmdb_id,item_type) DO UPDATE SET {updates}last_synced_at=NOW()"
         );
-        if preserve_top_title {
-            sqlx::query("SAVEPOINT sync_record")
-                .execute(&mut *transaction)
-                .await?;
-        }
         let result = sqlx::query(&query)
             .bind(&*record)
             .execute(&mut *transaction)
@@ -278,6 +289,86 @@ async fn write(
     })
 }
 
+// Missing TMDb child details produce a synthetic key. Keep each existing native
+// version on its known key until TMDb can confirm a replacement.
+async fn preserve_sync_child_keys(
+    transaction: &mut Transaction<'_, Postgres>,
+    records: &[Value],
+) -> Result<Vec<Value>> {
+    let mut output = vec![];
+    for record in records {
+        let kind = string(record, "item_type");
+        let fallback = string(record, "tmdb_id");
+        if !matches!(kind.as_str(), "Season" | "Episode") || !fallback.contains('-') {
+            output.push(record.clone());
+            continue;
+        }
+        let ids = list(&record["emby_item_ids_json"]);
+        let native_ids = ids.iter().filter_map(Value::as_str).collect::<Vec<_>>();
+        let rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE parent_series_tmdb_id=$1 AND item_type=$2 AND emby_item_ids_json ?| $3 ORDER BY (tmdb_id ~ '^[0-9]+$') DESC,tmdb_id FOR UPDATE")
+            .bind(string(record, "parent_series_tmdb_id")).bind(&kind).bind(&native_ids)
+            .fetch_all(&mut **transaction).await?;
+        let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (index, id) in ids.iter().enumerate() {
+            let candidates = rows
+                .iter()
+                .filter(|row| list(&row["emby_item_ids_json"]).contains(id))
+                .collect::<Vec<_>>();
+            let numeric = candidates
+                .iter()
+                .filter(|row| !string(row, "tmdb_id").contains('-'))
+                .collect::<Vec<_>>();
+            if numeric.len() > 1 {
+                return Err(ApiError::bad(format!(
+                    "原生 {kind} {id} 已有多个真实 TMDb 绑定，读取元数据失败时保留原绑定"
+                )));
+            }
+            let key = numeric
+                .first()
+                .map(|row| string(row, "tmdb_id"))
+                .or_else(|| {
+                    candidates
+                        .iter()
+                        .find(|row| string(row, "tmdb_id") == fallback)
+                        .map(|_| fallback.clone())
+                })
+                .or_else(|| candidates.first().map(|row| string(row, "tmdb_id")))
+                .unwrap_or_else(|| fallback.clone());
+            groups.entry(key).or_default().push(index);
+        }
+        if groups.is_empty() {
+            output.push(record.clone());
+        }
+        for (key, indices) in groups {
+            let mut resolved = record.clone();
+            resolved["tmdb_id"] = json!(key);
+            for field in [
+                "emby_item_ids_json",
+                "asset_details_json",
+                "file_sha1_json",
+                "file_pickcode_json",
+            ] {
+                let values = list(&record[field]);
+                resolved[field] = json!(
+                    indices
+                        .iter()
+                        .map(|i| values.get(*i).cloned().unwrap_or(Value::Null))
+                        .collect::<Vec<_>>()
+                );
+            }
+            if let Some(old) = rows.iter().find(|row| string(row, "tmdb_id") == key) {
+                for field in ["season_number", "episode_number", "episode_group_id"] {
+                    if !old[field].is_null() {
+                        resolved[field] = old[field].clone();
+                    }
+                }
+            }
+            output.push(resolved);
+        }
+    }
+    Ok(output)
+}
+
 // An episode-group change moves only the incoming Emby versions between metadata keys.
 // Fingerprints follow the Emby ID; versions in other directories stay on their old keys.
 async fn replace_child_bindings(
@@ -291,21 +382,23 @@ async fn replace_child_bindings(
         .filter(|p| !p.is_empty())
         .collect::<BTreeSet<_>>();
     for parent in parents {
-        let rows:Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE parent_series_tmdb_id=$1 AND item_type IN ('Season','Episode') FOR UPDATE")
+        let rows:Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE parent_series_tmdb_id=$1 AND item_type IN ('Season','Episode') ORDER BY (tmdb_id ~ '^[0-9]+$') DESC,tmdb_id FOR UPDATE")
             .bind(&parent).fetch_all(&mut **transaction).await?;
         let mut destinations = HashMap::new();
         let mut slots = HashMap::new();
         for old in &rows {
             let ids = list(&old["emby_item_ids_json"]);
             for (index, id) in ids.iter().enumerate() {
-                slots.insert(
-                    (string(old, "item_type"), id.clone()),
-                    json!({
+                let slot = json!({
                     "emby_item_ids_json":[id],
                     "asset_details_json":[list(&old["asset_details_json"]).get(index)],
                     "file_sha1_json":[list(&old["file_sha1_json"]).get(index)],
-                    "file_pickcode_json":[list(&old["file_pickcode_json"]).get(index)]}),
-                );
+                    "file_pickcode_json":[list(&old["file_pickcode_json"]).get(index)]});
+                // The real key is ordered first; stale duplicate assets must not
+                // replace its fingerprint revision or verified identity.
+                slots
+                    .entry((string(old, "item_type"), id.clone()))
+                    .or_insert(slot);
             }
         }
         for record in records
@@ -559,3 +652,7 @@ pub async fn reconstruct_full(
     );
     Ok(Some((payload, cast)))
 }
+
+#[cfg(test)]
+#[path = "../tests/support/sync_child_bindings.rs"]
+mod sync_child_bindings;

@@ -28,8 +28,8 @@ async function uploadWallpaper(page, panel) {
 
 test.beforeEach(async ({ page, api }) => {
   await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'light' });
-  await page.goto('/user-center', { waitUntil: 'domcontentloaded' });
-  await expect(page.getByRole('heading', { name: '用户中心', exact: true })).toBeVisible();
+  await page.goto('/user-management', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByRole('heading', { name: '用户管理', exact: true })).toBeVisible();
 });
 
 test('manual light and dark themes persist and ignore later system changes', async ({ page }) => {

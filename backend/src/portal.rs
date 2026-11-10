@@ -5,7 +5,7 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    extract::{Multipart, State},
+    extract::{Multipart, Path, State},
     http::HeaderMap,
     routing::{get, post},
 };
@@ -14,6 +14,8 @@ use serde_json::{Value, json};
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/portal/account-info", get(account))
+        .route("/api/portal/users", get(users))
+        .route("/api/portal/users/{id}", post(save_user_details))
         .route("/api/portal/telegram-chat-id", post(chat_id))
         .route("/api/portal/telegram-bot-info", get(bot_info))
         .route(
@@ -21,6 +23,93 @@ pub fn router() -> Router<AppState> {
             post(avatar).delete(delete_avatar),
         )
         .layer(axum::extract::DefaultBodyLimit::max(6 * 1024 * 1024))
+}
+async fn users(State(state): State<AppState>) -> Result<Json<Value>> {
+    let native = state.emby(reqwest::Method::GET, "Users", &[], None).await?;
+    let native = native
+        .as_array()
+        .ok_or_else(|| ApiError::bad("Emby 用户列表格式无效，未修改用户资料"))?;
+    let mut seen = std::collections::HashSet::new();
+    let details: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(e) FROM emby_users_extended e")
+        .fetch_all(&state.db)
+        .await?;
+    let mut users = vec![];
+    for user in native {
+        let id = string(user, "Id");
+        if id.is_empty() || string(user, "Name").is_empty() || !seen.insert(id.clone()) {
+            return Err(ApiError::bad(
+                "Emby 用户列表缺少唯一用户 ID，未修改用户资料",
+            ));
+        }
+        let administrator = user["Policy"]["IsAdministrator"]
+            .as_bool()
+            .ok_or_else(|| ApiError::bad("Emby 用户角色尚未确认"))?;
+        let disabled = user["Policy"]["IsDisabled"]
+            .as_bool()
+            .ok_or_else(|| ApiError::bad("Emby 用户启用状态尚未确认"))?;
+        let extra = details.iter().find(|detail| detail["emby_user_id"] == id);
+        users.push(json!({
+            "id":id,"name":user["Name"],
+            "is_administrator":administrator,
+            "is_disabled":disabled,
+            "profile_image_tag":user["PrimaryImageTag"],
+            "last_activity_date":user["LastActivityDate"],
+            "last_login_date":user["LastLoginDate"],
+            "registration_date":extra.map(|detail|&detail["registration_date"]),
+            "expiration_date":extra.map(|detail|&detail["expiration_date"]),
+            "notes":extra.map(|detail|&detail["notes"]),
+            "telegram_chat_id":extra.map(|detail|&detail["telegram_chat_id"])
+        }));
+    }
+    Ok(Json(json!({"users":users})))
+}
+async fn save_user_details(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>> {
+    if id.is_empty()
+        || id.len() > 128
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        || body.as_object().is_none_or(|fields| {
+            fields
+                .keys()
+                .any(|key| !matches!(key.as_str(), "notes" | "telegram_chat_id"))
+        })
+    {
+        return Err(ApiError::bad("无效用户资料，Emby 权限只在 Emby 中管理"));
+    }
+    let notes = body["notes"]
+        .as_str()
+        .ok_or_else(|| ApiError::bad("备注必须是文本"))?
+        .trim();
+    let chat = body["telegram_chat_id"]
+        .as_str()
+        .ok_or_else(|| ApiError::bad("Telegram 私聊 ID 必须是文本"))?
+        .trim();
+    if notes.chars().count() > 2000 || chat.len() > 128 {
+        return Err(ApiError::bad("用户备注或 Telegram 私聊 ID 过长"));
+    }
+    let user = state
+        .emby(reqwest::Method::GET, &format!("Users/{id}"), &[], None)
+        .await?;
+    if user["Id"] != id || string(&user, "Name").is_empty() {
+        return Err(ApiError::bad("Emby 未返回对应用户，未保存资料"));
+    }
+    let administrator = user["Policy"]["IsAdministrator"]
+        .as_bool()
+        .ok_or_else(|| ApiError::bad("Emby 用户角色尚未确认，未保存资料"))?;
+    let mut transaction = state.db.begin().await?;
+    sqlx::query("INSERT INTO emby_users(id,name,is_administrator,profile_image_tag,policy_json,last_updated_at) VALUES($1,$2,$3,$4,$5,NOW()) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,is_administrator=EXCLUDED.is_administrator,profile_image_tag=EXCLUDED.profile_image_tag,policy_json=EXCLUDED.policy_json,last_updated_at=NOW()")
+        .bind(&id).bind(string(&user,"Name")).bind(administrator)
+        .bind(user["PrimaryImageTag"].as_str()).bind(&user["Policy"]).execute(&mut *transaction).await?;
+    sqlx::query("INSERT INTO emby_users_extended(emby_user_id,notes,telegram_chat_id,created_by) VALUES($1,$2,$3,'admin') ON CONFLICT(emby_user_id) DO UPDATE SET notes=EXCLUDED.notes,telegram_chat_id=EXCLUDED.telegram_chat_id")
+        .bind(&id).bind(if notes.is_empty(){None}else{Some(notes)}).bind(if chat.is_empty(){None}else{Some(chat)})
+        .execute(&mut *transaction).await?;
+    transaction.commit().await?;
+    Ok(Json(json!({"message":"用户备注和通知资料已保存","id":id})))
 }
 fn user(state: &AppState, headers: &HeaderMap) -> Result<String> {
     Ok(state

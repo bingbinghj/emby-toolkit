@@ -2,8 +2,10 @@
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { useMessage } from '@/composables/useFeedback';
 import { preloadWallpaperImage, useWallpaper } from '@/composables/useWallpaper';
+import { useAuthStore } from '@/stores/auth';
 
-const { settings, images, activeImage, previousImage, crossfading, setPresentation } = useWallpaper();
+const { settings, images, activeImage, previousImage, crossfading, setPresentation, refreshSource, cancelSourceRequest } = useWallpaper();
+const auth = useAuthStore();
 const message = useMessage();
 const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
 const reducedMotion = ref(motion.matches);
@@ -16,8 +18,14 @@ function clearTimers() {
 
 function scheduleRotation(revision) {
   window.clearTimeout(rotationTimer);
-  if (revision !== generation || !settings.rotationInterval || reducedMotion.value || document.hidden || images.value.length < 2) return;
-  rotationTimer = window.setTimeout(() => {
+  const dynamicApi = settings.mode === 'remote' && settings.source === 'api';
+  if (revision !== generation || !settings.rotationInterval || reducedMotion.value || document.hidden || images.value.length < 2 && !dynamicApi) return;
+  rotationTimer = window.setTimeout(async () => {
+    if (dynamicApi) {
+      await refreshSource();
+      if (revision === generation) scheduleRotation(revision);
+      return;
+    }
     const next = (images.value.indexOf(activeImage.value) + 1) % images.value.length;
     void showImage(next, revision, true);
   }, settings.rotationInterval * 1000);
@@ -52,23 +60,31 @@ watch(images, () => {
   clearTimers();
   setPresentation({ previousImage: '', crossfading: false, ready: false });
   if (!images.value.length) {
-    setPresentation({ activeImage: '', transitionStartedAt: 0, ready: true });
+    setPresentation({ ...(settings.mode === 'remote' ? {} : { activeImage: '', transitionStartedAt: 0 }), ready: true });
     return;
   }
   void showImage(0, revision);
 }, { immediate: true });
 watch(() => settings.rotationInterval, () => scheduleRotation(generation));
+watch(() => [settings.mode, settings.source, settings.customApi, auth.isLoggedIn], () => {
+  if (settings.mode === 'remote') void refreshSource();
+  else cancelSourceRequest();
+}, { immediate: true });
 
 function motionChanged(event) {
   reducedMotion.value = event.matches;
   if (event.matches) {
     clearTimers();
+    if (settings.mode === 'remote' && settings.source === 'api') cancelSourceRequest();
     setPresentation({ previousImage: '', crossfading: false });
   } else scheduleRotation(generation);
 }
 
 function visibilityChanged() {
-  if (document.hidden) window.clearTimeout(rotationTimer);
+  if (document.hidden) {
+    window.clearTimeout(rotationTimer);
+    if (settings.mode === 'remote' && settings.source === 'api') cancelSourceRequest();
+  }
   else scheduleRotation(generation);
 }
 
@@ -78,6 +94,7 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   generation++;
+  cancelSourceRequest();
   clearTimers();
   motion.removeEventListener('change', motionChanged);
   document.removeEventListener('visibilitychange', visibilityChanged);

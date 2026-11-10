@@ -207,6 +207,139 @@ pub fn destination(item: &Value, kind: &str) -> Result<(PathBuf, &'static str)> 
     }
     Ok((directory.join(filename), image_type))
 }
+// Atomically publish bytes so failed writes never truncate the current image.
+async fn save_image(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    let stage = path.with_file_name(format!(".etk-image-{}", uuid::Uuid::new_v4().simple()));
+    let saved = async {
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&stage)
+            .await?;
+        file.write_all(bytes).await?;
+        file.sync_all().await?;
+        tokio::fs::rename(&stage, path).await
+    }
+    .await;
+    if saved.is_err() {
+        let _ = tokio::fs::remove_file(stage).await;
+    }
+    Ok(saved?)
+}
+async fn read_image(state: &AppState, url: &str, key: &str) -> Result<Option<Vec<u8>>> {
+    let response = crate::emby::send(
+        state
+            .http
+            .get(url)
+            .header("X-Emby-Token", key)
+            .header(header::CACHE_CONTROL, "no-cache")
+            .timeout(Duration::from_secs(20)),
+    )
+    .await?;
+    if response.status() == StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let bytes = response.error_for_status()?.bytes().await?.to_vec();
+    image::load_from_memory(&bytes).map_err(|_| ApiError::bad("原生图片回读无法解码"))?;
+    Ok(Some(bytes))
+}
+async fn delete_image(state: &AppState, url: &str, key: &str) -> Result<()> {
+    let response = crate::emby::send(state.http.delete(url).header("X-Emby-Token", key)).await?;
+    if response.status() != StatusCode::NOT_FOUND {
+        response.error_for_status()?;
+    }
+    Ok(())
+}
+async fn upload_image(
+    state: &AppState,
+    url: &str,
+    key: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> Result<()> {
+    let mut failures = vec![];
+    for body in [bytes.to_vec(), STANDARD.encode(bytes).into_bytes()] {
+        match crate::emby::send(
+            state
+                .http
+                .post(url)
+                .header("X-Emby-Token", key)
+                .header(header::CONTENT_TYPE, mime)
+                .body(body),
+        )
+        .await
+        {
+            Ok(response) if response.status().is_success() => return Ok(()),
+            Ok(response) => failures.push(format!("上传请求返回 HTTP {}", response.status())),
+            Err(error) => failures.push(error.status().map_or_else(
+                || "图片上传请求失败，无法访问上游服务".into(),
+                |status| format!("上传请求失败：HTTP {status}"),
+            )),
+        }
+    }
+    Err(ApiError::bad(format!(
+        "上传Emby失败：{}",
+        failures.join("；")
+    )))
+}
+fn pixel_difference(a: &image::RgbaImage, b: &image::RgbaImage) -> Option<f64> {
+    if a.dimensions() != b.dimensions() {
+        return None;
+    }
+    let sum: u64 = a
+        .as_raw()
+        .iter()
+        .zip(b.as_raw())
+        .map(|(a, b)| a.abs_diff(*b) as u64)
+        .sum();
+    Some(sum as f64 / a.as_raw().len() as f64)
+}
+async fn verify_image(
+    state: &AppState,
+    url: &str,
+    key: &str,
+    expected: Option<&[u8]>,
+    previous: Option<&[u8]>,
+) -> Result<()> {
+    let expected = expected
+        .map(image::load_from_memory)
+        .transpose()
+        .map_err(|_| ApiError::bad("待验收图片无法解码"))?
+        .map(|image| image.to_rgba8());
+    let previous = previous
+        .and_then(|bytes| image::load_from_memory(bytes).ok())
+        .map(|image| image.to_rgba8());
+    let mut error = "原生图片验收不一致".to_string();
+    for attempt in 0..5 {
+        match read_image(state, url, key).await {
+            Ok(None) if expected.is_none() => return Ok(()),
+            Ok(Some(bytes)) if expected.is_some() => {
+                let actual = image::load_from_memory(&bytes).unwrap().to_rgba8();
+                let expected = expected.as_ref().unwrap();
+                if let Some(difference) = pixel_difference(&actual, expected) {
+                    // Allow JPEG recompression, but never accept an unchanged prior image
+                    // merely because the requested replacement has similar pixels.
+                    let stale = previous.as_ref().is_some_and(|previous| {
+                        previous != expected
+                            && pixel_difference(&actual, previous)
+                                .is_some_and(|old| old <= difference)
+                    });
+                    if difference <= 3.0 && !stale {
+                        return Ok(());
+                    }
+                }
+            }
+            Ok(_) => (),
+            Err(failed) => error = format!("原生图片验收失败：{}", failed.1),
+        }
+        if attempt < 4 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+    Err(ApiError::bad(error))
+}
+
 async fn submit(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -220,7 +353,6 @@ async fn submit(
     let mut kind = String::new();
     let mut url = String::new();
     let mut bytes = vec![];
-    let mut content_type = String::new();
     if content.starts_with("application/json") {
         let data: Value = serde_json::from_slice(
             &axum::body::to_bytes(request.into_body(), 20 * 1024 * 1024)
@@ -254,7 +386,6 @@ async fn submit(
                         .map_err(|_| ApiError::bad("图片URL无效"))?
                 }
                 Some("file") => {
-                    content_type = field.content_type().unwrap_or("").into();
                     bytes = field
                         .bytes()
                         .await
@@ -284,74 +415,124 @@ async fn submit(
                         .send()
                         .await?
                         .error_for_status()?;
-                    let kind = response
-                        .headers()
-                        .get(header::CONTENT_TYPE)
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("")
-                        .to_string();
-                    Ok::<_, ApiError>((kind, response.bytes().await?.to_vec()))
+                    Ok::<_, ApiError>(response.bytes().await?.to_vec())
                 };
-                (content_type, bytes) = tokio::select! {
+                bytes = tokio::select! {
                     _=context.cancelled()=>{context.checkpoint().await?;unreachable!()},
                     result=download=>result?,
                 };
             }
-            if content_type.is_empty() {
-                content_type = if path.extension().is_some_and(|s| s == "png") {
-                    "image/png"
-                } else {
-                    "image/jpeg"
-                }
-                .into();
-            }
-            let stage =
-                path.with_file_name(format!(".etk-image-{}", uuid::Uuid::new_v4().simple()));
-            let finishing = crate::jobs::JobContext::for_recovery(Some(&context)).await;
+            // Validate the actual bytes before replacing either the local or native image.
+            image::load_from_memory(&bytes)
+                .map_err(|_| ApiError::bad("图片内容无法解码，原图未修改"))?;
+            let content_type = image::guess_format(&bytes)
+                .map_err(|_| ApiError::bad("图片格式不支持，原图未修改"))?
+                .to_mime_type();
             context.checkpoint().await?;
-            tokio::fs::write(&stage, &bytes).await?;
-            tokio::fs::rename(stage, &path).await?;
             let config = work.config.read().await.clone();
             let url = format!(
                 "{}/Items/{id}/Images/{image_type}",
                 string(&config, "emby_server_url").trim_end_matches('/')
             );
             let key = string(&config, "emby_api_key");
-            let _ = crate::emby::send(work.http.delete(&url).header("X-Emby-Token", &key)).await;
-            let mut success = false;
-            let mut failures = vec![];
-            for body in [bytes.clone(), STANDARD.encode(bytes).into_bytes()] {
-                match crate::emby::send(
-                    work.http
-                        .post(&url)
-                        .header("X-Emby-Token", &key)
-                        .header(header::CONTENT_TYPE, &content_type)
-                        .body(body),
-                )
-                .await {
-                    Ok(response) if response.status().is_success() => {
-                        success = true;
-                        break;
-                    }
-                    Ok(response) => failures.push(format!("上传请求返回 HTTP {}", response.status())),
-                    Err(error) => {
-                        let status = error.status();
-                        tracing::warn!(error=%error.without_url(), "图片上传请求未成功，继续备用上传及刷新收尾");
-                        failures.push(status.map_or_else(
-                            || "图片上传请求失败，无法访问上游服务".into(),
-                            |status| format!("上传请求失败：HTTP {status}"),
-                        ));
-                    }
+            let native = read_image(&work, &url, &key).await?;
+            let local = match tokio::fs::read(&path).await {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            };
+            let backup = work
+                .data_dir
+                .join("backups/image-replacement")
+                .join(uuid::Uuid::new_v4().simple().to_string());
+            tokio::fs::create_dir_all(&backup).await?;
+            for (name, original) in [("local-original", &local), ("native-original", &native)] {
+                if let Some(original) = original {
+                    save_image(&backup.join(name), original).await?;
                 }
             }
-            let refreshed = crate::emby::refresh_item(&work, &id, false, &finishing).await;
-            if !success {
-                if let Err(error) = refreshed {
-                    failures.push(format!("本地图片刷新未确认：{}", error.1));
-                }
-                return Err(ApiError::bad(format!("图片已保存，但上传Emby失败：{}", failures.join("；"))));
+            save_image(&backup.join("replacement"), &bytes).await?;
+            save_image(
+                &backup.join("manifest.json"),
+                &serde_json::to_vec_pretty(&json!({
+                    "id":id,"image_type":image_type,"path":path,
+                    "local_existed":local.is_some(),"native_existed":native.is_some()
+                }))
+                .unwrap(),
+            )
+            .await?;
+            let finishing = crate::jobs::JobContext::for_recovery(Some(&context)).await;
+            context.checkpoint().await?;
+            let mut local_changed = false;
+            let mut native_changed = false;
+            let changed = async {
+                save_image(&path, &bytes).await?;
+                local_changed = true;
+                native_changed = true;
+                delete_image(&work, &url, &key).await?;
+                let uploaded = upload_image(&work, &url, &key, content_type, &bytes).await;
+                let refreshed = crate::emby::refresh_item(&work, &id, false, &finishing).await;
+                uploaded?;
+                refreshed?;
+                verify_image(&work, &url, &key, Some(&bytes), native.as_deref()).await
             }
-            refreshed?;
+            .await;
+            if let Err(error) = changed {
+                let mut failures = vec![];
+                let restored = if !local_changed {
+                    Ok(())
+                } else {
+                    match &local {
+                        Some(original) => save_image(&path, original).await,
+                        None => match tokio::fs::remove_file(&path).await {
+                            Ok(()) => Ok(()),
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                            Err(error) => Err(error.into()),
+                        },
+                    }
+                };
+                if let Err(error) = restored {
+                    failures.push(format!("本地原图未恢复（{}）：{}", path.display(), error.1));
+                }
+                if native_changed {
+                    if let Err(error) = delete_image(&work, &url, &key).await {
+                        failures.push(format!("恢复前原生图片清理失败：{}", error.1));
+                    }
+                    if let Some(original) = &native {
+                        let mime = image::guess_format(original).unwrap().to_mime_type();
+                        if let Err(error) = upload_image(&work, &url, &key, mime, original).await {
+                            failures.push(format!("原生图片恢复上传失败：{}", error.1));
+                        }
+                    }
+                    if let Err(error) =
+                        crate::emby::refresh_item(&work, &id, false, &finishing).await
+                    {
+                        failures.push(format!("恢复刷新未确认：{}", error.1));
+                    }
+                    if let Err(error) =
+                        verify_image(&work, &url, &key, native.as_deref(), Some(&bytes)).await
+                    {
+                        failures.push(format!("原生图片未恢复：{}", error.1));
+                    }
+                }
+                let outcome = if failures.is_empty() {
+                    "原图已恢复".into()
+                } else {
+                    failures.join("；")
+                };
+                return Err(ApiError(
+                    error.0,
+                    format!(
+                        "{}；{}；原图备份已保留：{}",
+                        error.1,
+                        outcome,
+                        backup.display()
+                    ),
+                ));
+            }
+            if let Err(error) = tokio::fs::remove_dir_all(&backup).await {
+                tracing::warn!(%error, path=%backup.display(), "图片验收成功，旧图备份暂未清理");
+            }
             Ok(json!({"message":format!("{kind} 替换成功！")}))
         })
         .await?;

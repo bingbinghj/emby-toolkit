@@ -13,9 +13,9 @@ async function initializeGlass(page, { appearance = 'clear', quality = 'balanced
     }));
     localStorage.setItem(wallpaperKey, JSON.stringify({ mode: wallpaper, presetId: 'dusk', rotationInterval: 0 }));
   }, { themeKey: THEME_KEY, wallpaperKey: WALLPAPER_KEY, appearance, quality, wallpaper });
-  await page.goto('/user-center', { waitUntil: 'domcontentloaded' });
+  await page.goto('/user-management', { waitUntil: 'domcontentloaded' });
   await page.bringToFront();
-  await expect(page.getByRole('heading', { name: '用户中心', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '用户管理', exact: true })).toBeVisible();
 }
 
 async function expectConnectedDefinitions(page) {
@@ -55,8 +55,8 @@ test('one global wallpaper instance owns the initial image preload', async ({ pa
     };
     window.Image.prototype = OriginalImage.prototype;
   });
-  await page.goto('/user-center', { waitUntil: 'domcontentloaded' });
-  await expect(page.getByRole('heading', { name: '用户中心', exact: true })).toBeVisible();
+  await page.goto('/user-management', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByRole('heading', { name: '用户管理', exact: true })).toBeVisible();
   await expect(page.locator('.wallpaper-background')).toHaveCount(1);
   await expect.poll(() => page.evaluate(() => window.__wallpaperPreloads.filter(url => url === '/wallpapers/dusk.svg').length)).toBe(1);
 });

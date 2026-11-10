@@ -2,8 +2,8 @@
   <div class="mp-page user-center-page">
     <div class="d-flex flex-wrap align-center justify-space-between ga-3 mb-6">
       <div>
-        <h1 class="text-h4 mb-1">用户中心</h1>
-        <p class="text-body-2 text-medium-emphasis mb-0">欢迎回来，{{ accountInfo?.name || authStore.username }}</p>
+        <h1 class="text-h4 mb-1">用户管理</h1>
+        <p class="text-body-2 text-medium-emphasis mb-0">查看 Emby 用户，管理 ETK 备注和通知资料</p>
       </div>
       <VChip :color="authStore.isAdmin ? 'primary' : 'secondary'" variant="tonal" prepend-icon="mdi-account-circle-outline">
         {{ authStore.isAdmin ? '管理员' : '普通用户' }}
@@ -73,68 +73,42 @@
         </VCard>
       </VCol>
 
-      <VCol cols="12" lg="7">
-        <VCard class="notification-card h-100">
-          <VCardItem title="通知设置" subtitle="绑定 Telegram，接收入库和任务通知。" prepend-icon="mdi-bell-outline" />
-          <VProgressLinear v-if="loadingConfig" indeterminate />
+      <VCol v-if="authStore.isAdmin" cols="12" lg="7">
+        <VCard class="h-100">
+          <VCardItem title="Emby 用户" subtitle="用户权限与启用状态来自 Emby。" prepend-icon="mdi-account-group-outline">
+            <template #append><VBtn icon="mdi-refresh" variant="text" :loading="loadingUsers" aria-label="刷新用户列表" @click="loadUsers" /></template>
+          </VCardItem>
           <VCardText>
-            <VAlert v-if="configError" type="error" variant="tonal" class="mb-4">{{ configError }}</VAlert>
-            <VForm @submit.prevent="saveChatId">
-              <template v-if="configModel">
-                <VTextField
-                  v-model="configModel.telegram_bot_token"
-                  label="Telegram Bot Token"
-                  :type="showBotToken ? 'text' : 'password'"
-                  :append-inner-icon="showBotToken ? 'mdi-eye-off-outline' : 'mdi-eye-outline'"
-                  placeholder="从 @BotFather 获取"
-                  autocomplete="off"
-                  :disabled="loadingConfig || isSavingChatId"
-                  class="mb-4"
-                  @click:append-inner="showBotToken = !showBotToken"
-                />
-                <VTextField
-                  v-model="configModel.telegram_channel_id"
-                  label="全局通知频道"
-                  placeholder="频道链接、@频道名或 Chat ID"
-                  :disabled="loadingConfig || isSavingChatId"
-                  class="mb-3"
-                />
-                <div class="text-body-2 font-weight-medium mb-1">通知类型</div>
-                <div class="d-flex flex-wrap ga-3 mb-4">
-                  <VCheckbox v-model="configModel.telegram_notify_types" multiple value="library_new" label="入库通知" :disabled="loadingConfig || isSavingChatId" />
-                  <VCheckbox v-model="configModel.telegram_notify_types" multiple value="intercept_notify" label="拦截通知" :disabled="loadingConfig || isSavingChatId" />
-                  <VCheckbox v-model="configModel.telegram_notify_types" multiple value="recognize_fail" label="识别失败" :disabled="loadingConfig || isSavingChatId" />
+            <VAlert v-if="usersError" type="error" variant="tonal" class="mb-4">{{ usersError }}</VAlert>
+            <VTextField v-model="userSearch" label="搜索用户" prepend-inner-icon="mdi-magnify" clearable hide-details class="mb-4" />
+            <VDataTable :headers="userHeaders" :items="users" :search="userSearch || ''" :loading="loadingUsers" item-value="id" no-data-text="暂无 Emby 用户" items-per-page-text="每页用户数">
+              <template #item.name="{ item }">
+                <div class="d-flex align-center ga-3 py-2">
+                  <VAvatar size="36" color="primary" variant="tonal"><VImg v-if="item.profile_image_tag" :src="userAvatar(item)" :alt="item.name" /><span v-else>{{ String(item.name || '?').charAt(0) }}</span></VAvatar>
+                  <div><div class="text-body-2 font-weight-medium">{{ item.name }}</div><div v-if="item.notes" class="text-caption text-medium-emphasis">{{ item.notes }}</div></div>
                 </div>
               </template>
-              <VTextField
-                v-model="telegramChatId"
-                label="Telegram 用户ID（私聊ID）"
-                placeholder="例如 123456789"
-                hint="先向 Telegram 机器人发送 /start，再填写私聊ID，用于接收个人通知。"
-                persistent-hint
-                :disabled="loading || isSavingChatId"
-                class="mb-6"
-              />
-              <div class="notification-actions">
-                <VBtn variant="tonal" prepend-icon="mdi-telegram" :loading="isFetchingBotLink" @click="openBotChat">打开机器人</VBtn>
-                <VBtn
-                  variant="tonal"
-                  prepend-icon="mdi-send-outline"
-                  :loading="isTestingTelegram"
-                  :disabled="!configModel?.telegram_bot_token || (!telegramChatId && !configModel?.telegram_channel_id)"
-                  @click="testTelegram"
-                >发送测试</VBtn>
-                <VBtn type="submit" prepend-icon="mdi-content-save-outline" :loading="isSavingChatId" :disabled="loading || loadingConfig">保存通知设置</VBtn>
-              </div>
-            </VForm>
-            <div v-if="accountInfo?.telegram_channel_id" class="global-notification-link mt-6 pt-4">
-              <span class="text-body-2 text-medium-emphasis">全局通知频道</span>
-              <VBtn variant="text" :href="globalChannelLink" target="_blank" rel="noopener noreferrer" prepend-icon="mdi-open-in-new">加入频道 / 群组</VBtn>
-            </div>
+              <template #item.is_administrator="{ item }"><VChip size="small" :color="item.is_administrator ? 'primary' : 'secondary'">{{ item.is_administrator ? '管理员' : '普通用户' }}</VChip></template>
+              <template #item.is_disabled="{ item }"><VChip size="small" :color="item.is_disabled ? 'error' : 'success'">{{ item.is_disabled ? '已禁用' : '正常' }}</VChip></template>
+              <template #item.last_activity_date="{ item }">{{ formatDateTime(item.last_activity_date) }}</template>
+              <template #item.actions="{ item }"><VBtn size="small" variant="text" prepend-icon="mdi-pencil-outline" :aria-label="`编辑 ${item.name} 的ETK资料`" @click="editUser(item)">编辑资料</VBtn></template>
+            </VDataTable>
           </VCardText>
         </VCard>
       </VCol>
     </VRow>
+    <VDialog v-model="userDialogOpen" max-width="560" :persistent="isSavingUser">
+      <VCard v-if="editingUser">
+        <VCardTitle>编辑 {{ editingUser.name }} 的 ETK 资料</VCardTitle>
+        <VCardText>
+          <VAlert type="info" variant="tonal" class="mb-4">Emby 用户权限和启用状态请在 Emby 中管理。</VAlert>
+          <VAlert v-if="userSaveError" type="error" variant="tonal" class="mb-4">{{ userSaveError }}</VAlert>
+          <VTextField v-model="editingUser.telegram_chat_id" label="Telegram 用户ID（私聊ID）" :disabled="isSavingUser" maxlength="128" class="mb-4" />
+          <VTextarea v-model="editingUser.notes" label="备注" :disabled="isSavingUser" maxlength="2000" rows="3" />
+        </VCardText>
+        <VCardActions><VSpacer /><VBtn variant="text" :disabled="isSavingUser" @click="userDialogOpen = false">取消</VBtn><VBtn prepend-icon="mdi-content-save-outline" :loading="isSavingUser" @click="saveUserDetails">保存用户资料</VBtn></VCardActions>
+      </VCard>
+    </VDialog>
   </div>
 </template>
 
@@ -142,22 +116,15 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue';
 import axios from 'axios';
 import { useAuthStore } from '../stores/auth';
-import { useConfig } from '../composables/useConfig';
 import { useMessage } from '@/composables/useFeedback';
 
 const authStore = useAuthStore();
 const message = useMessage();
-const { configModel, loadingConfig, handleSaveConfig, configError } = useConfig();
-const isTestingTelegram = ref(false);
 
 const loading = ref(true);
 const accountInfo = computed(() => authStore.accountInfo);
-const telegramChatId = ref('');
-const isSavingChatId = ref(false);
 const isUploadingAvatar = ref(false);
 const isDeletingAvatar = ref(false);
-const isFetchingBotLink = ref(false);
-const showBotToken = ref(false);
 const fileInput = ref(null);
 const isMobile = ref(false);
 let accountPageActive = true;
@@ -178,14 +145,6 @@ const statusMap = {
 
 const statusText = computed(() => statusMap[accountInfo.value?.status]?.text || '未知');
 const statusType = computed(() => statusMap[accountInfo.value?.status]?.type || 'secondary');
-
-const globalChannelLink = computed(() => {
-  const channelId = accountInfo.value?.telegram_channel_id?.trim();
-  if (!channelId) return '#';
-  if (channelId.startsWith('https://t.me/')) return channelId;
-  if (channelId.startsWith('@')) return `https://t.me/${channelId.substring(1)}`;
-  return `https://t.me/${channelId}`;
-});
 
 const formatDateTime = (value) => {
   return value ? new Date(value).toLocaleDateString('zh-CN') : '—';
@@ -249,65 +208,61 @@ const deleteAvatar = async () => {
   }
 };
 
-const saveChatId = async () => {
-  if (loading.value || isSavingChatId.value) return;
-  isSavingChatId.value = true;
+const users = ref([]);
+const userSearch = ref('');
+const loadingUsers = ref(false);
+const usersError = ref('');
+const userDialogOpen = ref(false);
+const editingUser = ref(null);
+const isSavingUser = ref(false);
+const userSaveError = ref('');
+let usersSequence = 0;
+const userHeaders = [
+  { title: '用户', key: 'name' }, { title: '角色', key: 'is_administrator' },
+  { title: '状态', key: 'is_disabled' }, { title: '最近活动', key: 'last_activity_date' },
+  { title: '操作', key: 'actions', sortable: false },
+];
+const userAvatar = (item) => `/image_proxy/Users/${encodeURIComponent(item.id)}/Images/Primary?tag=${encodeURIComponent(item.profile_image_tag)}`;
+const loadUsers = async () => {
+  const sequence = ++usersSequence;
   const requestedUser = authStore.user;
-  const submittedChatId = telegramChatId.value;
+  loadingUsers.value = true;
+  usersError.value = '';
   try {
-    const config = configModel.value;
-    if (!config || !await handleSaveConfig({ telegram_bot_token: config.telegram_bot_token, telegram_channel_id: config.telegram_channel_id, telegram_notify_types: config.telegram_notify_types })) {
-      throw new Error(configError.value || '通知配置保存失败');
-    }
-    if (!isCurrentAccount(requestedUser)) return;
-    const response = await axios.post('/api/portal/telegram-chat-id', {
-      chat_id: submittedChatId
-    });
-    if (!isCurrentAccount(requestedUser)) return;
-    if (accountInfo.value) {
-      accountInfo.value.telegram_chat_id = submittedChatId;
-      accountInfo.value.telegram_channel_id = configModel.value.telegram_channel_id;
-    }
-    message.success(response.data.message || '保存成功');
+    const { data } = await axios.get('/api/portal/users');
+    if (!isCurrentAccount(requestedUser) || sequence !== usersSequence) return;
+    if (!Array.isArray(data.users)) throw new Error('用户列表格式无效');
+    users.value = data.users;
   } catch (error) {
-    if (isCurrentAccount(requestedUser)) message.error(error.response?.data?.message || error.message || '保存失败');
+    if (isCurrentAccount(requestedUser) && sequence === usersSequence) usersError.value = error.response?.data?.error || error.message || '用户列表读取失败';
   } finally {
-    isSavingChatId.value = false;
+    if (sequence === usersSequence) loadingUsers.value = false;
   }
 };
-
-const testTelegram = async () => {
-  if (isTestingTelegram.value) return;
-  isTestingTelegram.value = true;
-  const requestedUser = authStore.user;
-  try {
-    const { data } = await axios.post('/api/telegram/test', { token: configModel.value.telegram_bot_token, chat_id: telegramChatId.value.trim() || configModel.value.telegram_channel_id });
-    if (!isCurrentAccount(requestedUser)) return;
-    if (data.success === true) message.success(data.message || '测试消息已发送');
-    else message.error(data.message || '测试消息发送失败');
-  } catch (error) {
-    if (isCurrentAccount(requestedUser)) message.error(error.response?.data?.message || '测试消息发送失败');
-  } finally {
-    isTestingTelegram.value = false;
-  }
+const editUser = (item) => {
+  if (isSavingUser.value) return;
+  editingUser.value = { id: item.id, name: item.name, notes: item.notes || '', telegram_chat_id: item.telegram_chat_id || '' };
+  userSaveError.value = '';
+  userDialogOpen.value = true;
 };
-
-const openBotChat = async () => {
-  if (isFetchingBotLink.value) return;
-  isFetchingBotLink.value = true;
+const saveUserDetails = async () => {
+  if (isSavingUser.value || !editingUser.value) return;
   const requestedUser = authStore.user;
+  const submitted = { ...editingUser.value };
+  isSavingUser.value = true;
+  userSaveError.value = '';
   try {
-    const response = await axios.get('/api/portal/telegram-bot-info');
-    if (!isCurrentAccount(requestedUser)) return;
-    if (response.data.bot_username) {
-      window.open(`https://t.me/${response.data.bot_username}`, '_blank');
-    } else {
-      message.error(response.data.error || '未能获取到机器人信息');
-    }
+    const { data } = await axios.post(`/api/portal/users/${encodeURIComponent(submitted.id)}`, { notes: submitted.notes, telegram_chat_id: submitted.telegram_chat_id });
+    if (!isCurrentAccount(requestedUser) || editingUser.value?.id !== submitted.id) return;
+    if (data.id !== submitted.id) throw new Error('用户资料保存尚未确认');
+    const item = users.value.find(user => user.id === submitted.id);
+    if (item) Object.assign(item, { notes: submitted.notes.trim(), telegram_chat_id: submitted.telegram_chat_id.trim() });
+    userDialogOpen.value = false;
+    message.success(data.message || '用户资料已保存');
   } catch (error) {
-    if (isCurrentAccount(requestedUser)) message.error('请求机器人信息失败');
+    if (isCurrentAccount(requestedUser) && editingUser.value?.id === submitted.id) userSaveError.value = error.response?.data?.error || error.message || '用户资料保存失败';
   } finally {
-    isFetchingBotLink.value = false;
+    isSavingUser.value = false;
   }
 };
 
@@ -315,10 +270,10 @@ onMounted(async () => {
   checkMobile();
   window.addEventListener('resize', checkMobile);
   const requestedUser = authStore.user;
+  if (authStore.isAdmin) loadUsers();
   try {
     await authStore.fetchAccountInfo();
     if (!isCurrentAccount(requestedUser)) return;
-    telegramChatId.value = accountInfo.value?.telegram_chat_id || '';
   } catch (error) {
     if (isCurrentAccount(requestedUser)) message.error('加载账户信息失败');
   } finally {
@@ -341,11 +296,8 @@ onUnmounted(() => {
 .avatar-wrapper:hover .avatar-overlay, .avatar-wrapper:focus-visible .avatar-overlay { opacity:1; }
 .account-details :deep(.v-list-item) { padding-inline:0; }
 .account-details :deep(.v-list-item__prepend) { margin-inline-end:8px; }
-.notification-actions { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:12px; }
-.global-notification-link { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:12px; border-top:1px solid rgba(var(--v-border-color),var(--v-border-opacity)); }
 @media (max-width:540px) {
   .profile-avatar-section { gap:16px; }
-  .notification-actions > .v-btn { width:100%; }
   .account-details :deep(.v-list-item__append) { max-width:55%; text-align:end; }
 }
 </style>

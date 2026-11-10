@@ -9,6 +9,16 @@
       <div v-for="(detail, index) in mediaOperationFeedback.details" :key="index" class="text-wrap">{{ detail }}</div>
     </VAlert>
 
+    <VAlert v-if="mediaRecoveryState.pending || mediaRecoveryError" type="warning" :title="mediaRecoveryState.pending ? '媒体信息需要恢复' : '恢复状态未确认'" variant="tonal" class="mb-4" data-testid="media-recovery-alert">
+      <p>完成恢复验收后才能继续保存媒体信息。</p>
+      <div v-for="record in mediaRecoveryState.records" :key="record.id" class="mt-3">
+        <div class="text-wrap">{{ record.reason }}</div><div class="text-break">恢复目录：{{ record.directory }}</div>
+        <VBtn class="mt-2" color="warning" variant="flat" prepend-icon="mdi-restore" :loading="isRecoveringMediaInfo" :disabled="!record.can_recover || isCheckingMediaRecovery || isConfirmingMediaRecovery" :data-testid="`media-recovery-${record.id}`" @click="confirmMediaRecovery(record)">恢复媒体信息</VBtn>
+      </div>
+      <div v-if="mediaRecoveryError" class="mt-3 text-wrap">{{ mediaRecoveryError }}</div>
+      <VBtn class="mt-3" variant="text" :loading="isCheckingMediaRecovery" :disabled="isRecoveringMediaInfo" @click="loadMediaRecovery">重新检查恢复状态</VBtn>
+    </VAlert>
+
     <div v-if="isLoading" class="loading-container">
       <VProgressCircular indeterminate size="48" /><p class="mt-4 text-medium-emphasis">正在加载媒体详情...</p>
     </div>
@@ -197,6 +207,15 @@
       <VCard>
         <VCardTitle class="d-flex align-center"><span class="flex-grow-1">编辑媒体信息 (音轨/字幕)</span><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭媒体信息编辑器" @click="closeMediaInfoEditor" /></VCardTitle>
         <VCardText>
+          <VAlert v-if="mediaRecoveryState.pending || mediaRecoveryError" type="warning" :title="mediaRecoveryState.pending ? '媒体信息需要恢复' : '恢复状态未确认'" variant="tonal" class="mb-4" data-testid="media-recovery-alert">
+            <p>完成恢复验收后才能继续保存媒体信息。</p>
+            <div v-for="record in mediaRecoveryState.records" :key="record.id" class="mt-3">
+              <div class="text-wrap">{{ record.reason }}</div><div class="text-break">恢复目录：{{ record.directory }}</div>
+              <VBtn class="mt-2" color="warning" variant="flat" prepend-icon="mdi-restore" :loading="isRecoveringMediaInfo" :disabled="!record.can_recover || isCheckingMediaRecovery || isConfirmingMediaRecovery" :data-testid="`media-recovery-${record.id}`" @click="confirmMediaRecovery(record)">恢复媒体信息</VBtn>
+            </div>
+            <div v-if="mediaRecoveryError" class="mt-3 text-wrap">{{ mediaRecoveryError }}</div>
+            <VBtn class="mt-3" variant="text" :loading="isCheckingMediaRecovery" :disabled="isRecoveringMediaInfo" @click="loadMediaRecovery">重新检查恢复状态</VBtn>
+          </VAlert>
           <VBtn variant="tonal" prepend-icon="mdi-shield-check-outline" :loading="isRevalidatingFingerprints" class="mb-4" :disabled="isSavingMediaInfo || isDeletingMediaVersion || isRepairingTruehdCore" @click="revalidateFingerprints(currentEditMediaId)">重新校验当前视频指纹</VBtn>
           <VAlert v-if="mediaInfoContext.fingerprint_pending" type="warning" variant="tonal" class="mb-4">文件身份待校验。请先重新校验指纹，完成后重新打开编辑器，再保存媒体信息。</VAlert>
           <VAlert v-if="mediaInfoSaveFeedback" :type="mediaInfoSaveFeedback.type" :title="mediaInfoSaveFeedback.message" variant="tonal" class="mb-4">
@@ -247,7 +266,7 @@
         </VCardText>
         <VCardActions class="editor-actions">
           <VBtn color="warning" variant="tonal" prepend-icon="mdi-wrench-outline" :loading="isRepairingTruehdCore" :disabled="isSavingMediaInfo" @click="confirmMediaAction('纠正多出音轨', '将丢弃当前未保存修改；存在歧义时会只读探测 CD2，并且只纠正证据唯一的高清音轨兼容核心。是否继续？', repairCurrentAudioTracks)">纠正多出音轨</VBtn>
-          <VSpacer /><VBtn variant="text" @click="closeMediaInfoEditor">取消</VBtn><VBtn variant="flat" prepend-icon="mdi-content-save-outline" :disabled="isRepairingTruehdCore || isFillingMediaInfoTitles" :loading="isSavingMediaInfo" data-testid="media-info-save" @click="saveMediaInfo">保存并刷新</VBtn>
+          <VSpacer /><VBtn variant="text" @click="closeMediaInfoEditor">取消</VBtn><VBtn variant="flat" prepend-icon="mdi-content-save-outline" :disabled="isRepairingTruehdCore || isFillingMediaInfoTitles || mediaRecoveryBlocked" :loading="isSavingMediaInfo" data-testid="media-info-save" @click="saveMediaInfo">保存并刷新</VBtn>
         </VCardActions>
       </VCard>
     </VDialog>
@@ -542,6 +561,16 @@ const mediaInfoData = shallowRef(null);
 const mediaStreams = ref([]);
 const mediaInfoContext = ref({});
 const mediaInfoSaveFeedback = ref(null);
+const mediaRecoveryState = ref({ pending: false, records: [] });
+const mediaRecoveryError = ref('');
+const isCheckingMediaRecovery = ref(false);
+const isRecoveringMediaInfo = ref(false);
+const isConfirmingMediaRecovery = ref(false);
+const mediaRecoveryBlocked = computed(() => mediaRecoveryState.value.pending || Boolean(mediaRecoveryError.value) || isCheckingMediaRecovery.value || isRecoveringMediaInfo.value);
+let mediaRecoveryLoadSequence = 0;
+let mediaRecoverySession = 0;
+let mediaRecoveryDialog = null;
+let mediaInfoLoadedSnapshot = '';
 const currentEditMediaId = ref(null); // ★ 新增：记录当前正在编辑的具体媒体ID (电影ID或具体的集ID)
 const mediaInfoVersions = ref([]);
 let mediaInfoStreamSnapshotMap = new WeakMap();
@@ -556,6 +585,83 @@ const closeMediaInfoEditor = () => {
   ++mediaInfoLoadSequence;
   showMediaInfoEditor.value = false;
   mediaInfoLanguageSelectRefs.clear();
+};
+
+const loadMediaRecovery = async () => {
+  const sequence = ++mediaRecoveryLoadSequence;
+  const session = mediaRecoverySession;
+  isCheckingMediaRecovery.value = true;
+  try {
+    const { data } = await axios.get('/api/media_info/recovery');
+    if (session !== mediaRecoverySession || sequence !== mediaRecoveryLoadSequence) return false;
+    if (typeof data?.pending !== 'boolean' || !Array.isArray(data.records)) throw new Error('恢复状态响应无效，请重新检查');
+    mediaRecoveryState.value = data;
+    mediaRecoveryError.value = '';
+    return true;
+  } catch (error) {
+    if (session === mediaRecoverySession && sequence === mediaRecoveryLoadSequence) {
+      mediaRecoveryError.value = error.response?.data?.error || error.message || '无法读取恢复状态，请重新检查';
+    }
+    return false;
+  } finally {
+    if (session === mediaRecoverySession && sequence === mediaRecoveryLoadSequence) isCheckingMediaRecovery.value = false;
+  }
+};
+
+const recoverMediaInfo = async (record) => {
+  if (isRecoveringMediaInfo.value || isSavingMediaInfo.value || !mediaRecoveryState.value.records.some(item => item.id === record.id && item.can_recover)) return;
+  const session = mediaRecoverySession;
+  const sequence = mediaInfoLoadSequence;
+  const targetId = String(currentEditMediaId.value || '');
+  const draftSnapshot = JSON.stringify(mediaInfoData.value);
+  isRecoveringMediaInfo.value = true;
+  mediaRecoveryError.value = '';
+  try {
+    const { data } = await axios.post('/api/media_info/recovery', { recovery_id: record.id });
+    if (session !== mediaRecoverySession) return;
+    if (data?.recovered_id !== record.id || data.pending !== false) throw new Error(data?.error || data?.message || '恢复任务尚未通过验收');
+    if (!await loadMediaRecovery() || session !== mediaRecoverySession) return;
+    const warnings = mediaOperationDetails(Array.isArray(data.warning_details) ? data.warning_details : []);
+    if (Number(data.warnings) > 0 && !warnings.length) warnings.push(data.message || `恢复已验收，备份收尾尚未完成：${record.directory}`);
+    if (warnings.length) mediaOperationFeedback.value = { type: 'warning', message: '恢复已通过验收，仍有收尾提醒', details: warnings };
+    if (mediaRecoveryState.value.pending) {
+      message.warning('本条记录已恢复，仍有其他待恢复记录，请继续处理');
+      if (warnings.length && sequence === mediaInfoLoadSequence) mediaInfoSaveFeedback.value = mediaOperationFeedback.value;
+      return;
+    }
+    if (warnings.length) message.warning(mediaOperationFeedback.value.message);
+    else message.success(data.message || '媒体信息已恢复，原神医配置已通过回读验收');
+    if (showMediaInfoEditor.value && sequence === mediaInfoLoadSequence && targetId === String(currentEditMediaId.value || '')) {
+      const preserveDraft = draftSnapshot !== mediaInfoLoadedSnapshot || draftSnapshot !== JSON.stringify(mediaInfoData.value);
+      if (!preserveDraft) {
+        await openMediaInfoEditor(targetId);
+        if (session !== mediaRecoverySession || mediaInfoLoadSequence !== sequence + 1 || targetId !== String(currentEditMediaId.value || '') || !showMediaInfoEditor.value) return;
+      }
+      if (preserveDraft || warnings.length) mediaInfoSaveFeedback.value = {
+        type: warnings.length ? 'warning' : 'info',
+        message: warnings.length ? '恢复已通过验收，仍有收尾提醒' : '恢复已完成，当前编辑草稿已保留',
+        details: [...warnings, ...(preserveDraft ? ['当前编辑草稿已保留；可重新打开编辑器读取恢复后的媒体信息。'] : [])],
+      };
+    }
+  } catch (error) {
+    if (session !== mediaRecoverySession) return;
+    mediaRecoveryError.value = error.response?.data?.error || error.message || '恢复失败，请检查恢复目录';
+    message.error(mediaRecoveryError.value);
+  } finally {
+    isRecoveringMediaInfo.value = false;
+  }
+};
+
+const confirmMediaRecovery = (record) => {
+  if (isConfirmingMediaRecovery.value || isRecoveringMediaInfo.value || !record.can_recover) return;
+  const session = mediaRecoverySession;
+  isConfirmingMediaRecovery.value = true;
+  mediaRecoveryDialog = dialog.warning({
+    title: '恢复媒体信息', content: `将核对备份与 Emby 数据并恢复原神医配置。当前未保存的草稿会保留。\n恢复目录：${record.directory}`,
+    positiveText: '开始恢复', negativeText: '取消',
+    onPositiveClick: () => session === mediaRecoverySession ? recoverMediaInfo(record) : undefined,
+    onClose: () => { isConfirmingMediaRecovery.value = false; mediaRecoveryDialog = null; },
+  });
 };
 
 // ★ 新增：剧集分集选择相关状态
@@ -1255,6 +1361,7 @@ const fillLanguagesToTitles = async () => {
 const openMediaInfoEditor = async (targetId) => {
   const sequence = ++mediaInfoLoadSequence;
   mediaInfoSaveFeedback.value = null;
+  loadMediaRecovery();
 
   // 检查其中一个数组是否为空即可
   if (audioLanguageOptions.value.length === 0) {
@@ -1311,6 +1418,7 @@ const openMediaInfoEditor = async (targetId) => {
     deletedMediaStreamSnapshots.value = [];
     mediaInfoLanguageUndoStack.length = 0;
 
+    mediaInfoLoadedSnapshot = JSON.stringify(mediaInfoData.value);
     showMediaInfoEditor.value = true;
   } catch (e) {
     if (sequence === mediaInfoLoadSequence) {
@@ -1389,7 +1497,7 @@ const deleteCurrentMediaVersion = async () => {
 // 3. 保存修改 (修改为使用 currentEditMediaId)
 const saveMediaInfo = async () => {
   const targetId = String(currentEditMediaId.value || '').trim();
-  if (!targetId || isFillingMediaInfoTitles.value || isSavingMediaInfo.value || isRepairingTruehdCore.value || isDeletingMediaVersion.value) return;
+  if (!targetId || isFillingMediaInfoTitles.value || isSavingMediaInfo.value || isRepairingTruehdCore.value || isDeletingMediaVersion.value || mediaRecoveryBlocked.value) return;
   const sequence = mediaInfoLoadSequence;
   const draftSnapshot = JSON.stringify(mediaInfoData.value);
   const isCurrentEditor = () => showMediaInfoEditor.value
@@ -1453,6 +1561,7 @@ const saveMediaInfo = async () => {
         type: 'warning', message: '保存有提醒，请检查处理结果', details: mediaOperationDetails(details),
       };
       message.warning(mediaInfoSaveFeedback.value.message);
+      loadMediaRecovery();
     } else {
       message.success(res.data.message || "媒体信息已更新！");
       closeMediaInfoEditor();
@@ -1465,6 +1574,7 @@ const saveMediaInfo = async () => {
       details: mediaOperationDetails(Array.isArray(result.failures) && result.failures.length ? result.failures : [result.error || '请检查后端日志']),
     };
     message.error(mediaInfoSaveFeedback.value.message);
+    loadMediaRecovery();
   } finally {
     loadingMsg.destroy();
     isSavingMediaInfo.value = false;
@@ -1823,6 +1933,8 @@ const fetchMediaDetails = async () => {
 
 watch(() => route.fullPath, () => {
   invalidateActorSaveSession();
+  ++mediaRecoverySession;
+  mediaRecoveryDialog?.destroy();
 });
 
 watch(() => route.params.itemId, (value) => {
@@ -1840,6 +1952,7 @@ watch(() => route.params.itemId, (value) => {
   debouncedSearchActors.cancel();
   itemId.value = targetId;
   fetchMediaDetails();
+  loadMediaRecovery();
 });
 
 onMounted(() => {
@@ -1848,6 +1961,7 @@ onMounted(() => {
 
   if (itemId.value) {
     fetchMediaDetails();
+    loadMediaRecovery();
   } else {
     message.error("未提供媒体项ID！");
     isLoading.value = false;
@@ -1856,6 +1970,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   invalidateActorSaveSession();
+  ++mediaRecoverySession;
+  mediaRecoveryDialog?.destroy();
   ++mediaDetailsLoadSequence;
   window.removeEventListener('keydown', handleMediaInfoUndoShortcut);
   closeMediaInfoEditor();

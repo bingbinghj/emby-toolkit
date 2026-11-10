@@ -41,6 +41,7 @@ function fixture(post = async () => ({ data: {} })) {
   const requestStarted = deferred();
   let timerId = 0;
   const context = vm.createContext({
+    mediaRecoverySession: 0, mediaRecoveryDialog: null,
     actorSaveSession: 1, actorSaveNavigationTimer: null,
     route: { name: 'MediaEditPage', params: { itemId: '101' }, fullPath: '/edit-media/101' },
     itemDetails: { value: { item_id: '101', item_name: '示例影片' } },

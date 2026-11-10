@@ -22,6 +22,10 @@ pub fn router() -> Router<AppState> {
             get(edit).post(crate::media_save::submit),
         )
         .route("/api/media_info/fill_titles", post(fill_titles))
+        .route(
+            "/api/media_info/recovery",
+            get(crate::media_recovery::status).post(crate::media_recovery::submit),
+        )
 }
 
 async fn fill_titles(

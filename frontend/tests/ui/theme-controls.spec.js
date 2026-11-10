@@ -20,8 +20,8 @@ async function openGlassSettings(page, panel) {
 
 test.beforeEach(async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'light' });
-  await page.goto('/user-center', { waitUntil: 'domcontentloaded' });
-  await expect(page.getByRole('heading', { name: '用户中心', exact: true })).toBeVisible();
+  await page.goto('/user-management', { waitUntil: 'domcontentloaded' });
+  await expect(page.getByRole('heading', { name: '用户管理', exact: true })).toBeVisible();
 });
 
 test('theme side panel takes keyboard focus and returns it to the trigger on close', async ({ page }) => {
@@ -50,7 +50,7 @@ test('glass settings are reachable and Escape only dismisses the active dialog',
   await page.keyboard.press('Escape');
   await expect(dialog).not.toBeVisible();
   await expect(panel).toBeVisible();
-  await expect(page.getByRole('heading', { name: '用户中心', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '用户管理', exact: true })).toBeVisible();
 });
 
 test('glass preview cancels without writes and saved quality survives reload', async ({ page }) => {
@@ -73,7 +73,7 @@ test('glass preview cancels without writes and saved quality survives reload', a
   await expect(dialog).not.toBeVisible();
   await expect.poll(() => page.evaluate(key => JSON.parse(localStorage.getItem(key))?.glassQuality, THEME_KEY)).toBe('high');
   await page.reload({ waitUntil: 'domcontentloaded' });
-  await expect(page.getByRole('heading', { name: '用户中心', exact: true })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '用户管理', exact: true })).toBeVisible();
   await expect(page.locator('html')).toHaveAttribute('data-glass-quality', 'high');
   await expect(page.locator('html')).toHaveAttribute('data-glass-appearance', 'frosted');
 });
@@ -91,6 +91,7 @@ test('custom middle-gray accents keep readable text on visible plain buttons', a
   await expect.poll(() => page.evaluate(key => JSON.parse(localStorage.getItem(key))?.primaryColor, THEME_KEY)).toBe('#999999');
   await page.keyboard.press('Escape');
   await page.getByRole('tab', { name: /115/ }).click();
+  await page.getByRole('button', { name: '账户与连接', exact: true }).click();
   const button = page.getByRole('button', { name: '扫码获取', exact: true });
   await expect(button).toBeVisible();
   const colors = await button.evaluate(element => {

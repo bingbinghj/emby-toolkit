@@ -21,11 +21,11 @@ const isMobile = computed(() => mdAndDown.value);
 const collapsed = computed(() => appearance.settings.value.layout === 'collapsed' && !isMobile.value);
 const notificationOpen = ref(false), themeCustomizerOpen = ref(false), avatarLoadFailed = ref(false);
 const taskControlBusy = ref(false);
-const activeMenuKey = computed(() => route.name === 'MediaCenterLibrary' ? 'MediaCenter' : route.name);
+const activeMenuKey = computed(() => route.name === 'MediaCenterLibrary' ? 'Dashboard' : route.name);
 const taskPaused = computed(() => props.taskStatus?.state === 'paused');
 const taskStopping = computed(() => props.taskStatus?.stop_requested || props.taskStatus?.state === 'stopping');
 const userOptions = computed(() => [
-  { key: 'user-center', label: '用户中心', icon: 'mdi-account-circle-outline' },
+  { key: 'user-management', label: '用户管理', icon: 'mdi-account-group-outline' },
   ...(authStore.isAdmin ? [
     { key: 'edit-menu', label: '自定义导航', icon: 'mdi-menu-open' },
     { key: 'restart-container', label: '重启容器', icon: 'mdi-restart' },
@@ -97,8 +97,8 @@ const triggerRestart = async () => {
 };
 
 const handleUserSelect = async (key) => {
-  if (key === 'user-center') {
-    router.push({ name: 'UserCenter' });
+  if (key === 'user-management') {
+    router.push({ name: 'UserManagement' });
   } else if (key === 'edit-menu') {
     isMenuEditorVisible.value = true;
   } else if (key === 'restart-container') {
@@ -131,10 +131,7 @@ const baseMenuOptions = computed(() => {
   };
 
   if (authStore.isLoggedIn) {
-    discoveryGroup.children.push({ label: '用户中心', defaultLabel: '用户中心', key: 'UserCenter', icon: 'mdi-account-circle-outline' });
-    if (authStore.isAdmin) {
-      discoveryGroup.children.push({ label: '媒体中心', defaultLabel: '媒体中心', key: 'MediaCenter', icon: 'mdi-filmstrip' });
-    }
+    discoveryGroup.children.push({ label: '仪表盘', defaultLabel: '仪表盘', key: 'Dashboard', icon: 'mdi-view-dashboard-outline' });
   }
 
   const finalMenu = [discoveryGroup];
@@ -144,6 +141,7 @@ const baseMenuOptions = computed(() => {
       {
         label: '整理', defaultLabel: '整理', key: 'group-management', icon: 'mdi-folder-play-outline',
         children: [
+          { label: '媒体整理', defaultLabel: '媒体整理', key: 'MediaOrganize', icon: 'mdi-folder-move-outline' },
           { label: '手动处理', defaultLabel: '手动处理', key: 'ReviewList', icon: 'mdi-playlist-edit' },
         ]
       },
@@ -151,6 +149,8 @@ const baseMenuOptions = computed(() => {
         label: '系统', defaultLabel: '系统', key: 'group-system', icon: 'mdi-cog-outline',
         children: [
           { label: '通用设置', defaultLabel: '通用设置', key: 'settings-general', icon: 'mdi-cog-outline' },
+          { label: '通知设置', defaultLabel: '通知设置', key: 'settings-notifications', icon: 'mdi-bell-cog-outline' },
+          { label: '用户管理', defaultLabel: '用户管理', key: 'UserManagement', icon: 'mdi-account-group-outline' },
           { label: '任务中心', defaultLabel: '任务中心', key: 'settings-scheduler', icon: 'mdi-timer-outline' },
           { label: '封面生成', defaultLabel: '封面生成', key: 'CoverGeneratorConfig', icon: 'mdi-palette-outline' },
         ]
@@ -200,12 +200,15 @@ const syncMenuConfig = (savedTree) => {
 
       if (Array.isArray(savedGroup.children)) {
         savedGroup.children.forEach(savedChild => {
-          const baseChild = baseMenuMap.value.get(savedChild.key);
+          const key = { MediaCenter: 'Dashboard', UserCenter: 'UserManagement' }[savedChild.key] || savedChild.key;
+          const baseChild = baseMenuMap.value.get(key);
           if (!baseChild || baseChild.isGroup) return; // 废弃的子项
-          usedKeys.add(savedChild.key);
+          if (usedKeys.has(key)) return;
+          usedKeys.add(key);
+          const oldDefault = { MediaCenter: '媒体中心', UserCenter: '用户中心' }[savedChild.key];
           newGroup.children.push({
-            key: savedChild.key,
-            label: savedChild.label || baseChild.defaultLabel,
+            key,
+            label: savedChild.label && savedChild.label !== oldDefault ? savedChild.label : baseChild.defaultLabel,
             visible: savedChild.visible !== false
           });
         });
@@ -223,11 +226,10 @@ const syncMenuConfig = (savedTree) => {
         label: baseGroup.defaultLabel,
         visible: true,
         expanded: true,
-        children: baseGroup.children ? baseGroup.children.map(c => ({
-          key: c.key,
-          label: c.defaultLabel,
-          visible: true
-        })) : []
+        children: baseGroup.children ? baseGroup.children.filter(c => !usedKeys.has(c.key)).map(c => {
+          usedKeys.add(c.key);
+          return { key: c.key, label: c.defaultLabel, visible: true };
+        }) : []
       });
     } else {
       // 组存在，检查是否有新的子项
@@ -235,6 +237,7 @@ const syncMenuConfig = (savedTree) => {
       if (baseGroup.children) {
         baseGroup.children.forEach(baseChild => {
           if (!usedKeys.has(baseChild.key)) {
+            usedKeys.add(baseChild.key);
             targetGroup.children.push({
               key: baseChild.key,
               label: baseChild.defaultLabel,
@@ -467,7 +470,7 @@ const clearDragState = () => {
   <DefaultLayout :menus="isMenuReady ? menuOptions : []" :active-key="String(activeMenuKey || '')"
     :expanded-keys="defaultExpandedKeys" :layout="appearance.settings.value.layout" @navigate="handleMenuUpdate" @update:layout="setLayout">
     <template #brand="{ rail }">
-      <RouterLink :to="{ name: 'UserCenter' }" class="app-brand"><img src="./assets/logo.png" alt="Emby Toolkit" />
+      <RouterLink :to="{ name: 'Dashboard' }" class="app-brand"><img src="./assets/logo.png" alt="Emby Toolkit" />
         <span v-if="!rail" class="app-brand-name">Emby Toolkit</span>
       </RouterLink>
     </template>

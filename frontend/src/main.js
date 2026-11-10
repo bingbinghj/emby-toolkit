@@ -13,10 +13,12 @@ import icons from './plugins/icons.json'
 import { useAuthStore } from './stores/auth'
 import { installBackgroundTaskInterceptor } from './utils/backgroundTasks'
 import { initializeThemeRuntime } from './theme'
+import { loadMoviePilotFonts } from './plugins/fonts'
 import './styles/main.scss'
 import './styles/etk.css'
 
 icons.forEach(collection => addCollection(collection))
+loadMoviePilotFonts()
 const app = createApp(App)
 app.use(createPinia())
 app.use(vuetify)

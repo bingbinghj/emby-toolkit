@@ -15,6 +15,7 @@ for (const [tab, button, field, value, savedValue] of cards) {
   test(`${button} submits its edited field through the ETK configuration API`, async ({ page, api }) => {
     await page.goto('/settings/general');
     await page.getByRole('tab', { name: tab, exact: true }).click();
+    await page.getByRole('button', { name: button.replace(/^保存/, ''), exact: true }).click();
     await page.locator(`[data-field="${field}"]`).locator('input,textarea').first().fill(value);
     await page.getByRole('button', { name: button, exact: true }).click();
     await expect.poll(() => api.requests.some(request => request.method === 'POST' && request.path === '/api/config')).toBe(true);
@@ -27,6 +28,7 @@ for (const [tab, button, field, value, savedValue] of cards) {
 test('ingest card switch saves its boolean value without altering another card', async ({ page, api }) => {
   await page.goto('/settings/general');
   await page.getByRole('tab', { name: '高级', exact: true }).click();
+  await page.getByRole('button', { name: '入库自动处理', exact: true }).click();
   const enabled = page.locator('[data-field="auto_fill_language_titles_on_ingest"] input');
   const previous = await enabled.isChecked();
   await enabled.setChecked(!previous);

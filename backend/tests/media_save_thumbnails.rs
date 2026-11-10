@@ -5,6 +5,280 @@ mod native {
     use axum::{body::Body, http::Request, response::Response};
     use emby_toolkit::{media_save, state::string};
 
+    async fn recovery_status(state: &AppState) -> Value {
+        emby_toolkit::media_recovery::status(axum::extract::State(state.clone()))
+            .await
+            .unwrap()
+            .0
+    }
+
+    async fn recover_from_editor(state: &AppState, id: &str) -> Value {
+        use tower::ServiceExt;
+        let response = emby_toolkit::media_edit::router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/media_info/recovery")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(json!({"recovery_id":id}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::ACCEPTED);
+        let receipt: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(40), async {
+            loop {
+                let outcome = state
+                    .jobs
+                    .result(receipt["task_id"].as_str().unwrap())
+                    .await
+                    .unwrap();
+                if outcome["is_running"] == false {
+                    return outcome;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn editor_recovery_retries_only_the_recorded_target_and_cleans_verified_material() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        *f.proxy.protocol_fault.lock().await = "sync-failed".into();
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("恢复按钮重试标题");
+        f.save(json!({"mediainfo":edited}), false).await;
+        let recovery = reload_recovery(&f);
+        let status = recovery_status(&f.native.state).await;
+        assert_eq!(status["pending"], true);
+        assert_eq!(status["records"][0]["target_ids"], json!(["61616"]));
+        assert_eq!(status["records"][0]["can_recover"], true);
+        *f.proxy.protocol_fault.lock().await = String::new();
+        let result = recover_from_editor(
+            &f.native.state,
+            status["records"][0]["id"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(result["state"], "completed", "{result}");
+        assert_eq!(result["result"]["pending"], false);
+        assert_eq!(recovery_status(&f.native.state).await["pending"], false);
+        assert!(!recovery.exists());
+        assert_eq!(
+            f.native.host.item.lock().await["MediaStreams"][1]["Title"],
+            "恢复按钮重试标题"
+        );
+        assert_eq!(
+            *f.native.host.settings.lock().await,
+            f.proxy.original_settings
+        );
+        assert_eq!(*f.proxy.metadata_ids.lock().await, vec!["61616", "61616"]);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn editor_recovery_accepts_a_restored_legacy_61616_without_another_sync() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        *f.proxy.protocol_fault.lock().await = "sync-failed".into();
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("已手动恢复的旧记录");
+        f.save(json!({"mediainfo":edited.clone()}), false).await;
+        let recovery = reload_recovery(&f);
+        let marker = recovery.join("media-reload.json");
+        let mut legacy: Value =
+            serde_json::from_slice(&tokio::fs::read(&marker).await.unwrap()).unwrap();
+        for key in ["targets", "observations", "thumbnail_times"] {
+            legacy.as_object_mut().unwrap().remove(key);
+        }
+        tokio::fs::write(&marker, serde_json::to_vec(&legacy).unwrap())
+            .await
+            .unwrap();
+        // The original incident was repaired externally; only its old guard
+        // and temporary plugin settings remained.
+        f.proxy.finish_sync("61616", edited).await;
+        let before = f.native.host.item.lock().await.clone();
+        let status = recovery_status(&f.native.state).await;
+        let result = recover_from_editor(
+            &f.native.state,
+            status["records"][0]["id"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(result["state"], "completed", "{result}");
+        assert_eq!(*f.native.host.item.lock().await, before);
+        assert_eq!(*f.proxy.metadata_ids.lock().await, vec!["61616"]);
+        assert_eq!(
+            *f.native.host.settings.lock().await,
+            f.proxy.original_settings
+        );
+        assert!(!recovery.exists());
+        assert_eq!(recovery_status(&f.native.state).await["pending"], false);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn editor_recovery_keeps_the_guard_and_original_settings_when_resource_evidence_is_missing()
+     {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        *f.proxy.protocol_fault.lock().await = "sync-failed".into();
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("不可丢失的恢复材料");
+        f.save(json!({"mediainfo":edited}), false).await;
+        let recovery = reload_recovery(&f);
+        let marker = recovery.join("media-reload.json");
+        let material: Value =
+            serde_json::from_slice(&tokio::fs::read(&marker).await.unwrap()).unwrap();
+        let file = material["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["path"].as_str().unwrap().ends_with(".bif"))
+            .unwrap();
+        tokio::fs::remove_file(file["backup"].as_str().unwrap())
+            .await
+            .unwrap();
+        let temporary = f.native.host.settings.lock().await.clone();
+        let before = f.native.host.item.lock().await.clone();
+        let status = recovery_status(&f.native.state).await;
+        let result = recover_from_editor(
+            &f.native.state,
+            status["records"][0]["id"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(result["state"], "failed", "{result}");
+        assert!(marker.exists());
+        assert!(recovery.join("original-settings.json").exists());
+        assert_eq!(*f.native.host.settings.lock().await, temporary);
+        assert_eq!(*f.native.host.item.lock().await, before);
+        assert_eq!(recovery_status(&f.native.state).await["pending"], true);
+        assert_eq!(*f.proxy.metadata_ids.lock().await, vec!["61616"]);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn editor_recovery_restores_complete_audio_json_and_cache_after_safe_import() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        let mut info = f.native.original.clone();
+        info[0]["MediaSourceInfo"]["MediaStreams"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|s| s["Type"] == "Audio");
+        info[0]["Chapters"] = json!([]);
+        info[0]["EmbeddedInfo"] = json!({"Name":"旧嵌入音乐名"});
+        {
+            let mut item = f.native.host.item.lock().await;
+            item["Type"] = json!("Audio");
+            update_native_guid(&f.native.host, &mut item).await;
+            item["Chapters"] = json!([]);
+            item["Name"] = json!("当前音乐名");
+            item["ImageTags"] = json!({"Primary":"当前音乐封面"});
+            item["MediaStreams"] = info[0]["MediaSourceInfo"]["MediaStreams"].clone();
+            item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
+        }
+        info[0]["MediaSourceInfo"]["MediaStreams"][0]["Title"] = json!("恢复音乐轨道");
+        *f.proxy.protocol_fault.lock().await = "sync-failed".into();
+        f.save(json!({"mediainfo":info.clone()}), false).await;
+        let recovery = reload_recovery(&f);
+        assert!(recovery.join("complete-audio-61616.json").is_file());
+        *f.proxy.protocol_fault.lock().await = String::new();
+        let status = recovery_status(&f.native.state).await;
+        let result = recover_from_editor(
+            &f.native.state,
+            status["records"][0]["id"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(result["state"], "completed", "{result}");
+        let live = f.native.host.item.lock().await.clone();
+        let full: Value =
+            serde_json::from_slice(&tokio::fs::read(info_path(&live)).await.unwrap()).unwrap();
+        let cached: Value =
+            sqlx::query_scalar("SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1=$1")
+                .bind(format!("{:040X}", 42))
+                .fetch_one(&f.native.state.db)
+                .await
+                .unwrap();
+        assert_eq!(full[0]["EmbeddedInfo"], info[0]["EmbeddedInfo"]);
+        assert_eq!(cached, full);
+        assert_eq!(live["Name"], "当前音乐名");
+        assert_eq!(live["ImageTags"], json!({"Primary":"当前音乐封面"}));
+        assert!(!recovery.exists());
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn editor_recovery_rechecks_native_sync_before_finishing_configuration_and_refuses_a_boolean_only_proof()
+     {
+        for complete_evidence in [true, false] {
+            let f = ThumbnailFixture::with_flag(Some(false)).await;
+            f.proxy
+                .reject_settings_restore
+                .store(true, Ordering::SeqCst);
+            f.save(json!({"mediainfo":f.native.original}), false).await;
+            let root = f.native.state.data_dir.join("backups/media-info-reload");
+            let recovery = std::fs::read_dir(root)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| p.join("pending-scan.json").exists())
+                .unwrap();
+            if !complete_evidence {
+                let path = recovery.join("pending-scan.json");
+                let mut proof: Value =
+                    serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+                proof.as_object_mut().unwrap().remove("verification");
+                tokio::fs::write(path, serde_json::to_vec(&proof).unwrap())
+                    .await
+                    .unwrap();
+            }
+            f.proxy
+                .reject_settings_restore
+                .store(false, Ordering::SeqCst);
+            let temporary = f.native.host.settings.lock().await.clone();
+            let previous_reads = f.proxy.readbacks.load(Ordering::SeqCst);
+            if complete_evidence {
+                f.proxy
+                    .required_recovery_reads
+                    .store(previous_reads + 2, Ordering::SeqCst);
+            }
+            let status = recovery_status(&f.native.state).await;
+            assert_eq!(status["records"][0]["can_recover"], complete_evidence);
+            let result = recover_from_editor(
+                &f.native.state,
+                status["records"][0]["id"].as_str().unwrap(),
+            )
+            .await;
+            if complete_evidence {
+                assert_eq!(result["state"], "completed", "{result}");
+                assert!(
+                    f.proxy.readbacks.load(Ordering::SeqCst) > previous_reads,
+                    "the verified flag cannot replace a fresh native readback"
+                );
+                assert_eq!(
+                    *f.native.host.settings.lock().await,
+                    f.proxy.original_settings
+                );
+                assert!(!recovery.exists());
+            } else {
+                assert_eq!(result["state"], "failed", "{result}");
+                assert!(result["message"].as_str().unwrap().contains("不能仅凭"));
+                assert_eq!(*f.native.host.settings.lock().await, temporary);
+                assert!(recovery.join("pending-scan.json").exists());
+            }
+            f.close().await;
+        }
+    }
+
     #[derive(Clone)]
     struct Proxy {
         original_url: String,
@@ -18,6 +292,7 @@ mod native {
         sync_inputs: Arc<Mutex<Vec<(String, Value)>>>,
         protocol_fault: Arc<Mutex<String>>,
         readbacks: Arc<AtomicUsize>,
+        required_recovery_reads: Arc<AtomicUsize>,
         thumbnail_task: Arc<Mutex<Value>>,
         reject_thumbnail: Arc<AtomicBool>,
         reject_refresh: Arc<AtomicBool>,
@@ -296,7 +571,8 @@ mod native {
                     }
                 }
                 if query.get("Fields").is_some_and(|fields| {
-                    fields == "Id,Path,Type,Chapters,MediaSources,MediaStreams"
+                    let fields = fields.split(',').collect::<Vec<_>>();
+                    fields.contains(&"MediaStreams") && fields.contains(&"Chapters")
                 }) {
                     proxy.readbacks.fetch_add(1, Ordering::SeqCst);
                 }
@@ -439,7 +715,10 @@ mod native {
             if path == "/UI/Command" && proxy.reject_page_save_once.swap(false, Ordering::SeqCst) {
                 return StatusCode::BAD_REQUEST.into_response();
             }
-            if path == "/UI/Command" && proxy.reject_settings_restore.load(Ordering::SeqCst) {
+            if path == "/UI/Command"
+                && (proxy.reject_settings_restore.load(Ordering::SeqCst)
+                    || proxy.required_recovery_reads.load(Ordering::SeqCst) > 0)
+            {
                 let (parts, body) = request.into_parts();
                 let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
                 let command: Value = serde_json::from_slice(&bytes).unwrap();
@@ -448,8 +727,15 @@ mod native {
                 if desired["ExclusiveControlFeatures"]
                     == proxy.original_settings["ExclusiveControlFeatures"]
                 {
-                    proxy.restore_rejections.fetch_add(1, Ordering::SeqCst);
-                    return StatusCode::BAD_REQUEST.into_response();
+                    assert!(
+                        proxy.readbacks.load(Ordering::SeqCst)
+                            >= proxy.required_recovery_reads.load(Ordering::SeqCst),
+                        "fresh target readbacks must precede restoring the original configuration"
+                    );
+                    if proxy.reject_settings_restore.load(Ordering::SeqCst) {
+                        proxy.restore_rejections.fetch_add(1, Ordering::SeqCst);
+                        return StatusCode::BAD_REQUEST.into_response();
+                    }
                 }
                 return proxy
                     .forward(Request::from_parts(parts, Body::from(bytes)))
@@ -693,6 +979,7 @@ mod native {
                 sync_inputs: Arc::default(),
                 protocol_fault: Arc::default(),
                 readbacks: Arc::default(),
+                required_recovery_reads: Arc::default(),
                 thumbnail_task: Arc::new(Mutex::new(
                     json!({"Id":"thumbnail","Key":"VideoThumbnailExtractTask","State":"Idle","LastExecutionResult":{"StartTimeUtc":"old","Status":"Completed"}}),
                 )),

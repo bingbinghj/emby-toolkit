@@ -40,4 +40,10 @@ npm run test:ui -- --workers=1
 
 主题支持明亮、深色和系统偏好，包含主色、圆角、纵向/折叠/水平导航及完整玻璃设置。玻璃设置提供材质、质量、动态模式、光学参数、预览、取消和保存。浏览器不支持的渲染能力沿用上游 CSS 回退。
 
-壁纸支持本地预设、自定义 URL、图片上传、轮换和淡化。主题及壁纸在浏览器中持久化，迁移已有 ETK 外观设置。图标由构建脚本提取并打包到本地资源。
+壁纸支持本地预设、TMDb、Bing、Emby 背景、自定义 API、固定 URL 和图片上传，提供 MP 的轮换间隔与淡化效果。主题及壁纸在浏览器中持久化，迁移已有 ETK 外观设置；字体采用 Inter 和 Noto Sans SC。图标由构建脚本提取并打包到本地资源。
+
+## 仪表盘刷新
+
+统计、最新入库和媒体库沿用 MoviePilot v3 的成功快照逻辑：按组件创建时的登录用户隔离，缓存有效期 24 小时，仅完整成功结果（包括空列表）更新快照。刷新失败保留成功数据并显示时间和重试入口；首次失败显示未读取状态。115 容量只保留当前页面内的成功数据，不写入快照。
+
+参考上游 `609ea05eac7efc7c2cb31edcf5364d26c9c592f1` 的 `useDashboardSnapshot.ts`、`AnalyticsStorage.vue`、`AnalyticsMediaStatistic.vue`、`MediaServerLatest.vue` 和 `MediaServerLibrary.vue`。Rust `/api/dashboard/media` 的分区错误映射为对应卡片未成功，快照仅含计数及安全的海报/标题字段。

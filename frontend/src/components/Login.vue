@@ -126,7 +126,7 @@ async function handleLogin() {
     await authStore.login({ ...credentials.value });
     if (!isPageActive) return;
     message.success('登录成功');
-    router.push({ name: 'UserCenter' });
+    router.push({ name: 'Dashboard' });
   } catch (error) {
     if (!isPageActive) return;
     if (error.response?.status === 428) {

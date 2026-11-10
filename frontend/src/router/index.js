@@ -12,6 +12,9 @@ import CoverGeneratorConfig from '../components/CoverGeneratorConfig.vue';
 import UserCenterPage from '../components/UserCenterPage.vue'
 import SetupPage from '../components/Setup.vue';
 import MediaCenterPage from '../components/MediaCenterPage.vue';
+import DashboardPage from '../components/DashboardPage.vue';
+import MediaOrganizePage from '../components/MediaOrganizePage.vue';
+import NotificationSettingsPage from '../components/settings/NotificationSettingsPage.vue';
 
 // --- 2. 定义路由规则 (带 meta.public 标签) ---
 const routes = [
@@ -35,7 +38,7 @@ const routes = [
   },
   {
     path: '/',
-    redirect: '/user-center'
+    redirect: '/dashboard'
   },
   {
     path: '/review',
@@ -44,16 +47,37 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
+    path: '/dashboard',
+    name: 'Dashboard',
+    component: DashboardPage,
+    meta: { requiresAuth: true },
+  },
+  {
+    path: '/media-organize',
+    name: 'MediaOrganize',
+    component: MediaOrganizePage,
+    meta: { requiresAuth: true },
+  },
+  {
     path: '/media-center',
     name: 'MediaCenter',
+    redirect: '/dashboard',
+  },
+  {
+    path: '/library/:libraryId',
+    name: 'MediaCenterLibrary',
     component: MediaCenterPage,
+    props: true,
     meta: { requiresAuth: true },
   },
   {
     path: '/media-center/library/:libraryId',
-    name: 'MediaCenterLibrary',
-    component: MediaCenterPage,
-    props: true,
+    redirect: to => ({ name: 'MediaCenterLibrary', params: to.params, query: to.query }),
+  },
+  {
+    path: '/settings/notifications',
+    name: 'settings-notifications',
+    component: NotificationSettingsPage,
     meta: { requiresAuth: true },
   },
   {
@@ -82,12 +106,17 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
-    path: '/user-center',
-    name: 'UserCenter',
+    path: '/user-management',
+    name: 'UserManagement',
     component: UserCenterPage,
     meta: {
       requiresAuth: true // 这个页面必须登录才能访问
     },
+  },
+  {
+    path: '/user-center',
+    name: 'UserCenter',
+    redirect: '/user-management',
   },
 ];
 

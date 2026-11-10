@@ -3,9 +3,9 @@ import { test, expect } from './fixtures.js';
 const actorSavePath = '/api/update_media_cast_sa/101';
 
 async function leaveEditor(page) {
-  await page.locator('.v-navigation-drawer').getByText('媒体中心', { exact: true }).click();
-  await expect(page).toHaveURL(/\/media-center$/);
-  await expect(page.getByRole('heading', { name: '媒体中心', exact: true })).toBeVisible();
+  await page.locator('.v-navigation-drawer').getByText('仪表盘', { exact: true }).click();
+  await expect(page).toHaveURL(/\/dashboard$/);
+  await expect(page.getByRole('heading', { name: '仪表盘', exact: true })).toBeVisible();
 }
 
 async function finishRequest(page, release, result) {
@@ -23,7 +23,7 @@ test('late actor save cannot navigate after the editor is unmounted', async ({ p
   await pending.started;
   await leaveEditor(page);
   await finishRequest(page, pending.release, { message: '演员已保存' });
-  await expect(page).toHaveURL(/\/media-center$/);
+  await expect(page).toHaveURL(/\/dashboard$/);
   await expect(page.getByText('修改已保存，Emby将自动刷新。', { exact: true })).not.toBeVisible();
 });
 
@@ -33,7 +33,7 @@ test('leaving the editor cancels already scheduled actor save navigation', async
   await expect(page.getByText('修改已保存，Emby将自动刷新。', { exact: true })).toBeVisible();
   await leaveEditor(page);
   await page.waitForTimeout(1800);
-  await expect(page).toHaveURL(/\/media-center$/);
+  await expect(page).toHaveURL(/\/dashboard$/);
 });
 
 test('an older actor save cannot navigate after the same media is reopened', async ({ page, api }) => {
@@ -60,6 +60,6 @@ test('late actor failure stays with the editor that submitted it', async ({ page
   await started;
   await leaveEditor(page);
   await finishRequest(page, release, { error: '旧演员保存失败' });
-  await expect(page).toHaveURL(/\/media-center$/);
+  await expect(page).toHaveURL(/\/dashboard$/);
   await expect(page.getByText('旧演员保存失败', { exact: true })).not.toBeVisible();
 });

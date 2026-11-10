@@ -13,7 +13,7 @@
         <VSpacer />
         <VBtn v-if="current.options.negativeText || current.options.onPositiveClick" variant="text" color="default"
           :disabled="current.busy" @click="answerDialog(current, false)">{{ current.options.negativeText || '取消' }}</VBtn>
-        <VBtn :color="current.type" :loading="current.busy" variant="flat" @click="answerDialog(current, true)">
+        <VBtn :color="current.type" :loading="current.busy" :disabled="current.busy" variant="flat" @click="answerDialog(current, true)">
           {{ current.options.positiveText || (current.options.onPositiveClick ? '确认' : '知道了') }}
         </VBtn>
       </VCardActions>

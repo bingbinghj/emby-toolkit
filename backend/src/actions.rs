@@ -17,6 +17,92 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/actions/reprocess_item/{id}", post(submit))
         .route("/api/actions/reprocess_all_review_items", post(all))
+        .route("/api/actions/reorganize", post(reorganize))
+}
+async fn reorganize(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<(StatusCode, Json<Value>)> {
+    let selected = body["item_ids"]
+        .as_array()
+        .filter(|ids| !ids.is_empty() && ids.len() <= 500)
+        .ok_or_else(|| ApiError::bad("请选择 1 至 500 个明确的媒体项目"))?;
+    let mut ids = vec![];
+    for value in selected {
+        let id = value
+            .as_str()
+            .filter(|id| {
+                !id.is_empty()
+                    && id.len() <= 128
+                    && id
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+            })
+            .ok_or_else(|| ApiError::bad("媒体项目 ID 无效"))?;
+        if !ids.iter().any(|selected: &String| selected == id) {
+            ids.push(id.to_string());
+        }
+    }
+    let work = state.clone();
+    let task = state.jobs.submit_response("媒体重新整理", move |context| async move {
+        let total = ids.len();
+        let mut items = vec![];
+        let mut failures = vec![];
+        let mut warning_details = vec![];
+        let mut warnings = 0_u64;
+        let mut updated = 0;
+        for (index, id) in ids.iter().enumerate() {
+            if let Err(error) = context.checkpoint().await {
+                if context.is_cancelled() { break; }
+                return Err(error);
+            }
+            context.update_counted(index as u64, total as u64, "媒体重新整理", &format!("重新执行 ETK 流程：媒体 {id}")).await;
+            // The empty reason runs the complete rebuilding and scrape flow, rather
+            // than the missing-media-info shortcut used by review retries.
+            match reprocess_inner(&work, id, "", &context, true).await {
+                Ok(report) => {
+                    let mut errors = crate::media_edit::list(&report["failures"]);
+                    if let Some(error) = report["error"].as_str().filter(|error| !error.is_empty()) {
+                        errors.push(json!(error));
+                    }
+                    let failed = !errors.is_empty() || report["success"] == false
+                        || report["failed"].as_u64().unwrap_or(0) > 0;
+                    let details = crate::media_edit::list(&report["warning_details"]);
+                    warnings += report["warnings"].as_u64().unwrap_or(0);
+                    warning_details.extend(details.iter().map(|detail| json!(format!("{id}：{}", detail.as_str().unwrap_or("处理有提醒")))));
+                    if failed {
+                        failures.push(format!("{id}：{}", if errors.is_empty() { string(&report, "message") } else { errors.iter().map(|error| error.as_str().map(str::to_string).unwrap_or_else(||error.to_string())).collect::<Vec<_>>().join("；") }));
+                    } else {
+                        updated += 1;
+                    }
+                    items.push(json!({"item_id":id,"status":if failed {"failed"} else {"completed"},"report":report}));
+                }
+                Err(error) if context.is_cancelled() => {
+                    items.push(json!({"item_id":id,"status":"cancelled","error":error.1}));
+                    break;
+                }
+                Err(error) => {
+                    failures.push(format!("{id}：{}", error.1));
+                    items.push(json!({"item_id":id,"status":"failed","error":error.1}));
+                }
+            }
+        }
+        let failed = failures.len();
+        let remaining = &ids[items.len()..];
+        let cancelled = context.is_cancelled();
+        if cancelled {
+            warning_details.push(json!(format!("任务已取消，已保留处理结果，仍有 {} 项未开始整理", remaining.len())));
+        }
+        Ok((if failed > 0 || warnings > 0 || !warning_details.is_empty() {207} else {200}, json!({
+            "selected_count":total,"updated":updated,"failed":failed,"items":items,"remaining_ids":remaining,"cancelled":cancelled,
+            "failures":failures,"warnings":warnings,"warning_details":warning_details,
+            "message":format!("媒体重新整理{}：处理 {updated} 项，失败 {failed} 项", if cancelled {"已取消"} else {"完成"})
+        })))
+    }).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"task_id":task,"message":"媒体重新整理任务已提交"})),
+    ))
 }
 async fn submit(
     State(state): State<AppState>,
@@ -73,6 +159,15 @@ pub async fn reprocess(
     reason: &str,
     context: &JobContext,
 ) -> Result<Value> {
+    reprocess_inner(state, id, reason, context, false).await
+}
+async fn reprocess_inner(
+    state: &AppState,
+    id: &str,
+    reason: &str,
+    context: &JobContext,
+    file_refresh: bool,
+) -> Result<Value> {
     context.checkpoint().await?;
     let requested = details(
         state,
@@ -80,6 +175,11 @@ pub async fn reprocess(
         "Id,Name,Type,Path,People,ProviderIds,Genres,MediaSources,SeriesId,ParentId",
     )
     .await?;
+    if requested["Id"] != id {
+        return Err(ApiError::bad(
+            "Emby 返回的媒体 ID 与整理目标不一致，未继续处理",
+        ));
+    }
     let missing = reason.contains("缺失媒体信息");
     let mut ids = crate::revalidation::scope(state, id, context).await?;
     if matches!(requested["Type"].as_str(), Some("Series" | "Season")) && ids.is_empty() {
@@ -167,8 +267,11 @@ pub async fn reprocess(
     let mut rebuild_warning_details = vec![];
     if let Some(first) = rebuilt.keys().next() {
         let body = json!({"mediainfo":rebuilt[first],"target_item_ids":ids,"stream_patches":[]});
-        let (status, result) =
-            crate::media_save::save_with_rebuilt(state, first, &body, &rebuilt, context).await?;
+        let (status, result) = if file_refresh {
+            crate::media_save::save_rebuilt_files(state, first, &body, &rebuilt, context).await?
+        } else {
+            crate::media_save::save_with_rebuilt(state, first, &body, &rebuilt, context).await?
+        };
         ensure_rebuild_completed(status, &result)?;
         rebuild_warnings = result["warnings"].as_u64().unwrap_or(0);
         rebuild_warning_details = crate::media_edit::list(&result["warning_details"]);

@@ -7,9 +7,42 @@ use crate::{
 };
 use serde_json::{Value, json};
 
-fn actors_match(expected: &Value, actual: &Value) -> bool {
+fn tmdb_id(person: &Value) -> Result<String> {
+    let mut found = "";
+    if let Some(ids) = person["ProviderIds"].as_object() {
+        for (key, value) in ids {
+            if !key.eq_ignore_ascii_case("tmdb") {
+                continue;
+            }
+            let Some(id) = value.as_str().filter(|id| !id.is_empty()) else {
+                continue;
+            };
+            if !found.is_empty() && found != id {
+                return Err(ApiError(
+                    axum::http::StatusCode::CONFLICT,
+                    format!(
+                        "人物 {} 的 TMDb ProviderIds 大小写键值冲突，无法确认演员关联",
+                        string(person, "Id")
+                    ),
+                ));
+            }
+            found = id;
+        }
+    }
+    Ok(found.to_owned())
+}
+
+fn normalize_tmdb_id(person: &mut Value) -> Result<()> {
+    let id = tmdb_id(person)?;
+    if !id.is_empty() {
+        person["ProviderIds"]["Tmdb"] = json!(id);
+    }
+    Ok(())
+}
+
+fn actors_match(expected: &Value, actual: &Value) -> Result<bool> {
     let (Some(expected), Some(actual)) = (expected.as_array(), actual.as_array()) else {
-        return false;
+        return Ok(false);
     };
     let expected = expected
         .iter()
@@ -20,10 +53,15 @@ fn actors_match(expected: &Value, actual: &Value) -> bool {
         .filter(|person| person["Type"] == "Actor")
         .collect::<Vec<_>>();
     if expected.len() != actual.len() {
-        return false;
+        return Ok(false);
     }
+    let actual_ids = actual
+        .iter()
+        .map(|person| tmdb_id(person))
+        .collect::<Result<Vec<_>>>()?;
     let mut used = std::collections::HashSet::new();
     for person in expected {
+        let tmdb = tmdb_id(person)?;
         let matched = actual.iter().enumerate().find(|(index, live)| {
             !used.contains(index)
                 && live["Name"] == person["Name"]
@@ -32,18 +70,15 @@ fn actors_match(expected: &Value, actual: &Value) -> bool {
                     .as_str()
                     .filter(|id| !id.is_empty())
                     .is_none_or(|id| live["Id"] == id)
-                && person["ProviderIds"]["Tmdb"]
-                    .as_str()
-                    .filter(|id| !id.is_empty())
-                    .is_none_or(|id| live["ProviderIds"]["Tmdb"] == id)
+                && (tmdb.is_empty() || actual_ids[*index] == tmdb)
         });
         if let Some((index, _)) = matched {
             used.insert(index);
         } else {
-            return false;
+            return Ok(false);
         }
     }
-    true
+    Ok(true)
 }
 
 pub(crate) async fn verify_readback(
@@ -90,9 +125,10 @@ pub(crate) async fn verify_readback(
                 let name_matches = expected
                     .get("Name")
                     .is_none_or(|name| live["Name"] == *name);
-                let people_matches = expected
-                    .get("People")
-                    .is_none_or(|people| actors_match(people, &live["People"]));
+                let people_matches = match expected.get("People") {
+                    Some(people) => actors_match(people, &live["People"])?,
+                    None => true,
+                };
                 if name_matches && people_matches {
                     tracing::info!("[人物回读] 媒体/人物ID {id}：本次姓名和演员角色已通过验收");
                     return Ok(());
@@ -154,6 +190,7 @@ pub(crate) async fn update_name(
             format!("人物 ID 与目标 {id} 不一致，未修改人物"),
         ));
     }
+    tmdb_id(&person)?;
     if person["Name"] == name {
         return Ok(false);
     }
@@ -268,7 +305,9 @@ pub async fn enrich_provider_ids(
     let mut actors = vec![];
     let mut pending = vec![];
     for person in people.iter().filter(|person| person["Type"] == "Actor") {
-        let id = string(person, "Id");
+        let mut person = person.clone();
+        normalize_tmdb_id(&mut person)?;
+        let id = string(&person, "Id");
         if id.is_empty() {
             continue;
         }
@@ -281,7 +320,7 @@ pub async fn enrich_provider_ids(
             position
         };
         actors[position] = person.clone();
-        if string(&person["ProviderIds"], "Tmdb").is_empty() && !chinese(&string(person, "Name")) {
+        if string(&person["ProviderIds"], "Tmdb").is_empty() && !chinese(&string(&person, "Name")) {
             pending.push(id);
         }
     }
@@ -312,6 +351,9 @@ pub(crate) async fn complete_provider_ids(
     context: Option<&crate::jobs::JobContext>,
 ) -> Result<Vec<Value>> {
     let mut people = people.to_vec();
+    for person in people.iter_mut().filter(|person| person["Type"] == "Actor") {
+        normalize_tmdb_id(person)?;
+    }
     let ids = people
         .iter()
         .filter(|person| {
@@ -359,10 +401,8 @@ pub(crate) async fn complete_provider_ids(
                     "Emby 未返回演员 {id} 的唯一人物记录，无法确认演员关联"
                 )));
             }
-            if let Some(tmdb) = matching[0]["ProviderIds"]["Tmdb"]
-                .as_str()
-                .filter(|tmdb| !tmdb.is_empty())
-            {
+            let tmdb = tmdb_id(matching[0])?;
+            if !tmdb.is_empty() {
                 for person in people.iter_mut().filter(|person| {
                     person["Id"] == *id && string(&person["ProviderIds"], "Tmdb").is_empty()
                 }) {
@@ -371,9 +411,8 @@ pub(crate) async fn complete_provider_ids(
                         .is_none_or(|ids| ids.is_empty())
                     {
                         person["ProviderIds"] = matching[0]["ProviderIds"].clone();
-                    } else {
-                        person["ProviderIds"]["Tmdb"] = json!(tmdb);
                     }
+                    person["ProviderIds"]["Tmdb"] = json!(tmdb);
                 }
             }
         }
@@ -413,7 +452,7 @@ async fn process_inner(
         .iter()
         .filter(|p| p["Type"] == "Actor")
     {
-        let id = string(&person["ProviderIds"], "Tmdb");
+        let id = tmdb_id(person)?;
         let name = string(person, "Name");
         let matched = raw
             .iter()
@@ -539,15 +578,13 @@ async fn update_emby_inner(
     );
     let mut names = std::collections::BTreeMap::<String, String>::new();
     let mut locations = std::collections::HashMap::new();
-    let allowed = cast
+    let mut allowed = cast
         .iter()
         .filter_map(|p| p["id"].as_i64().map(|n| n.to_string()))
-        .chain(
-            list(&item["People"])
-                .iter()
-                .map(|p| string(&p["ProviderIds"], "Tmdb")),
-        )
         .collect::<std::collections::HashSet<_>>();
+    for person in list(&item["People"]) {
+        allowed.insert(tmdb_id(&person)?);
+    }
     for actor in cast {
         if chinese(&string(actor, "name"))
             && let Some(id) = actor["id"].as_i64()
@@ -596,7 +633,7 @@ async fn update_emby_inner(
         }
     }
     for person in list(&item["People"]) {
-        let id = string(&person["ProviderIds"], "Tmdb");
+        let id = tmdb_id(&person)?;
         if names.contains_key(&id) && !string(&person, "Id").is_empty() {
             locations.insert(id, string(&person, "Id"));
         }
@@ -622,11 +659,11 @@ async fn update_emby_inner(
                 None,
             )
             .await?;
-        if let Some(person) = list(&items["Items"])
-            .iter()
-            .find(|p| string(&p["ProviderIds"], "Tmdb") == *id)
-        {
-            locations.insert(id.clone(), string(person, "Id"));
+        for person in list(&items["Items"]) {
+            if tmdb_id(&person)? == *id {
+                locations.insert(id.clone(), string(&person, "Id"));
+                break;
+            }
         }
     }
     tracing::info!(
@@ -659,3 +696,7 @@ async fn update_emby_inner(
     );
     Ok(updated)
 }
+
+#[cfg(test)]
+#[path = "../tests/fixtures/person_provider_ids.rs"]
+mod provider_id_tests;

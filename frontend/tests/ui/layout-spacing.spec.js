@@ -14,7 +14,7 @@ async function expectTitleBelowNavbar(page, title) {
 }
 
 const routes = [
-  { path: '/media-center', title: '媒体中心' },
+  { path: '/dashboard', title: '仪表盘' },
   { path: '/settings/general', title: '通用设置' },
 ];
 for (const colorScheme of ['light', 'dark']) {
@@ -40,7 +40,7 @@ for (const layout of ['collapsed', 'horizontal']) {
     await page.addInitScript(layout => localStorage.setItem('moviepilot-theme-customizer', JSON.stringify({
       theme: 'dark', glassEnabled: true, glassQuality: 'css', glassAppearance: 'clear', layout,
     })), layout);
-    await page.goto('/media-center', { waitUntil: 'domcontentloaded' });
-    await expectTitleBelowNavbar(page, '媒体中心');
+    await page.goto('/dashboard', { waitUntil: 'domcontentloaded' });
+    await expectTitleBelowNavbar(page, '仪表盘');
   });
 }

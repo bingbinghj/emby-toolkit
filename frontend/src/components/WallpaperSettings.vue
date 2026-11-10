@@ -1,14 +1,16 @@
 <script setup>
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { useMessage } from '@/composables/useFeedback';
-import { MAX_WALLPAPER_LENGTH, normalizeWallpaperImage, preloadWallpaperImage, useWallpaper } from '@/composables/useWallpaper';
+import { MAX_WALLPAPER_LENGTH, normalizeWallpaperImage, preloadWallpaperImage, useWallpaper, wallpaperRotationIntervals } from '@/composables/useWallpaper';
 
-const { settings, presets, updateSettings, setCustomImage } = useWallpaper();
+const { settings, presets, sources, activeImage, sourceLoading, sourceError, refreshSource, updateSettings, setCustomImage } = useWallpaper();
 const message = useMessage();
 const url = ref(settings.customImage.startsWith('http') ? settings.customImage : '');
+const apiUrl = ref(settings.customApi);
 const busy = ref(false), fileInput = ref(null), previewFailed = ref(false);
-const intervals = [{ title: '不轮换', value: 0 }, { title: '30 秒', value: 30 }, { title: '1 分钟', value: 60 }, { title: '2 分钟', value: 120 }, { title: '5 分钟', value: 300 }];
-const preview = computed(() => settings.mode === 'custom' ? settings.customImage : settings.mode === 'preset' ? presets.find(preset => preset.id === settings.presetId)?.image : '');
+const intervals = computed(() => wallpaperRotationIntervals.some(item => item.value === settings.rotationInterval)
+  ? wallpaperRotationIntervals : [...wallpaperRotationIntervals, { title: `${settings.rotationInterval} 秒（已保存）`, value: settings.rotationInterval }]);
+const preview = computed(() => settings.mode === 'custom' ? settings.customImage : settings.mode === 'preset' ? presets.find(preset => preset.id === settings.presetId)?.image : settings.mode === 'remote' ? activeImage.value : '');
 let generation = 0;
 
 function cancelPending() { generation++; busy.value = false; }
@@ -17,6 +19,7 @@ function change(patch) {
   try { updateSettings(patch); } catch (error) { message.error(error.message); }
 }
 watch(() => settings.customImage, image => { url.value = image.startsWith('http') ? image : ''; });
+watch(() => settings.customApi, value => { apiUrl.value = value; });
 watch(() => [settings.mode, settings.presetId, settings.customImage, settings.rotationInterval], cancelPending);
 watch(preview, () => { previewFailed.value = false; });
 onBeforeUnmount(cancelPending);
@@ -75,9 +78,9 @@ async function upload(event) {
 
 <template>
   <section class="wallpaper-settings">
-    <h3 class="text-subtitle-1 mb-3">壁纸</h3>
+    <h3 class="text-subtitle-1 mb-3">背景壁纸</h3>
     <VBtnToggle :model-value="settings.mode" mandatory divided density="comfortable" color="primary" class="mb-4" @update:model-value="change({ mode: $event })">
-      <VBtn value="preset">预设</VBtn><VBtn value="custom">自定义</VBtn><VBtn value="none">关闭</VBtn>
+      <VBtn value="preset">预设</VBtn><VBtn value="remote">来源</VBtn><VBtn value="custom">自定义</VBtn><VBtn value="none">关闭</VBtn>
     </VBtnToggle>
     <template v-if="settings.mode === 'preset'">
       <div class="wallpaper-presets mb-4">
@@ -85,7 +88,19 @@ async function upload(event) {
           <img :src="preset.image" alt="" /><span>{{ preset.title }}</span>
         </button>
       </div>
-      <VSelect :model-value="settings.rotationInterval" :items="intervals" label="轮换间隔" hide-details @update:model-value="change({ rotationInterval: $event })" />
+    </template>
+    <template v-if="settings.mode === 'remote'">
+      <VSelect :model-value="settings.source" :items="sources" label="壁纸来源" aria-label="壁纸来源" class="mb-3" hide-details @update:model-value="change({ source: $event })" />
+      <template v-if="settings.source === 'api'">
+        <VTextField v-model="apiUrl" label="壁纸 API 地址" aria-label="壁纸 API 地址" placeholder="https://example.com/wallpapers" hide-details @keyup.enter="change({ customApi: apiUrl })" />
+        <VBtn class="my-3" variant="tonal" :loading="sourceLoading" @click="change({ customApi: apiUrl })">应用 API</VBtn>
+        <p class="text-caption text-medium-emphasis mb-3">API 需允许浏览器跨域读取，并返回图片地址数组或 { images: [...] }。</p>
+      </template>
+      <VAlert v-if="sourceError" type="warning" variant="tonal" density="compact" class="mb-3">{{ sourceError }} 上一次成功背景仍保留。</VAlert>
+      <VBtn variant="text" prepend-icon="mdi-refresh" :loading="sourceLoading" class="mb-3" @click="refreshSource">重新读取壁纸</VBtn>
+    </template>
+    <template v-if="settings.mode === 'preset' || settings.mode === 'remote'">
+      <VSelect :model-value="settings.rotationInterval" :items="intervals" label="轮换间隔" aria-label="轮换间隔" hide-details @update:model-value="change({ rotationInterval: $event })" />
       <p class="text-caption text-medium-emphasis mt-2">跟随系统的减少动态效果设置；开启后停止自动轮换。</p>
     </template>
     <template v-if="settings.mode === 'custom'">

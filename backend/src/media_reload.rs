@@ -33,6 +33,327 @@ const METADATA_FIELDS: &[&str] = &[
     "ParentIndexNumber",
 ];
 
+async fn recovery_backup(recovery: &Path, value: &Value) -> Result<PathBuf> {
+    let path = PathBuf::from(value.as_str().ok_or_else(|| conflict("恢复材料路径缺失"))?);
+    check_ancestors(&path).await?;
+    if !tokio::fs::symlink_metadata(&path).await?.is_file()
+        || !tokio::fs::canonicalize(&path)
+            .await?
+            .starts_with(tokio::fs::canonicalize(recovery).await?)
+    {
+        return Err(conflict("恢复材料不在该备份目录内或不是普通文件"));
+    }
+    Ok(path)
+}
+
+fn recovery_bif_times(bytes: &[u8]) -> Result<Value> {
+    if bytes.len() < 80 || bytes.get(..8) != Some(b"\x89BIF\r\n\x1a\n") {
+        return Err(conflict("原有 BIF 恢复备份无效"));
+    }
+    let read = |n| u32::from_le_bytes(bytes[n..n + 4].try_into().unwrap());
+    let count = read(12) as usize;
+    let end = count
+        .checked_add(1)
+        .and_then(|n| n.checked_mul(8))
+        .and_then(|n| n.checked_add(64))
+        .filter(|n| *n <= bytes.len())
+        .ok_or_else(|| conflict("原有 BIF 索引无效"))?;
+    let multiplier = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
+    if count == 0
+        || multiplier == 0
+        || read(8) != 0
+        || read(64 + count * 8) != u32::MAX
+        || read(68 + count * 8) as usize != bytes.len()
+    {
+        return Err(conflict("原有 BIF 恢复备份无效"));
+    }
+    let mut times = vec![];
+    for i in 0..count {
+        let begin = read(68 + i * 8) as usize;
+        let finish = read(76 + i * 8) as usize;
+        if begin < end
+            || begin >= finish
+            || finish > bytes.len()
+            || image::load_from_memory(&bytes[begin..finish]).is_err()
+        {
+            return Err(conflict("原有 BIF 图片内容无效"));
+        }
+        let ticks = u64::from(read(64 + i * 8))
+            .checked_mul(multiplier)
+            .and_then(|n| n.checked_mul(10000))
+            .ok_or_else(|| conflict("原有 BIF 时间索引溢出"))?;
+        if times
+            .last()
+            .is_some_and(|previous: &Value| previous.as_u64().unwrap() > ticks)
+        {
+            return Err(conflict("原有 BIF 时间索引顺序无效"));
+        }
+        times.push(json!(ticks));
+    }
+    Ok(json!(times))
+}
+
+pub(crate) async fn recover_record(
+    state: &AppState,
+    recovery: &Path,
+    context: &JobContext,
+) -> Result<()> {
+    let marker = recovery.join("media-reload.json");
+    let record = if tokio::fs::try_exists(&marker).await? {
+        crate::media_recovery::read_json(&marker).await?
+    } else {
+        crate::media_recovery::read_json(&recovery.join("pending-scan.json")).await?["verification"]
+            .clone()
+    };
+    let ids = record["target_ids"]
+        .as_array()
+        .filter(|ids| !ids.is_empty())
+        .ok_or_else(|| conflict("恢复记录没有有效目标媒体，备份已保留"))?;
+    let mut targets = vec![];
+    let mut json_paths = BTreeSet::new();
+    let mut requested = BTreeMap::new();
+    for id in ids {
+        context.checkpoint().await?;
+        let id = id
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| conflict("恢复记录媒体 ID 无效"))?;
+        let entries = media_edit::list(&record["json"]);
+        let entries = entries
+            .iter()
+            .filter(|entry| entry["item_id"] == id)
+            .collect::<Vec<_>>();
+        if entries.len() != 1 {
+            return Err(conflict(format!("{id}：恢复 JSON 记录缺失或重复")));
+        }
+        let entry = entries[0];
+        let backup = recovery_backup(recovery, &entry["backup"]).await?;
+        let info = crate::media_recovery::read_json(&backup).await?;
+        ensure_single_bundle(&info)?;
+        let path = PathBuf::from(string(entry, "path"));
+        let current = media_edit::repair_target(state, id).await?;
+        if !current.candidates.contains(&path) {
+            return Err(conflict(format!(
+                "{id}：备份 JSON 路径与当前媒体身份不一致"
+            )));
+        }
+        crate::identity::verify(&current.asset, &info)?;
+        let source = crate::media_paths::strm_target(&current.path).await;
+        if let Some(saved) = media_edit::list(&record["targets"])
+            .iter()
+            .find(|entry| entry["id"] == id)
+            && (saved["path"] != current.path
+                || saved["source"] != json!(source)
+                || saved["sha"] != json!(current.sha)
+                || (saved["asset"].is_object() && saved["asset"] != json!(current.asset)))
+        {
+            return Err(conflict(format!("{id}：备份后的媒体文件或 STRM 来源变化")));
+        }
+        targets.push(SavedTarget {
+            id: id.into(),
+            path: current.path,
+            source,
+            sha: current.sha,
+            asset: (!current.kind.is_empty()).then_some(current.asset),
+            info: media_info::restore_json(&info)?,
+            refresh_required: true,
+        });
+        json_paths.insert(path.clone());
+        requested.insert(id.to_string(), (path, backup));
+    }
+    let owners = targets
+        .iter()
+        .map(|target| target.id.clone())
+        .collect::<BTreeSet<_>>();
+    if owners.len() != targets.len() {
+        return Err(conflict("恢复记录包含重复媒体 ID"));
+    }
+    let mut files = BTreeMap::new();
+    let mut thumbnails = BTreeMap::new();
+    let mut image_times = BTreeMap::<String, BTreeSet<u64>>::new();
+    let mut audio_complete = BTreeMap::new();
+    for audio in media_edit::list(&record["audio_complete"]) {
+        let id = string(&audio, "item_id");
+        let target = targets
+            .iter()
+            .find(|target| target.id == id)
+            .ok_or_else(|| conflict("完整音乐 JSON 的恢复目标不一致"))?;
+        let complete = recovery_backup(recovery, &audio["complete"]).await?;
+        let full = crate::media_recovery::read_json(&complete).await?;
+        ensure_single_bundle(&full)?;
+        let mut import = full.clone();
+        for bundle in import.as_array_mut().unwrap() {
+            bundle.as_object_mut().unwrap().remove("EmbeddedInfo");
+            bundle.as_object_mut().unwrap().remove("EmbeddedImage");
+        }
+        if import != target.info || audio["path"] != json!(requested[&id].0) {
+            return Err(conflict(
+                "完整音乐 JSON 与导入备份不一致，已保留全部恢复材料",
+            ));
+        }
+        audio_complete.insert(id, (complete, full));
+    }
+    for file in media_edit::list(&record["files"]) {
+        let path = PathBuf::from(string(&file, "path"));
+        if !path.is_absolute() {
+            return Err(conflict("原资源恢复路径不是绝对路径"));
+        }
+        let backup = recovery_backup(recovery, &file["backup"]).await?;
+        let ids = media_edit::list(&file["owner_ids"])
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        if ids.is_empty() || !ids.is_subset(&owners) {
+            return Err(conflict("原资源恢复记录缺少有效所属媒体"));
+        }
+        if path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("bif"))
+        {
+            let times = recovery_bif_times(&tokio::fs::read(&backup).await?)?;
+            for id in &ids {
+                if thumbnails.get(id).is_none_or(|old: &Value| {
+                    old.as_array().unwrap().len() < times.as_array().unwrap().len()
+                }) {
+                    thumbnails.insert(id.clone(), times.clone());
+                }
+            }
+        }
+        if path.components().any(|part| part.as_os_str() == "chapters")
+            && path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                matches!(
+                    e.to_ascii_lowercase().as_str(),
+                    "jpg" | "jpeg" | "png" | "webp"
+                )
+            })
+        {
+            image::load_from_memory(&tokio::fs::read(&backup).await?)
+                .map_err(|_| conflict("原有章节图片恢复备份无效"))?;
+            for id in &ids {
+                if record["observations"][id].is_null() {
+                    let ticks = path
+                        .file_stem()
+                        .and_then(|name| name.to_str())
+                        .and_then(|name| name.parse::<u64>().ok())
+                        .ok_or_else(|| conflict("旧记录无法确定原章节图片对应时间，备份已保留"))?;
+                    image_times.entry(id.clone()).or_default().insert(ticks);
+                }
+            }
+        }
+        files.insert(
+            path.clone(),
+            Snapshot {
+                path,
+                backup,
+                owners: ids,
+            },
+        );
+    }
+    // A generated bridge is also original recovery evidence, not a fresh
+    // snapshot of the currently missing pictures.
+    for bridge in media_edit::list(&record["bridges"]) {
+        let id = string(&bridge, "item_id");
+        if !owners.contains(&id) {
+            return Err(conflict("BIF 桥接恢复目标不一致"));
+        }
+        let backup = recovery_backup(recovery, &bridge["source"]).await?;
+        let path = PathBuf::from(string(&bridge, "destination"));
+        let target = targets.iter().find(|target| target.id == id).unwrap();
+        if path.parent() != Path::new(&target.path).parent()
+            || !path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("bif"))
+        {
+            return Err(conflict("BIF 桥接位置与当前媒体文件不一致"));
+        }
+        let times = recovery_bif_times(&tokio::fs::read(&backup).await?)?;
+        thumbnails.entry(id.clone()).or_insert(times);
+        files.entry(path.clone()).or_insert(Snapshot {
+            path,
+            backup,
+            owners: BTreeSet::from([id]),
+        });
+    }
+    let mut before = BTreeMap::new();
+    for target in &targets {
+        let live = identity_details(state, target).await?;
+        let mut observed = record["observations"][&target.id]
+            .as_object()
+            .map(|_| record["observations"][&target.id].clone())
+            .unwrap_or(live);
+        if record["observations"][&target.id].is_null() && image_times.contains_key(&target.id) {
+            observed["Chapters"] = media_info::object(&target.info).unwrap()["Chapters"].clone();
+            for chapter in observed["Chapters"].as_array_mut().unwrap() {
+                if chapter["StartPositionTicks"]
+                    .as_u64()
+                    .is_some_and(|ticks| image_times[&target.id].contains(&ticks))
+                {
+                    chapter["ImageTag"] = json!("retained-original-image");
+                }
+            }
+        }
+        if let Some(times) = record["thumbnail_times"].get(&target.id) {
+            thumbnails.insert(target.id.clone(), times.clone());
+        }
+        before.insert(target.id.clone(), observed);
+    }
+    for target in &targets {
+        let (path, backup) = &requested[&target.id];
+        check_ancestors(path).await?;
+        if tokio::fs::symlink_metadata(path)
+            .await
+            .is_ok_and(|metadata| !metadata.is_file())
+        {
+            return Err(conflict("恢复 JSON 不是普通文件，备份已保留"));
+        }
+        let already_imported =
+            tokio::fs::read(path).await.ok() == Some(tokio::fs::read(backup).await?);
+        let full_audio = if let Some((full, _)) = audio_complete.get(&target.id) {
+            tokio::fs::read(path).await.ok() == Some(tokio::fs::read(full).await?)
+        } else {
+            false
+        };
+        if !already_imported && !full_audio && !json_unchanged(path, backup, &files).await? {
+            return Err(conflict("媒体 JSON 在失败后被修改，保留当前文件及备份"));
+        }
+    }
+    context.checkpoint().await?;
+    let finish = JobContext::for_recovery(Some(context)).await;
+    for target in &targets {
+        let (path, backup) = &requested[&target.id];
+        restore_json(path, backup).await?;
+        crate::media_save::cache_saved(state, target.sha.as_deref(), &target.info).await?;
+    }
+    let resources = files
+        .into_iter()
+        .filter(|(path, _)| !json_paths.contains(path))
+        .collect::<BTreeMap<_, _>>();
+    restore_files(&resources, &owners).await?;
+    let confirmed = AtomicBool::new(false);
+    let retry = recovery.join(format!("retry-{}", uuid::Uuid::new_v4().simple()));
+    reload(state, &targets, &finish, &confirmed, &retry).await?;
+    verify_reloaded(
+        state,
+        &targets.iter().collect::<Vec<_>>(),
+        &finish,
+        &before,
+        &thumbnails,
+    )
+    .await?;
+    for target in &targets {
+        if let Some((complete, full)) = audio_complete.get(&target.id) {
+            let (path, import) = &requested[&target.id];
+            if tokio::fs::read(path).await? != tokio::fs::read(import).await? {
+                return Err(conflict("音乐 JSON 在恢复期间变化，完整音乐备份仍保留"));
+            }
+            restore_json(path, complete).await?;
+            crate::media_save::cache_saved(state, target.sha.as_deref(), full).await?;
+        }
+    }
+    Ok(())
+}
+
 fn conflict(message: impl Into<String>) -> ApiError {
     ApiError(StatusCode::CONFLICT, message.into())
 }
@@ -986,6 +1307,9 @@ pub(crate) async fn reload(
     let marker = recovery.join("media-reload.json");
     tokio::fs::write(&marker, serde_json::to_vec(&json!({
         "target_ids":affected.iter().map(|t|&t.id).collect::<Vec<_>>(),
+        "targets":affected.iter().map(|t|json!({"id":t.id,"path":t.path,"source":t.source,"sha":t.sha,"asset":t.asset})).collect::<Vec<_>>(),
+        "observations":observations,
+        "thumbnail_times":thumbnails,
         "files":files.values().map(|f|json!({"path":f.path,"backup":f.backup,"owner_ids":f.owners})).collect::<Vec<_>>(),
         "json":json_files.iter().map(|(id,path,backup)|json!({"item_id":id,"path":path,"backup":backup})).collect::<Vec<_>>(),
         "audio_complete":audio_json.iter().map(|(id,path,import,complete)|json!({"item_id":id,"path":path,"import":import,"complete":complete})).collect::<Vec<_>>(),
@@ -1163,6 +1487,7 @@ pub(crate) async fn reload(
             recovery.join("pending-scan.json"),
             serde_json::to_vec(&json!({
                 "kind":"native-sync", "verified":true,
+                "verification":crate::media_recovery::read_json(&marker).await?,
                 "ids":ready.iter().map(|target| &target.id).collect::<Vec<_>>()
             }))
             .unwrap(),

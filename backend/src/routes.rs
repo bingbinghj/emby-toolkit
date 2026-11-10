@@ -41,6 +41,8 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::mappings::router())
         .merge(crate::database_admin::router())
         .merge(crate::database_stats::router())
+        .merge(crate::wallpaper::router())
+        .merge(crate::dashboard::router())
         .route("/api/system/about_info", get(about))
         .route("/api/system/menu_config", get(menu_get).post(menu_save))
         .route("/api/system/menu_config/reset", post(menu_reset))
@@ -123,10 +125,7 @@ async fn auth_status(State(state): State<AppState>, headers: HeaderMap) -> Resul
             json!({"status":"setup_required", "message":"系统未配置"}),
         ));
     }
-    if let Some(session) = state.sessions.from_headers(&headers)
-        && (state.sessions.administrator_claim(&headers) == Some(true)
-            || db::is_admin(&state.db, &session.user_id).await?)
-    {
+    if let Some(session) = auth::administrator_session(&state, &headers).await? {
         return Ok(Json(
             json!({"status":"logged_in", "user":{"id":session.user_id,"name":session.name,"is_admin":true}}),
         ));
@@ -200,10 +199,8 @@ async fn login(State(state): State<AppState>, Json(body): Json<Value>) -> Result
         return Err(ApiError::bad("Emby 未返回用户 ID"));
     }
     let name = string(user, "Name");
-    if let Err(error) = sqlx::query("INSERT INTO emby_users(id,name,is_administrator,policy_json,last_seen_at,last_updated_at) VALUES($1,$2,TRUE,$3,NOW(),NOW()) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,is_administrator=TRUE,policy_json=EXCLUDED.policy_json,last_seen_at=NOW(),last_updated_at=NOW()")
-        .bind(&id).bind(&name).bind(&user["Policy"]).execute(&state.db).await {
-        tracing::warn!("登录时同步用户信息失败：{error}");
-    }
+    sqlx::query("INSERT INTO emby_users(id,name,is_administrator,policy_json,last_seen_at,last_updated_at) VALUES($1,$2,TRUE,$3,NOW(),NOW()) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,is_administrator=TRUE,policy_json=EXCLUDED.policy_json,last_seen_at=NOW(),last_updated_at=NOW()")
+        .bind(&id).bind(&name).bind(&user["Policy"]).execute(&state.db).await?;
     let token = state.sessions.sign_administrator(&Session {
         user_id: id.clone(),
         name: name.clone(),
@@ -222,14 +219,17 @@ async fn logout() -> impl IntoResponse {
     )
 }
 async fn can_configure(state: &AppState, headers: &HeaderMap) -> Result<bool> {
-    if !state.configured().await {
+    Ok(!state.configured().await || configuration_session(state, headers).await?)
+}
+async fn configuration_session(state: &AppState, headers: &HeaderMap) -> Result<bool> {
+    if state
+        .sessions
+        .from_headers(headers)
+        .is_some_and(|session| session.setup_mode)
+    {
         return Ok(true);
     }
-    if let Some(session) = state.sessions.from_headers(headers) {
-        let recovery = session.setup_mode;
-        return Ok(recovery || db::is_admin(&state.db, &session.user_id).await?);
-    }
-    Ok(false)
+    Ok(auth::administrator_session(state, headers).await?.is_some())
 }
 async fn setup(
     State(state): State<AppState>,
@@ -347,10 +347,13 @@ async fn verify_recovery(
         .into_response())
 }
 async fn config_get(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>> {
-    if !can_configure(&state, &headers).await? {
-        return Err(ApiError::forbidden());
+    if configuration_session(&state, &headers).await? {
+        return Ok(Json(state.config.read().await.clone()));
     }
-    Ok(Json(state.config.read().await.clone()))
+    if !state.configured().await {
+        return Ok(Json(json!({})));
+    }
+    Err(ApiError::forbidden())
 }
 async fn config_save(
     State(state): State<AppState>,

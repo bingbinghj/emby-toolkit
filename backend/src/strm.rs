@@ -355,6 +355,55 @@ async fn restore_settings(
     tracing::error!("[神医临时设置] {mode_name} 已结束，恢复原配置失败，请检查神医设置");
     false
 }
+
+pub(crate) fn valid_recovery_settings(original: &Value) -> bool {
+    original.as_object().is_some_and(|fields| {
+        !fields.is_empty()
+            && fields.keys().all(|key| {
+                matches!(
+                    key.as_str(),
+                    "ExclusiveControlFeatures" | "PersistMediaInfoMode" | "EnableImageCapture"
+                )
+            })
+            && fields
+                .get("PersistMediaInfoMode")
+                .is_none_or(Value::is_string)
+            && fields
+                .get("EnableImageCapture")
+                .is_none_or(Value::is_boolean)
+            && fields
+                .get("ExclusiveControlFeatures")
+                .is_some_and(|v| v.is_string() || v.is_null())
+    })
+}
+
+pub(crate) async fn finish_media_recovery<F, Fut>(
+    state: &AppState,
+    original: &Value,
+    function: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let _gate = state.strm.gate.lock().await;
+    if !valid_recovery_settings(original) {
+        return Err(ApiError::bad("原配置恢复说明无效，未修改神医配置"));
+    }
+    let id = discover(state).await?;
+    let tasks = state.emby(Method::GET, "ScheduledTasks", &[], None).await?;
+    if !media_tasks_idle(&tasks) {
+        return Err(ApiError::bad("神医媒体任务尚未结束，请结束后重试恢复"));
+    }
+    function().await?;
+    if !restore_settings(state, &id, original, "preserve", None).await {
+        return Err(ApiError::bad(
+            "媒体已通过验收，但神医原配置恢复尚未确认，恢复记录已保留",
+        ));
+    }
+    Ok(())
+}
+
 fn settings_finished<T>(mode: &str, outcome: Result<T>) -> Result<T> {
     let mode_name = settings_mode_label(mode);
     match &outcome {

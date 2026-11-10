@@ -19,6 +19,7 @@ function fixture(post) {
     isRepairingTruehdCore: { value: false }, isDeletingMediaVersion: { value: false },
     mediaInfoLoadSequence: 1, mediaInfoLanguageSelectRefs: new Map(),
     mediaInfoSaveFeedback: { value: null }, mediaInfoContext: { value: {} },
+    mediaRecoveryBlocked: { value: false }, loadMediaRecovery: () => {},
     mediaInfoData: { value: [{
       MediaSourceInfo: { MediaStreams: [{ Type: 'Audio', Index: 1, Title: '日语', Language: 'jpn' }] },
       Chapters: [],
@@ -178,4 +179,13 @@ test('failed save preserves the editor and exposes the actual recovery failure',
   assert.deepEqual(f.context.mediaInfoData.value, draft);
   assert.equal(f.messages.at(-1).type, 'error');
   assert.match(f.context.mediaInfoSaveFeedback.value.details.join('；'), /101.*原图片恢复尚未确认/);
+});
+
+test('pending recovery prevents a media save before submitting any request', async () => {
+  const f = fixture(async () => ({ data: { metadata_refresh: { state: 'verified' } } }));
+  f.context.mediaRecoveryBlocked.value = true;
+  await f.context.save();
+  assert.deepEqual(f.calls, []);
+  assert.deepEqual(f.messages, []);
+  assert.equal(f.context.showMediaInfoEditor.value, true);
 });

@@ -46,8 +46,12 @@
               <VRow class="mp-aligned-grid settings-card-grid settings-grid">
                 <!-- 左侧列 -->
                 <VCol cols="12">
-                  <VCard class="dashboard-card">
-                    <template #title><span class="card-title">基础设置</span></template>
+                  <CollapsibleSettingCard class="dashboard-card" title="基础设置" subtitle="媒体处理与语言显示" icon="mdi-tune" :default-collapsed="false">
+                    <template #status>
+                      <VChip v-for="status in settingCardStatus['basic']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
+
+                    </template>
+
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="delay_between_items_sec">
                         <VNumberInput
@@ -198,16 +202,16 @@
                         </VBtn>
                       </div>
                     </template>
-                  </VCard>
+                  </CollapsibleSettingCard>
                 </VCol>
                 <!-- 第二列：实时监控 -->
                 <VCol cols="12">
-                  <VCard class="dashboard-card">
-                    <template #title>
-                      <div style="display: flex; align-items: center; gap: 8px">
-                        <span class="card-title">实时监控</span>
-                      </div>
+                  <CollapsibleSettingCard class="dashboard-card" title="实时监控" subtitle="自动发现本地媒体变化" icon="mdi-folder-eye-outline">
+                    <template #status>
+                      <VChip v-for="status in settingCardStatus['monitor']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
+
                     </template>
+
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="monitor_enabled">
                         <VSwitch v-model="configModel.monitor_enabled" label="启用文件系统监控"></VSwitch>
@@ -359,11 +363,15 @@
                         </VBtn>
                       </div>
                     </template>
-                  </VCard>
+                  </CollapsibleSettingCard>
                 </VCol>
                 <VCol cols="12">
-                  <VCard class="dashboard-card">
-                    <template #title><span class="card-title">数据源与API</span></template>
+                  <CollapsibleSettingCard class="dashboard-card" title="数据源与API" subtitle="元数据服务与访问凭据" icon="mdi-database-outline">
+                    <template #status>
+                      <VChip v-for="status in settingCardStatus['sources']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
+
+                    </template>
+
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="tmdb_api_key">
                         <VTextField
@@ -436,23 +444,19 @@
                         </VBtn>
                       </div>
                     </template>
-                  </VCard>
+                  </CollapsibleSettingCard>
                 </VCol>
               </VRow>
             </VWindowItem>
             <VWindowItem value="115_drive" eager>
               <VRow class="mp-aligned-grid settings-card-grid settings-grid">
                 <VCol cols="12">
-                  <VCard class="dashboard-card" style="height: 100%">
-                    <template #title>
-                      <div style="display: flex; align-items: center; gap: 8px">
-                        <span class="card-title">账户与连接</span>
-                        <VChip v-if="p115Info" size="small" round :color="p115Info.valid ? 'success' : 'error'">
-                          {{ p115Info.msg || (p115Info.valid ? '连接正常' : '连接异常') }}
-                        </VChip>
-                        <VChip v-else color="warning" size="small" round>未检查</VChip>
-                      </div>
+                  <CollapsibleSettingCard class="dashboard-card" title="账户与连接" subtitle="115 授权方式与连接状态" icon="mdi-cloud-key-outline">
+                    <template #status>
+                      <VChip v-for="status in settingCardStatus['p115Account']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
+                      <span v-if="p115Info?.user_info?.user_name" class="text-body-2">{{ p115Info.user_info.user_name }}</span>
                     </template>
+
                     <template #append>
                       <div class="d-flex ga-3 flex-wrap align-center">
                         <VBtn
@@ -653,11 +657,15 @@
                         </VBtn>
                       </div>
                     </template>
-                  </VCard>
+                  </CollapsibleSettingCard>
                 </VCol>
                 <VCol cols="12">
-                  <VCard class="dashboard-card" style="height: 100%">
-                    <template #title><span class="card-title">指纹与缓存</span></template>
+                  <CollapsibleSettingCard class="dashboard-card" title="指纹与缓存" subtitle="媒体目录与文件身份" icon="mdi-fingerprint">
+                    <template #status>
+                      <VChip v-for="status in settingCardStatus['fingerprints']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
+
+                    </template>
+
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="local_strm_root">
                         <div class="settings-input-group d-flex align-start ga-2">
@@ -753,7 +761,7 @@
                         </VBtn>
                       </div>
                     </template>
-                  </VCard>
+                  </CollapsibleSettingCard>
                 </VCol>
               </VRow>
             </VWindowItem>
@@ -761,8 +769,12 @@
               <VRow class="settings-grid">
                 <!-- ########## 左侧卡片: Emby 连接设置 ########## -->
                 <VCol cols="12">
-                  <VCard class="dashboard-card">
-                    <template #title><span class="card-title">Emby 连接设置</span></template>
+                  <CollapsibleSettingCard class="dashboard-card" title="Emby 连接设置" subtitle="媒体服务器与媒体库" icon="mdi-plex">
+                    <template #status>
+                      <VChip v-for="status in settingCardStatus['emby']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
+
+                    </template>
+
                     <VCardText class="settings-card-body">
                       <!-- ★★★ 调整点1: 恢复双列，但减小间距 x-gap="12" ★★★ -->
                       <VRow class="settings-grid">
@@ -984,7 +996,7 @@
                         </VBtn>
                       </div>
                     </template>
-                  </VCard>
+                  </CollapsibleSettingCard>
                 </VCol>
               </VRow>
             </VWindowItem>
@@ -992,8 +1004,12 @@
               <VRow class="settings-grid">
                 <!-- 左侧: AI翻译 -->
                 <VCol cols="12">
-                  <VCard class="dashboard-card" style="height: 100%">
-                    <template #title><span class="card-title">AI 增强</span></template>
+                  <CollapsibleSettingCard class="dashboard-card" title="AI 增强" subtitle="翻译服务与处理策略" icon="mdi-robot-outline">
+                    <template #status>
+                      <VChip v-for="status in settingCardStatus['ai']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
+
+                    </template>
+
                     <template #append>
                       <div class="d-flex ga-3 flex-wrap align-center">
                         <VBtn color="info" @click="openPromptModal" variant="outlined" size="x-small">
@@ -1198,7 +1214,7 @@
                         </VBtn>
                       </div>
                     </template>
-                  </VCard>
+                  </CollapsibleSettingCard>
                 </VCol>
               </VRow>
             </VWindowItem>
@@ -1206,8 +1222,12 @@
               <VRow class="mp-aligned-grid settings-card-grid settings-grid">
                 <!-- 卡片 1: 日志配置 -->
                 <VCol cols="12">
-                  <VCard class="dashboard-card">
-                    <template #title><span class="card-title">日志配置</span></template>
+                  <CollapsibleSettingCard class="dashboard-card" title="日志配置" subtitle="日志保留与文件大小" icon="mdi-file-document-outline">
+                    <template #status>
+                      <VChip v-for="status in settingCardStatus['logs']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
+
+                    </template>
+
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="log_rotation_size_mb">
                         <VNumberInput
@@ -1252,12 +1272,16 @@
                         </VBtn>
                       </div>
                     </template>
-                  </VCard>
+                  </CollapsibleSettingCard>
                 </VCol>
                 <!-- 卡片 2: 入库自动处理 -->
                 <VCol cols="12">
-                  <VCard class="dashboard-card">
-                    <template #title><span class="card-title">入库自动处理</span></template>
+                  <CollapsibleSettingCard class="dashboard-card" title="入库自动处理" subtitle="新媒体入库后的增强任务" icon="mdi-folder-plus-outline">
+                    <template #status>
+                      <VChip v-for="status in settingCardStatus['ingest']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
+
+                    </template>
+
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="auto_repair_truehd_core_on_ingest">
                         <VSwitch
@@ -1329,12 +1353,16 @@
                         </VBtn>
                       </div>
                     </template>
-                  </VCard>
+                  </CollapsibleSettingCard>
                 </VCol>
                 <!-- 卡片 3: 媒体重命名格式 -->
                 <VCol cols="12">
-                  <VCard class="dashboard-card">
-                    <template #title><span class="card-title">媒体重命名格式</span></template>
+                  <CollapsibleSettingCard class="dashboard-card" title="媒体重命名格式" subtitle="电影与电视剧的目录和文件名" icon="mdi-file-edit-outline">
+                    <template #status>
+                      <VChip v-for="status in settingCardStatus['rename']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
+
+                    </template>
+
                     <VCardText class="settings-card-body">
                       <div class="rename-format-grid">
                         <div class="rename-format-form">
@@ -1445,12 +1473,16 @@
                         </VBtn>
                       </div>
                     </template>
-                  </VCard>
+                  </CollapsibleSettingCard>
                 </VCol>
                 <!-- 卡片 3: 数据管理 (左下) -->
                 <VCol cols="12">
-                  <VCard class="dashboard-card">
-                    <template #title><span class="card-title">数据管理</span></template>
+                  <CollapsibleSettingCard class="dashboard-card" title="数据管理" subtitle="备份、还原与缓存维护" icon="mdi-database-cog-outline">
+                    <template #status>
+                      <VChip v-for="status in settingCardStatus['data']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
+
+                    </template>
+
                     <VCardText class="settings-card-body">
                       <div class="d-flex ga-3 flex-column">
                         <div class="data-action-grid">
@@ -1545,7 +1577,7 @@
                         </p>
                       </div>
                     </VCardText>
-                  </VCard>
+                  </CollapsibleSettingCard>
                 </VCol>
               </VRow>
             </VWindowItem>
@@ -2230,6 +2262,7 @@ import { ref, reactive, watch, computed, onMounted, onUnmounted, nextTick } from
 import { useMessage, useDialog } from '@/composables/useFeedback';
 import { useDisplay } from 'vuetify';
 import SettingsQrCode from './general/SettingsQrCode.vue';
+import CollapsibleSettingCard from './general/CollapsibleSettingCard.vue';
 const ExportIcon = 'mdi-download';
 const ImportIcon = 'mdi-cloud-upload';
 const ClearIcon = 'mdi-delete-outline';
@@ -2564,6 +2597,7 @@ const deselectAllForClear = () => tablesToClear.value = [];
 // ★★★ 115 相关逻辑 ★★★
 const p115Info = ref(null);
 const loading115Info = ref(false);
+const p115StatusError = ref('');
 
 // ★★★ Cookie 扫码获取逻辑 ★★★
 const showCookieModal = ref(false);
@@ -3101,6 +3135,7 @@ const startWebAuth = () => {
 // 检查 115 状态
 const check115Status = async () => {
     loading115Info.value = true;
+    p115StatusError.value = '';
     try {
         const res = await axios.get('/api/p115/status');
         if (res.data && res.data.data) {
@@ -3108,14 +3143,44 @@ const check115Status = async () => {
             message.success('115 状态刷新成功！');
         } else {
             p115Info.value = null;
+            p115StatusError.value = '状态响应无效';
         }
     } catch (e) {
         p115Info.value = null;
+        p115StatusError.value = '状态读取失败';
         message.error('状态获取失败: ' + (e.response?.data?.message || e.response?.data?.data?.msg || e.message));
     } finally {
         loading115Info.value = false;
     }
 };
+
+const p115ConnectionStatus = computed(() => {
+  if (loading115Info.value) return { label: '检测中', color: 'secondary', icon: 'mdi-progress-clock' };
+  if (p115StatusError.value) return { label: '状态读取失败', color: 'warning', icon: 'mdi-alert-circle-outline' };
+  const info = p115Info.value;
+  if (info?.valid === true) return { label: '已连接', color: 'success', icon: 'mdi-check-circle-outline' };
+  if (info?.valid === false) return { label: '连接异常，请重新检查授权', color: 'warning', icon: 'mdi-alert-circle-outline' };
+  if (info?.has_token || info?.has_cookie) return { label: '已授权，未验证', color: 'info', icon: 'mdi-key-outline' };
+  return { label: info ? '未授权' : '未检查', color: 'secondary', icon: 'mdi-link-off' };
+});
+const settingCardStatus = computed(() => {
+  const config = configModel.value || {};
+  const configured = (label, ready) => ({ label: `${label}${ready ? '已配置，未验证' : '未配置'}`, color: ready ? 'info' : 'secondary', icon: ready ? 'mdi-key-outline' : 'mdi-link-off' });
+  const enabled = (label, ready) => ({ label: `${label}${ready ? '已启用' : '已停用'}`, color: ready ? 'success' : 'secondary', icon: ready ? 'mdi-check-circle-outline' : 'mdi-pause-circle-outline' });
+  return {
+    basic: [{ label: '媒体处理参数', color: 'primary', icon: 'mdi-tune' }],
+    monitor: [enabled('监控', config.monitor_enabled)],
+    sources: [configured('TMDb ', Boolean(config.tmdb_api_key)), enabled('豆瓣辅助', config.douban_enable_online_api)],
+    p115Account: [p115ConnectionStatus.value],
+    fingerprints: [{ label: config.local_strm_root || config.cd2_media_root ? '媒体目录已配置' : '媒体目录未配置', color: 'info', icon: 'mdi-folder-outline' }],
+    emby: [configured('Emby ', Boolean(config.emby_server_url && config.emby_api_key))],
+    ai: [configured('API ', Boolean(config.ai_api_key)), enabled('翻译', config.ai_translate_actor_role || config.ai_translate_title || config.ai_translate_overview || config.ai_translate_episode_overview)],
+    logs: [{ label: '日志保留策略', color: 'primary', icon: 'mdi-file-document-outline' }],
+    ingest: [enabled('入库增强', config.auto_repair_truehd_core_on_ingest || config.auto_fill_language_titles_on_ingest || config.auto_extract_intro_fingerprint_on_ingest || config.auto_extract_video_thumbnails_on_ingest)],
+    rename: [{ label: '电影与电视剧模板', color: 'primary', icon: 'mdi-file-edit-outline' }],
+    data: [{ label: '备份与维护', color: 'primary', icon: 'mdi-database-outline' }],
+  };
+});
 
 // 辅助函数：获取规则摘要
 const genreOptions = computed(() => {

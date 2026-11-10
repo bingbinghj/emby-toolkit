@@ -59,14 +59,25 @@ export const test = base.extend({
     respond('POST', '/api/system/menu_config', request => { menu = clone(request.body); return { message: '导航已保存' }; });
     respond('POST', '/api/system/menu_config/reset', () => { menu = []; return { message: '导航已重置' }; });
     respond('GET', '/api/portal/account-info', { name: 'UI Test', status: 'active', registration_date: '2026-01-01T00:00:00Z', expiration_date: null, telegram_chat_id: '', telegram_channel_id: '', profile_image_tag: null });
+    respond('GET', '/api/portal/users', { users: [
+      { id: 'ui-test-user', name: 'UI Test', is_administrator: true, is_disabled: false, notes: '', telegram_chat_id: '', profile_image_tag: null },
+      { id: 'member', name: 'Media Member', is_administrator: false, is_disabled: true, notes: '原备注', telegram_chat_id: '123', profile_image_tag: null },
+    ] });
+    respond('POST', '/api/portal/users/member', { message: '用户资料已保存', id: 'member' });
     respond('POST', '/api/portal/telegram-chat-id', request => ({ telegram_chat_id: request.body.telegram_chat_id, message: '通知设置已保存' }));
     respond('GET', '/api/portal/telegram-bot-info', { username: 'fixture_bot' });
     respond('GET', '/api/media_center/libraries', { libraries: [library] });
+    respond('GET', '/api/dashboard/media', {
+      statistics: { movie_count: { count: 1 }, tv_count: { count: 0 }, episode_count: { count: 0 }, music_count: { count: 0 } },
+      recent: [{ id: '101', name: mediaDetails.item_name, item_type: 'Movie', production_year: 2026, image_tag: 'fixture' }],
+      libraries: [library], errors: {},
+    });
     respond('GET', '/api/media_center/libraries/movies/items', { library, items: [{ Id: '101', Name: mediaDetails.item_name, Type: 'Movie', ProductionYear: 2026, ImageTags: { Primary: 'fixture' } }], total: 1, start_index: 0, anchor_index: 0 });
     respond('GET', '/api/review_items', { items: [{ item_id: '101', item_name: mediaDetails.item_name, item_type: 'Movie', failed_at: '2026-11-09T12:00:00Z', reason: '人工复核', original_score: 8.2 }], total_items: 1 });
     respond('GET', '/api/search_emby_library', { items: [{ item_id: '101', item_name: mediaDetails.item_name, item_type: 'Movie' }], total_items: 1 });
     respond('GET', '/api/media_for_editing/101', mediaDetails);
     respond('GET', '/api/media_info/edit/101', mediaInfo);
+    respond('GET', '/api/media_info/recovery', { pending: false, records: [] });
     respond('POST', '/api/media_info/edit/101', { message: '媒体信息已更新', warnings: 0, metadata_refresh: { state: 'verified', verified_ids: ['101'] } });
     respond('POST', '/api/update_media_cast_sa/101', { message: '演员已保存' });
     respond('POST', '/api/actions/translate_cast_sa', mediaDetails.current_emby_cast);

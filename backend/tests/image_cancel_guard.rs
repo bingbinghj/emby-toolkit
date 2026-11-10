@@ -26,6 +26,11 @@ fn jpeg(color: [u8; 3]) -> Vec<u8> {
 struct Host {
     item: Value,
     replacement: Vec<u8>,
+    fake_target_upload: Arc<Mutex<bool>>,
+    fake_all_uploads: Arc<Mutex<bool>>,
+    wrong_target_upload: Arc<Mutex<bool>>,
+    reencode_target_upload: Arc<Mutex<bool>>,
+    keep_native_on_delete: Arc<Mutex<bool>>,
     native: Arc<Mutex<Vec<u8>>>,
     events: Arc<Mutex<Vec<&'static str>>>,
     downloading: Arc<Notify>,
@@ -42,11 +47,25 @@ async fn picture(State(host): State<Host>) -> Response {
     ([("Content-Type", "image/jpeg")], host.replacement).into_response()
 }
 async fn remove(State(host): State<Host>) -> StatusCode {
-    host.events.lock().await.push("delete");
-    host.native.lock().await.clear();
+    let first = {
+        let mut events = host.events.lock().await;
+        let first = !events.contains(&"delete");
+        events.push("delete");
+        first
+    };
+    let missing = host.native.lock().await.is_empty();
+    if !*host.keep_native_on_delete.lock().await {
+        host.native.lock().await.clear();
+    }
     host.deleted.notify_one();
-    host.delete_gate.acquire().await.unwrap().forget();
-    StatusCode::NO_CONTENT
+    if first {
+        host.delete_gate.acquire().await.unwrap().forget();
+    }
+    if missing {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::NO_CONTENT
+    }
 }
 async fn upload(State(host): State<Host>, request: Request<Body>) -> Response {
     host.events.lock().await.push("upload");
@@ -59,9 +78,38 @@ async fn upload(State(host): State<Host>, request: Request<Body>) -> Response {
     let Ok(bytes) = decoded else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    image::load_from_memory(&bytes).unwrap();
-    *host.native.lock().await = bytes;
+    if image::load_from_memory(&bytes).is_err() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    if *host.fake_all_uploads.lock().await
+        || bytes == host.replacement && *host.fake_target_upload.lock().await
+    {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    *host.native.lock().await =
+        if bytes == host.replacement && *host.wrong_target_upload.lock().await {
+            jpeg([0, 255, 0])
+        } else if bytes == host.replacement && *host.reencode_target_upload.lock().await {
+            let image = image::load_from_memory(&bytes).unwrap();
+            let mut reencoded = vec![];
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut reencoded, 80)
+                .encode_image(&image)
+                .unwrap();
+            reencoded
+        } else {
+            bytes
+        };
     StatusCode::NO_CONTENT.into_response()
+}
+
+async fn native_picture(State(host): State<Host>) -> Response {
+    host.events.lock().await.push("readback");
+    let native = host.native.lock().await.clone();
+    if native.is_empty() {
+        StatusCode::NOT_FOUND.into_response()
+    } else {
+        ([("Content-Type", "image/jpeg")], native).into_response()
+    }
 }
 
 struct Fixture {
@@ -76,6 +124,9 @@ struct Fixture {
 }
 impl Fixture {
     async fn new(block_download: bool) -> Self {
+        Self::with_replacement(block_download, jpeg([0, 0, 255])).await
+    }
+    async fn with_replacement(block_download: bool, replacement: Vec<u8>) -> Self {
         let url = std::env::var("DATABASE_URL").unwrap();
         let admin = sqlx::PgPool::connect(&url).await.unwrap();
         let schema = format!("image_cancel_{}", uuid::Uuid::new_v4().simple());
@@ -107,7 +158,12 @@ impl Fixture {
             .unwrap();
         let host = Host {
             item: json!({"Id":"movie","Type":"Movie","Path":path}),
-            replacement: jpeg([0, 0, 255]),
+            replacement,
+            fake_target_upload: Arc::default(),
+            fake_all_uploads: Arc::default(),
+            wrong_target_upload: Arc::default(),
+            reencode_target_upload: Arc::default(),
+            keep_native_on_delete: Arc::default(),
             native: Arc::new(Mutex::new(original.clone())),
             events: Arc::default(),
             downloading: Arc::default(),
@@ -123,7 +179,10 @@ impl Fixture {
                 "/Users/user/Items/movie",
                 get(|State(host): State<Host>| async move { Json(host.item) }),
             )
-            .route("/Items/movie/Images/Primary", delete(remove).post(upload))
+            .route(
+                "/Items/movie/Images/Primary",
+                delete(remove).post(upload).get(native_picture),
+            )
             .route(
                 "/Items/movie/Refresh",
                 post(|State(host): State<Host>| async move {
@@ -175,7 +234,7 @@ impl Fixture {
         data["task_id"].as_str().unwrap().to_string()
     }
     async fn finished(&self, task: &str) -> Value {
-        tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::time::timeout(Duration::from_secs(45), async {
             loop {
                 let result = self.state.jobs.result(task).await.unwrap();
                 if result["is_running"] == false {
@@ -249,7 +308,9 @@ async fn cancellation_after_native_delete_finishes_image_commit_and_keeps_result
     assert_eq!(native, replacement);
     assert_eq!(
         events,
-        vec!["download", "delete", "upload", "upload", "refresh"]
+        vec![
+            "download", "readback", "delete", "upload", "upload", "refresh", "readback"
+        ]
     );
 }
 
@@ -268,12 +329,12 @@ async fn exhausted_raw_upload_still_tries_base64_and_finishes_refresh() {
     assert_eq!(result["state"], "completed", "{result}");
     assert_eq!(native, replacement);
     assert_eq!(events.iter().filter(|event| **event == "upload").count(), 7);
-    assert_eq!(events.last(), Some(&"refresh"));
+    assert_eq!(events.last(), Some(&"readback"));
 }
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby and image source are localhost"]
-async fn exhausted_uploads_still_refresh_saved_local_image_and_keep_failure() {
+async fn exhausted_uploads_restore_local_original_and_report_native_recovery_failure() {
     let f = Fixture::new(false).await;
     *f.host.fail_all_uploads.lock().await = true;
     f.host.delete_gate.add_permits(1);
@@ -283,13 +344,231 @@ async fn exhausted_uploads_still_refresh_saved_local_image_and_keep_failure() {
         .await
         .unwrap();
     let events = f.host.events.lock().await.clone();
-    let replacement = f.host.replacement.clone();
+    let original = f.original.clone();
+    let native = f.host.native.lock().await.clone();
+    let recovery = result["result"]["error"].as_str().unwrap().to_string();
+    let backups = f.directory.path().join("app/backups/image-replacement");
+    assert!(
+        tokio::fs::read_dir(&backups)
+            .await
+            .unwrap()
+            .next_entry()
+            .await
+            .unwrap()
+            .is_some()
+    );
     f.close().await;
     assert_eq!(result["state"], "failed", "{result}");
     assert!(
         result["result"]["error"].as_str().unwrap().contains("503"),
         "{result}"
     );
-    assert_eq!(local, replacement);
-    assert_eq!(events.last(), Some(&"refresh"));
+    assert_eq!(local, original);
+    assert!(native.is_empty());
+    assert!(recovery.contains("原生图片未恢复"), "{recovery}");
+    assert!(recovery.contains("原图备份已保留"), "{recovery}");
+    assert_eq!(events.last(), Some(&"readback"));
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby and image source are localhost"]
+async fn damaged_image_is_rejected_before_local_or_native_mutation() {
+    let f = Fixture::with_replacement(false, b"<html>not a jpeg</html>".to_vec()).await;
+    let task = f.submit().await;
+    let result = f.finished(&task).await;
+    let local = tokio::fs::read(f.directory.path().join("poster.jpg"))
+        .await
+        .unwrap();
+    let native = f.host.native.lock().await.clone();
+    let events = f.host.events.lock().await.clone();
+    let original = f.original.clone();
+    f.close().await;
+    assert_eq!(result["state"], "failed", "{result}");
+    assert_eq!(local, original);
+    assert_eq!(native, original);
+    assert_eq!(events, vec!["download"]);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby and image source are localhost"]
+async fn successful_upload_without_native_image_fails_and_restores_originals() {
+    let f = Fixture::new(false).await;
+    *f.host.fake_target_upload.lock().await = true;
+    f.host.delete_gate.add_permits(1);
+    let task = f.submit().await;
+    let result = f.finished(&task).await;
+    let local = tokio::fs::read(f.directory.path().join("poster.jpg"))
+        .await
+        .unwrap();
+    let native = f.host.native.lock().await.clone();
+    let original = f.original.clone();
+    let events = f.host.events.lock().await.clone();
+    f.close().await;
+    assert_eq!(result["state"], "failed", "{result}");
+    assert!(
+        result["result"]["error"].as_str().unwrap().contains("验收"),
+        "{result}"
+    );
+    assert_eq!(local, original);
+    assert_eq!(native, original);
+    assert!(events.iter().filter(|event| **event == "readback").count() >= 3);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby and image source are localhost"]
+async fn different_valid_native_image_does_not_pass_replacement_readback() {
+    let f = Fixture::new(false).await;
+    *f.host.wrong_target_upload.lock().await = true;
+    f.host.delete_gate.add_permits(1);
+    let task = f.submit().await;
+    let result = f.finished(&task).await;
+    let native = f.host.native.lock().await.clone();
+    let original = f.original.clone();
+    f.close().await;
+    assert_eq!(result["state"], "failed", "{result}");
+    assert!(
+        result["result"]["error"].as_str().unwrap().contains("验收"),
+        "{result}"
+    );
+    assert_eq!(native, original);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby and image source are localhost"]
+async fn fake_success_during_recovery_is_reported_and_keeps_original_backup() {
+    let f = Fixture::new(false).await;
+    *f.host.fake_all_uploads.lock().await = true;
+    f.host.delete_gate.add_permits(2);
+    let task = f.submit().await;
+    let result = f.finished(&task).await;
+    let error = result["result"]["error"].as_str().unwrap().to_string();
+    let mut backups = tokio::fs::read_dir(f.directory.path().join("app/backups/image-replacement"))
+        .await
+        .unwrap();
+    let backup = backups.next_entry().await.unwrap().unwrap().path();
+    assert_eq!(
+        tokio::fs::read(backup.join("local-original"))
+            .await
+            .unwrap(),
+        f.original
+    );
+    assert_eq!(
+        tokio::fs::read(backup.join("native-original"))
+            .await
+            .unwrap(),
+        f.original
+    );
+    assert!(f.host.native.lock().await.is_empty());
+    f.close().await;
+    assert_eq!(result["state"], "failed", "{result}");
+    assert!(error.contains("原生图片未恢复"), "{error}");
+    assert!(error.contains("原图备份已保留"), "{error}");
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby and image source are localhost"]
+async fn first_image_can_be_created_when_native_delete_returns_not_found() {
+    let f = Fixture::new(false).await;
+    f.host.native.lock().await.clear();
+    tokio::fs::remove_file(f.directory.path().join("poster.jpg"))
+        .await
+        .unwrap();
+    f.host.delete_gate.add_permits(1);
+    let task = f.submit().await;
+    let result = f.finished(&task).await;
+    let native = f.host.native.lock().await.clone();
+    let replacement = f.host.replacement.clone();
+    f.close().await;
+    assert_eq!(result["state"], "completed", "{result}");
+    assert_eq!(native, replacement);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby and image source are localhost"]
+async fn failed_first_image_replacement_restores_original_absence() {
+    let f = Fixture::new(false).await;
+    f.host.native.lock().await.clear();
+    tokio::fs::remove_file(f.directory.path().join("poster.jpg"))
+        .await
+        .unwrap();
+    *f.host.wrong_target_upload.lock().await = true;
+    f.host.delete_gate.add_permits(2);
+    let task = f.submit().await;
+    let result = f.finished(&task).await;
+    assert!(
+        !tokio::fs::try_exists(f.directory.path().join("poster.jpg"))
+            .await
+            .unwrap()
+    );
+    assert!(f.host.native.lock().await.is_empty());
+    f.close().await;
+    assert_eq!(result["state"], "failed", "{result}");
+    assert!(
+        result["result"]["error"]
+            .as_str()
+            .unwrap()
+            .contains("原图已恢复"),
+        "{result}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby and image source are localhost"]
+async fn jpeg_recompression_can_pass_pixel_readback_without_identical_bytes() {
+    let image = image::RgbImage::from_fn(32, 32, |x, y| {
+        image::Rgb([
+            (x * 4 + 50) as u8,
+            (y * 4 + 50) as u8,
+            ((x + y) * 2 + 40) as u8,
+        ])
+    });
+    let mut replacement = vec![];
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut replacement, 95)
+        .encode_image(&image)
+        .unwrap();
+    let f = Fixture::with_replacement(false, replacement.clone()).await;
+    *f.host.reencode_target_upload.lock().await = true;
+    f.host.delete_gate.add_permits(1);
+    let task = f.submit().await;
+    let result = f.finished(&task).await;
+    let native = f.host.native.lock().await.clone();
+    f.close().await;
+    assert_eq!(result["state"], "completed", "{result}");
+    assert!(
+        native != replacement,
+        "native JPEG must be reencoded at a different quality"
+    );
+    assert_eq!(
+        image::load_from_memory(&native)
+            .unwrap()
+            .to_rgba8()
+            .dimensions(),
+        (32, 32)
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby and image source are localhost"]
+async fn similar_unchanged_original_does_not_pass_replacement_readback() {
+    let f = Fixture::with_replacement(false, jpeg([250, 0, 0])).await;
+    assert_ne!(
+        image::load_from_memory(&f.host.replacement)
+            .unwrap()
+            .to_rgba8(),
+        image::load_from_memory(&f.original).unwrap().to_rgba8()
+    );
+    *f.host.keep_native_on_delete.lock().await = true;
+    *f.host.fake_target_upload.lock().await = true;
+    f.host.delete_gate.add_permits(1);
+    let task = f.submit().await;
+    let result = f.finished(&task).await;
+    let native = f.host.native.lock().await.clone();
+    let original = f.original.clone();
+    f.close().await;
+    assert_eq!(result["state"], "failed", "{result}");
+    assert!(
+        result["result"]["error"].as_str().unwrap().contains("验收"),
+        "{result}"
+    );
+    assert_eq!(native, original);
 }

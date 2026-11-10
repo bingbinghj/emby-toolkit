@@ -242,8 +242,11 @@ impl JobManager {
         tracing::info!(task_id=%id,"[任务开始] {name}");
         let manager = self.clone();
         tokio::spawn(async move {
+            let task_context = context.clone();
             let work = std::panic::AssertUnwindSafe(
-                TASK_ACTIVITY.scope(context.activity.clone(), function(context.clone())),
+                TASK_ACTIVITY.scope(context.activity.clone(), async move {
+                    function(task_context).await
+                }),
             )
             .catch_unwind();
             tokio::pin!(work);
@@ -286,32 +289,32 @@ impl JobManager {
             let failed = result.as_ref().is_ok_and(|(status, value)| {
                 *status >= 400
                     || value["success"] == false
+                    || value["error"]
+                        .as_str()
+                        .is_some_and(|error| !error.is_empty())
                     || value["failed"].as_u64().unwrap_or(0) > 0
                     || value["failures"]
                         .as_array()
                         .is_some_and(|items| !items.is_empty())
             });
-            let warnings = result
-                .as_ref()
-                .is_ok_and(|(_, value)| value["warnings"].as_u64().unwrap_or(0) > 0);
+            let warnings = result.as_ref().is_ok_and(|(status, value)| {
+                *status == 207
+                    || value["warnings"].as_u64().unwrap_or(0) > 0
+                    || value["warning_details"]
+                        .as_array()
+                        .is_some_and(|items| !items.is_empty())
+            });
             let mut cancellation_warning = false;
             if context.cancel.is_cancelled() {
                 state["state"] = json!("cancelled");
                 state["message"] = json!("任务已取消");
                 match result {
                     Ok((status, value)) => {
-                        cancellation_warning = failed
-                            || warnings
-                            || status == 207
-                            || value["warning_details"]
-                                .as_array()
-                                .is_some_and(|items| !items.is_empty())
-                            || value["error"]
-                                .as_str()
-                                .is_some_and(|error| !error.is_empty());
+                        cancellation_warning = failed || warnings;
                         if cancellation_warning {
                             let message = value["error"]
                                 .as_str()
+                                .filter(|error| !error.is_empty())
                                 .or_else(|| value["message"].as_str())
                                 .unwrap_or("请查看任务结果中的失败或提醒详情");
                             state["message"] =
@@ -343,9 +346,12 @@ impl JobManager {
                         state["result_status"] = json!(status);
                         let message = value["error"]
                             .as_str()
+                            .filter(|error| !error.is_empty())
                             .or_else(|| value["message"].as_str())
                             .unwrap_or(if failed {
                                 "部分项目处理失败，请查看任务结果"
+                            } else if warnings {
+                                "处理完成，有提醒，请查看任务结果"
                             } else {
                                 "处理完成"
                             })

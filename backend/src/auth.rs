@@ -110,14 +110,25 @@ pub async fn require_admin(
     request: Request,
     next: Next,
 ) -> Result<Response> {
-    let session = state
-        .sessions
-        .from_headers(request.headers())
-        .ok_or_else(ApiError::forbidden)?;
-    if session.user_id.is_empty() || !db::is_admin(&state.db, &session.user_id).await? {
+    if administrator_session(&state, request.headers())
+        .await?
+        .is_none()
+    {
         return Err(ApiError::forbidden());
     }
     Ok(next.run(request).await)
+}
+pub async fn administrator_session(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Option<Session>> {
+    let Some(session) = state.sessions.from_headers(headers) else {
+        return Ok(None);
+    };
+    if session.user_id.is_empty() || !db::is_admin(&state.db, &session.user_id).await? {
+        return Ok(None);
+    }
+    Ok(Some(session))
 }
 pub fn cookie(token: &str) -> String {
     format!("etk_session={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2678400")

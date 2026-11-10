@@ -298,6 +298,7 @@ pub async fn items(
     }
     let mut result = vec![];
     let mut start = 0;
+    let mut total: Option<usize> = None;
     let mut seen = HashSet::new();
     loop {
         context.checkpoint().await?;
@@ -318,8 +319,26 @@ pub async fn items(
             ];
             match state.emby(Method::GET, "Items", &query, None).await {
                 Ok(value) if value["Items"].is_array() => {
-                    page = Some((value, limit));
-                    break;
+                    let count = value["Items"].as_array().unwrap().len();
+                    if let Some(value) = value.get("TotalRecordCount") {
+                        let page_total = value
+                            .as_u64()
+                            .and_then(|count| usize::try_from(count).ok())
+                            .filter(|total| *total >= start + count)
+                            .ok_or_else(|| ApiError::bad("Emby 分页总数无效，已停止同步"))?;
+                        total = Some(total.unwrap_or(0).max(page_total));
+                    }
+                    if count == 0 && total.is_some_and(|total| start < total) {
+                        if attempt == 2 {
+                            return Err(ApiError::bad(
+                                "Emby 分页不完整，重试后仍缺少条目，已停止同步",
+                            ));
+                        }
+                        tokio::time::sleep(Duration::from_secs(2 * (attempt + 1))).await;
+                    } else {
+                        page = Some((value, limit));
+                        break;
+                    }
                 }
                 Ok(_) if attempt == 2 => {
                     return Err(ApiError::bad("Emby 分页响应无效，已停止同步"));
@@ -344,7 +363,7 @@ pub async fn items(
         }
         let count = items.len();
         result.append(items);
-        if count < limit {
+        if total.is_some_and(|total| result.len() >= total) || (total.is_none() && count < limit) {
             break;
         }
         start += count;

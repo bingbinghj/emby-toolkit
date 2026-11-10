@@ -430,22 +430,61 @@ fn references(
 }
 
 impl Changes {
-    async fn rollback(&self, state: &AppState) {
+    async fn rollback(&self, state: &AppState) -> Vec<String> {
+        let mut failures = vec![];
         for (id, name) in self.cloud.iter().rev() {
             if let Err(error) = crate::p115::rename(state, id, name).await {
-                tracing::error!("115改名回滚失败：目标名称 {name}，文件 {id}，{}", error.1);
+                failures.push(format!(
+                    "115改名回滚失败：目标名称 {name}，文件 {id}，{}",
+                    error.1
+                ));
             }
         }
         for (path, bytes) in self.contents.iter().rev() {
             if let Err(error) = tokio::fs::write(path, bytes).await {
-                tracing::error!(%error,"文件内容回滚失败：{}", path.display());
+                failures.push(format!("文件内容回滚失败：{}：{error}", path.display()));
             }
         }
         for (old, new) in self.moves.iter().rev() {
             if let Err(error) = tokio::fs::rename(new, old).await {
-                tracing::error!(%error,"文件改名回滚失败：{} → {}", new.display(), old.display());
+                failures.push(format!(
+                    "文件改名回滚失败：{} → {}：{error}",
+                    new.display(),
+                    old.display()
+                ));
             }
         }
+        for failure in &failures {
+            tracing::error!("{failure}");
+        }
+        failures
+    }
+    async fn rollback_after_error(
+        &self,
+        state: &AppState,
+        mut error: ApiError,
+        recovery: &std::path::Path,
+    ) -> ApiError {
+        let failures = self.rollback(state).await;
+        if failures.is_empty() {
+            return error;
+        }
+        let manifest = json!({"original_error":error.1,"moves":self.moves,
+            "contents":self.contents,"cloud":self.cloud,"rollback_failures":failures});
+        error.1 = format!(
+            "{}；{}；恢复资料：{}",
+            error.1,
+            failures.join("；"),
+            recovery.display()
+        );
+        if let Err(write_error) =
+            write_recovery(&recovery.join("rollback-recovery.json"), &manifest).await
+        {
+            error
+                .1
+                .push_str(&format!("；回滚恢复清单保存失败：{}", write_error.1));
+        }
+        error
     }
     async fn move_path(&mut self, old: PathBuf, new: PathBuf) -> Result<()> {
         if old == new {
@@ -1027,7 +1066,7 @@ async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext)
             transaction.commit().await?;
             Ok::<_,ApiError>(())
         }.await;
-        if let Err(error) = result { changes.rollback(state).await; return Err(error); }
+        if let Err(error) = result { return Err(changes.rollback_after_error(state, error, &recovery).await); }
         let position = crate::media_extra::log_position(state).await?;
         write_recovery(&recovery.join("pending-scan.json"), &json!({"position":position,"ids":null})).await?;
         confirmed.store(false, Ordering::Release);
@@ -1065,6 +1104,172 @@ async fn sample(State(state): State<AppState>, Json(body): Json<Value>) -> Resul
     Ok(Json(
         json!({"movie":if string(&body,"movie_format").trim().is_empty(){String::new()}else{rename::render(&string(&body,"movie_format"),&movie,".mkv")?},"tv":if string(&body,"tv_format").trim().is_empty(){String::new()}else{rename::render(&string(&body,"tv_format"),&tv,".mp4")?}}),
     ))
+}
+
+#[cfg(test)]
+mod rollback_tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn state(directory: &std::path::Path) -> AppState {
+        AppState {
+            db: sqlx::postgres::PgPoolOptions::new()
+                .acquire_timeout(std::time::Duration::from_millis(10))
+                .connect_lazy("postgres://unused:unused@127.0.0.1/unused")
+                .unwrap(),
+            config: Arc::new(RwLock::new(json!({}))),
+            http: reqwest::Client::new(),
+            sessions: Arc::new(crate::auth::SessionSigner::load(directory).unwrap()),
+            recovery_tokens: Arc::default(),
+            data_dir: directory.into(),
+            notifications: Arc::default(),
+            webhooks: Arc::default(),
+            ai: Arc::default(),
+            jobs: Arc::default(),
+            logs: crate::logs::LogStore::open(&directory.join("logs")).unwrap(),
+            p115: Arc::default(),
+            strm: Arc::default(),
+            douban: Arc::default(),
+            docker: Arc::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_rollbacks_report_targets_keep_recovery_and_attempt_all_steps() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = state(directory.path());
+        let old = directory.path().join("Old.strm");
+        let new = directory.path().join("New.strm");
+        let other_old = directory.path().join("OtherOld.strm");
+        let other_new = directory.path().join("OtherNew.strm");
+        let blocked_content = directory.path().join("blocked-content");
+        tokio::fs::create_dir(&old).await.unwrap();
+        tokio::fs::write(old.join("user-file"), b"keep me")
+            .await
+            .unwrap();
+        tokio::fs::create_dir(&blocked_content).await.unwrap();
+        tokio::fs::write(&new, b"new playback path").await.unwrap();
+        tokio::fs::write(&other_new, b"other playback path")
+            .await
+            .unwrap();
+        let changes = Changes {
+            moves: vec![
+                (other_old.clone(), other_new.clone()),
+                (old.clone(), new.clone()),
+            ],
+            contents: vec![
+                (new.clone(), b"original playback path".to_vec()),
+                (blocked_content.clone(), b"original JSON".to_vec()),
+            ],
+            cloud: vec![("cloud-file".into(), "Original.mkv".into())],
+        };
+        let recovery = directory.path().join("recovery");
+        tokio::fs::create_dir(&recovery).await.unwrap();
+        let error = changes
+            .rollback_after_error(
+                &state,
+                ApiError(StatusCode::CONFLICT, "initial database conflict".into()),
+                &recovery,
+            )
+            .await;
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        for expected in [
+            "initial database conflict",
+            "cloud-file",
+            "Original.mkv",
+            old.to_str().unwrap(),
+            new.to_str().unwrap(),
+            blocked_content.to_str().unwrap(),
+            recovery.to_str().unwrap(),
+        ] {
+            assert!(error.1.contains(expected), "{}", error.1);
+        }
+        assert!(old.is_dir() && new.is_file());
+        assert!(other_old.is_file() && !other_new.exists());
+        assert_eq!(
+            tokio::fs::read(&new).await.unwrap(),
+            b"original playback path"
+        );
+        assert_eq!(
+            tokio::fs::read(old.join("user-file")).await.unwrap(),
+            b"keep me"
+        );
+        let manifest: Value = serde_json::from_slice(
+            &tokio::fs::read(recovery.join("rollback-recovery.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["rollback_failures"].as_array().unwrap().len(), 3);
+        assert_eq!(manifest["moves"], json!(changes.moves));
+        assert_eq!(manifest["contents"], json!(changes.contents));
+        assert_eq!(manifest["cloud"], json!(changes.cloud));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                tokio::fs::metadata(recovery.join("rollback-recovery.json"))
+                    .await
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_rollback_preserves_original_error_without_false_warning() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = state(directory.path());
+        let old = directory.path().join("Old.strm");
+        let new = directory.path().join("New.strm");
+        tokio::fs::write(&new, b"new playback path").await.unwrap();
+        let changes = Changes {
+            moves: vec![(old.clone(), new.clone())],
+            contents: vec![(new.clone(), b"original playback path".to_vec())],
+            cloud: vec![],
+        };
+        let error = changes
+            .rollback_after_error(
+                &state,
+                ApiError(StatusCode::CONFLICT, "original failure".into()),
+                &directory.path().join("recovery"),
+            )
+            .await;
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(error.1, "original failure");
+        assert!(!new.exists());
+        assert_eq!(
+            tokio::fs::read(old).await.unwrap(),
+            b"original playback path"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_write_failure_does_not_hide_original_or_rollback_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = state(directory.path());
+        let new = directory.path().join("New.strm");
+        let changes = Changes {
+            moves: vec![(directory.path().join("Old.strm"), new.clone())],
+            contents: vec![],
+            cloud: vec![],
+        };
+        let error = changes
+            .rollback_after_error(
+                &state,
+                ApiError(StatusCode::CONFLICT, "original failure".into()),
+                &directory.path().join("missing-recovery"),
+            )
+            .await;
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert!(error.1.contains("original failure"));
+        assert!(error.1.contains(new.to_str().unwrap()));
+        assert!(error.1.contains("回滚恢复清单保存失败"));
+    }
 }
 
 #[cfg(test)]

@@ -4,9 +4,9 @@
       <header class="d-flex align-center justify-space-between ga-3 mb-4">
         <div class="d-flex align-center ga-3 min-width-0">
           <VBtn v-if="libraryId" icon="mdi-arrow-left" variant="text" color="default"
-            aria-label="返回媒体库" title="返回媒体库" @click="goToLibraries" />
+            aria-label="返回仪表盘" title="返回我的媒体库" @click="goToLibraries" />
           <div class="min-width-0">
-            <h1 class="text-h5 font-weight-bold text-truncate">{{ libraryId ? (library?.name || '媒体库') : '媒体中心' }}</h1>
+            <h1 class="text-h5 font-weight-bold text-truncate">{{ libraryId ? (library?.name || '媒体库') : '我的媒体库' }}</h1>
             <p class="text-body-2 text-medium-emphasis mt-1">{{ libraryId ? `浏览${mediaTypeLabel} · ${total} 项媒体` : '浏览和管理 Emby 媒体库' }}</p>
           </div>
         </div>
@@ -236,7 +236,7 @@ const loadPage = async (startIndex, { reset = false, target = null } = {}) => {
 };
 
 const openLibrary = (id) => router.push({ name: 'MediaCenterLibrary', params: { libraryId: id } });
-const goToLibraries = () => router.push({ name: 'MediaCenter' });
+const goToLibraries = () => router.push({ name: 'Dashboard' });
 const openMedia = (id) => router.push({ name: 'MediaEditPage', params: { itemId: id } });
 const resetBrowserPosition = () => {
   mediaPage.value?.scrollTo({ top: 0, behavior: 'auto' });

@@ -15,7 +15,7 @@ for (const ended of [false, true]) {
   test(`topbar stop confirmation ignores a task that ${ended ? 'ended' : 'was replaced'}`, async ({ page, api }) => {
     api.setTask(runningTask);
     api.respond('POST', '/api/trigger_stop_task', { message: '停止请求已发送' });
-    await page.goto('/user-center');
+    await page.goto('/user-management');
     await openStopConfirmation(page);
     api.setTask(ended
       ? { is_running: false, state: 'idle', message: '等待任务', history: [], logs: [] }
@@ -33,7 +33,7 @@ for (const ended of [false, true]) {
 test('topbar confirmed stop submits only the task named in its confirmation', async ({ page, api }) => {
   api.setTask(runningTask);
   api.respond('POST', '/api/trigger_stop_task', { message: '停止请求已发送' });
-  await page.goto('/user-center');
+  await page.goto('/user-management');
   await openStopConfirmation(page);
   await page.getByRole('button', { name: '停止任务', exact: true }).click();
   await expect.poll(() => api.requests.some(request => request.path === '/api/trigger_stop_task')).toBe(true);
@@ -48,9 +48,9 @@ async function openMenuEditor(page) {
 
 test('failed menu read preserves fallback navigation and blocks save until a successful null read', async ({ page, api }) => {
   api.respond('GET', '/api/system/menu_config', { error: '菜单配置暂时无法读取' }, 503);
-  await page.goto('/user-center');
-  await page.locator('.v-navigation-drawer').getByText('媒体中心', { exact: true }).click();
-  await expect(page).toHaveURL(/\/media-center$/);
+  await page.goto('/user-management');
+  await page.locator('.v-navigation-drawer').getByText('仪表盘', { exact: true }).click();
+  await expect(page).toHaveURL(/\/dashboard$/);
   const editor = await openMenuEditor(page);
   const save = editor.getByRole('button', { name: '保存并应用', exact: true });
   await expect(editor.getByText('菜单配置暂时无法读取', { exact: true })).toBeVisible();
@@ -67,7 +67,7 @@ test('failed menu read preserves fallback navigation and blocks save until a suc
 
 test('explicit reset is allowed after a failed menu read and unlocks saving the confirmed defaults', async ({ page, api }) => {
   api.respond('GET', '/api/system/menu_config', { error: '菜单配置暂时无法读取' }, 503);
-  await page.goto('/user-center');
+  await page.goto('/user-management');
   const editor = await openMenuEditor(page);
   await expect(editor.getByRole('button', { name: '保存并应用', exact: true })).toBeDisabled();
   await editor.getByRole('button', { name: '恢复默认', exact: true }).click();
