@@ -566,7 +566,7 @@ async fn menu_get(State(state): State<AppState>) -> Result<Json<Value>> {
     Ok(Json(
         db::setting(&state.db, "custom_menu_config")
             .await?
-            .unwrap_or(json!({})),
+            .unwrap_or(Value::Null),
     ))
 }
 async fn menu_save(State(state): State<AppState>, Json(value): Json<Value>) -> Result<Json<Value>> {

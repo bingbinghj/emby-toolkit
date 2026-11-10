@@ -925,7 +925,7 @@ async fn backup_info(state: &AppState, context: &crate::jobs::JobContext) -> Res
                             } else {
                                 "缺失媒体信息".into()
                             };
-                            sqlx::query("INSERT INTO failed_log(item_id,item_name,item_type,reason,error_message,score) VALUES($1,$2,$3,$4,$4,0) ON CONFLICT(item_id) DO UPDATE SET reason=EXCLUDED.reason,error_message=EXCLUDED.error_message,score=0,failed_at=NOW()")
+                            sqlx::query("INSERT INTO failed_log(item_id,item_name,item_type,reason,error_message) VALUES($1,$2,$3,$4,$4) ON CONFLICT(item_id) DO UPDATE SET reason=EXCLUDED.reason,error_message=EXCLUDED.error_message,failed_at=NOW()")
                                     .bind(owner_id).bind(crate::state::string(&owner,"title")).bind(crate::state::string(&owner,"item_type")).bind(reason).execute(&state.db).await?;
                         }
                     }

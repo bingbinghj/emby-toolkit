@@ -12,7 +12,7 @@ const privateRoutes = [
   ['/library/movies', '电影'],
   ['/settings/general', '设置'],
   ['/settings/scheduler', '任务中心'],
-  ['/settings/cover-generator', '媒体库封面生成'],
+  ['/settings/cover-generator', '封面生成'],
   ['/edit-media/101', '手动编辑媒体信息'],
 ];
 
@@ -20,7 +20,13 @@ for (const [path, heading] of privateRoutes) {
   test(`authenticated route renders ${path}`, async ({ page }) => {
     await page.goto(path);
     const title = page.getByRole('heading', { name: heading, exact: true }).first();
-    if (heading === '设置' || heading === '通知') {
+    const roots = { 仪表盘: '.dashboard-page', 用户管理: '.user-management-page', 媒体整理: '.media-organize-page', 手动处理: '.review-page' };
+    if (roots[heading]) {
+      await expect(page.locator(roots[heading])).toBeVisible();
+      await expect(page.locator(roots[heading]).getByRole('heading', { name: heading, exact: true })).toHaveCount(0);
+    } else if (heading === '任务中心' || heading === '封面生成' || heading === '手动编辑媒体信息') {
+      await expect(title).toBeAttached();
+    } else if (heading === '设置' || heading === '通知') {
       await expect(title).toBeAttached();
       await expect(page.getByRole('tab', { name: heading === '设置' ? '系统' : '通知', exact: true })).toHaveAttribute('aria-selected', 'true');
     } else await expect(title).toBeVisible();
@@ -37,7 +43,7 @@ test.describe('login required', () => {
     await page.getByLabel('密码', { exact: true }).fill('fixture-password');
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page).toHaveURL(/\/dashboard$/);
-    await expect(page.getByRole('heading', { name: '仪表盘', exact: true })).toBeVisible();
+    await expect(page.locator('.dashboard-page')).toBeVisible();
     expect(api.requests.find(request => request.path === '/api/auth/login').body).toEqual({ username: 'UI Test', password: 'fixture-password' });
   });
 });
@@ -61,7 +67,7 @@ test.describe('ordinary account', () => {
   test.use({ admin: false });
   test('account details remain available and management navigation stays hidden', async ({ page, api }) => {
     await page.goto('/user-management');
-    await expect(page.getByRole('heading', { name: '用户管理', exact: true })).toBeVisible();
+    await expect(page.locator('.user-management-page')).toBeVisible();
     await expect(page.getByText('用户管理需要管理员权限。', { exact: true })).toBeVisible();
     expect(api.requests.some(request => request.path === '/api/portal/users')).toBe(false);
     await expect(page.getByRole('button', { name: '通知中心', exact: true })).toHaveCount(0);
@@ -78,12 +84,13 @@ test('menu order changes through accessible controls and is saved', async ({ pag
   const firstGroup = dialog.locator('.menu-editor-group').nth(2);
   const items = firstGroup.locator('.menu-editor-item');
   await expect(items).toHaveCount(4);
-  await items.nth(1).getByRole('button', { name: '上移菜单', exact: true }).click();
+  for (const index of [3, 2, 1]) await items.nth(index).getByRole('button', { name: '上移菜单', exact: true }).click();
   await expect(items.nth(0).getByLabel('菜单名称', { exact: true })).toHaveValue('用户管理');
   await dialog.getByRole('button', { name: '保存并应用', exact: true }).click();
   await expect.poll(() => api.requests.some(request => request.method === 'POST' && request.path === '/api/system/menu_config')).toBe(true);
   const saved = api.requests.find(request => request.method === 'POST' && request.path === '/api/system/menu_config').body;
   expect(saved[2].children.map(item => item.key)).toEqual(['UserManagement', 'settings-general', 'settings-scheduler', 'CoverGeneratorConfig']);
+  expect(saved[2].user_management_order_version).toBe(1);
   await page.reload();
   await page.getByRole('button', { name: 'UI Test 的用户菜单', exact: true }).click();
   await page.getByText('自定义导航', { exact: true }).click();

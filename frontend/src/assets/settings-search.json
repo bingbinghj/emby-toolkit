@@ -1,0 +1,986 @@
+[
+  {
+    "field": "delay_between_items_sec",
+    "label": "处理项目间的延迟 (秒)",
+    "card": "基础设置",
+    "category": "system",
+    "keywords": [
+      "处理项目间的延迟 (秒)",
+      "基础设置",
+      "媒体处理与语言显示"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "media_info_retry_interval",
+    "label": "媒体信息验收等待 (秒)",
+    "card": "基础设置",
+    "category": "system",
+    "keywords": [
+      "媒体信息验收等待 (秒)",
+      "基础设置",
+      "媒体处理与语言显示",
+      "每轮单项补提取后等待该时长再验收。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "media_info_retry_attempts",
+    "label": "媒体信息验收重试次数",
+    "card": "基础设置",
+    "category": "system",
+    "keywords": [
+      "媒体信息验收重试次数",
+      "基础设置",
+      "媒体处理与语言显示",
+      "仅重试仍缺少有效媒体信息的项目；设为 0 时只验收，不补提取。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "subtitle_chinese_default_language",
+    "label": "中文字幕默认语言",
+    "card": "基础设置",
+    "category": "system",
+    "keywords": [
+      "中文字幕默认语言",
+      "基础设置",
+      "媒体处理与语言显示",
+      "仅用于媒体信息编辑器中未明确简繁的中文字幕“修正语言 (Language)”选项，方便填充标题；保留明确的 chs、cht。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "max_actors_to_process",
+    "label": "最大主要演员数",
+    "card": "基础设置",
+    "category": "system",
+    "keywords": [
+      "最大主要演员数",
+      "基础设置",
+      "媒体处理与语言显示",
+      "处理后最终演员表数量，超过会截断，优先保留有头像演员。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "max_episode_actors_to_process",
+    "label": "最大分集演员数",
+    "card": "基础设置",
+    "category": "system",
+    "keywords": [
+      "最大分集演员数",
+      "基础设置",
+      "媒体处理与语言显示",
+      "每集最多处理的演员数量，0代表不单独处理分集演员。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "extract_thumb",
+    "label": "截取视频图片",
+    "card": "基础设置",
+    "category": "system",
+    "keywords": [
+      "截取视频图片",
+      "基础设置",
+      "媒体处理与语言显示",
+      "从视频流中截取高清画面作为分集图或背景图。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "actor_role_add_prefix",
+    "label": "为角色名添加前缀",
+    "card": "基础设置",
+    "category": "system",
+    "keywords": [
+      "为角色名添加前缀",
+      "基础设置",
+      "媒体处理与语言显示",
+      "角色名前加上“饰 ”或“配 ”。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "remove_actors_without_avatars",
+    "label": "移除无头像的演员",
+    "card": "基础设置",
+    "category": "system",
+    "keywords": [
+      "移除无头像的演员",
+      "基础设置",
+      "媒体处理与语言显示",
+      "在最终演员表移除那些找不到任何可用头像的演员。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "keyword_to_tags",
+    "label": "关键词写入标签",
+    "card": "基础设置",
+    "category": "system",
+    "keywords": [
+      "关键词写入标签",
+      "基础设置",
+      "媒体处理与语言显示",
+      "将映射后的中文关键词写入标签。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "studio_to_chinese",
+    "label": "工作室中文化",
+    "card": "基础设置",
+    "category": "system",
+    "keywords": [
+      "工作室中文化",
+      "基础设置",
+      "媒体处理与语言显示",
+      "将工作室名称转换为中文。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "emby_server_url",
+    "label": "地址",
+    "card": "媒体服务器",
+    "category": "system",
+    "keywords": [
+      "地址",
+      "媒体服务器",
+      "媒体服务器与媒体库",
+      "服务端地址，格式：http(s)://ip:port"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "emby_public_url",
+    "label": "外网播放地址",
+    "card": "媒体服务器",
+    "category": "system",
+    "keywords": [
+      "外网播放地址",
+      "媒体服务器",
+      "媒体服务器与媒体库",
+      "跳转播放页面使用的地址，格式：http(s)://domain:port"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "emby_api_key",
+    "label": "API密钥",
+    "card": "媒体服务器",
+    "category": "system",
+    "keywords": [
+      "API密钥",
+      "媒体服务器",
+      "媒体服务器与媒体库",
+      "Emby设置->高级->API密钥中生成的密钥"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "emby_webhook_secret",
+    "label": "Webhook密钥",
+    "card": "媒体服务器",
+    "category": "system",
+    "keywords": [
+      "Webhook密钥",
+      "媒体服务器",
+      "媒体服务器与媒体库"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "emby_webhook_ingest_enabled",
+    "label": "Webhook入库",
+    "card": "媒体服务器",
+    "category": "system",
+    "keywords": [
+      "Webhook入库",
+      "媒体服务器",
+      "媒体服务器与媒体库",
+      "关闭后忽略 Emby 的 item.add 和 library.new 入库事件；MoviePilot完成通知、元数据更新和删除通知不受影响。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "emby_user_id",
+    "label": "用户ID",
+    "card": "媒体服务器",
+    "category": "system",
+    "keywords": [
+      "用户ID",
+      "媒体服务器",
+      "媒体服务器与媒体库",
+      "格式错误！ID应为32位。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "emby_admin_user",
+    "label": "用户名",
+    "card": "媒体服务器",
+    "category": "system",
+    "keywords": [
+      "用户名",
+      "媒体服务器",
+      "媒体服务器与媒体库",
+      "登录用户名"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "emby_admin_pass",
+    "label": "密码",
+    "card": "媒体服务器",
+    "category": "system",
+    "keywords": [
+      "密码",
+      "媒体服务器",
+      "媒体服务器与媒体库",
+      "登录密码"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "emby_api_timeout",
+    "label": "Emby API 超时时间 (秒)",
+    "card": "媒体服务器",
+    "category": "system",
+    "keywords": [
+      "Emby API 超时时间 (秒)",
+      "媒体服务器",
+      "媒体服务器与媒体库"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "libraries_to_ignore",
+    "label": "排除媒体库",
+    "card": "媒体服务器",
+    "category": "system",
+    "keywords": [
+      "排除媒体库",
+      "媒体服务器",
+      "媒体服务器与媒体库",
+      "选中的媒体库不会参与处理；不选则处理全部媒体库。",
+      "刷新媒体库"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "ai_prompt_templates",
+    "label": "配置提示词",
+    "card": "AI 增强",
+    "category": "system",
+    "keywords": [
+      "配置提示词",
+      "AI 增强",
+      "翻译服务与处理策略"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "ai_provider",
+    "label": "LLM提供商",
+    "card": "AI 增强",
+    "category": "system",
+    "keywords": [
+      "LLM提供商",
+      "AI 增强",
+      "翻译服务与处理策略",
+      "选择使用的LLM服务提供商"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "ai_api_key",
+    "label": "LLM API密钥",
+    "card": "AI 增强",
+    "category": "system",
+    "keywords": [
+      "LLM API密钥",
+      "AI 增强",
+      "翻译服务与处理策略",
+      "LLM服务提供商的API密钥，用于身份验证"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "ai_model_name",
+    "label": "LLM模型名称",
+    "card": "AI 增强",
+    "category": "system",
+    "keywords": [
+      "LLM模型名称",
+      "AI 增强",
+      "翻译服务与处理策略",
+      "指定使用的LLM模型，可刷新模型目录或手动输入。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "ai_base_url",
+    "label": "LLM基础URL",
+    "card": "AI 增强",
+    "category": "system",
+    "keywords": [
+      "LLM基础URL",
+      "AI 增强",
+      "翻译服务与处理策略",
+      "LLM API的基础URL地址，用于自定义API端点"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "ai_request_timeout",
+    "label": "AI 翻译超时时间（秒）",
+    "card": "AI 增强",
+    "category": "system",
+    "keywords": [
+      "AI 翻译超时时间（秒）",
+      "AI 增强",
+      "翻译服务与处理策略"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "ai_max_retries",
+    "label": "失败重试次数",
+    "card": "AI 增强",
+    "category": "system",
+    "keywords": [
+      "失败重试次数",
+      "AI 增强",
+      "翻译服务与处理策略",
+      "0 表示不重试。超时或临时请求失败后重试当前请求；已成功翻译的词条会使用缓存。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "ai_translation_batch_size",
+    "label": "单批最大翻译词条数",
+    "card": "AI 增强",
+    "category": "system",
+    "keywords": [
+      "单批最大翻译词条数",
+      "AI 增强",
+      "翻译服务与处理策略"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "ai_translate_actor_role",
+    "label": "翻译演员与角色",
+    "card": "AI 增强",
+    "category": "system",
+    "keywords": [
+      "翻译演员与角色",
+      "AI 增强",
+      "翻译服务与处理策略"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "ai_translate_on_sync",
+    "label": "同步媒体数据时翻译",
+    "card": "AI 增强",
+    "category": "system",
+    "keywords": [
+      "同步媒体数据时翻译",
+      "AI 增强",
+      "翻译服务与处理策略"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "ai_translate_title",
+    "label": "翻译片名",
+    "card": "AI 增强",
+    "category": "system",
+    "keywords": [
+      "翻译片名",
+      "AI 增强",
+      "翻译服务与处理策略"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "ai_translate_overview",
+    "label": "翻译简介",
+    "card": "AI 增强",
+    "category": "system",
+    "keywords": [
+      "翻译简介",
+      "AI 增强",
+      "翻译服务与处理策略"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "ai_translate_episode_overview",
+    "label": "翻译分集简介",
+    "card": "AI 增强",
+    "category": "system",
+    "keywords": [
+      "翻译分集简介",
+      "AI 增强",
+      "翻译服务与处理策略"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "ai_joke_fallback",
+    "label": "无简介小笑话占位",
+    "card": "AI 增强",
+    "category": "system",
+    "keywords": [
+      "无简介小笑话占位",
+      "AI 增强",
+      "翻译服务与处理策略"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "ai_translation_mode",
+    "label": "翻译模式",
+    "card": "AI 增强",
+    "category": "system",
+    "keywords": [
+      "翻译模式",
+      "AI 增强",
+      "翻译服务与处理策略",
+      "快速模式 (仅翻译)",
+      "顾问模式 (结合剧情上下文)"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "log_rotation_size_mb",
+    "label": "单个日志文件大小 (MB)",
+    "card": "日志配置",
+    "category": "system",
+    "keywords": [
+      "单个日志文件大小 (MB)",
+      "日志配置",
+      "日志保留与文件大小",
+      "设置 app.log 文件的最大体积，超限后会轮转。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "log_rotation_backup_count",
+    "label": "日志备份数量",
+    "card": "日志配置",
+    "category": "system",
+    "keywords": [
+      "日志备份数量",
+      "日志配置",
+      "日志保留与文件大小",
+      "保留最近的日志文件数量 (app.log.1, app.log.2 ...)。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "data_management",
+    "label": "数据管理",
+    "card": "数据管理",
+    "category": "system",
+    "keywords": [
+      "数据管理",
+      "备份、还原与缓存维护",
+      "导出数据",
+      "清空指定表",
+      "清理离线媒体",
+      "校准ID计数器",
+      "重置Emby数据"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "p115_auth_method",
+    "label": "授权方式",
+    "card": "存储",
+    "category": "directory",
+    "keywords": [
+      "授权方式",
+      "存储",
+      "115 授权方式与连接状态",
+      "网页登录授权",
+      "自定义 AppID 扫码"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "p115_app_id",
+    "label": "OpenAPI",
+    "card": "存储",
+    "category": "directory",
+    "keywords": [
+      "OpenAPI",
+      "存储",
+      "115 授权方式与连接状态",
+      "请先填写 AppID 并保存此卡片，然后再扫码授权。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "p115_api_priority",
+    "label": "115接口",
+    "card": "存储",
+    "category": "directory",
+    "keywords": [
+      "115接口",
+      "存储",
+      "115 授权方式与连接状态",
+      "默认优先 Cookie，失败后再尝试 OpenAPI。",
+      "优先 Cookie（默认）",
+      "优先 OpenAPI（备用）"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "p115_request_interval",
+    "label": "API 请求间隔 (秒)",
+    "card": "存储",
+    "category": "directory",
+    "keywords": [
+      "API 请求间隔 (秒)",
+      "存储",
+      "115 授权方式与连接状态",
+      "115 官方对 API 调用频率有严格限制，建议保持 0.5 秒以上。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "emby_metadata_path",
+    "label": "媒体元数据目录",
+    "card": "目录",
+    "category": "directory",
+    "keywords": [
+      "媒体元数据目录",
+      "目录",
+      "媒体目录与文件身份",
+      "选择已挂载的 Emby metadata 文件夹；与 Emby 使用相同路径时可留空。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "local_strm_root",
+    "label": "本地 STRM 根目录",
+    "card": "目录",
+    "category": "directory",
+    "keywords": [
+      "本地 STRM 根目录",
+      "目录",
+      "媒体目录与文件身份",
+      "用于从 Emby 路径反查 115 缓存位置，辅助补齐 PC/SHA1。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "cd2_media_root",
+    "label": "CD2 媒体库本地根目录",
+    "card": "目录",
+    "category": "directory",
+    "keywords": [
+      "CD2 媒体库本地根目录",
+      "目录",
+      "媒体目录与文件身份"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "p115_fingerprint_media_root_path",
+    "label": "115 云端媒体库根目录",
+    "card": "目录",
+    "category": "directory",
+    "keywords": [
+      "115 云端媒体库根目录",
+      "目录",
+      "媒体目录与文件身份"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "p115_generate_mediainfo",
+    "label": "媒体信息格式化",
+    "card": "目录",
+    "category": "directory",
+    "keywords": [
+      "媒体信息格式化",
+      "目录",
+      "媒体目录与文件身份",
+      "Webhook 或指纹任务可将媒体信息写入本地缓存，用于备份与还原。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "p115_enable_sync_delete",
+    "label": "Emby 删除联动 115 删除",
+    "card": "目录",
+    "category": "directory",
+    "keywords": [
+      "Emby 删除联动 115 删除",
+      "目录",
+      "媒体目录与文件身份",
+      "通知到达时同步删除匹配的 115 文件。此操作不可逆，请确认删除链路可靠后再开启。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "monitor_enabled",
+    "label": "启用文件系统监控",
+    "card": "实时监控",
+    "category": "rule",
+    "keywords": [
+      "启用文件系统监控",
+      "实时监控",
+      "自动发现本地媒体变化"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "monitor_paths",
+    "label": "监控路径",
+    "card": "实时监控",
+    "category": "rule",
+    "keywords": [
+      "监控路径",
+      "实时监控",
+      "自动发现本地媒体变化",
+      "请保持和 Emby 媒体库路径映射一致。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "monitor_exclude_dirs",
+    "label": "排除路径",
+    "card": "实时监控",
+    "category": "rule",
+    "keywords": [
+      "排除路径",
+      "实时监控",
+      "自动发现本地媒体变化",
+      "命中这些路径的文件将 跳过刮削流程 ，仅刷新。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "monitor_exclude_refresh_delay",
+    "label": "排除刷新延迟",
+    "card": "实时监控",
+    "category": "rule",
+    "keywords": [
+      "排除刷新延迟",
+      "实时监控",
+      "自动发现本地媒体变化",
+      "仅对 排除路径 生效。设为 0 则立即刷新。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "monitor_extensions",
+    "label": "监控扩展名",
+    "card": "实时监控",
+    "category": "rule",
+    "keywords": [
+      "监控扩展名",
+      "实时监控",
+      "自动发现本地媒体变化",
+      "选择常见媒体格式，也可以输入扩展名并回车添加。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "tmdb_image_language_preference",
+    "label": "图片语言偏好",
+    "card": "实时监控",
+    "category": "rule",
+    "keywords": [
+      "图片语言偏好",
+      "实时监控",
+      "自动发现本地媒体变化",
+      "控制下载 海报 等图片时的语言优先级。",
+      "简体中文优先",
+      "原语言优先"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "monitor_sha1_pc_search",
+    "label": "SHA1检测",
+    "card": "实时监控",
+    "category": "rule",
+    "keywords": [
+      "SHA1检测",
+      "实时监控",
+      "自动发现本地媒体变化",
+      "文件SHA1查询，非115网盘勿启用。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "auto_repair_truehd_core_on_ingest",
+    "label": "入库自动纠正高清音轨",
+    "card": "入库自动处理",
+    "category": "rule",
+    "keywords": [
+      "入库自动纠正高清音轨",
+      "入库自动处理",
+      "新媒体入库后的增强任务",
+      "仅在入库时执行安全的兼容核心纠正；手动音轨纠正任务不受此开关影响。默认关闭。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "auto_fill_language_titles_on_ingest",
+    "label": "入库自动填充语言和标题",
+    "card": "入库自动处理",
+    "category": "rule",
+    "keywords": [
+      "入库自动填充语言和标题",
+      "入库自动处理",
+      "新媒体入库后的增强任务",
+      "根据原始标题识别语言，填充音轨和非中文字幕的语言及标题；中文字幕正常跳过并保留原样，未知语言需手动确认。默认关闭。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "auto_extract_intro_fingerprint_on_ingest",
+    "label": "入库自动提取片头声纹",
+    "card": "入库自动处理",
+    "category": "rule",
+    "keywords": [
+      "入库自动提取片头声纹",
+      "入库自动处理",
+      "新媒体入库后的增强任务",
+      "电视剧入库且标题填充、回读验收完成后自动提取片头声纹，电影不处理。标题未完成时跳过。默认关闭。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "auto_extract_video_thumbnails_on_ingest",
+    "label": "入库自动提取视频预览缩略图",
+    "card": "入库自动处理",
+    "category": "rule",
+    "keywords": [
+      "入库自动提取视频预览缩略图",
+      "入库自动处理",
+      "新媒体入库后的增强任务",
+      "电视剧和电影入库且标题填充、回读验收完成后生成视频预览缩略图，失败时自动尝试修复。标题未完成时跳过。默认关闭。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "extract_video_thumbnails_after_save",
+    "label": "保存后提取视频缩略图",
+    "card": "入库自动处理",
+    "category": "rule",
+    "keywords": [
+      "保存后提取视频缩略图",
+      "入库自动处理",
+      "新媒体入库后的增强任务",
+      "手动保存媒体信息后运行神医视频缩略图任务，按神医当前配置范围处理。默认关闭。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "movie_rename_format",
+    "label": "电影重命名格式",
+    "card": "整理 & 刮削",
+    "category": "rule",
+    "keywords": [
+      "电影重命名格式",
+      "整理 & 刮削",
+      "电影与电视剧的目录和文件名",
+      "与 MoviePilot「存储&目录 → 整理&刮削」使用相同的 Jinja2 格式；扩展名始终使用源文件扩展名。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "tv_rename_format",
+    "label": "电视剧重命名格式",
+    "card": "整理 & 刮削",
+    "category": "rule",
+    "keywords": [
+      "电视剧重命名格式",
+      "整理 & 刮削",
+      "电影与电视剧的目录和文件名",
+      "与 MoviePilot「存储&目录 → 整理&刮削」使用相同的 Jinja2 格式；可使用 `season`、`episode` 和 `season_episode`。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "tmdb_api_key",
+    "label": "TMDB API Key",
+    "card": "数据源与API",
+    "category": "search",
+    "keywords": [
+      "TMDB API Key",
+      "数据源与API",
+      "元数据服务与访问凭据",
+      "设置 TheMovieDb API Key"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "tmdb_api_base_url",
+    "label": "TMDB API服务地址",
+    "card": "数据源与API",
+    "category": "search",
+    "keywords": [
+      "TMDB API服务地址",
+      "数据源与API",
+      "元数据服务与访问凭据",
+      "自定义 TheMovieDb API域名或代理地址",
+      "TMDb API的基础URL，通常不需要修改。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "douban_enable_online_api",
+    "label": "启用豆瓣辅助",
+    "card": "数据源与API",
+    "category": "search",
+    "keywords": [
+      "启用豆瓣辅助",
+      "数据源与API",
+      "元数据服务与访问凭据"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "api_douban_default_cooldown_seconds",
+    "label": "豆瓣API冷却时间 (秒)",
+    "card": "数据源与API",
+    "category": "search",
+    "keywords": [
+      "豆瓣API冷却时间 (秒)",
+      "数据源与API",
+      "元数据服务与访问凭据"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "douban_cookie",
+    "label": "豆瓣登录 Cookie",
+    "card": "数据源与API",
+    "category": "search",
+    "keywords": [
+      "豆瓣登录 Cookie",
+      "数据源与API",
+      "元数据服务与访问凭据",
+      "非必要不用配置，作用有限。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "notification_channel",
+    "label": "Telegram",
+    "card": "通知渠道",
+    "category": "notification",
+    "keywords": [
+      "Telegram",
+      "通知渠道",
+      "设置消息发送渠道参数"
+    ],
+    "route": "notification"
+  },
+  {
+    "field": "telegram_notify_types",
+    "label": "消息类型",
+    "card": "通知发送范围",
+    "category": "notification",
+    "keywords": [
+      "消息类型",
+      "通知发送范围",
+      "对应消息类型只会发送给设定的用户。"
+    ],
+    "route": "notification"
+  },
+  {
+    "field": "notification_scope",
+    "label": "通知发送范围",
+    "card": "通知发送范围",
+    "category": "notification",
+    "keywords": [
+      "通知发送范围",
+      "对应消息类型只会发送给设定的用户。"
+    ],
+    "route": "notification"
+  },
+  {
+    "field": "notification_time.start",
+    "label": "开始时间",
+    "card": "通知发送时间",
+    "category": "notification",
+    "keywords": [
+      "开始时间",
+      "通知发送时间",
+      "设定消息发送的时间范围。"
+    ],
+    "route": "notification"
+  },
+  {
+    "field": "notification_time.end",
+    "label": "结束时间",
+    "card": "通知发送时间",
+    "category": "notification",
+    "keywords": [
+      "结束时间",
+      "通知发送时间",
+      "设定消息发送的时间范围。"
+    ],
+    "route": "notification"
+  },
+  {
+    "field": "telegram_enabled",
+    "label": "启用",
+    "card": "通知渠道",
+    "category": "notification",
+    "keywords": [
+      "启用",
+      "通知渠道"
+    ],
+    "route": "notification"
+  },
+  {
+    "field": "telegram_bot_token",
+    "label": "Bot Token",
+    "card": "通知渠道",
+    "category": "notification",
+    "keywords": [
+      "Bot Token",
+      "通知渠道",
+      "Telegram机器人token，格式：123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+    ],
+    "route": "notification"
+  },
+  {
+    "field": "telegram_channel_id",
+    "label": "Chat ID",
+    "card": "通知渠道",
+    "category": "notification",
+    "keywords": [
+      "Chat ID",
+      "通知渠道",
+      "接受消息通知的用户、群组或频道Chat ID"
+    ],
+    "route": "notification"
+  },
+  {
+    "field": "telegram_chat_id",
+    "label": "个人 Chat ID",
+    "card": "通知渠道",
+    "category": "notification",
+    "keywords": [
+      "个人 Chat ID",
+      "通知渠道",
+      "先向 Telegram 机器人发送 /start，再填写私聊ID，用于接收个人通知。"
+    ],
+    "route": "notification"
+  }
+]

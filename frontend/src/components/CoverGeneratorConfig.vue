@@ -1,7 +1,7 @@
 <template>
   <VContainer fluid class="mp-page cover-page pa-0">
-    <div class="d-flex flex-wrap align-center justify-space-between ga-4 mb-6">
-      <MpPageTitle title="媒体库封面生成" subtitle="选择封面样式并配置媒体库标题" />
+    <h1 class="sr-only">封面生成</h1>
+    <div class="d-flex flex-wrap align-center justify-end ga-4 mb-6">
       <VBtn prepend-icon="mdi-image-multiple-outline" :loading="isGenerating" :disabled="isLoading || !isConfigReady" @click="runGenerateAllTask">
         生成全部封面
       </VBtn>
@@ -115,7 +115,7 @@
               <VAlert type="info" variant="tonal" class="mb-5">可填写字体下载链接，或上传字体到服务器后填写本地路径；本地路径优先于下载链接。</VAlert>
               <VRow>
                 <VCol v-for="field in singleFields" :key="field.key" cols="12" md="6">
-                  <VNumberInput v-if="field.type === 'number'" v-model="configData[field.key]" :label="field.label" :placeholder="field.placeholder" :step="field.step || 1" :hint="field.hint" :persistent-hint="!!field.hint" />
+                  <VTextField type="number" v-if="field.type === 'number'" v-model.number="configData[field.key]" :label="field.label" :placeholder="field.placeholder" :step="field.step || 1" :hint="field.hint" :persistent-hint="!!field.hint" />
                   <VTextField v-else v-model="configData[field.key]" :label="field.label" placeholder="留空使用预设字体" :hint="field.hint" :persistent-hint="!!field.hint" />
                 </VCol>
                 <VCol cols="12"><VSwitch v-model="configData.single_use_primary" label="优先使用海报图" hint="不启用则优先使用背景图" persistent-hint /></VCol>
@@ -126,7 +126,7 @@
               <VAlert type="info" variant="tonal" class="mb-5">此页为“多图风格1”的专属设置。</VAlert>
               <VRow>
                 <VCol v-for="field in multiFields" :key="field.key" cols="12" md="6">
-                  <VNumberInput v-if="field.type === 'number'" v-model="configData[field.key]" :label="field.label" :placeholder="field.placeholder" :step="field.step || 1" :disabled="field.blur && !configData.multi_1_blur" :hint="field.hint" :persistent-hint="!!field.hint" />
+                  <VTextField type="number" v-if="field.type === 'number'" v-model.number="configData[field.key]" :label="field.label" :placeholder="field.placeholder" :step="field.step || 1" :disabled="field.blur && !configData.multi_1_blur" :hint="field.hint" :persistent-hint="!!field.hint" />
                   <VTextField v-else v-model="configData[field.key]" :label="field.label" placeholder="留空使用预设字体" :disabled="configData.multi_1_use_main_font" />
                 </VCol>
                 <VCol cols="12" md="4"><VSwitch v-model="configData.multi_1_blur" label="启用模糊背景" hint="不启用则使用纯色渐变背景" persistent-hint /></VCol>
@@ -149,7 +149,6 @@
 </template>
 
 <script setup>
-import MpPageTitle from './MpPageTitle.vue';
 import { computed, ref, onMounted, onBeforeUnmount, watch } from 'vue';
 import axios from 'axios';
 import { useMessage } from '@/composables/useFeedback';

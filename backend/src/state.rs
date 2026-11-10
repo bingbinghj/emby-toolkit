@@ -42,6 +42,10 @@ impl AppState {
         {
             config.as_object_mut().unwrap().extend(stored);
         }
+        config
+            .as_object_mut()
+            .unwrap()
+            .remove("min_score_for_review");
         migrate_cookie_priority(&db, &mut config).await;
         config["emby_server_id"] = Value::Null;
         let logs = crate::logs::LogStore::open(&data_dir.join("logs"))?;
@@ -79,6 +83,10 @@ impl AppState {
         if let Some(Value::Object(stored)) = db::setting(&self.db, "dynamic_app_config").await? {
             config.as_object_mut().unwrap().extend(stored);
         }
+        config
+            .as_object_mut()
+            .unwrap()
+            .remove("min_score_for_review");
         migrate_cookie_priority(&self.db, &mut config).await;
         config["emby_server_id"] = self.config.read().await["emby_server_id"].clone();
         self.logs.configure(&config);
@@ -92,6 +100,8 @@ impl AppState {
         let mut config = self.config.write().await;
         let mut next = config.clone();
         next.as_object_mut().unwrap().extend(updates.clone());
+        next.as_object_mut().unwrap().remove("min_score_for_review");
+        crate::notifications::validate_config(&next)?;
         for key in [
             "emby_api_key",
             "emby_admin_pass",

@@ -233,3 +233,9 @@ CREATE INDEX IF NOT EXISTS idx_media_organize_history_item ON media_organize_his
 INSERT INTO app_settings(setting_key, value_json)
 VALUES('media_organize_history_started_at', to_jsonb(NOW()))
 ON CONFLICT(setting_key) DO NOTHING;
+
+-- Quality scoring no longer determines processing results. Retain legacy log
+-- columns and error records for existing databases and exports.
+UPDATE app_settings SET value_json=value_json - 'min_score_for_review'
+WHERE setting_key='dynamic_app_config' AND jsonb_typeof(value_json)='object'
+    AND value_json ? 'min_score_for_review';

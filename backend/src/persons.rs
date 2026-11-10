@@ -239,50 +239,6 @@ pub async fn upsert(state: &AppState, person: &Value) -> Result<()> {
     }
     Ok(())
 }
-pub fn score(cast: &[Value], animation: bool) -> f64 {
-    if cast.is_empty() {
-        return if animation { 7.0 } else { 0.0 };
-    }
-    let total = cast
-        .iter()
-        .map(|p| {
-            let name = p["name"]
-                .as_str()
-                .or_else(|| p["Name"].as_str())
-                .unwrap_or("");
-            let role = p["character"]
-                .as_str()
-                .or_else(|| p["Role"].as_str())
-                .unwrap_or("");
-            let names = if chinese(name) {
-                5.0
-            } else if !name.is_empty() {
-                1.0
-            } else {
-                0.0
-            };
-            let roles = if chinese(role) {
-                if ["演员", "配音"].contains(&role) || role.ends_with("(配音)") {
-                    2.5
-                } else {
-                    5.0
-                }
-            } else if !role.is_empty() {
-                0.5
-            } else {
-                0.0
-            };
-            names + roles
-        })
-        .sum::<f64>()
-        / cast.len() as f64;
-    let score = if !animation && cast.len() < 10 {
-        total * cast.len() as f64 / 10.0
-    } else {
-        total
-    };
-    (score * 10.0).round_ties_even() / 10.0
-}
 pub async fn process(state: &AppState, source: &[Value], item: &Value) -> Result<Vec<Value>> {
     process_inner(state, source, item, true).await
 }

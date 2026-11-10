@@ -87,7 +87,7 @@ async fn search_items(state: &AppState, params: &HashMap<String, String>) -> Res
         if id.is_empty() || !seen.insert(id.clone()) {
             continue;
         }
-        items.push(json!({"item_id":id,"item_name":item["Name"].as_str().filter(|s|!s.is_empty()).map(str::to_string).unwrap_or(format!("ItemID {id}")),"item_type":item["Type"],"failed_at":null,"error_message":format!("Emby 媒体库搜索结果 (年份: {})",item["ProductionYear"].as_i64().map(|n|n.to_string()).unwrap_or("N/A".into())),"score":null,"provider_ids":item["ProviderIds"].as_object().cloned().unwrap_or_default()}));
+        items.push(json!({"item_id":id,"item_name":item["Name"].as_str().filter(|s|!s.is_empty()).map(str::to_string).unwrap_or(format!("ItemID {id}")),"item_type":item["Type"],"failed_at":null,"error_message":format!("Emby 媒体库搜索结果 (年份: {})",item["ProductionYear"].as_i64().map(|n|n.to_string()).unwrap_or("N/A".into())),"provider_ids":item["ProviderIds"].as_object().cloned().unwrap_or_default()}));
         details.insert(id, item);
     }
     let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE (title ILIKE $1 OR original_title ILIKE $1) AND ($2='' OR item_type=ANY(string_to_array($2,','))) LIMIT 50") .bind(format!("%{query}%")).bind(if kind.is_empty(){""}else{types}).fetch_all(&state.db).await?;
@@ -118,7 +118,7 @@ async fn search_items(state: &AppState, params: &HashMap<String, String>) -> Res
                 .filter(|s| !s.is_empty())
                 .collect::<Vec<_>>()
                 .join(" ");
-            items.push(json!({"item_id":id,"item_name":format!("{}{}",string(&row,"title"),if version.is_empty(){String::new()}else{format!(" [{version}]")}),"item_type":row["item_type"],"production_year":row["release_year"],"failed_at":null,"error_message":format!("本地数据库搜索结果 (年份: {})",row["release_year"]),"score":null,"provider_ids":{"Tmdb":row["tmdb_id"]},"season_number":row["season_number"],"episode_number":row["episode_number"]}));
+            items.push(json!({"item_id":id,"item_name":format!("{}{}",string(&row,"title"),if version.is_empty(){String::new()}else{format!(" [{version}]")}),"item_type":row["item_type"],"production_year":row["release_year"],"failed_at":null,"error_message":format!("本地数据库搜索结果 (年份: {})",row["release_year"]),"provider_ids":{"Tmdb":row["tmdb_id"]},"season_number":row["season_number"],"episode_number":row["episode_number"]}));
             if let Ok(item)=crate::media_edit::details(state,id,"Id,Name,Type,ProductionYear,Path,IndexNumber,ParentIndexNumber,SeriesId,SeriesName,SeriesPrimaryImageTag,ImageTags").await{details.insert(id.to_string(),item);}
         }
     }

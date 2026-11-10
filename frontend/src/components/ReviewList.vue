@@ -1,32 +1,29 @@
 <!-- Media presentation follows MoviePilot v3 cards and Vuetify tables; actions use ETK APIs. -->
 <template>
   <div class="mp-page review-page">
-    <header class="d-flex flex-wrap align-center justify-space-between ga-3 mb-6">
-      <MpPageTitle title="手动处理" subtitle="搜索媒体或检查待复核项目" />
-      <VBtnToggle v-if="!compactList" v-model="displayMode" mandatory divided variant="outlined" density="compact" aria-label="显示方式">
-        <VBtn value="table" icon="mdi-format-list-bulleted" title="表格视图" aria-label="表格视图" />
-        <VBtn value="cards" icon="mdi-view-grid-outline" title="卡片视图" aria-label="卡片视图" />
-      </VBtnToggle>
-    </header>
     <VCard class="dashboard-card">
       <VCardText>
-        <VAlert type="info" variant="tonal" title="操作提示" class="mb-4">
-          输入片名搜索 Emby 媒体库，或选择待复核媒体进入编辑页面。已完成的项目可标记为已处理。
-        </VAlert>
         <VAlert v-if="props.taskStatus?.is_running" type="warning" variant="tonal" title="后台任务运行中" class="mb-4">
           请等待当前任务结束后再提交处理操作。
         </VAlert>
         <div class="review-toolbar">
-          <VTextField v-model="searchQuery" label="搜索媒体" placeholder="输入媒体名称搜索整个 Emby 库..."
+          <VTextField v-model="searchQuery" label="搜索媒体" aria-label="搜索媒体" placeholder="输入媒体名称搜索整个 Emby 库..."
             prepend-inner-icon="mdi-magnify" clearable hide-details density="compact" variant="solo" flat rounded="pill" class="review-search-field"
-            autocomplete="off" @keyup.enter="handleSearch" @update:model-value="handleSearchQueryChange" @click:clear="clearSearch">
+            autocomplete="off" @keyup.enter="handleSearch" @update:model-value="handleSearchQueryChange" @click:clear="clearSearch" @compositionstart="searchComposing = true" @compositionend="finishSearchComposition">
             <template #append-inner><VBtn icon="mdi-magnify" variant="text" size="small" aria-label="搜索" title="搜索" @click.stop="handleSearch" /></template>
           </VTextField>
-          <VSelect v-if="isShowingSearchResults" v-model="searchSort" :items="searchSortOptions" item-title="label" item-value="value"
-            label="搜索结果排序" aria-label="搜索结果排序" hide-details density="compact" class="review-filter" @update:model-value="currentPage = 1" />
-          <VSelect v-model="selectedMediaType" :items="mediaTypeOptions" item-title="label" item-value="value"
-            label="媒体类型" aria-label="按媒体类型筛选" placeholder="全部媒体类型" clearable hide-details density="compact"
-            class="review-filter" @update:model-value="handleMediaTypeChange" />
+          <VMenu v-if="isShowingSearchResults" location="bottom end">
+            <template #activator="{ props }"><VBtn v-bind="props" icon="mdi-sort" variant="text" aria-label="搜索结果排序" title="搜索结果排序" /></template>
+            <VList min-width="200" class="px-2"><VListSubheader>搜索结果排序</VListSubheader><VListItem v-for="option in searchSortOptions" :key="option.value" :title="option.label" :active="searchSort === option.value" @click="searchSort = option.value; currentPage = 1"><template #append><VIcon v-if="searchSort === option.value" icon="mdi-check" color="primary" /></template></VListItem></VList>
+          </VMenu>
+          <VMenu location="bottom end">
+            <template #activator="{ props }"><VBtn v-bind="props" icon="mdi-filter-multiple-outline" :variant="selectedMediaType ? 'tonal' : 'text'" :color="selectedMediaType ? 'primary' : 'default'" aria-label="按媒体类型筛选" title="按媒体类型筛选" /></template>
+            <VList min-width="200" class="px-2"><VListSubheader>媒体类型</VListSubheader><VListItem v-for="option in mediaTypeOptions" :key="option.value || 'all'" :title="option.label" :active="selectedMediaType === option.value" @click="selectedMediaType = option.value; handleMediaTypeChange()"><template #append><VIcon v-if="selectedMediaType === option.value" icon="mdi-check" color="primary" /></template></VListItem></VList>
+          </VMenu>
+          <VBtnToggle v-if="!compactList" v-model="displayMode" mandatory divided variant="outlined" density="compact" aria-label="显示方式">
+            <VBtn value="table" icon="mdi-format-list-bulleted" title="表格视图" aria-label="表格视图" />
+            <VBtn value="cards" icon="mdi-view-grid-outline" title="卡片视图" aria-label="卡片视图" />
+          </VBtnToggle>
           <VBtn color="error" variant="tonal" prepend-icon="mdi-delete-outline"
             :disabled="tableData.length === 0 || loading || isShowingSearchResults"
             @click="confirmReviewAction('清空待复核', '确定要清空全部待复核记录吗？此操作不可恢复。', clearAllReviewItems)">清空待复核</VBtn>
@@ -95,7 +92,6 @@
             <template #item.library_name="{ item }">{{ item.library_name || '未知媒体库' }}</template>
             <template #item.failed_at="{ item }">{{ formatDate(item.failed_at) }}</template>
             <template #item.reason="{ item }"><span class="review-table-reason" :title="item.reason">{{ item.reason || '未记录原因' }}</span></template>
-            <template #item.score="{ item }">{{ formatScore(item.score) }}</template>
             <template #item.actions="{ item }"><ReviewActions :row="item" /></template>
           </component>
           <div v-else-if="!loading" class="text-center py-10">
@@ -109,8 +105,8 @@
 </template>
 
 <script setup>
-import MpPageTitle from './MpPageTitle.vue';
-import { useRouter } from 'vue-router';
+import { useRouter, useRoute } from 'vue-router';
+import { useContextSearch } from '@/composables/useContextSearch';
 import { ref, onMounted, onUnmounted, computed, watch, h } from 'vue';
 import axios from 'axios';
 import { sortReviewSearchResults, reviewEpisodeLabel } from '../utils/reviewSearch';
@@ -125,7 +121,7 @@ const props = defineProps({
   }
 });
 
-const router = useRouter();
+const router = useRouter(), route = useRoute();
 const message = useMessage();
 const dialog = useDialog();
 
@@ -141,7 +137,8 @@ const compactList = ref(false);
 const displayMode = ref('table');
 const useCardView = computed(() => displayMode.value === 'cards' || compactList.value);
 const reprocessingAll = ref(false);
-let listObserver;
+let listObserver, searchTimer, listSequence = 0, pageActive = true;
+const searchComposing = ref(false);
 const searchQuery = ref('');
 const loadingAction = ref({});
 const currentRowId = ref(null);
@@ -162,10 +159,12 @@ const cardRows = computed(() => isShowingSearchResults.value
 
 const selectedMediaType = ref(null);
 const mediaTypeOptions = [
+  { label: '全部媒体类型', value: null },
   { label: '电视剧', value: 'Series' },
   { label: '电影', value: 'Movie' }
 ];
 const handleMediaTypeChange = () => {
+  clearTimeout(searchTimer);
   currentPage.value = 1;
   if (isShowingSearchResults.value) searchEmbyLibrary();
   else fetchReviewItems();
@@ -272,8 +271,6 @@ const reviewImage = row => {
   const tag = row.image_tag ? `&tag=${encodeURIComponent(row.image_tag)}` : '';
   return `/image_proxy/Items/${encodeURIComponent(id)}/Images/Primary?maxWidth=240&quality=85${tag}`;
 };
-const formatScore = score => score !== null && score !== undefined && Number.isFinite(Number(score))
-  ? Number(score).toFixed(1) : '—';
 
 const columns = computed(() => [
   ...(isShowingSearchResults.value ? [{ title: '封面', key: 'cover', width: 84, sortable: false }] : []),
@@ -284,7 +281,6 @@ const columns = computed(() => [
     { title: '类型', key: 'item_type', width: 100, sortable: false },
     { title: '记录时间', key: 'failed_at', minWidth: 170, sortable: false },
     { title: '原因', key: 'reason', minWidth: 220, sortable: false },
-    { title: '评分', key: 'score', width: 88, sortable: false },
   ]),
   { title: '操作', key: 'actions', minWidth: 340, align: 'center', sortable: false },
 ]);
@@ -313,6 +309,7 @@ const paginationProps = computed(() => ({
 }));
 
 const fetchReviewItems = async () => {
+  const sequence = ++listSequence, requestedPage = currentPage.value;
   loading.value = true;
   error.value = null;
   isShowingSearchResults.value = false;
@@ -325,17 +322,18 @@ const fetchReviewItems = async () => {
             media_type: mediaType
         }
     });
-    if ((selectedMediaType.value || '') !== mediaType) return;
+    if (!pageActive || sequence !== listSequence || currentPage.value !== requestedPage || (selectedMediaType.value || '') !== mediaType) return;
     tableData.value = response.data.items;
     totalItems.value = response.data.total_items;
   } catch (err) {
-    handleFetchError(err, "加载待处理列表失败。");
+    if (pageActive && sequence === listSequence) handleFetchError(err, "加载待处理列表失败。");
   } finally {
-    loading.value = false;
+    if (pageActive && sequence === listSequence) loading.value = false;
   }
 };
 
 const searchEmbyLibrary = async () => {
+  const sequence = ++listSequence;
   const query = searchQuery.value.trim();
   loading.value = true;
   error.value = null;
@@ -345,7 +343,7 @@ const searchEmbyLibrary = async () => {
     const response = await axios.get(`/api/search_emby_library`, {
         params: { query, media_type: mediaType }
     });
-    if (searchQuery.value.trim() !== query || (selectedMediaType.value || '') !== mediaType) return;
+    if (!pageActive || sequence !== listSequence || searchQuery.value.trim() !== query || (selectedMediaType.value || '') !== mediaType) return;
     tableData.value = response.data.items.map(item => ({
         ...item,
         failed_at: null,
@@ -353,9 +351,9 @@ const searchEmbyLibrary = async () => {
     }));
     totalItems.value = response.data.total_items;
   } catch (err) {
-    handleFetchError(err, "搜索 Emby 媒体库失败。");
+    if (pageActive && sequence === listSequence) handleFetchError(err, "搜索 Emby 媒体库失败。");
   } finally {
-    loading.value = false;
+    if (pageActive && sequence === listSequence) loading.value = false;
   }
 };
 
@@ -412,14 +410,19 @@ const handleFetchError = (err, defaultMessage) => {
 };
 
 const handleSearchQueryChange = (value) => {
+  clearTimeout(searchTimer);
   searchQuery.value = String(value ?? '');
   if (!searchQuery.value.trim() && isShowingSearchResults.value) {
     tableData.value = [];
     totalItems.value = 0;
     currentPage.value = 1;
     fetchReviewItems();
+  } else if (searchQuery.value.trim() && !searchComposing.value) {
+    searchTimer = setTimeout(handleSearch, compactList.value ? 600 : 1000);
   }
 };
+
+const finishSearchComposition = () => { searchComposing.value = false; handleSearchQueryChange(searchQuery.value); };
 
 const clearSearch = () => {
   searchQuery.value = '';
@@ -427,6 +430,8 @@ const clearSearch = () => {
 };
 
 const handleSearch = () => {
+  clearTimeout(searchTimer);
+  if (searchComposing.value) return;
   if (searchQuery.value.trim()) {
     currentPage.value = 1;
     searchEmbyLibrary();
@@ -443,21 +448,28 @@ watch(resultsContainer, element => {
   listObserver = new ResizeObserver(([entry]) => { compactList.value = entry.contentRect.width < 760; });
   listObserver.observe(element);
 });
-onMounted(fetchReviewItems);
-onUnmounted(() => listObserver?.disconnect());
+useContextSearch({ label: '搜索全部媒体', query: searchQuery, submit: handleSearch, onInput: handleSearchQueryChange, clear: clearSearch, composing: searchComposing, compositionEnd: finishSearchComposition, loading });
+watch(() => route.query.q, value => {
+  const query = typeof value === 'string' ? value : '';
+  if (query !== searchQuery.value) { searchQuery.value = query; handleSearch(); }
+});
+onMounted(() => {
+  const query = typeof route.query.q === 'string' ? route.query.q : '';
+  if (query.trim()) { searchQuery.value = query; handleSearch(); } else fetchReviewItems();
+});
+onUnmounted(() => { pageActive = false; ++listSequence; clearTimeout(searchTimer); listObserver?.disconnect(); });
 </script>
 
 <style scoped>
 .review-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:12px; margin-bottom:24px; }
 .review-search-field { flex:1 1 300px; min-width:0; }
-.review-filter { flex:0 1 190px; min-width:150px; }
 .review-results { min-width:0; }
 .review-cards { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,440px),1fr)); gap:16px; }
 .review-item-card { min-width:0; }
 .review-card-body { display:flex; gap:16px; padding:16px; }
 .review-card-cover { flex:0 0 96px; width:96px; align-self:flex-start; padding:0; cursor:pointer; }
 .review-card-detail { flex:1; min-width:0; }
-.review-item-title { max-width:100%; height:auto; min-height:24px; justify-content:flex-start; font-weight:600; text-align:left; }
+.review-item-title { max-width:100%; height:auto; min-height:24px; padding-block:4px !important; border-radius:0; justify-content:flex-start; font-weight:600; text-align:left; }
 .review-item-title :deep(.v-btn__content) { white-space:normal; text-align:left; overflow-wrap:anywhere; }
 .review-item-meta { margin:6px 0; color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity)); font-size:12px; overflow-wrap:anywhere; }
 .review-item-reason { margin:12px 0; overflow-wrap:anywhere; }
@@ -465,8 +477,11 @@ onUnmounted(() => listObserver?.disconnect());
 .review-results :deep(.v-data-table .review-actions) { margin:8px 0; }
 .review-result-cover { width:56px; padding:0; margin:8px 0; cursor:pointer; }
 .review-poster-fallback { display:flex; justify-content:center; align-items:center; width:100%; height:100%; color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity)); background:rgba(var(--v-theme-on-surface),.06); }
-.review-table-reason { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; max-width:24rem; }
+.review-table-reason { display:block; max-width:24rem; white-space:pre-wrap; overflow-wrap:anywhere; line-height:1.5; }
+.review-page :deep(.v-alert-title) { white-space:normal; overflow-wrap:anywhere; }
+.review-page :deep(.v-data-table__td) { padding-block:12px; }
+.review-page :deep(.v-list-item-title) { white-space:normal; overflow-wrap:anywhere; }
 .review-pagination { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:16px; }
 .review-page-size { flex:0 0 120px; }
-@media (max-width:600px) { .review-search-field { flex-basis:100%; } .review-filter { flex:1 1 150px; min-width:0; } .review-toolbar > .v-btn { flex:1 1 auto; } .review-card-body { gap:12px; padding:12px; } .review-card-cover { flex-basis:72px; width:72px; } .review-pagination { justify-content:center; } }
+@media (max-width:600px) { .review-search-field { flex-basis:100%; } .review-toolbar > .v-btn:not(.v-btn--icon) { flex:1 1 auto; } .review-card-body { gap:12px; padding:12px; } .review-card-cover { flex-basis:72px; width:72px; } .review-pagination { justify-content:center; } }
 </style>

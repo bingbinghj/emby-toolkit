@@ -8,7 +8,7 @@ for (const width of [1920, 1440, 390]) {
       if (path === '/settings/general') {
         await expect(page.getByRole('tab', { name: '系统', exact: true })).toHaveAttribute('aria-selected', 'true');
         await expect(page.locator('.setting-card').first()).toBeVisible();
-      } else await expect(page.locator('h1')).toBeVisible();
+      } else await expect(page.locator('.dashboard-card-title').first()).toBeVisible();
       await expect.poll(() => page.locator('.layout-page-content').evaluate(element => {
         const style = getComputedStyle(element);
         const child = element.querySelector('.main-content-wrapper');
@@ -38,7 +38,7 @@ for (const layout of ['collapsed', 'horizontal']) {
     await page.setViewportSize({ width: 1920, height: 900 });
     await page.addInitScript(layout => localStorage.setItem('moviepilot-theme-customizer', JSON.stringify({ layout })), layout);
     await page.goto('/dashboard');
-    await expect(page.getByRole('heading', { name: '仪表盘', exact: true })).toBeVisible();
+    await expect(page.locator('.dashboard-card-title').first()).toBeVisible();
     await expect.poll(() => page.locator('.layout-page-content').evaluate(element => {
       const bounds = element.getBoundingClientRect();
       return Math.round(bounds.right);

@@ -56,19 +56,19 @@ test('MP content settings save visibility after confirmation and default layout 
   await expect(modules(page)).toHaveCount(4);
 });
 
-test('MoviePilot-style refresh failures preserve successful snapshots and current-page 115 space with retry notices', async ({ page, api }) => {
+test('MoviePilot-style reload failures preserve media snapshots and report unknown 115 space with retry notices', async ({ page, api }) => {
   api.respond('GET', '/api/dashboard/media', dashboard);
   api.respond('GET', '/api/p115/status', space);
   await page.goto('/dashboard');
   await expect(page.getByTestId('dashboard-movie_count')).toHaveText('772');
   api.respond('GET', '/api/dashboard/media', { error: 'Emby 暂不可用' }, 503);
   api.respond('GET', '/api/p115/status', { data: { valid: false, msg: '115 凭证失效' } });
-  await page.getByRole('button', { name: '刷新', exact: true }).click();
+  await page.reload();
   await expect(page.locator('[data-dashboard-module="recent"]')).toContainText('Emby 暂不可用');
   await expect(page.locator('[data-dashboard-module="recent"]')).toContainText('显示上次成功数据');
   await expect(page.locator('[data-dashboard-module="libraries"]')).toContainText('显示上次成功数据');
   await expect(page.locator('[data-dashboard-module="storage"]')).toContainText('115 凭证失效');
-  await expect(page.getByText('1 TB', { exact: true })).toBeVisible();
+  await expect(page.getByText('1 TB', { exact: true })).toHaveCount(0);
   await expect(page.getByTestId('dashboard-movie_count')).toHaveText('772');
   await expect(page.getByTestId('dashboard-episode_count')).toHaveText('13,781');
   await expect(page.getByRole('link', { name: '编辑最新入库电影', exact: true })).toHaveCount(1);
@@ -90,7 +90,7 @@ test('a failed widget preserves its whole snapshot while independent successful 
   await expect(page.getByRole('link', { name: '编辑最新入库电影', exact: true })).toHaveCount(1);
   const fresh = { ...dashboard, statistics: { ...dashboard.statistics, movie_count: { count: 773 }, episode_count: { count: null, error: '剧集统计读取失败' } }, recent: null, libraries: [{ ...dashboard.libraries[0], name: '已刷新的媒体库', image_tag: 'new-library-composite' }], errors: { recent: '最新入库读取失败' } };
   api.respond('GET', '/api/dashboard/media', fresh);
-  await page.getByRole('button', { name: '刷新', exact: true }).click();
+  await page.reload();
   await expect(page.getByTestId('dashboard-episode_count')).toHaveText('13,781');
   await expect(page.getByTestId('dashboard-movie_count')).toHaveText('772');
   await expect(page.locator('[data-dashboard-module="statistics"]')).toContainText('剧集统计读取失败');
@@ -99,13 +99,13 @@ test('a failed widget preserves its whole snapshot while independent successful 
   await expect(page.getByRole('link', { name: '打开已刷新的媒体库', exact: true })).toHaveCount(1);
   const nextRecent = [{ ...dashboard.recent[0], name: '刷新后的入库电影' }];
   api.respond('GET', '/api/dashboard/media', { ...fresh, statistics: { ...dashboard.statistics, movie_count: { count: 773 } }, recent: nextRecent, libraries: null, errors: { libraries: '媒体库读取失败' } });
-  await page.getByRole('button', { name: '刷新', exact: true }).click();
+  await page.reload();
   await expect(page.getByRole('link', { name: '打开已刷新的媒体库', exact: true })).toHaveCount(1);
   await expect(page.locator('[data-dashboard-module="libraries"]')).toContainText('媒体库读取失败');
   await expect(page.getByRole('link', { name: '编辑刷新后的入库电影', exact: true })).toHaveCount(1);
   await expect(page.getByTestId('dashboard-movie_count')).toHaveText('773');
   api.respond('GET', '/api/dashboard/media', { ...dashboard, statistics: null, libraries: [{ ...dashboard.libraries[0], name: '再次刷新的媒体库' }], errors: { statistics: '媒体统计读取失败' } });
-  await page.getByRole('button', { name: '刷新', exact: true }).click();
+  await page.reload();
   await expect(page.getByTestId('dashboard-movie_count')).toHaveText('773');
   await expect(page.getByTestId('dashboard-tv_count')).toHaveText('208');
   await expect(page.locator('[data-dashboard-module="statistics"]')).toContainText('媒体统计读取失败');
@@ -173,7 +173,10 @@ test('a late response from an unmounted dashboard cannot write a successful snap
   const pending = api.defer('GET', '/api/dashboard/media');
   await page.goto('/dashboard');
   await pending.started;
-  await page.getByRole('link', { name: '搜索媒体', exact: true }).click();
+  const drawer = page.locator('.layout-vertical-nav');
+  const review = drawer.getByText('手动处理', { exact: true });
+  if (!await review.isVisible()) await drawer.getByText('整理', { exact: true }).click();
+  await review.click();
   await expect(page).toHaveURL(/\/review$/);
   const received = page.waitForResponse('**/api/dashboard/media');
   pending.release(dashboard);

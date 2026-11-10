@@ -180,7 +180,7 @@ pub async fn feedback(
     };
     // Refreshing identities must not mark other directories offline.
     metadata::ingest(state, &mut records, false).await?;
-    let score = review(state, &item, &cast, media_info_only).await?;
+    record_processed(state, &item).await?;
     let incoming = records
         .iter()
         .flat_map(|r| {
@@ -190,11 +190,11 @@ pub async fn feedback(
         })
         .collect::<HashSet<_>>();
     tracing::info!(
-        "缓存回流完成：《{media_name}》，Emby {id}，TMDb {tmdb}，数据库记录 {} 条，评分 {score:.2}",
+        "缓存回流完成：《{media_name}》，Emby {id}，TMDb {tmdb}，数据库记录 {} 条",
         records.len()
     );
     Ok(
-        json!({"updated":records.len(),"ids":incoming,"cache_hit":true,"score":score,"message":"缓存回流完成，已更新 Emby ID 和媒体资产"}),
+        json!({"updated":records.len(),"ids":incoming,"cache_hit":true,"message":"缓存回流完成，已更新 Emby ID 和媒体资产"}),
     )
 }
 
@@ -540,14 +540,14 @@ async fn process(
             json!({"updated":records.len(),"nfo_written":written,"images_downloaded":images,"message":message,"warnings":warning_details.len(),"warning_details":warning_details}),
         );
     }
-    let score = review(state, item, &cast, pending).await?;
+    record_processed(state, item).await?;
     tracing::info!(
-        "完整刮削完成：《{media_name}》，Emby {}，TMDb {tmdb}，数据库记录 {} 条，NFO 写入 {written} 个，图片下载 {images} 个，评分 {score:.2}",
+        "完整刮削完成：《{media_name}》，Emby {}，TMDb {tmdb}，数据库记录 {} 条，NFO 写入 {written} 个，图片下载 {images} 个",
         string(item, "Id"),
         records.len()
     );
     Ok(
-        json!({"updated":records.len(),"nfo_written":written,"images_downloaded":images,"score":score,"message":message,"warnings":warning_details.len(),"warning_details":warning_details}),
+        json!({"updated":records.len(),"nfo_written":written,"images_downloaded":images,"message":message,"warnings":warning_details.len(),"warning_details":warning_details}),
     )
 }
 
@@ -942,111 +942,25 @@ pub async fn prepare_cached_report(
     Ok(Some(report))
 }
 
-async fn review(
-    state: &AppState,
-    item: &Value,
-    cast: &[Value],
-    media_info_only: bool,
-) -> Result<f64> {
-    let config = state.config.read().await.clone();
-    let threshold = config["min_score_for_review"].as_f64().unwrap_or(7.0);
-    let animation = list(&item["Genres"]).iter().any(|g| {
-        ["Animation", "动画", "Documentary", "纪录", "记录"].contains(
-            &g.as_str()
-                .unwrap_or_else(|| g["name"].as_str().unwrap_or("")),
-        )
-    });
-    let mut score = if media_info_only {
-        10.0_f64.max(threshold)
-    } else {
-        crate::persons::score(cast, animation)
-    };
-    let mut missing = None;
-    if matches!(item["Type"].as_str(), Some("Movie" | "Episode")) {
-        let sidecar = std::path::Path::new(item["Path"].as_str().unwrap_or(""))
-            .with_extension("")
-            .to_string_lossy()
-            .to_string()
-            + "-mediainfo.json";
-        let video = crate::media_preflight::valid_video(item);
-        if !crate::media_preflight::valid_video_sidecar(std::path::Path::new(&sidecar)).await
-            && !video
-        {
-            missing = Some("缺失媒体信息: ".to_string());
-        }
-    } else if item["Type"] == "Series" {
-        let tmdb = string(&item["ProviderIds"], "Tmdb");
-        let episodes:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE item_type='Episode' AND in_library=true AND parent_series_tmdb_id=$1 ORDER BY season_number,episode_number").bind(tmdb).fetch_all(&state.db).await?;
-        for episode in episodes {
-            let assets = list(&episode["asset_details_json"]);
-            let path = assets
-                .first()
-                .map(|a| string(a, "path"))
-                .unwrap_or_default();
-            let sidecar = std::path::Path::new(&path)
-                .with_extension("")
-                .to_string_lossy()
-                .to_string()
-                + "-mediainfo.json";
-            let video = assets
-                .iter()
-                .flat_map(|a| list(&a["video_streams"]))
-                .any(|s| {
-                    s["width"].as_u64().is_some_and(|n| n > 0)
-                        && s["height"].as_u64().is_some_and(|n| n > 0)
-                });
-            if path.is_empty()
-                || (!crate::media_preflight::valid_video_sidecar(std::path::Path::new(&sidecar))
-                    .await
-                    && !video)
-            {
-                missing = Some(format!(
-                    "缺失媒体信息: [S{}E{}]",
-                    episode["season_number"], episode["episode_number"]
-                ));
-                break;
-            }
-        }
-    }
-    if missing.is_some() {
-        score = 0.0;
-    }
-    let reason = missing.or_else(|| {
-        (score < threshold).then(|| format!("处理评分 ({score:.2}) 低于阈值 ({threshold:.1})。"))
-    });
+async fn record_processed(state: &AppState, item: &Value) -> Result<()> {
+    // Admission failures belong to the processing pipeline and its history.
+    // Actor language/completeness must not invent a failed admission.
     let id = if item["Type"] == "Episode" && !string(item, "SeriesId").is_empty() {
         string(item, "SeriesId")
     } else {
         string(item, "Id")
     };
     let name = string(item, "Name");
-    let kind = if item["Type"] == "Episode" {
-        "Series"
-    } else {
-        item["Type"].as_str().unwrap_or("")
-    };
     let mut transaction = state.db.begin().await?;
-    tracing::info!(
-        "处理评分写入开始：Emby {id}，名称 {name}，评分 {score:.2}，复核结果 {}",
-        reason.as_deref().unwrap_or("评分和媒体信息检查通过")
-    );
-    sqlx::query("INSERT INTO processed_log(item_id,item_name,score) VALUES($1,$2,$3) ON CONFLICT(item_id) DO UPDATE SET item_name=EXCLUDED.item_name,score=EXCLUDED.score,processed_at=NOW()")
-        .bind(&id).bind(&name).bind(score as f32).execute(&mut *transaction).await?;
-    if let Some(reason) = reason {
-        sqlx::query("INSERT INTO failed_log(item_id,item_name,item_type,reason,error_message,score) VALUES($1,$2,$3,$4,$4,$5) ON CONFLICT(item_id) DO UPDATE SET item_name=EXCLUDED.item_name,item_type=EXCLUDED.item_type,reason=EXCLUDED.reason,error_message=EXCLUDED.error_message,score=EXCLUDED.score,failed_at=NOW()")
-        .bind(&id).bind(&name).bind(kind).bind(reason).bind(score as f32).execute(&mut *transaction).await?;
-    } else {
-        sqlx::query("DELETE FROM failed_log WHERE item_id=$1")
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
-    }
+    sqlx::query("INSERT INTO processed_log(item_id,item_name) VALUES($1,$2) ON CONFLICT(item_id) DO UPDATE SET item_name=EXCLUDED.item_name,processed_at=NOW()")
+        .bind(&id).bind(&name).execute(&mut *transaction).await?;
+    sqlx::query("DELETE FROM failed_log WHERE item_id=$1")
+        .bind(&id)
+        .execute(&mut *transaction)
+        .await?;
     transaction.commit().await?;
-    tracing::info!(
-        "处理评分写入完成：《{name}》，Emby {}，评分 {score:.2}",
-        string(item, "Id")
-    );
-    Ok(score)
+    tracing::info!("处理记录写入完成：《{name}》，Emby {id}");
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1055,10 +969,10 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires disposable PostgreSQL in DATABASE_URL"]
-    async fn review_failure_updates_the_message_used_by_the_actor_editor() {
+    async fn successful_processing_does_not_rate_actors_or_require_optional_media_info() {
         let url = std::env::var("DATABASE_URL").unwrap();
         let root = sqlx::PgPool::connect(&url).await.unwrap();
-        let schema = format!("review_message_{}", uuid::Uuid::new_v4().simple());
+        let schema = format!("processing_without_score_{}", uuid::Uuid::new_v4().simple());
         sqlx::query(&format!("CREATE SCHEMA {schema}"))
             .execute(&root)
             .await
@@ -1077,32 +991,56 @@ mod tests {
             .unwrap();
         let directory = tempfile::tempdir().unwrap();
         let state = AppState::new(pool, directory.path().into()).await.unwrap();
-        let item = json!({"Id":"movie","Type":"Movie","Name":"电影","Path":directory.path().join("movie.strm")});
-        let score = review(&state, &item, &[], true).await.unwrap();
-        assert_eq!(score, 0.0);
-        let initial: Value =
-            sqlx::query_scalar("SELECT to_jsonb(f) FROM failed_log f WHERE item_id='movie'")
+        state.config.write().await["min_score_for_review"] = json!(100);
+        sqlx::query("INSERT INTO failed_log(item_id,reason,error_message,score) VALUES('movie','旧处理评分低于阈值','旧处理评分低于阈值',0)")
+            .execute(&state.db).await.unwrap();
+        let item = json!({"Id":"movie","Type":"Movie","Name":"电影","Path":directory.path().join("movie.strm"),"People":[]});
+        record_processed(&state, &item).await.unwrap();
+        let processed: Value =
+            sqlx::query_scalar("SELECT to_jsonb(p) FROM processed_log p WHERE item_id='movie'")
                 .fetch_one(&state.db)
                 .await
                 .unwrap();
-        sqlx::query("UPDATE failed_log SET error_message='旧原因' WHERE item_id='movie'")
-            .execute(&state.db)
+        assert!(processed["score"].is_null());
+        let failures: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM failed_log WHERE item_id='movie'")
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+        assert_eq!(
+            failures, 0,
+            "actor quality must not invent a failed admission"
+        );
+        sqlx::query("INSERT INTO failed_log(item_id,reason,error_message,score) VALUES('failed','原生导入失败','原生导入失败',0)")
+            .execute(&state.db).await.unwrap();
+        crate::db::save_setting(
+            &state.db,
+            "dynamic_app_config",
+            &json!({"min_score_for_review":99,"max_actors_to_process":40}),
+        )
+        .await
+        .unwrap();
+        crate::db::initialize(&state.db).await.unwrap();
+        let config = crate::db::setting(&state.db, "dynamic_app_config")
             .await
+            .unwrap()
             .unwrap();
-        review(&state, &item, &[], true).await.unwrap();
-        let updated: Value =
-            sqlx::query_scalar("SELECT to_jsonb(f) FROM failed_log f WHERE item_id='movie'")
+        assert!(config.get("min_score_for_review").is_none());
+        assert_eq!(config["max_actors_to_process"], 40);
+        let reason: String =
+            sqlx::query_scalar("SELECT error_message FROM failed_log WHERE item_id='failed'")
                 .fetch_one(&state.db)
                 .await
                 .unwrap();
+        assert_eq!(
+            reason, "原生导入失败",
+            "schema migration must preserve real failure details"
+        );
         state.db.close().await;
         sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
             .execute(&root)
             .await
             .unwrap();
         root.close().await;
-        assert_eq!(initial["error_message"], initial["reason"]);
-        assert_eq!(updated["error_message"], updated["reason"]);
-        assert_eq!(updated["error_message"], "缺失媒体信息: ");
     }
 }

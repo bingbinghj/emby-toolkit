@@ -21,10 +21,21 @@
   "monitor_extensions": [
     ".mp4",
     ".mkv",
+    ".ts",
+    ".iso",
+    ".rmvb",
     ".avi",
     ".mov",
-    ".iso",
-    ".ts",
+    ".mpeg",
+    ".mpg",
+    ".wmv",
+    ".3gp",
+    ".asf",
+    ".m4v",
+    ".flv",
+    ".m2ts",
+    ".tp",
+    ".f4v",
     ".strm"
   ],
   "monitor_exclude_dirs": [],
@@ -41,7 +52,6 @@
   "p115_enable_sync_delete": false,
   "p115_app_id": "",
   "delay_between_items_sec": 0.5,
-  "min_score_for_review": 6.0,
   "max_actors_to_process": 50,
   "max_episode_actors_to_process": 0,
   "extract_thumb": false,
@@ -99,8 +109,16 @@
   ],
   "telegram_notify_types": [
     "library_new",
-    "recognize_fail",
-    "intercept_notify"
+    "recognize_fail"
   ],
-  "emby_webhook_secret": ""
+  "emby_webhook_secret": "",
+  "telegram_enabled": true,
+  "notification_scope": {
+    "library_new": "admin",
+    "recognize_fail": "admin"
+  },
+  "notification_time": {
+    "start": "00:00",
+    "end": "23:59"
+  }
 }

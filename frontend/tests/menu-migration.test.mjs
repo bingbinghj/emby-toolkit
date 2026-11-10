@@ -51,3 +51,20 @@ test('canonical and legacy entries still produce one key across existing groups'
   assert.equal(children.find(child => child.key === 'UserManagement').label, '用户管理');
   assert.equal(new Set(children.map(child => child.key)).size, children.length);
 });
+
+test('existing user management moves last without changing other menu order', () => {
+  const result = merge([{ key: 'group-system', children: [
+    { key: 'UserManagement', label: '用户管理' }, { key: 'settings-general', label: '我的设置' },
+  ] }]);
+  const system = result.find(group => group.key === 'group-system');
+  assert.deepEqual(system.children.map(child => child.key), ['settings-general', 'UserManagement']);
+  assert.equal(system.children[0].label, '我的设置');
+  assert.equal(system.user_management_order_version, 1);
+});
+
+test('an explicit order saved after migration is preserved on future reads', () => {
+  const result = merge([{ key: 'group-system', user_management_order_version: 1, children: [
+    { key: 'UserManagement' }, { key: 'settings-general' },
+  ] }]);
+  assert.deepEqual(result.find(group => group.key === 'group-system').children.map(child => child.key), ['UserManagement', 'settings-general']);
+});

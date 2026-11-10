@@ -1,8 +1,6 @@
 <template>
   <section class="mp-page scheduler-page">
-    <div class="mp-page-header mb-6">
-      <MpPageTitle title="任务中心" subtitle="查看任务说明并执行媒体维护" />
-    </div>
+    <h1 class="sr-only">任务中心</h1>
     <div v-if="isLoading" class="center-container"><VProgressCircular indeterminate color="primary" size="48" /></div>
     <VAlert v-else-if="configError" type="error" variant="tonal">{{ configError }}</VAlert>
     <div v-else-if="configModel" class="scheduler-content">
@@ -82,7 +80,6 @@
   </section>
 </template>
 <script setup>
-import MpPageTitle from '../MpPageTitle.vue';
 import { ref, onMounted, onBeforeUnmount, watch, nextTick, computed } from 'vue';
 import { useMessage } from '@/composables/useFeedback';
 import { useConfig } from '../../composables/useConfig.js';

@@ -8,7 +8,7 @@ use crate::{
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     routing::post,
 };
 use futures_util::FutureExt;
@@ -22,8 +22,14 @@ pub fn router() -> Router<AppState> {
 }
 async fn reorganize(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<(StatusCode, Json<Value>)> {
+    let operator = state
+        .sessions
+        .from_headers(&headers)
+        .ok_or_else(ApiError::forbidden)?
+        .user_id;
     let selected = body["item_ids"]
         .as_array()
         .filter(|ids| !ids.is_empty() && ids.len() <= 500)
@@ -47,6 +53,7 @@ async fn reorganize(
     let history_ids = crate::media_organize_history::selected_history(&state, &body, &ids).await?;
     let work = state.clone();
     let task = state.jobs.submit_response("媒体重新整理", move |context| async move {
+        crate::notifications::with_operator(operator, async move {
         let total = ids.len();
         let mut items = vec![];
         let mut failures = vec![];
@@ -107,6 +114,7 @@ async fn reorganize(
             "failures":failures,"warnings":warnings,"warning_details":warning_details,
             "message":format!("媒体重新整理{}：处理 {updated} 项，失败 {failed} 项", if cancelled {"已取消"} else {"完成"})
         })))
+        }).await
     }).await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -116,13 +124,23 @@ async fn reorganize(
 async fn submit(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<(StatusCode, Json<Value>)> {
+    let operator = state
+        .sessions
+        .from_headers(&headers)
+        .ok_or_else(ApiError::forbidden)?
+        .user_id;
     let work = state.clone();
     let task = state
         .jobs
         .submit("重新处理项目", move |context| async move {
-            reprocess(&work, &id, body["reason"].as_str().unwrap_or(""), &context).await
+            crate::notifications::with_operator(
+                operator,
+                reprocess(&work, &id, body["reason"].as_str().unwrap_or(""), &context),
+            )
+            .await
         })
         .await?;
     Ok((
@@ -132,8 +150,14 @@ async fn submit(
 }
 async fn all(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<(StatusCode, Json<Value>)> {
+    let operator = state
+        .sessions
+        .from_headers(&headers)
+        .ok_or_else(ApiError::forbidden)?
+        .user_id;
     let kind = string(&body, "media_type");
     if !["", "Movie", "Series"].contains(&kind.as_str()) {
         return Err(ApiError::bad("媒体类型仅支持电视剧或电影"));
@@ -141,6 +165,7 @@ async fn all(
     let reason = string(&body, "reason");
     let work = state.clone();
     let task=state.jobs.submit("重新处理待复核项",move|context|async move{
+        crate::notifications::with_operator(operator, async move {
         let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(f) FROM failed_log f WHERE ($1='' OR reason LIKE $1||'%') AND ($2='' OR item_type=$2 OR ($2='Series' AND item_type IN ('Season','Episode')))").bind(reason).bind(kind).fetch_all(&work.db).await?;
         let mut updated=0;let mut failures=vec![];let mut warnings=0_u64;let mut warning_details=vec![];
         for row in rows{
@@ -156,6 +181,7 @@ async fn all(
             }
         }
         Ok(json!({"updated":updated,"failures":failures,"warnings":warnings,"warning_details":warning_details,"message":format!("待复核项目重新处理完成：处理 {updated} 项，失败 {} 项，提醒 {warnings} 条",failures.len())}))
+        }).await
     }).await?;
     Ok((
         StatusCode::ACCEPTED,

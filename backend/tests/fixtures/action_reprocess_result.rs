@@ -280,10 +280,24 @@ async fn selected_movie_reorganizes_its_related_versions_and_scrapes_without_tou
         .unwrap();
     });
     f.state.save_config(&json!({"emby_server_url":base,"tmdb_api_base_url":base,"tmdb_api_key":"fixture","monitor_sha1_pc_search":true,"douban_enable_online_api":false,"ai_api_key":"","item_delay":0})).await.unwrap();
-    let (_, accepted) =
-        super::reorganize(State(f.state.clone()), Json(json!({"item_ids":["61616"]})))
-            .await
-            .unwrap();
+    let token = f.state.sessions.sign(&crate::auth::Session {
+        user_id: "fixture-operator".into(),
+        name: "Fixture Operator".into(),
+        setup_mode: false,
+        expires: chrono::Utc::now().timestamp() + 120,
+    });
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::COOKIE,
+        format!("etk_session={token}").parse().unwrap(),
+    );
+    let (_, accepted) = super::reorganize(
+        State(f.state.clone()),
+        headers,
+        Json(json!({"item_ids":["61616"]})),
+    )
+    .await
+    .unwrap();
     let outcome = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
             let result = f

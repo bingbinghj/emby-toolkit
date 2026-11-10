@@ -2,7 +2,7 @@ import { test, expect } from './fixtures.js';
 
 const cards = [
   ['规则', '保存实时监控', 'monitor_exclude_refresh_delay', '35', 35],
-  ['搜索 & 下载', '保存数据源与API', 'tmdb_api_key', 'new-fixture-tmdb-key', 'new-fixture-tmdb-key'],
+  ['数据源', '保存数据源与API', 'tmdb_api_key', 'new-fixture-tmdb-key', 'new-fixture-tmdb-key'],
   ['存储 & 目录', '保存存储', 'p115_request_interval', '1.2', 1.2],
   ['存储 & 目录', '保存目录', 'local_strm_root', '/config/ui-strm', '/config/ui-strm'],
   ['系统', '保存媒体服务器', 'emby_public_url', 'http://public.invalid:8096', 'http://public.invalid:8096'],

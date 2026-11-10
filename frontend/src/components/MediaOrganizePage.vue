@@ -1,17 +1,22 @@
 <template>
   <div class="mp-page media-organize-page">
-    <header class="d-flex flex-wrap align-center justify-space-between ga-3 mb-6">
-      <MpPageTitle title="媒体整理" subtitle="查看入库处理记录，选择电影或剧集重新整理。" />
-      <VBtn color="primary" prepend-icon="mdi-refresh" :disabled="!canReorganize" :loading="processing" data-testid="organize-selected" @click="openConfirmation">重新整理 {{ selectedMediaCount || '' }}</VBtn>
-    </header>
-
     <VCard class="mb-4">
       <VCardText>
         <div class="organize-toolbar">
-          <VTextField v-model="search" label="搜索入库记录" placeholder="按名称查找" prepend-inner-icon="mdi-magnify" clearable variant="solo" flat rounded="pill" hide-details class="organize-search" :disabled="processing" @keyup.enter="searchItems" />
-          <VSelect v-model="statusFilter" :items="statusOptions" item-title="title" item-value="value" label="处理状态" hide-details class="organize-filter" :disabled="processing" />
-          <VBtn variant="tonal" prepend-icon="mdi-magnify" :loading="loadingItems" :disabled="processing" @click="searchItems">搜索</VBtn>
-          <VBtn icon="mdi-refresh" variant="text" aria-label="刷新入库记录" :loading="loadingItems" :disabled="processing" @click="loadItems" />
+          <VTextField v-model="search" label="搜索入库记录" aria-label="搜索入库记录" placeholder="按名称查找" prepend-inner-icon="mdi-magnify" clearable variant="solo" flat rounded="pill" hide-details density="compact" class="organize-search" :disabled="processing" @keyup.enter="searchItems" @click:clear="clearSearch" @compositionstart="searchComposing = true" @compositionend="finishSearchComposition">
+            <template #append-inner><VBtn icon="mdi-magnify" variant="text" size="small" aria-label="搜索" :loading="loadingItems" :disabled="processing" @click.stop="searchItems" /></template>
+          </VTextField>
+          <VMenu location="bottom end">
+            <template #activator="{ props }"><VBtn v-bind="props" icon="mdi-filter-multiple-outline" :variant="statusFilter === 'all' ? 'text' : 'tonal'" :color="statusFilter === 'all' ? 'default' : 'primary'" aria-label="处理状态筛选" title="处理状态筛选" :disabled="processing" data-testid="organize-status-filter" /></template>
+            <VList min-width="200" class="px-2">
+              <VListSubheader>处理状态</VListSubheader>
+              <VListItem v-for="option in statusOptions" :key="option.value" :title="option.title" :active="statusFilter === option.value" @click="statusFilter = option.value">
+                <template #append><VIcon v-if="statusFilter === option.value" icon="mdi-check" color="primary" /></template>
+              </VListItem>
+            </VList>
+          </VMenu>
+          <VBtn icon="mdi-refresh" variant="text" color="default" aria-label="刷新入库记录" :loading="loadingItems" :disabled="processing" @click="loadItems" />
+          <VBtn color="primary" variant="tonal" prepend-icon="mdi-refresh" :disabled="!canReorganize" :loading="processing" data-testid="organize-selected" @click="openConfirmation">重新整理 {{ selectedMediaCount || '' }}</VBtn>
         </div>
       </VCardText>
     </VCard>
@@ -25,10 +30,8 @@
     <VAlert v-if="feedback" :type="feedback.type" :title="feedback.message" variant="tonal" class="mb-4" data-testid="organize-result">
       <div v-for="(detail, index) in feedback.details" :key="index" class="text-wrap">{{ detail }}</div>
     </VAlert>
-    <VAlert v-if="trackingSince && !itemsError" type="info" variant="tonal" class="mb-4" data-testid="organize-tracking">入库记录从 {{ formatDate(trackingSince) }} 起持续记录，此前入库的历史记录不可用。</VAlert>
 
     <VCard>
-      <VCardItem title="整理记录" subtitle="按处理开始时间从新到旧显示入库电影和单集。" />
       <div v-if="smAndDown" class="history-cards pa-3" data-testid="organize-items-mobile">
         <VProgressLinear v-if="loadingItems" indeterminate />
         <VCard v-for="item in items" :key="item.id" variant="outlined" class="history-card">
@@ -68,27 +71,27 @@
           <p>将重新执行媒体信息重建、回读验收和元数据增强。电影包含关联版本，剧集只处理所选单集。同一媒体的多条记录合并为一次整理。</p>
           <VList bg-color="transparent" density="compact"><VListItem v-for="item in confirmationItems" :key="item.id" :title="itemTitle(item)" :subtitle="`${episodeLabel(item) || (item.item_type === 'Movie' ? '电影' : '剧集')} · ${item.item_id}`" /></VList>
         </VCardText>
-        <VCardActions><VSpacer /><VBtn variant="text" :disabled="processing" @click="confirmationOpen = false">取消</VBtn><VBtn color="warning" :loading="processing" data-testid="organize-confirm" @click="reorganize">开始重新整理</VBtn></VCardActions>
+        <VCardActions><VSpacer /><VBtn variant="text" :disabled="processing" @click="confirmationOpen = false">取消</VBtn><VBtn color="primary" variant="flat" :loading="processing" data-testid="organize-confirm" @click="reorganize">开始重新整理</VBtn></VCardActions>
       </VCard>
     </VDialog>
   </div>
 </template>
 
 <script setup>
-import MpPageTitle from './MpPageTitle.vue';
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { useContextSearch } from '@/composables/useContextSearch';
 import { useDisplay } from 'vuetify';
 import axios from 'axios';
 import { useMessage } from '@/composables/useFeedback';
 
 const message = useMessage();
 const { smAndDown } = useDisplay();
-const items = ref([]), search = ref(''), appliedSearch = ref(''), statusFilter = ref('all'), page = ref(1), total = ref(null), trackingSince = ref('');
+const items = ref([]), search = ref(''), appliedSearch = ref(''), statusFilter = ref('all'), page = ref(1), total = ref(null), searchComposing = ref(false);
 const statusOptions = [{ title: '全部状态', value: 'all' }, { title: '成功', value: 'success' }, { title: '失败', value: 'failed' }, { title: '有提醒', value: 'warning' }, { title: '正在处理', value: 'processing' }];
 const pageSize = 24;
 const selectedItems = ref([]), confirmationItems = ref([]), confirmationOpen = ref(false);
 const loadingItems = ref(false), itemsError = ref(''), processing = ref(false), feedback = ref(null);
-let active = true, itemSequence = 0;
+let active = true, itemSequence = 0, searchTimer;
 const loadedQuery = ref('');
 const queryKey = () => JSON.stringify([page.value, appliedSearch.value, statusFilter.value]);
 const selectedIds = computed(() => selectedItems.value.map(item => item.id));
@@ -135,7 +138,6 @@ const loadItems = async () => {
     const refreshed = new Map(data.items.map(item => [item.id, item]));
     selectedItems.value = selectedItems.value.map(item => refreshed.get(item.id) || item);
     total.value = data.total;
-    trackingSince.value = typeof data.tracking_since === 'string' ? data.tracking_since : '';
     loadedQuery.value = targetQuery;
     itemsError.value = '';
   } catch (error) {
@@ -145,7 +147,13 @@ const loadItems = async () => {
   }
 };
 
-const searchItems = () => { appliedSearch.value = search.value?.trim() || ''; page.value = 1; loadItems(); };
+const searchItems = () => { clearTimeout(searchTimer); if (searchComposing.value || processing.value) return; appliedSearch.value = search.value?.trim() || ''; page.value = 1; loadItems(); };
+const clearSearch = () => { search.value = ''; searchItems(); };
+const scheduleSearch = () => {
+  clearTimeout(searchTimer);
+  if (!searchComposing.value && !processing.value && (search.value?.trim() || '') !== appliedSearch.value) searchTimer = setTimeout(searchItems, smAndDown.value ? 600 : 1000);
+};
+const finishSearchComposition = () => { searchComposing.value = false; scheduleSearch(); };
 const removeSelection = id => { if (!processing.value) selectedItems.value = selectedItems.value.filter(item => item.id !== id); };
 const updateSelection = ids => {
   if (!canSelectItems()) return;
@@ -195,21 +203,25 @@ const reorganize = async () => {
   }
 };
 
-watch(statusFilter, () => { page.value = 1; loadItems(); });
+watch(search, scheduleSearch);
+watch(statusFilter, () => { clearTimeout(searchTimer); appliedSearch.value = search.value?.trim() || ''; page.value = 1; loadItems(); });
+useContextSearch({ label: '搜索入库记录', query: search, submit: searchItems, clear: clearSearch, composing: searchComposing, compositionEnd: finishSearchComposition, disabled: processing, loading: loadingItems });
 onMounted(loadItems);
-onBeforeUnmount(() => { active = false; ++itemSequence; });
+onBeforeUnmount(() => { active = false; ++itemSequence; clearTimeout(searchTimer); });
 </script>
 
 <style scoped>
 .media-organize-page { width: 100%; min-width: 0; }
 .organize-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .organize-search { flex: 1 1 280px; min-width: 0; }
-.organize-filter { flex: 0 1 170px; min-width: 0; }
 .organize-media-copy { min-width: 0; flex: 1; }
-.media-title { max-width: 100%; height: auto; min-height: 36px; white-space: normal; text-align: start; }
+.media-title { max-width: 100%; height: auto; min-height: 36px; padding-block: 4px !important; border-radius: 0; white-space: normal; text-align: start; }
 .media-title :deep(.v-btn__content) { white-space: normal; overflow-wrap: anywhere; }
 .media-organize-page :deep(.v-card-title), .media-organize-page :deep(.v-card-subtitle) { white-space: normal; overflow-wrap: anywhere; }
-.history-message { white-space: pre-wrap; overflow-wrap: anywhere; }
+.history-message { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.media-organize-page :deep(.v-data-table__td) { padding-block: 12px; }
+.media-organize-page :deep(.v-alert-title), .media-organize-page :deep(.v-chip__content) { white-space: normal; overflow-wrap: anywhere; }
+.media-organize-page :deep(.v-chip) { height: auto; min-height: 26px; padding-block: 4px; }
 .history-cards { display: grid; gap: 12px; }
 .history-card { min-width: 0; }
 .history-card-body { display: flex; align-items: flex-start; gap: 12px; }

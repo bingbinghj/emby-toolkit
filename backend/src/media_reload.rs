@@ -10,6 +10,9 @@ use axum::http::StatusCode;
 use md5::{Digest, Md5};
 use reqwest::Method;
 use serde_json::{Value, json};
+use sha2::Sha256;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
@@ -132,11 +135,354 @@ fn recovery_chapter_ticks(path: &Path, info: &Value) -> Result<u64> {
     Ok(ticks)
 }
 
-pub(crate) async fn recover_record(
+type RecoveryJsonTargets = (Vec<SavedTarget>, BTreeMap<String, (PathBuf, PathBuf)>);
+
+fn parse_recovery_json(bytes: &[u8], path: &Path) -> Result<Value> {
+    // Reject duplicate keys: comparing a lossy map would hide a real value
+    // change when another JSON consumer selects the first duplicate instead.
+    struct CheckedJson(Value);
+    impl<'de> serde::Deserialize<'de> for CheckedJson {
+        fn deserialize<D: serde::Deserializer<'de>>(
+            deserializer: D,
+        ) -> std::result::Result<Self, D::Error> {
+            struct Visitor;
+            impl<'de> serde::de::Visitor<'de> for Visitor {
+                type Value = CheckedJson;
+                fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    formatter.write_str("JSON without duplicate keys")
+                }
+                fn visit_bool<E: serde::de::Error>(
+                    self,
+                    value: bool,
+                ) -> std::result::Result<CheckedJson, E> {
+                    Ok(CheckedJson(json!(value)))
+                }
+                fn visit_i64<E: serde::de::Error>(
+                    self,
+                    value: i64,
+                ) -> std::result::Result<CheckedJson, E> {
+                    Ok(CheckedJson(json!(value)))
+                }
+                fn visit_u64<E: serde::de::Error>(
+                    self,
+                    value: u64,
+                ) -> std::result::Result<CheckedJson, E> {
+                    Ok(CheckedJson(json!(value)))
+                }
+                fn visit_f64<E: serde::de::Error>(
+                    self,
+                    value: f64,
+                ) -> std::result::Result<CheckedJson, E> {
+                    serde_json::Number::from_f64(value)
+                        .map(|value| CheckedJson(Value::Number(value)))
+                        .ok_or_else(|| E::custom("nonfinite JSON number"))
+                }
+                fn visit_str<E: serde::de::Error>(
+                    self,
+                    value: &str,
+                ) -> std::result::Result<CheckedJson, E> {
+                    Ok(CheckedJson(json!(value)))
+                }
+                fn visit_unit<E: serde::de::Error>(self) -> std::result::Result<CheckedJson, E> {
+                    Ok(CheckedJson(Value::Null))
+                }
+                fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                    self,
+                    mut sequence: A,
+                ) -> std::result::Result<CheckedJson, A::Error> {
+                    let mut values = vec![];
+                    while let Some(value) = sequence.next_element::<CheckedJson>()? {
+                        values.push(value.0);
+                    }
+                    Ok(CheckedJson(Value::Array(values)))
+                }
+                fn visit_map<A: serde::de::MapAccess<'de>>(
+                    self,
+                    mut fields: A,
+                ) -> std::result::Result<CheckedJson, A::Error> {
+                    let mut values = serde_json::Map::new();
+                    while let Some((key, value)) = fields.next_entry::<String, CheckedJson>()? {
+                        if values.insert(key, value.0).is_some() {
+                            return Err(serde::de::Error::custom("duplicate JSON key"));
+                        }
+                    }
+                    Ok(CheckedJson(Value::Object(values)))
+                }
+            }
+            deserializer.deserialize_any(Visitor)
+        }
+    }
+    serde_json::from_slice::<CheckedJson>(bytes)
+        .map(|value| value.0)
+        .map_err(|_| {
+            conflict(format!(
+                "媒体 JSON 无法严格解析，保留当前文件及备份：{}",
+                path.display()
+            ))
+        })
+}
+
+fn json_equivalent(left: &[u8], right: &[u8], path: &Path) -> Result<bool> {
+    Ok(parse_recovery_json(left, path)? == parse_recovery_json(right, path)?)
+}
+
+fn json_hash(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+async fn current_json(path: &Path) -> Result<Option<Vec<u8>>> {
+    check_ancestors(path).await?;
+    match tokio::fs::symlink_metadata(path).await {
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(conflict(format!(
+                "恢复 JSON 不是普通文件，备份已保留：{}",
+                path.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    let bytes = tokio::fs::read(path).await?;
+    parse_recovery_json(&bytes, path)?;
+    Ok(Some(bytes))
+}
+
+fn json_preview(value: Option<&Value>) -> Value {
+    let Some(value) = value else {
+        return json!({"missing":true});
+    };
+    let text = value.to_string();
+    if text.chars().count() > 256 {
+        json!({"preview":text.chars().take(256).collect::<String>(),"bytes":text.len()})
+    } else {
+        value.clone()
+    }
+}
+
+fn json_changes(
+    expected: Option<&Value>,
+    current: Option<&Value>,
+    path: &str,
+    changes: &mut Vec<Value>,
+    count: &mut usize,
+) {
+    if expected == current {
+        return;
+    }
+    match (expected, current) {
+        (Some(Value::Object(left)), Some(Value::Object(right))) => {
+            let keys = left.keys().chain(right.keys()).collect::<BTreeSet<_>>();
+            for key in keys {
+                let key_path = format!("{path}/{}", key.replace('~', "~0").replace('/', "~1"));
+                json_changes(left.get(key), right.get(key), &key_path, changes, count);
+            }
+        }
+        (Some(Value::Array(left)), Some(Value::Array(right))) => {
+            for index in 0..left.len().max(right.len()) {
+                json_changes(
+                    left.get(index),
+                    right.get(index),
+                    &format!("{path}/{index}"),
+                    changes,
+                    count,
+                );
+            }
+        }
+        _ => {
+            *count += 1;
+            if changes.len() < 64 {
+                changes.push(json!({"path":path,"expected":json_preview(expected),"current":json_preview(current)}));
+            }
+        }
+    }
+}
+
+async fn inspect_recovery_json(
+    recovery: &Path,
+    record: &Value,
+    requested: &BTreeMap<String, (PathBuf, PathBuf)>,
+) -> Result<(Vec<Value>, BTreeMap<PathBuf, Option<Vec<u8>>>)> {
+    let mut conflicts = vec![];
+    let mut observed = BTreeMap::new();
+    for (id, (path, backup)) in requested {
+        let bytes = current_json(path).await?;
+        observed.insert(path.clone(), bytes.clone());
+        let Some(bytes) = bytes else {
+            continue;
+        };
+        let expected_bytes = tokio::fs::read(backup).await?;
+        if json_equivalent(&bytes, &expected_bytes, path)? {
+            continue;
+        }
+        let canonical = tokio::fs::canonicalize(path).await?;
+        let original = media_edit::list(&record["files"]).into_iter().find(|file| {
+            file["path"]
+                .as_str()
+                .is_some_and(|file| Path::new(file) == canonical || Path::new(file) == path)
+        });
+        if let Some(original) = original {
+            let original = recovery_backup(recovery, &original["backup"]).await?;
+            if json_equivalent(&bytes, &tokio::fs::read(original).await?, path)? {
+                continue;
+            }
+        }
+        let audio = media_edit::list(&record["audio_complete"])
+            .into_iter()
+            .find(|audio| audio["item_id"] == *id);
+        if let Some(audio) = audio {
+            let complete = recovery_backup(recovery, &audio["complete"]).await?;
+            if json_equivalent(&bytes, &tokio::fs::read(complete).await?, path)? {
+                continue;
+            }
+        }
+        let expected = parse_recovery_json(&expected_bytes, backup)?;
+        let current = parse_recovery_json(&bytes, path)?;
+        let mut changes = vec![];
+        let mut change_count = 0;
+        json_changes(
+            Some(&expected),
+            Some(&current),
+            "",
+            &mut changes,
+            &mut change_count,
+        );
+        conflicts.push(json!({"item_id":id,"path":path,"current_sha256":json_hash(&bytes),"changes":changes,"change_count":change_count}));
+    }
+    Ok((conflicts, observed))
+}
+
+pub(crate) async fn recovery_json_conflicts(
     state: &AppState,
     recovery: &Path,
-    context: &JobContext,
+) -> Result<Vec<Value>> {
+    let record = recovery_record(recovery).await?;
+    let (_, requested) = prepare_recovery_json(state, recovery, &record).await?;
+    Ok(inspect_recovery_json(recovery, &record, &requested)
+        .await?
+        .0)
+}
+
+pub(crate) async fn conflict_backup_directories(
+    state: &AppState,
+    recovery: &Path,
+) -> Result<Vec<PathBuf>> {
+    let index = recovery.join("conflict-backups.json");
+    if !tokio::fs::try_exists(&index).await? {
+        return Ok(vec![]);
+    }
+    let directories: Vec<PathBuf> =
+        serde_json::from_value(crate::media_recovery::read_json(&index).await?)
+            .map_err(|_| conflict("当前 JSON 留存记录无效，全部备份仍保留"))?;
+    let root = state.data_dir.join("backups/media-info-conflicts");
+    for directory in &directories {
+        check_ancestors(&directory.join("unused")).await?;
+        if !directory.is_absolute() || !directory.starts_with(&root) {
+            return Err(conflict(
+                "当前 JSON 留存目录不在独立备份根目录内，全部备份仍保留",
+            ));
+        }
+    }
+    Ok(directories)
+}
+
+fn validate_current_json_hashes(
+    conflicts: &[Value],
+    hashes: &BTreeMap<String, String>,
 ) -> Result<()> {
+    if hashes.is_empty() && !conflicts.is_empty() {
+        return Err(conflict(format!(
+            "媒体 JSON 在失败后被修改，保留当前文件及备份；请核对差异并确认备份当前 JSON 后恢复：{}",
+            conflicts
+                .iter()
+                .map(|value| format!("{}：{}", string(value, "item_id"), string(value, "path")))
+                .collect::<Vec<_>>()
+                .join("；")
+        )));
+    }
+    let expected = conflicts
+        .iter()
+        .map(|value| (string(value, "item_id"), string(value, "current_sha256")))
+        .collect::<BTreeMap<_, _>>();
+    if *hashes != expected {
+        return Err(conflict(
+            "当前 JSON 已再次变化或确认目标不一致，请重新核对差异，未覆盖任何媒体 JSON",
+        ));
+    }
+    Ok(())
+}
+
+async fn verify_current_json_snapshot(observed: &BTreeMap<PathBuf, Option<Vec<u8>>>) -> Result<()> {
+    for (path, before) in observed {
+        if current_json(path).await? != *before {
+            return Err(conflict(format!(
+                "当前 JSON 在恢复准备期间再次变化，未覆盖媒体 JSON：{}",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn write_recovery_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(path).await?;
+    file.write_all(bytes).await?;
+    file.sync_all().await?;
+    Ok(())
+}
+
+async fn preserve_current_json(
+    state: &AppState,
+    recovery: &Path,
+    conflicts: &[Value],
+    observed: &BTreeMap<PathBuf, Option<Vec<u8>>>,
+    directories: &mut Vec<PathBuf>,
+) -> Result<()> {
+    if conflicts.is_empty() {
+        return Ok(());
+    }
+    let root = state.data_dir.join("backups/media-info-conflicts");
+    check_ancestors(&root.join("unused")).await?;
+    tokio::fs::create_dir_all(&root).await?;
+    let directory = root.join(uuid::Uuid::new_v4().simple().to_string());
+    tokio::fs::create_dir(&directory).await?;
+    #[cfg(unix)]
+    tokio::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).await?;
+    directories.push(directory.clone());
+    // Persist the retained location before copying. An interrupted copy must
+    // not lose the only pointer to its already created preservation directory.
+    let index = recovery.join("conflict-backups.json");
+    let staged = recovery.join(format!(
+        ".conflict-index-{}.json",
+        uuid::Uuid::new_v4().simple()
+    ));
+    write_recovery_file(&staged, &serde_json::to_vec(directories).unwrap()).await?;
+    tokio::fs::rename(&staged, &index).await?;
+    tokio::fs::File::open(recovery).await?.sync_all().await?;
+    for conflict in conflicts {
+        let id = string(conflict, "item_id");
+        let path = PathBuf::from(string(conflict, "path"));
+        let bytes = observed[&path].as_ref().unwrap();
+        write_recovery_file(&directory.join(format!("current-{id}.json")), bytes).await?;
+    }
+    write_recovery_file(
+        &directory.join("manifest.json"),
+        &serde_json::to_vec(&json!({
+            "recovery_directory":recovery,"files":conflicts
+        }))
+        .unwrap(),
+    )
+    .await?;
+    tokio::fs::File::open(&directory).await?.sync_all().await?;
+    tokio::fs::File::open(&root).await?.sync_all().await?;
+    Ok(())
+}
+
+async fn recovery_record(recovery: &Path) -> Result<Value> {
     let marker = recovery.join("media-reload.json");
     let record = if tokio::fs::try_exists(&marker).await? {
         crate::media_recovery::read_json(&marker).await?
@@ -144,15 +490,21 @@ pub(crate) async fn recover_record(
         crate::media_recovery::read_json(&recovery.join("pending-scan.json")).await?["verification"]
             .clone()
     };
+    Ok(record)
+}
+
+async fn prepare_recovery_json(
+    state: &AppState,
+    recovery: &Path,
+    record: &Value,
+) -> Result<RecoveryJsonTargets> {
     let ids = record["target_ids"]
         .as_array()
         .filter(|ids| !ids.is_empty())
         .ok_or_else(|| conflict("恢复记录没有有效目标媒体，备份已保留"))?;
     let mut targets = vec![];
-    let mut json_paths = BTreeSet::new();
     let mut requested = BTreeMap::new();
     for id in ids {
-        context.checkpoint().await?;
         let id = id
             .as_str()
             .filter(|id| !id.is_empty())
@@ -167,7 +519,7 @@ pub(crate) async fn recover_record(
         }
         let entry = entries[0];
         let backup = recovery_backup(recovery, &entry["backup"]).await?;
-        let info = crate::media_recovery::read_json(&backup).await?;
+        let info = parse_recovery_json(&tokio::fs::read(&backup).await?, &backup)?;
         ensure_single_bundle(&info)?;
         let path = PathBuf::from(string(entry, "path"));
         let current = media_edit::repair_target(state, id).await?;
@@ -197,7 +549,6 @@ pub(crate) async fn recover_record(
             info: media_info::restore_json(&info)?,
             refresh_required: true,
         });
-        json_paths.insert(path.clone());
         requested.insert(id.to_string(), (path, backup));
     }
     let owners = targets
@@ -207,6 +558,50 @@ pub(crate) async fn recover_record(
     if owners.len() != targets.len() {
         return Err(conflict("恢复记录包含重复媒体 ID"));
     }
+    let mut shared = BTreeMap::<PathBuf, Value>::new();
+    for (path, backup) in requested.values() {
+        let canonical = match tokio::fs::canonicalize(path).await {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let parent = path
+                    .parent()
+                    .ok_or_else(|| conflict("恢复 JSON 路径没有父目录"))?;
+                tokio::fs::canonicalize(parent)
+                    .await?
+                    .join(path.file_name().unwrap())
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let info = parse_recovery_json(&tokio::fs::read(backup).await?, backup)?;
+        if shared
+            .insert(canonical, info.clone())
+            .is_some_and(|previous| previous != info)
+        {
+            return Err(conflict(
+                "多个恢复目标共用同一 JSON 路径但备份内容不同，未覆盖任何媒体 JSON",
+            ));
+        }
+    }
+    Ok((targets, requested))
+}
+
+pub(crate) async fn recover_record(
+    state: &AppState,
+    recovery: &Path,
+    context: &JobContext,
+    current_hashes: &BTreeMap<String, String>,
+) -> Result<Vec<PathBuf>> {
+    context.checkpoint().await?;
+    let record = recovery_record(recovery).await?;
+    let (targets, requested) = prepare_recovery_json(state, recovery, &record).await?;
+    let json_paths = requested
+        .values()
+        .map(|(path, _)| path.clone())
+        .collect::<BTreeSet<_>>();
+    let owners = targets
+        .iter()
+        .map(|target| target.id.clone())
+        .collect::<BTreeSet<_>>();
     let mut files = BTreeMap::new();
     let mut thumbnails = BTreeMap::new();
     let mut image_times = BTreeMap::<String, BTreeSet<u64>>::new();
@@ -218,7 +613,7 @@ pub(crate) async fn recover_record(
             .find(|target| target.id == id)
             .ok_or_else(|| conflict("完整音乐 JSON 的恢复目标不一致"))?;
         let complete = recovery_backup(recovery, &audio["complete"]).await?;
-        let full = crate::media_recovery::read_json(&complete).await?;
+        let full = parse_recovery_json(&tokio::fs::read(&complete).await?, &complete)?;
         ensure_single_bundle(&full)?;
         let mut import = full.clone();
         for bundle in import.as_array_mut().unwrap() {
@@ -317,7 +712,10 @@ pub(crate) async fn recover_record(
         let mut observed = record["observations"][&target.id]
             .as_object()
             .map(|_| record["observations"][&target.id].clone())
-            .unwrap_or(live);
+            .unwrap_or_else(|| live.clone());
+        for field in METADATA_FIELDS {
+            observed[*field] = live[*field].clone();
+        }
         if record["observations"][&target.id].is_null() && image_times.contains_key(&target.id) {
             observed["Chapters"] = media_info::object(&target.info).unwrap()["Chapters"].clone();
             for chapter in observed["Chapters"].as_array_mut().unwrap() {
@@ -334,60 +732,83 @@ pub(crate) async fn recover_record(
         }
         before.insert(target.id.clone(), observed);
     }
-    for target in &targets {
-        let (path, backup) = &requested[&target.id];
-        check_ancestors(path).await?;
-        if tokio::fs::symlink_metadata(path)
-            .await
-            .is_ok_and(|metadata| !metadata.is_file())
-        {
-            return Err(conflict("恢复 JSON 不是普通文件，备份已保留"));
-        }
-        let already_imported =
-            tokio::fs::read(path).await.ok() == Some(tokio::fs::read(backup).await?);
-        let full_audio = if let Some((full, _)) = audio_complete.get(&target.id) {
-            tokio::fs::read(path).await.ok() == Some(tokio::fs::read(full).await?)
-        } else {
-            false
-        };
-        if !already_imported && !full_audio && !json_unchanged(path, backup, &files).await? {
-            return Err(conflict("媒体 JSON 在失败后被修改，保留当前文件及备份"));
-        }
-    }
+    let (conflicts, observed) = inspect_recovery_json(recovery, &record, &requested).await?;
+    validate_current_json_hashes(&conflicts, current_hashes)?;
     context.checkpoint().await?;
-    let finish = JobContext::for_recovery(Some(context)).await;
-    for target in &targets {
-        let (path, backup) = &requested[&target.id];
-        restore_json(path, backup).await?;
-        crate::media_save::cache_saved(state, target.sha.as_deref(), &target.info).await?;
-    }
-    let resources = files
-        .into_iter()
-        .filter(|(path, _)| !json_paths.contains(path))
-        .collect::<BTreeMap<_, _>>();
-    restore_files(&resources, &owners).await?;
-    let confirmed = AtomicBool::new(false);
-    let retry = recovery.join(format!("retry-{}", uuid::Uuid::new_v4().simple()));
-    reload(state, &targets, &finish, &confirmed, &retry).await?;
-    verify_reloaded(
-        state,
-        &targets.iter().collect::<Vec<_>>(),
-        &finish,
-        &before,
-        &thumbnails,
-    )
-    .await?;
-    for target in &targets {
-        if let Some((complete, full)) = audio_complete.get(&target.id) {
-            let (path, import) = &requested[&target.id];
-            if tokio::fs::read(path).await? != tokio::fs::read(import).await? {
-                return Err(conflict("音乐 JSON 在恢复期间变化，完整音乐备份仍保留"));
-            }
-            restore_json(path, complete).await?;
-            crate::media_save::cache_saved(state, target.sha.as_deref(), full).await?;
+    let mut directories = conflict_backup_directories(state, recovery).await?;
+    let outcome: Result<()> = async {
+        verify_current_json_snapshot(&observed).await?;
+        for target in &targets {
+            identity_details(state, target).await?;
         }
+        preserve_current_json(state, recovery, &conflicts, &observed, &mut directories).await?;
+        verify_current_json_snapshot(&observed).await?;
+        for target in &targets {
+            identity_details(state, target).await?;
+        }
+        context.checkpoint().await?;
+        let finish = JobContext::for_recovery(Some(context)).await;
+        let mut written = BTreeSet::new();
+        for target in &targets {
+            let (path, backup) = &requested[&target.id];
+            if written.insert(path.clone()) {
+                identity_details(state, target).await?;
+                if current_json(path).await? != observed[path] {
+                    return Err(conflict(
+                        "当前 JSON 在写入前再次变化，保留当前文件与全部备份",
+                    ));
+                }
+                restore_json_guarded(path, backup, observed[path].as_deref()).await?;
+            }
+            crate::media_save::cache_saved(state, target.sha.as_deref(), &target.info).await?;
+        }
+        let resources = files
+            .into_iter()
+            .filter(|(path, _)| !json_paths.contains(path))
+            .collect::<BTreeMap<_, _>>();
+        restore_files(&resources, &owners).await?;
+        let confirmed = AtomicBool::new(false);
+        let retry = recovery.join(format!("retry-{}", uuid::Uuid::new_v4().simple()));
+        reload(state, &targets, &finish, &confirmed, &retry).await?;
+        verify_reloaded(
+            state,
+            &targets.iter().collect::<Vec<_>>(),
+            &finish,
+            &before,
+            &thumbnails,
+        )
+        .await?;
+        for target in &targets {
+            if let Some((complete, full)) = audio_complete.get(&target.id) {
+                let (path, import) = &requested[&target.id];
+                identity_details(state, target).await?;
+                let observed = current_json(path)
+                    .await?
+                    .ok_or_else(|| conflict("音乐 JSON 在恢复期间丢失，完整音乐备份仍保留"))?;
+                if !json_equivalent(&observed, &tokio::fs::read(import).await?, path)? {
+                    return Err(conflict("音乐 JSON 在恢复期间变化，完整音乐备份仍保留"));
+                }
+                restore_json_guarded(path, complete, Some(&observed)).await?;
+                crate::media_save::cache_saved(state, target.sha.as_deref(), full).await?;
+            }
+        }
+        Ok(())
     }
-    Ok(())
+    .await;
+    if let Err(mut error) = outcome {
+        if !directories.is_empty() {
+            error.1.push_str(&format!(
+                "；当前 JSON 独立备份仍保留：{}",
+                directories
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("；")
+            ));
+        }
+        return Err(error);
+    }
+    Ok(directories)
 }
 
 fn conflict(message: impl Into<String>) -> ApiError {
@@ -797,6 +1218,11 @@ async fn metadata_directory(state: &AppState, root: &Path, item: &Value) -> Resu
 }
 
 async fn restore_json(path: &Path, backup: &Path) -> Result<()> {
+    let expected = current_json(path).await?;
+    restore_json_guarded(path, backup, expected.as_deref()).await
+}
+
+async fn restore_json_guarded(path: &Path, backup: &Path, expected: Option<&[u8]>) -> Result<()> {
     check_ancestors(path).await?;
     if tokio::fs::symlink_metadata(path)
         .await
@@ -804,7 +1230,7 @@ async fn restore_json(path: &Path, backup: &Path) -> Result<()> {
     {
         return Err(conflict("恢复 JSON 变为符号链接，已保留备份"));
     }
-    crate::media_save::commit_json_stage(backup, path).await
+    crate::media_save::commit_json_stage_guarded(backup, path, expected).await
 }
 
 async fn json_unchanged(
@@ -826,7 +1252,15 @@ async fn json_unchanged(
     let current = tokio::fs::read(path).await?;
     let original_path = tokio::fs::canonicalize(path).await?;
     let original = files.get(&original_path);
-    Ok(current == tokio::fs::read(original.map(|f| f.backup.as_path()).unwrap_or(backup)).await?)
+    let original = tokio::fs::read(original.map(|f| f.backup.as_path()).unwrap_or(backup)).await?;
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+    {
+        json_equivalent(&current, &original, path)
+    } else {
+        Ok(current == original)
+    }
 }
 
 fn sync_contract_supported(swagger: &Value) -> bool {
@@ -1498,12 +1932,17 @@ pub(crate) async fn reload(
                 continue;
             }
             let restored = async {
-                if tokio::fs::read(path).await? != tokio::fs::read(import).await? {
+                let target = ready.iter().find(|target| target.id == *id).unwrap();
+                identity_details(state, target).await?;
+                let observed = current_json(path)
+                    .await?
+                    .ok_or_else(|| conflict("音乐 JSON 在同步期间丢失，完整音乐备份仍保留"))?;
+                if !json_equivalent(&observed, &tokio::fs::read(import).await?, path)? {
                     return Err(conflict(
                         "音乐 JSON 在同步期间变化，保留用户文件及完整恢复备份",
                     ));
                 }
-                restore_json(path, complete).await
+                restore_json_guarded(path, complete, Some(&observed)).await
             }
             .await;
             if let Err(error) = restored {
@@ -1565,6 +2004,116 @@ pub(crate) async fn reload(
 #[cfg(test)]
 mod recovery_tests {
     use super::*;
+
+    #[test]
+    fn semantic_json_comparison_accepts_formatting_without_ignoring_real_changes() {
+        let path = Path::new("/media/item-mediainfo.json");
+        assert!(json_equivalent(br#"{"Size":42,"MediaStreams":[{"Title":"original","Language":"jpn"}]}"#,
+            b"{ \n \"MediaStreams\": [{ \"Language\":\"jpn\", \"Title\":\"original\" }],\"Size\":42 }", path).unwrap());
+        assert!(
+            !json_equivalent(br#"{"Title":"original"}"#, br#"{"Title":"changed"}"#, path).unwrap()
+        );
+        assert!(!json_equivalent(br#"[1,2]"#, br#"[2,1]"#, path).unwrap());
+        assert!(!json_equivalent(br#"{"Title":null}"#, br#"{}"#, path).unwrap());
+    }
+
+    #[test]
+    fn ambiguous_duplicate_keys_and_invalid_json_cannot_be_treated_as_unchanged() {
+        let path = Path::new("/media/item-mediainfo.json");
+        for current in [
+            br#"{"Title":"changed","Title":"original"}"#.as_slice(),
+            br#"[{"Title":"changed","\u0054itle":"original"}]"#,
+            br#"{"MediaStreams":[]} trailing"#,
+            br#"{"Title":"original""#,
+        ] {
+            assert!(json_equivalent(current, br#"{"Title":"original"}"#, path).is_err());
+        }
+    }
+
+    #[test]
+    fn explicit_hash_confirmation_must_match_the_exact_actual_conflict_set() {
+        let hash = "a".repeat(64);
+        let conflicts =
+            vec![json!({"item_id":"61616","path":"/media/item.json","current_sha256":hash})];
+        assert!(validate_current_json_hashes(&conflicts, &BTreeMap::new()).is_err());
+        assert!(
+            validate_current_json_hashes(
+                &conflicts,
+                &BTreeMap::from([("61616".into(), hash.clone())])
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_current_json_hashes(
+                &conflicts,
+                &BTreeMap::from([("61616".into(), "b".repeat(64))])
+            )
+            .is_err()
+        );
+        assert!(
+            validate_current_json_hashes(
+                &conflicts,
+                &BTreeMap::from([("61617".into(), hash.clone())])
+            )
+            .is_err()
+        );
+        assert!(
+            validate_current_json_hashes(&[], &BTreeMap::from([("61616".into(), hash)])).is_err()
+        );
+    }
+
+    #[test]
+    fn json_diagnostics_count_all_changes_and_keep_missing_distinct_from_null() {
+        let expected = json!({"Title":null,"tracks":vec![0;80]});
+        let current = json!({"tracks":vec![1;80]});
+        let mut changes = vec![];
+        let mut count = 0;
+        json_changes(
+            Some(&expected),
+            Some(&current),
+            "",
+            &mut changes,
+            &mut count,
+        );
+        assert_eq!(count, 81);
+        assert_eq!(changes.len(), 64);
+        assert_eq!(changes[0]["path"], "/Title");
+        assert_eq!(changes[0]["expected"], Value::Null);
+        assert_eq!(changes[0]["current"]["missing"], true);
+    }
+
+    #[tokio::test]
+    async fn json_guard_is_semantic_but_binary_resource_guard_stays_byte_exact() {
+        let temporary = tempfile::tempdir().unwrap();
+        let backup = temporary.path().join("asset-backup");
+        tokio::fs::write(&backup, br#"{"Title":"original","Size":42}"#)
+            .await
+            .unwrap();
+        let formatted = br#"{ "Size":42, "Title":"original" }"#;
+        let json = temporary.path().join("item.json");
+        let binary = temporary.path().join("item.bif");
+        tokio::fs::write(&json, formatted).await.unwrap();
+        tokio::fs::write(&binary, formatted).await.unwrap();
+        assert!(
+            json_unchanged(&json, &backup, &BTreeMap::new())
+                .await
+                .unwrap()
+        );
+        assert!(
+            !json_unchanged(&binary, &backup, &BTreeMap::new())
+                .await
+                .unwrap()
+        );
+        let observed = BTreeMap::from([(json.clone(), Some(formatted.to_vec()))]);
+        tokio::fs::write(&json, br#"{"Title":"new change","Size":42}"#)
+            .await
+            .unwrap();
+        assert!(verify_current_json_snapshot(&observed).await.is_err());
+        assert_eq!(
+            tokio::fs::read(&json).await.unwrap(),
+            br#"{"Title":"new change","Size":42}"#
+        );
+    }
 
     fn original_chapters() -> Value {
         json!([{"Chapters":[{"StartPositionTicks":0_u64},{"StartPositionTicks":897560000_u64},

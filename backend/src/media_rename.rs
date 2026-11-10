@@ -1097,13 +1097,96 @@ async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext)
     }
     outcome
 }
+fn sample_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+async fn latest_sample(state: &AppState, user: &str, kind: &str, template: &str) -> Result<Value> {
+    if !sample_id(user) {
+        return Err(ApiError::bad("未配置有效 Emby 用户 ID"));
+    }
+    let response = state.emby(reqwest::Method::GET, &format!("Users/{user}/Items"), &[
+        ("IncludeItemTypes", kind.into()), ("Recursive", "true".into()),
+        ("SortBy", "DateCreated".into()), ("SortOrder", "Descending".into()), ("Limit", "1".into()),
+        ("Fields", "Path,MediaSources,MediaStreams,ProductionYear,OriginalTitle,ProviderIds,SeriesName,SeriesId,DateCreated".into()),
+    ], None).await?;
+    let items = response["Items"]
+        .as_array()
+        .ok_or_else(|| ApiError::bad("Emby 最近入库响应无效"))?;
+    let Some(item) = items.first() else {
+        return Ok(Value::Null);
+    };
+    if item["Type"] != kind || !sample_id(&string(item, "Id")) || string(item, "Name").is_empty() {
+        return Err(ApiError::bad("Emby 最近入库的媒体身份无效"));
+    }
+    let mut item = item.clone();
+    if kind == "Episode" {
+        let series_id = string(&item, "SeriesId");
+        if !sample_id(&series_id) {
+            return Err(ApiError::bad("最近入库剧集缺少所属电视剧"));
+        }
+        let series = state
+            .emby(
+                reqwest::Method::GET,
+                &format!("Users/{user}/Items/{series_id}"),
+                &[("Fields", "ProductionYear,OriginalTitle,ProviderIds".into())],
+                None,
+            )
+            .await?;
+        if series["Id"] != series_id
+            || series["Type"] != "Series"
+            || string(&series, "Name").is_empty()
+        {
+            return Err(ApiError::bad("最近入库剧集的电视剧信息无效"));
+        }
+        for field in ["Name", "ProductionYear", "OriginalTitle", "ProviderIds"] {
+            item[field] = series[field].clone();
+        }
+    }
+    let source = string(&item, "Path");
+    if source.is_empty() {
+        return Err(ApiError::bad("最近入库媒体缺少源文件路径"));
+    }
+    let mut technical = rename::pt(&source);
+    for field in ["year", "season", "episode", "season_episode"] {
+        technical.as_object_mut().unwrap().remove(field);
+    }
+    let fields = rename::context(&item, &source, &technical);
+    let preview = if template.trim().is_empty() {
+        String::new()
+    } else {
+        rename::render(template, &fields, &crate::media_paths::extension(&source))?
+    };
+    Ok(
+        json!({"preview":preview,"sample":{"id":item["Id"],"title":item["Name"],
+        "season_episode":fields["season_episode"],"created_at":item["DateCreated"],"source_name":source}}),
+    )
+}
+
 async fn sample(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Json<Value>> {
-    let _ = state;
-    let movie = json!({"title":"肖申克的救赎","en_title":"The Shawshank Redemption","year":1994,"tmdbid":278,"season":0,"episode":0,"season_episode":"","part":"","videoFormat":"2160p","videoCodec":"H265","audioCodec":"DTS 5.1","effect":"","fileExt":".mkv"});
-    let tv = json!({"title":"凡人修仙传","en_title":"A Record of a Mortal's Journey to Immortality","year":2020,"tmdbid":95557,"season":1,"episode":1,"season_episode":"S01E01","part":"","videoFormat":"2160p","videoCodec":"H265","audioCodec":"AAC 2.0","effect":"HDR","resourceType":"WEB-DL","releaseGroup":"ADWeb","fileExt":".mp4"});
-    Ok(Json(
-        json!({"movie":if string(&body,"movie_format").trim().is_empty(){String::new()}else{rename::render(&string(&body,"movie_format"),&movie,".mkv")?},"tv":if string(&body,"tv_format").trim().is_empty(){String::new()}else{rename::render(&string(&body,"tv_format"),&tv,".mp4")?}}),
-    ))
+    let user = string(&*state.config.read().await, "emby_user_id");
+    let movie_format = string(&body, "movie_format");
+    let tv_format = string(&body, "tv_format");
+    let (movie, tv) = tokio::join!(
+        latest_sample(&state, &user, "Movie", &movie_format),
+        latest_sample(&state, &user, "Episode", &tv_format)
+    );
+    let mut response = json!({"movie":"","tv":"","movie_sample":null,"tv_sample":null,"errors":{}});
+    for (key, result) in [("movie", movie), ("tv", tv)] {
+        match result {
+            Ok(value) if !value.is_null() => {
+                response[key] = value["preview"].clone();
+                response[format!("{key}_sample")] = value["sample"].clone();
+            }
+            Ok(_) => (),
+            Err(error) => response["errors"][key] = json!(error.1),
+        }
+    }
+    Ok(Json(response))
 }
 
 #[cfg(test)]
@@ -1402,5 +1485,180 @@ mod stale_sidecar_tests {
         );
         assert!(old.exists());
         assert!(new.exists());
+    }
+}
+
+#[cfg(test)]
+mod sample_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tokio::sync::RwLock;
+
+    async fn environment(
+        movie: Value,
+        episode: Value,
+        series: Value,
+    ) -> (
+        tempfile::TempDir,
+        AppState,
+        Arc<Mutex<Vec<Value>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let requests = Arc::new(Mutex::new(vec![]));
+        let recorded = requests.clone();
+        let app = Router::new()
+            .route(
+                "/Users/sample-user/Items",
+                get(
+                    move |axum::extract::Query(query): axum::extract::Query<
+                        HashMap<String, String>,
+                    >| {
+                        let (recorded, movie, episode) =
+                            (recorded.clone(), movie.clone(), episode.clone());
+                        async move {
+                            recorded.lock().unwrap().push(json!(query));
+                            let payload = if query["IncludeItemTypes"] == "Movie" {
+                                movie
+                            } else {
+                                episode
+                            };
+                            if payload == "unavailable" {
+                                return (StatusCode::BAD_GATEWAY, Json(json!({})));
+                            }
+                            (StatusCode::OK, Json(payload))
+                        }
+                    },
+                ),
+            )
+            .route(
+                "/Users/sample-user/Items/series-new",
+                get(move || {
+                    let series = series.clone();
+                    async move { Json(series) }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let state = AppState {
+            db: sqlx::postgres::PgPoolOptions::new()
+                .connect_lazy("postgres://unused:unused@127.0.0.1/unused")
+                .unwrap(),
+            config: Arc::new(RwLock::new(
+                json!({"emby_server_url":format!("http://{address}"),"emby_api_key":"isolated-fixture","emby_user_id":"sample-user"}),
+            )),
+            http: reqwest::Client::new(),
+            sessions: Arc::new(crate::auth::SessionSigner::load(directory.path()).unwrap()),
+            recovery_tokens: Arc::default(),
+            data_dir: directory.path().into(),
+            notifications: Arc::default(),
+            webhooks: Arc::default(),
+            ai: Arc::default(),
+            jobs: Arc::default(),
+            logs: crate::logs::LogStore::open(&directory.path().join("logs")).unwrap(),
+            p115: Arc::default(),
+            strm: Arc::default(),
+            douban: Arc::default(),
+            docker: Arc::default(),
+        };
+        (directory, state, requests, server)
+    }
+
+    #[tokio::test]
+    async fn previews_the_newest_real_movie_and_episode_with_series_metadata() {
+        let (_directory, state, requests, server) = environment(
+            json!({"Items":[{"Id":"movie-new","Type":"Movie","Name":"最近电影","ProductionYear":2026,"Path":"/media/Old.1994.2160p.H265.mkv","DateCreated":"2026-11-10"}]}),
+            json!({"Items":[{"Id":"episode-new","Type":"Episode","Name":"最新一集","SeriesId":"series-new","ParentIndexNumber":2,"IndexNumber":8,"Path":"/media/Old.S01E01.1080p.mp4","DateCreated":"2026-11-11"}]}),
+            json!({"Id":"series-new","Type":"Series","Name":"最近电视剧","ProductionYear":2025,"ProviderIds":{"Tmdb":"series-tmdb"}}),
+        ).await;
+        let result = sample(State(state), Json(json!({"movie_format":"{{title}} ({{year}})/{{title}}.{{videoFormat}}.mkv","tv_format":"{{title}} ({{year}})/{{season_episode}}.{{tmdbid}}.mp4"}))).await.unwrap().0;
+        assert_eq!(result["movie"], "最近电影 (2026)/最近电影.2160p.mkv");
+        assert_eq!(result["tv"], "最近电视剧 (2025)/S02E08.series-tmdb.mp4");
+        assert_eq!(result["movie_sample"]["id"], "movie-new");
+        assert_eq!(result["tv_sample"]["id"], "episode-new");
+        assert_eq!(result["tv_sample"]["created_at"], "2026-11-11");
+        assert_eq!(result["errors"], json!({}));
+        let recorded = requests.lock().unwrap();
+        assert_eq!(recorded.len(), 2);
+        for query in recorded.iter() {
+            assert_eq!(query["SortBy"], "DateCreated");
+            assert_eq!(query["SortOrder"], "Descending");
+            assert_eq!(query["Recursive"], "true");
+            assert_eq!(query["Limit"], "1");
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn empty_recent_library_has_no_fabricated_examples() {
+        let (_directory, state, _, server) =
+            environment(json!({"Items":[]}), json!({"Items":[]}), Value::Null).await;
+        let result = sample(
+            State(state),
+            Json(json!({"movie_format":"{{title}}.mkv","tv_format":"{{title}}.mp4"})),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(result["movie"], "");
+        assert_eq!(result["tv"], "");
+        assert!(result["movie_sample"].is_null() && result["tv_sample"].is_null());
+        assert_eq!(result["errors"], json!({}));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn one_type_failure_preserves_the_other_real_example() {
+        let (_directory, state, _, server) = environment(
+            json!({"Items":[{"Id":"movie-new","Type":"Movie","Name":"真实电影","Path":"/media/Real.mkv"}]}),
+            json!("unavailable"), Value::Null,
+        ).await;
+        let result = sample(State(state), Json(json!({"movie_format":"{{title}}.mkv"})))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(result["movie"], "真实电影.mkv");
+        assert_eq!(result["movie_sample"]["id"], "movie-new");
+        assert!(result["tv_sample"].is_null());
+        assert!(
+            result["errors"]["tv"]
+                .as_str()
+                .unwrap()
+                .contains("HTTP 502")
+        );
+        assert!(result["errors"].get("movie").is_none());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn malformed_identity_and_invalid_template_are_reported_per_type() {
+        let (_directory, state, _, server) = environment(
+            json!({"Items":[{"Id":"movie-new","Type":"Movie","Name":"最近电影","Path":"/media/New.mkv"}]}),
+            json!({"Items":[{"Id":"episode-new","Type":"Episode","Name":"最新一集","SeriesId":"../invalid","Path":"/media/Episode.mkv"}]}), Value::Null,
+        ).await;
+        let result = sample(
+            State(state),
+            Json(json!({"movie_format":"{{", "tv_format":"{{title}}.mkv"})),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(result["movie_sample"].is_null() && result["tv_sample"].is_null());
+        assert!(
+            result["errors"]["movie"]
+                .as_str()
+                .unwrap()
+                .contains("Jinja2")
+        );
+        assert!(
+            result["errors"]["tv"]
+                .as_str()
+                .unwrap()
+                .contains("缺少所属电视剧")
+        );
+        server.abort();
     }
 }

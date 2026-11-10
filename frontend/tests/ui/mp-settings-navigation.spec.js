@@ -12,11 +12,11 @@ test('MP settings use one navigation entry and working header categories', async
   await expect(page.getByLabel('媒体元数据目录', { exact: true })).toBeVisible();
   await page.getByRole('tab', { name: '规则', exact: true }).click();
   await expect(page.getByRole('button', { name: '保存实时监控', exact: true })).toBeVisible();
-  await page.getByRole('tab', { name: '搜索 & 下载', exact: true }).click();
+  await page.getByRole('tab', { name: '数据源', exact: true }).click();
   await expect(page.getByLabel('TMDB API Key', { exact: true })).toBeVisible();
   await page.getByRole('tab', { name: '通知', exact: true }).click();
   await expect(page).toHaveURL(/settings\/notifications/);
-  await expect(page.getByLabel('Telegram Bot Token', { exact: true })).toBeVisible();
+  await expect(page.locator('.notification-channel')).toBeVisible();
   await page.reload();
   await expect(page.getByRole('tab', { name: '通知', exact: true })).toHaveAttribute('aria-selected', 'true');
 });
@@ -27,9 +27,9 @@ test('mobile header settings tabs stay within the viewport', async ({ page }) =>
   const tabs = page.locator('.settings-header-tabs');
   await expect(tabs).toBeVisible();
   await page.getByRole('tab', { name: '通知', exact: true }).click();
-  await expect(page.getByLabel('Telegram Bot Token', { exact: true })).toBeVisible();
+  await expect(page.locator('.notification-channel')).toBeVisible();
   const navbar = await page.locator('.layout-navbar').boundingBox();
-  const content = await page.getByLabel('Telegram Bot Token', { exact: true }).boundingBox();
+  const content = await page.locator('.notification-channel').boundingBox();
   expect(content.y).toBeGreaterThan(navbar.y + navbar.height);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(392);
 });
@@ -37,5 +37,5 @@ test('mobile header settings tabs stay within the viewport', async ({ page }) =>
 test('MP notification deep links open the notification settings category', async ({ page }) => {
   await page.goto('/setting?tab=notification');
   await expect(page.getByRole('tab', { name: '通知', exact: true })).toHaveAttribute('aria-selected', 'true');
-  await expect(page.getByLabel('Telegram Bot Token', { exact: true })).toBeVisible();
+  await expect(page.locator('.notification-channel')).toBeVisible();
 });

@@ -101,7 +101,7 @@ async fn emby(
             .timeout(Duration::from_secs(20))
             .send()
             .await,
-        StatusCode::OK,
+        StatusCode::NOT_FOUND,
     )
     .await
 }

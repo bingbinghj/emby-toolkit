@@ -38,7 +38,7 @@ function fixture({ get = async () => ({ data: { pending: false, records: [] } })
     message: Object.fromEntries(['success', 'warning', 'error'].map(type => [type, text => messages.push({ type, text })])),
     dialog: { warning: options => { dialogs.push(options); return { destroy() { options.onClose?.(); } }; } },
   });
-  vm.runInContext(['mediaOperationDetails', 'loadMediaRecovery', 'recoverMediaInfo', 'confirmMediaRecovery'].map(functionSource).join('\n') + '\nthis.load = loadMediaRecovery; this.recover = recoverMediaInfo; this.confirm = confirmMediaRecovery;', context);
+  vm.runInContext(['mediaOperationDetails', 'loadMediaRecovery', 'recoveryConflictValue', 'recoveryJsonConflictHashes', 'recoverMediaInfo', 'confirmMediaRecovery'].map(functionSource).join('\n') + '\nthis.load = loadMediaRecovery; this.recover = recoverMediaInfo; this.confirm = confirmMediaRecovery;', context);
   return { context, requests, messages, reloads, dialogs };
 }
 
@@ -142,7 +142,7 @@ test('retrying cleanup deletes the backup without reloading or replacing a media
 });
 
 test('failed final task keeps recovery entry and the actual failure', async () => {
-  const f = fixture({ post: async () => { throw { response: { data: { error: '61616：章节图片尚未恢复' } } }; } });
+  const f = fixture({ post: async () => { throw { response: { data: { error: '61616：章节图片尚未恢复' } } }; }, get: async () => ({ data: pendingState() }) });
   const draft = JSON.stringify(f.context.mediaInfoData.value);
   await f.context.recover(record);
   assert.equal(f.context.mediaRecoveryState.value.pending, true);
@@ -240,4 +240,117 @@ test('only one confirmation opens and an old confirmation cannot recover on a ne
   assert.deepEqual(f.requests, []);
   f.dialogs[0].onClose();
   assert.equal(f.context.isConfirmingMediaRecovery.value, false);
+});
+
+const currentHash = 'a'.repeat(64);
+const nextHash = 'b'.repeat(64);
+const preservedDirectory = '/config/backups/media-info-conflicts/retained-current-json';
+const jsonConflictRecord = (hash = currentHash) => ({
+  ...record,
+  json_conflicts: [{
+    item_id: '101', path: '/media/Movie-mediainfo.json', current_sha256: hash,
+    changes: [{ path: '/0/MediaSourceInfo/MediaStreams/0/Title', expected: '原标题', current: '用户修改' }],
+    change_count: 1,
+  }],
+});
+
+function setConflict(f, record = jsonConflictRecord()) {
+  f.context.mediaRecoveryState.value = { pending: true, records: [record] };
+  return record;
+}
+
+test('a real JSON conflict cannot be overwritten by the default recovery action', async () => {
+  const f = fixture();
+  const changed = setConflict(f);
+  await f.context.recover(changed);
+  assert.deepEqual(f.requests, []);
+  assert.equal(f.context.mediaRecoveryState.value.pending, true);
+  assert.match(f.context.mediaRecoveryError.value, /确认备份后恢复/);
+});
+
+test('explicit conflict confirmation submits the exact shown hash and retains the current JSON backup path', async () => {
+  const f = fixture({ post: async () => ({ data: { ...result, conflict_backup_directories: [preservedDirectory] } }) });
+  const changed = setConflict(f);
+  f.context.mediaInfoData.value[0].MediaSourceInfo.MediaStreams[0].Title = '保留本地草稿';
+  f.context.confirm(changed);
+  assert.equal(f.dialogs[0].title, '备份当前 JSON 并恢复');
+  assert.equal(f.dialogs[0].positiveText, '备份并恢复');
+  assert.match(f.dialogs[0].content, /当前文件备份到独立留存目录/);
+  assert.ok(f.dialogs[0].content.includes(currentHash));
+  await f.dialogs[0].onPositiveClick();
+  assert.deepEqual(f.requests[0].body, { recovery_id: record.id, current_json_hashes: { '101': currentHash } });
+  assert.equal(f.context.mediaRecoveryState.value.pending, false);
+  assert.deepEqual(f.reloads, []);
+  assert.equal(f.context.mediaInfoData.value[0].MediaSourceInfo.MediaStreams[0].Title, '保留本地草稿');
+  assert.ok(f.context.mediaInfoSaveFeedback.value.details.some(detail => detail.includes(preservedDirectory)));
+  assert.ok(f.context.mediaOperationFeedback.value.details.some(detail => detail.includes(preservedDirectory)));
+});
+
+test('a pristine editor reload keeps the separate current JSON retention directory visible', async () => {
+  const f = fixture({ post: async () => ({ data: { ...result, conflict_backup_directories: [preservedDirectory] } }) });
+  f.context.confirm(setConflict(f));
+  await f.dialogs[0].onPositiveClick();
+  assert.deepEqual(f.reloads, ['101']);
+  assert.equal(f.context.mediaInfoSaveFeedback.value.type, 'info');
+  assert.ok(f.context.mediaInfoSaveFeedback.value.details.some(detail => detail.includes(preservedDirectory)));
+});
+
+test('a confirmation for an older shown JSON hash cannot submit after status changes', async () => {
+  const f = fixture();
+  f.context.confirm(setConflict(f));
+  setConflict(f, jsonConflictRecord(nextHash));
+  await f.dialogs[0].onPositiveClick();
+  assert.deepEqual(f.requests, []);
+  assert.equal(f.context.mediaRecoveryState.value.records[0].json_conflicts[0].current_sha256, nextHash);
+  assert.match(f.context.mediaRecoveryError.value, /重新检查差异/);
+});
+
+test('a conflicting JSON without a complete current hash cannot open an overwrite confirmation', () => {
+  const f = fixture();
+  f.context.confirm(setConflict(f, jsonConflictRecord('')));
+  assert.deepEqual(f.dialogs, []);
+  assert.equal(f.context.isConfirmingMediaRecovery.value, false);
+  assert.match(f.context.mediaRecoveryError.value, /缺少有效哈希/);
+});
+
+test('a hash conflict from the server refreshes diagnostics before a new explicit confirmation', async () => {
+  let attempts = 0;
+  const f = fixture({
+    post: async () => {
+      if (++attempts === 1) throw { response: { status: 409, data: { error: '当前 JSON 哈希已变化，未覆盖文件' } } };
+      return { data: { ...result, conflict_backup_directories: [preservedDirectory] } };
+    },
+    get: async () => ({ data: attempts === 1 ? { pending: true, records: [jsonConflictRecord(nextHash)] } : { pending: false, records: [] } }),
+  });
+  f.context.confirm(setConflict(f));
+  await f.dialogs[0].onPositiveClick();
+  assert.equal(f.context.mediaRecoveryState.value.records[0].json_conflicts[0].current_sha256, nextHash);
+  assert.match(f.context.mediaRecoveryError.value, /未覆盖文件/);
+  assert.deepEqual(f.requests.map(request => request.method), ['POST', 'GET']);
+  f.dialogs[0].onClose();
+  f.context.confirm(f.context.mediaRecoveryState.value.records[0]);
+  await f.dialogs[1].onPositiveClick();
+  assert.deepEqual(f.requests[2].body.current_json_hashes, { '101': nextHash });
+  assert.equal(f.context.mediaRecoveryState.value.pending, false);
+});
+
+test('every conflicting item hash is captured in one explicit confirmation', async () => {
+  const f = fixture();
+  const changed = jsonConflictRecord();
+  changed.json_conflicts.push({ ...changed.json_conflicts[0], item_id: '102', path: '/media/Second-mediainfo.json', current_sha256: nextHash });
+  f.context.confirm(setConflict(f, changed));
+  await f.dialogs[0].onPositiveClick();
+  assert.deepEqual(f.requests[0].body.current_json_hashes, { '101': currentHash, '102': nextHash });
+});
+
+test('backup deletion warnings still expose the separately retained current JSON directory', async () => {
+  const f = fixture({
+    post: async () => ({ status: 207, data: { ...result, pending: true, backup_deleted: false, warnings: 1, warning_details: ['原恢复目录删除失败'], conflict_backup_directories: [preservedDirectory] } }),
+    get: async () => ({ data: { pending: true, records: [{ ...cleanupRecord, conflict_backup_directories: [preservedDirectory] }] } }),
+  });
+  f.context.confirm(setConflict(f));
+  await f.dialogs[0].onPositiveClick();
+  assert.equal(f.context.mediaRecoveryState.value.pending, true);
+  assert.equal(f.messages.at(-1).type, 'warning');
+  assert.ok(f.context.mediaInfoSaveFeedback.value.details.some(detail => detail.includes(preservedDirectory)));
 });

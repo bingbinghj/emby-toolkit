@@ -1,314 +1,157 @@
 <template>
   <section class="history-log-view" aria-label="历史日志">
-    <div class="drawer-inner-wrapper">
-      <div class="header-section">
-        <div class="d-flex ga-3 align-start">
-          <VTextField v-model="searchQuery" label="在所有日志文件中搜索" placeholder="输入关键词" clearable hide-details density="compact" prepend-inner-icon="mdi-magnify" :disabled="isLoading" @keyup.enter="executeSearch" />
-          <VBtn color="primary" variant="tonal" prepend-icon="mdi-magnify" :loading="isSearching" :disabled="isLoading" @click="executeSearch">搜索</VBtn>
-        </div>
-        <VRadioGroup v-model="searchMode" inline hide-details class="mt-2" :disabled="isLoading">
-          <VRadio label="匹配日志行" value="filter" />
-          <VRadio label="完整上下文" value="context" />
-        </VRadioGroup>
-      </div>
-      <VDivider class="my-3" />
-      <div class="flex-spin">
-        <VOverlay :model-value="isLoading" contained persistent class="align-center justify-center" :scrim="false">
-          <VCard class="pa-4 text-center" aria-live="polite"><VProgressCircular indeterminate color="primary" /><p class="text-body-2 mt-3">{{ loadingText }}</p></VCard>
-        </VOverlay>
-        <div v-if="isSearchMode && searchMode === 'context'" class="view-container">
-          <div class="toolbar"><VBtn variant="tonal" size="small" prepend-icon="mdi-arrow-left" @click="clearSearch">返回文件浏览</VBtn><span class="tip">已隐藏日期与模块名，仅显示核心流</span></div>
-          <div v-if="htmlContent" class="iframe-wrapper"><iframe :srcdoc="htmlContent" title="日志搜索上下文" frameborder="0" width="100%" height="100%" @load="applyFrameTheme" /></div>
-          <div v-else class="empty-state"><VIcon icon="mdi-text-search" size="40" class="text-medium-emphasis" /><p>未找到匹配的完整处理流程</p></div>
-        </div>
-        <div v-else-if="isSearchMode && searchMode === 'filter'" class="view-container">
-          <div class="toolbar"><VBtn variant="tonal" size="small" prepend-icon="mdi-arrow-left" @click="clearSearch">返回文件浏览</VBtn></div>
-          <div v-if="hasSearchResults" class="log-text-area">
-            <div v-for="(line, index) in parsedLogResults" :key="index" class="log-line" :class="line.type === 'log' ? line.level.toLowerCase() : 'raw'">
-              <template v-if="line.type === 'log'"><span class="timestamp">{{ line.timestamp }}</span><span class="level">{{ line.level }}</span><span class="message">{{ line.message }}</span></template>
-              <template v-else>{{ line.content }}</template>
-            </div>
-          </div>
-          <div v-else class="empty-state"><VIcon icon="mdi-text-search" size="40" class="text-medium-emphasis" /><p>未找到匹配的日志记录</p></div>
-        </div>
-        <div v-else class="view-container">
-          <div class="toolbar">
-            <VSelect v-model="selectedFile" :items="fileOptions" item-title="label" item-value="value" label="日志文件" :loading="isLoadingFiles" hide-details density="compact" class="history-file-select" @update:model-value="filename => fetchLogContent(filename)" />
-            <span class="tip"><VIcon icon="mdi-clock-outline" size="14" /> 最新日志在顶部</span>
-            <VBtn icon="mdi-refresh" variant="text" size="small" aria-label="刷新历史日志" :loading="isLoading" @click="refreshLogs" />
-          </div>
-          <div v-if="logPages > 1" class="history-pagination">
-            <VBtn variant="tonal" size="small" prepend-icon="mdi-chevron-left" :disabled="isLoading || logPage <= 1" @click="fetchLogContent(selectedFile, logPage - 1)">较新日志</VBtn>
-            <span>第 {{ logPage }} / {{ logPages }} 页，共 {{ logTotalLines }} 行</span>
-            <VBtn variant="tonal" size="small" append-icon="mdi-chevron-right" :disabled="isLoading || logPage >= logPages" @click="fetchLogContent(selectedFile, logPage + 1)">较早日志</VBtn>
-          </div>
-          <div v-if="logContent" class="iframe-wrapper"><iframe :srcdoc="logContent" title="历史日志内容" frameborder="0" width="100%" height="100%" @load="applyFrameTheme" /></div>
-          <div v-else class="empty-state"><VIcon icon="mdi-file-document-outline" size="40" class="text-medium-emphasis" /><p>暂无日志内容</p></div>
-        </div>
-      </div>
+    <div class="history-search-toolbar">
+      <VTextField v-model="searchQuery" label="在所有日志文件中搜索" placeholder="输入关键词" clearable hide-details density="compact" prepend-inner-icon="mdi-magnify" :disabled="isLoading" @keyup.enter="executeSearch" />
+      <VBtn variant="tonal" prepend-icon="mdi-magnify" :loading="isSearching" :disabled="isLoading" @click="executeSearch">搜索</VBtn>
+    </div>
+    <VRadioGroup v-model="searchMode" inline hide-details :disabled="isLoadingFiles || isLoadingContent">
+      <VRadio label="匹配日志行" value="filter" />
+      <VRadio label="完整上下文" value="context" />
+    </VRadioGroup>
+    <div class="history-toolbar">
+      <VBtn v-if="isSearchMode" variant="tonal" size="small" prepend-icon="mdi-arrow-left" @click="clearSearch">返回文件浏览</VBtn>
+      <VSelect v-else v-model="selectedFile" :items="logFiles" label="日志文件" :loading="isLoadingFiles" :disabled="isLoading" hide-details density="compact" class="history-file-select" @update:model-value="filename => fetchLogContent(filename)" />
+      <VSelect v-model="levelFilter" :items="levelOptions" label="日志级别" hide-details density="compact" class="history-level-select" />
+      <VBtn icon="mdi-refresh" variant="text" size="small" aria-label="刷新历史日志" :loading="isLoading" @click="refreshLogs" />
+      <VBtn variant="tonal" size="small" prepend-icon="mdi-download" :disabled="!displayedRecords.length" @click="downloadLogs">导出日志</VBtn>
+    </div>
+    <div v-if="!isSearchMode && logPages > 1" class="history-pagination">
+      <VBtn variant="tonal" size="small" prepend-icon="mdi-chevron-left" :disabled="isLoading || logPage <= 1" @click="fetchLogContent(selectedFile, logPage - 1)">较新日志</VBtn>
+      <span>第 {{ logPage }} / {{ logPages }} 页，共 {{ logTotalLines }} 行</span>
+      <VBtn variant="tonal" size="small" append-icon="mdi-chevron-right" :disabled="isLoading || logPage >= logPages" @click="fetchLogContent(selectedFile, logPage + 1)">较早日志</VBtn>
+    </div>
+    <VAlert v-if="errorMessage" type="error" variant="tonal">{{ errorMessage }}</VAlert>
+    <VProgressLinear v-if="isLoading" indeterminate color="primary" :aria-label="loadingText" />
+    <div ref="scrollRef" class="history-log-list" role="region" aria-label="历史日志内容" tabindex="0">
+      <LogRecord v-for="(entry, index) in displayedRecords" :key="index" :line="entry.line" :file="entry.file" :keyword="isSearchMode ? appliedQuery : ''" />
+      <div v-if="!isLoading && !displayedRecords.length" class="history-empty"><VIcon icon="mdi-text-search" size="40" /><p>{{ isSearchMode ? '未找到匹配的日志记录' : levelFilter === 'all' ? '暂无日志内容' : '没有匹配的日志' }}</p></div>
     </div>
   </section>
 </template>
+
 <script setup>
-import { ref, watch, computed, onMounted, onUnmounted } from 'vue';
+import { ref, watch, computed, onUnmounted, nextTick } from 'vue';
 import axios from 'axios';
-import { useMessage } from '@/composables/useFeedback';
+import LogRecord from './LogRecord.vue';
+import { matchesLogRecord } from '@/utils/logRecords';
 
 const props = defineProps({ show: { type: Boolean, default: false } });
-
-const message = useMessage();
-const isLoadingFiles = ref(false);
-const isLoadingContent = ref(false);
-const isSearching = ref(false);
-const logFiles = ref([]);
-const selectedFile = ref(null);
-const logContent = ref(''); // 现在这里存储的是 HTML 字符串
+const isLoadingFiles = ref(false), isLoadingContent = ref(false), isSearching = ref(false);
+const logFiles = ref([]), selectedFile = ref(null), logContent = ref([]), searchResults = ref([]);
 const logPage = ref(1), logPages = ref(1), logTotalLines = ref(0);
-const searchQuery = ref('');
-const searchResults = ref([]);
-const htmlContent = ref(''); // 搜索结果的 HTML
-const isSearchMode = ref(false);
-const searchMode = ref('context');
-let themeObserver;
-let readSequence = 0, searchSequence = 0;
-
-function applyFrameTheme(event) {
-  const frame = event?.target;
-  if (!frame?.contentDocument) return;
-  const vars = getComputedStyle(document.documentElement);
-  let style = frame.contentDocument.querySelector('#etk-log-theme');
-  if (!style) {
-    style = frame.contentDocument.createElement('style');
-    style.id = 'etk-log-theme';
-    (frame.contentDocument.head || frame.contentDocument.documentElement).appendChild(style);
-  }
-  const color = key => vars.getPropertyValue(key).trim();
-  const css = `:root{--bg-color:${color('--ui-input-bg')};--text-color:${color('--ui-text')};--time-color:${color('--ui-text-muted')};--debug-color:${color('--ui-text-muted')};--info-color:${color('--ui-text')};--warn-color:${color('--ui-warning-text')};--error-color:${color('--ui-error-text')};--arrow-color:${color('--ui-primary-text')};--highlight-bg:${color('--ui-primary-solid')}}
-body{background:var(--bg-color)!important;color:var(--text-color)!important;margin:0!important;padding:14px!important;height:auto!important;line-height:1.75!important}h3,.block-header{color:var(--time-color)!important;border-color:${color('--ui-border')}!important}pre,.msg{overflow-wrap:anywhere!important;word-break:break-word!important}.log-block{border-color:${color('--ui-border')}!important}.line:hover{background:${color('--accent-glow-color')}!important}.ts{opacity:1!important}mark,.keyword{background:var(--highlight-bg)!important;color:${color('--ui-on-primary')}!important}`;
-  if (style.textContent !== css) style.textContent = css;
-}
-onMounted(() => {
-  themeObserver = new MutationObserver(() => {
-    document.querySelectorAll('.history-log-view iframe').forEach(target => applyFrameTheme({ target }));
-  });
-  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['style', 'class', 'data-theme'] });
-});
-onUnmounted(() => themeObserver?.disconnect());
-
+const searchQuery = ref(''), appliedQuery = ref(''), searchMode = ref('context'), isSearchMode = ref(false);
+const levelFilter = ref('all'), errorMessage = ref(''), scrollRef = ref(null);
+const levelOptions = [{ title: '全部日志', value: 'all' }, { title: 'DEBUG', value: 'debug' }, { title: 'INFO', value: 'info' }, { title: '警告', value: 'warning' }, { title: '错误', value: 'error' }];
+let readSequence = 0, fileSequence = 0, pageActive = true;
 const isLoading = computed(() => isLoadingFiles.value || isLoadingContent.value || isSearching.value);
-const hasSearchResults = computed(() => searchResults.value.length > 0);
-const fileOptions = computed(() => logFiles.value.map(file => ({ label: file, value: file })));
-const loadingText = computed(() => {
-  if (isLoadingFiles.value) return '正在获取文件列表...';
-  if (isLoadingContent.value) return '正在渲染日志视图...';
-  if (isSearching.value) return '正在搜索...';
-  return '';
-});
-
-// 仅用于筛选模式的简单解析
-const parseLogLine = (line) => {
-  const match = line.match(/^(\d{4}-\d{2}-\d{2}\s(\d{2}:\d{2}:\d{2})),\d+\s-\s.+?\s-\s(DEBUG|INFO|WARNING|ERROR|CRITICAL)\s-\s(.*)$/);
-  if (match) {
-    return { type: 'log', timestamp: match[2], level: match[3], message: match[4].trim() };
-  }
-  return { type: 'raw', content: line };
-};
-
-const parsedLogResults = computed(() => {
-  if (!hasSearchResults.value || searchMode.value === 'context') return [];
-  const finalLines = [];
-  finalLines.push(`以“筛选”模式找到 ${searchResults.value.length} 条结果:`);
-  let lastFile = '';
-  searchResults.value.forEach(result => {
-    if (result.file !== lastFile) {
-      if (finalLines.length > 1) finalLines.push('');
-      finalLines.push(`--- [ 文件: ${result.file} ] ---`);
-      lastFile = result.file;
-    }
-    finalLines.push(result.content);
-  });
-  return finalLines.map(parseLogLine);
-});
+const loadingText = computed(() => isLoadingFiles.value ? '正在获取文件列表' : isSearching.value ? '正在搜索日志' : '正在读取日志');
+const displayedRecords = computed(() => (isSearchMode.value ? searchResults.value : logContent.value)
+  .filter(entry => matchesLogRecord(entry.line, '', levelFilter.value)));
 
 const fetchLogFiles = async () => {
+  const sequence = ++fileSequence;
   isLoadingFiles.value = true;
   try {
-    const response = await axios.get('/api/logs/list');
-    logFiles.value = Array.isArray(response.data) ? response.data : [];
-    if (!isSearchMode.value && logFiles.value.length > 0 && !selectedFile.value) {
-      selectedFile.value = logFiles.value[0];
-      await fetchLogContent(selectedFile.value);
-    }
+    const { data } = await axios.get('/api/logs/list');
+    if (!pageActive || sequence !== fileSequence) return;
+    if (!Array.isArray(data) || data.some(file => typeof file !== 'string')) throw new Error('日志文件列表格式无效');
+    logFiles.value = data;
+    if (!data.includes(selectedFile.value)) selectedFile.value = data[0] || null;
+    if (!selectedFile.value) logContent.value = [];
   } catch (error) {
-    message.error('获取日志文件列表失败！');
+    if (pageActive && sequence === fileSequence) errorMessage.value = error.response?.data?.error || error.message || '获取日志文件列表失败';
   } finally {
-    isLoadingFiles.value = false;
+    if (pageActive && sequence === fileSequence) isLoadingFiles.value = false;
   }
 };
 
-// ★★★ 修改：请求 HTML 格式 ★★★
 const fetchLogContent = async (filename, page = 1) => {
   if (!filename) return;
   const sequence = ++readSequence;
   isLoadingContent.value = true;
-  logContent.value = ''; // 清空旧内容
+  errorMessage.value = '';
   try {
-    const response = await axios.get('/api/logs/view', {
-      params: {
-        filename,
-        page,
-        format: 'html' // 告诉后端我要 HTML
-      },
-      responseType: 'text'
-    });
-    if (sequence === readSequence) {
-      logContent.value = response.data;
-      logPage.value = Number(response.headers?.['x-log-page']) || 1;
-      logPages.value = Number(response.headers?.['x-log-pages']) || 1;
-      logTotalLines.value = Number(response.headers?.['x-log-total-lines']) || 0;
-    }
+    const { data } = await axios.get('/api/logs/view', { params: { filename, page, format: 'json' } });
+    if (!pageActive || sequence !== readSequence) return;
+    if (!Array.isArray(data?.lines) || data.lines.some(line => typeof line !== 'string')) throw new Error('日志内容格式无效');
+    logContent.value = data.lines.map(line => ({ line, file: filename }));
+    logPage.value = Number(data.page) || 1;
+    logPages.value = Number(data.pages) || 1;
+    logTotalLines.value = Number(data.total_lines) || 0;
+    await nextTick();
+    if (scrollRef.value) scrollRef.value.scrollTop = 0;
   } catch (error) {
-    if (sequence === readSequence) message.error(`加载日志 ${filename} 失败！`);
+    if (pageActive && sequence === readSequence) errorMessage.value = error.response?.data?.error || error.message || `加载日志 ${filename} 失败`;
   } finally {
-    if (sequence === readSequence) isLoadingContent.value = false;
+    if (pageActive && sequence === readSequence) isLoadingContent.value = false;
   }
 };
 
 const executeSearch = async () => {
-  if (isLoading.value) return;
-  if (!String(searchQuery.value || '').trim()) {
-    message.warning('请输入搜索关键词。');
-    return;
-  }
+  if (isLoadingFiles.value || isLoadingContent.value) return;
+  const query = String(searchQuery.value || '').trim();
+  if (!query) { clearSearch(); return; }
+  const sequence = ++readSequence;
+  const mode = searchMode.value;
   isSearching.value = true;
-  const sequence = ++searchSequence;
-  isSearchMode.value = true;
-  searchResults.value = [];
-  htmlContent.value = '';
-
+  errorMessage.value = '';
   try {
-    if (searchMode.value === 'context') {
-      const response = await axios.get('/api/logs/search_context', {
-        params: { q: searchQuery.value, format: 'html' },
-        responseType: 'text'
-      });
-      if (sequence !== searchSequence) return;
-      if (typeof response.data === 'string' && response.data.trim()) {
-        htmlContent.value = response.data;
-      } else {
-        htmlContent.value = '';
-      }
-    } else {
-      const response = await axios.get('/api/logs/search', { params: { q: searchQuery.value } });
-      if (sequence === searchSequence) searchResults.value = Array.isArray(response.data) ? response.data : [];
-    }
+    const { data } = await axios.get(mode === 'context' ? '/api/logs/search_context' : '/api/logs/search', { params: { q: query } });
+    if (!pageActive || sequence !== readSequence || mode !== searchMode.value) return;
+    if (!Array.isArray(data)) throw new Error('日志搜索结果格式无效');
+    const entries = mode === 'context'
+      ? data.flatMap(block => (block.lines || []).map(line => ({ line, file: block.file || '' })))
+      : data.map(entry => ({ line: entry.content, file: entry.file || '' }));
+    if (entries.some(entry => typeof entry.line !== 'string')) throw new Error('日志搜索内容格式无效');
+    searchResults.value = entries;
+    appliedQuery.value = query;
+    isSearchMode.value = true;
+    await nextTick();
+    if (scrollRef.value) scrollRef.value.scrollTop = 0;
   } catch (error) {
-    console.error(error);
-    message.error('搜索失败，请检查后台日志。');
+    if (pageActive && sequence === readSequence) errorMessage.value = error.response?.data?.error || error.message || '搜索日志失败';
   } finally {
-    if (sequence === searchSequence) isSearching.value = false;
+    if (pageActive && sequence === readSequence) isSearching.value = false;
   }
 };
 
 const clearSearch = () => {
-  searchSequence++;
+  readSequence++;
   isSearching.value = false;
   isSearchMode.value = false;
   searchQuery.value = '';
+  appliedQuery.value = '';
   searchResults.value = [];
-  htmlContent.value = '';
-  if (selectedFile.value && !logContent.value) {
-    fetchLogContent(selectedFile.value);
-  }
+  errorMessage.value = '';
 };
-
-watch(() => props.show, visible => { if (visible && !logFiles.value.length) fetchLogFiles(); }, { immediate: true });
-watch(searchMode, () => { if (isSearchMode.value && String(searchQuery.value || '').trim()) executeSearch(); });
 async function refreshLogs() {
   if (isLoading.value) return;
+  if (isSearchMode.value) return executeSearch();
+  errorMessage.value = '';
   await fetchLogFiles();
   if (selectedFile.value) await fetchLogContent(selectedFile.value);
 }
+function downloadLogs() {
+  const url = URL.createObjectURL(new Blob([displayedRecords.value.map(entry => entry.line).join('\n')], { type: 'text/plain;charset=utf-8' }));
+  const link = document.createElement('a');
+  link.href = url; link.download = selectedFile.value || 'etk-search.log'; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+watch(() => props.show, async visible => { if (visible && !logFiles.value.length && !isLoading.value) await refreshLogs(); }, { immediate: true });
+watch(searchMode, () => { if (isSearchMode.value || isSearching.value) executeSearch(); }, { flush: 'sync' });
+onUnmounted(() => { pageActive = false; readSequence++; fileSequence++; });
 </script>
 
 <style scoped>
-.history-log-view { display:flex; flex:1; min-height:0; min-width:0; }
-.drawer-inner-wrapper {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  width:100%;
-  min-width:0;
-  padding:0;
-  box-sizing: border-box;
-}
-
-.header-section { flex-shrink: 0; }
-.history-pagination { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:8px; flex-shrink:0; }
+.history-log-view { display:flex; flex:1; flex-direction:column; gap:12px; min-height:0; min-width:0; overflow:auto; }
+.history-search-toolbar, .history-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:10px; flex-shrink:0; }
+.history-search-toolbar > .v-input { flex:1; min-width:160px; }
+.history-file-select { flex:1 1 200px; min-width:0; }
+.history-level-select { flex:0 1 140px; min-width:110px; }
+.history-log-view > .v-input, .history-log-view > .v-alert, .history-log-view > .v-progress-linear { flex-shrink:0; }
+.history-pagination { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; flex-shrink:0; }
 .history-pagination span { color:var(--ui-text-muted); font-size:12px; }
-
-.flex-spin {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  min-height: 320px;
-  position: relative;
-}
-
-.empty-state { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; flex:1; min-height:240px; color:rgb(var(--v-theme-on-surface)); opacity:.7; }
-
-.view-container {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  overflow: hidden;
-}
-
-.toolbar {
-  flex-shrink: 0;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
-  gap:12px;
-  flex-wrap:wrap;
-}
-.history-file-select { width:min(260px,100%); flex:1; min-width:0; }
-
-.tip { font-size:12px; color:var(--ui-text-muted); }
-
-.iframe-wrapper {
-  flex: 1;
-  border:1px solid var(--ui-border);
-  border-radius:10px;
-  overflow: hidden;
-  background-color:var(--ui-surface-muted);
-  height: 100%;
-  display: flex;
-}
-
-iframe { flex: 1; display: block; }
-
-.log-text-area {
-  flex: 1;
-  background-color:var(--ui-surface-muted);
-  font-family: 'Courier New', Courier, monospace;
-  font-size: 13px;
-  padding: 10px 15px;
-  border:1px solid var(--ui-border);
-  border-radius:10px;
-  overflow-y: auto;
-  white-space: pre-wrap;
-  word-break: break-all;
-}
-
-.log-line { line-height:1.8; padding:3px 0; color:var(--ui-text); }
-.log-line.warning { color:var(--ui-warning-text); }
-.log-line.error, .log-line.critical { color:var(--ui-error-text); }
-.log-line.debug, .log-line.raw { color:var(--ui-text-muted); }
-.timestamp { color:var(--ui-text-muted); margin-right:1em; }
-.level { font-weight: bold; margin-right: 1em; text-transform: uppercase; }
-@media (max-width:540px) { .toolbar { gap:8px; } .tip { display:none; } }
+.history-log-list { display:flex; flex-direction:column; gap:12px; flex:1 0 160px; min-height:160px; min-width:0; overflow:auto; overscroll-behavior:contain; padding:8px 4px; }
+.history-empty { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:32px 8px; color:var(--ui-text-muted); }
+@media (max-width:540px) { .history-search-toolbar > .v-input { flex-basis:100%; } .history-log-list { padding:4px; } }
 </style>

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue';
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, unref } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { useDisplay } from 'vuetify';
 import axios from 'axios';
@@ -7,6 +7,7 @@ import { useAuthStore } from '@/stores/auth';
 import { refreshTaskStatus } from '@/composables/useTaskStatus';
 import { useMessage, useDialog } from '@/composables/useFeedback';
 import { useThemeCustomizer, THEME_CUSTOMIZER_OPEN_EVENT } from '@/composables/useThemeCustomizer';
+import { activeContextSearch } from '@/composables/useContextSearch';
 import DefaultLayout from '@/layouts/components/DefaultLayout.vue';
 import NotificationCenter from '@/components/NotificationCenter.vue';
 import ThemeCustomizer from '@/components/theme/ThemeCustomizer.vue';
@@ -20,6 +21,70 @@ const { mdAndDown } = useDisplay();
 const isMobile = computed(() => mdAndDown.value);
 const collapsed = computed(() => appearance.settings.value.layout === 'collapsed' && !isMobile.value);
 const notificationOpen = ref(false), themeCustomizerOpen = ref(false), avatarLoadFailed = ref(false);
+const searchOpen = ref(false), desktopSearchInput = ref(null), mobileSearchInput = ref(null);
+const fallbackSearch = ref(''), searchComposing = ref(false);
+const searchAvailable = computed(() => authStore.isLoggedIn && (Boolean(activeContextSearch.value) || authStore.isAdmin));
+const searchShortcutLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ K' : 'Ctrl K';
+const searchLabel = computed(() => unref(activeContextSearch.value?.label) || '搜索全部媒体');
+const searchDisabled = computed(() => Boolean(unref(activeContextSearch.value?.disabled)));
+const searchLoading = computed(() => Boolean(unref(activeContextSearch.value?.loading)));
+const searchWord = computed({
+  get: () => String(activeContextSearch.value?.query.value ?? fallbackSearch.value),
+  set: updateSearch,
+});
+function updateSearch(value) {
+  if (searchDisabled.value) return;
+  const text = String(value ?? '');
+  const context = activeContextSearch.value;
+  if (context) {
+    context.query.value = text;
+    if (!searchComposing.value) context.onInput?.(text);
+  } else fallbackSearch.value = text;
+}
+async function submitSearch() {
+  if (searchDisabled.value || searchComposing.value) return;
+  const context = activeContextSearch.value;
+  try {
+    if (context) await context.submit?.();
+    else await router.push({ name: 'ReviewList', query: searchWord.value.trim() ? { q: searchWord.value.trim() } : {} });
+    searchOpen.value = false;
+  } catch (error) { message.error(error.response?.data?.error || error.message || '搜索失败'); }
+}
+async function clearSearch() {
+  if (searchDisabled.value) return;
+  updateSearch('');
+  const context = activeContextSearch.value;
+  try { if (context) await (context.clear || context.submit)?.(); }
+  catch (error) { message.error(error.response?.data?.error || error.message || '清空搜索失败'); }
+}
+function startSearchComposition() {
+  searchComposing.value = true;
+  if (activeContextSearch.value?.composing) activeContextSearch.value.composing.value = true;
+}
+function finishSearchComposition() {
+  searchComposing.value = false;
+  const context = activeContextSearch.value;
+  if (context?.composing) context.composing.value = false;
+  if (context?.compositionEnd) context.compositionEnd();
+  else context?.onInput?.(searchWord.value);
+}
+async function openSearch() {
+  if (!searchAvailable.value) return;
+  searchOpen.value = isMobile.value || !activeContextSearch.value;
+  await nextTick();
+  (isMobile.value ? mobileSearchInput.value : desktopSearchInput.value)?.focus();
+}
+function searchShortcut(event) {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k' && searchAvailable.value) {
+    event.preventDefault();
+    openSearch();
+  }
+}
+watch([() => route.path, activeContextSearch, isMobile], () => {
+  searchOpen.value = false;
+  searchComposing.value = false;
+  fallbackSearch.value = '';
+});
 const taskControlBusy = ref(false);
 const settingsPage = computed(() => ['settings-general', 'settings-notifications'].includes(route.name));
 const contentKey = computed(() => settingsPage.value ? route.name : route.path);
@@ -29,7 +94,7 @@ const settingsTabs = [
   { value: 'system', title: '系统', icon: 'mdi-server-network' },
   { value: 'directory', title: '存储 & 目录', icon: 'mdi-folder' },
   { value: 'rule', title: '规则', icon: 'mdi-filter' },
-  { value: 'search', title: '搜索 & 下载', icon: 'mdi-magnify' },
+  { value: 'search', title: '数据源', icon: 'mdi-database-search-outline' },
   { value: 'notification', title: '通知', icon: 'mdi-bell' },
 ];
 const activeSettingsTab = computed(() => route.name === 'settings-notifications' ? 'notification'
@@ -95,8 +160,8 @@ function moveMenuItem(groupIndex, childIndex, delta) {
   if (target < 0 || target >= children.length) return;
   children.splice(target, 0, children.splice(childIndex, 1)[0]);
 }
-onMounted(() => { initMenuConfig(); window.addEventListener(THEME_CUSTOMIZER_OPEN_EVENT, openThemeCustomizer); });
-onBeforeUnmount(() => window.removeEventListener(THEME_CUSTOMIZER_OPEN_EVENT, openThemeCustomizer));
+onMounted(() => { initMenuConfig(); window.addEventListener(THEME_CUSTOMIZER_OPEN_EVENT, openThemeCustomizer); window.addEventListener('keydown', searchShortcut); });
+onBeforeUnmount(() => { window.removeEventListener(THEME_CUSTOMIZER_OPEN_EVENT, openThemeCustomizer); window.removeEventListener('keydown', searchShortcut); });
 
 const triggerRestart = async () => {
   message.info('正在发送重启指令...');
@@ -165,9 +230,9 @@ const baseMenuOptions = computed(() => {
         label: '系统', defaultLabel: '系统', key: 'group-system', icon: 'mdi-cog-outline',
         children: [
           { label: '设置', defaultLabel: '设置', key: 'settings-general', icon: 'mdi-cog-outline' },
-          { label: '用户管理', defaultLabel: '用户管理', key: 'UserManagement', icon: 'mdi-account-group-outline' },
           { label: '任务中心', defaultLabel: '任务中心', key: 'settings-scheduler', icon: 'mdi-timer-outline' },
           { label: '封面生成', defaultLabel: '封面生成', key: 'CoverGeneratorConfig', icon: 'mdi-palette-outline' },
+          { label: '用户管理', defaultLabel: '用户管理', key: 'UserManagement', icon: 'mdi-account-group-outline' },
         ]
       }
     );
@@ -210,6 +275,7 @@ const syncMenuConfig = (savedTree) => {
         label: savedGroup.label || baseGroup.defaultLabel,
         visible: savedGroup.visible !== false,
         expanded: savedGroup.expanded !== false, // 默认展开
+        user_management_order_version: savedGroup.user_management_order_version,
         children: []
       };
 
@@ -264,6 +330,14 @@ const syncMenuConfig = (savedTree) => {
     }
   });
 
+  // Migrate existing navigation once; a later explicit reorder retains its saved position.
+  resultTree.forEach(group => {
+    if (group.user_management_order_version !== 1) {
+      const userIndex = group.children.findIndex(child => child.key === 'UserManagement');
+      if (userIndex >= 0) group.children.push(...group.children.splice(userIndex, 1));
+    }
+    group.user_management_order_version = 1;
+  });
   return resultTree;
 };
 
@@ -491,8 +565,27 @@ const clearDragState = () => {
       </RouterLink>
     </template>
     <template #navbar-leading>
-      <VBtn v-if="authStore.isAdmin" variant="text" class="navbar-search" prepend-icon="mdi-magnify"
-        :to="{ name: 'ReviewList' }" aria-label="搜索媒体"><span v-if="!isMobile">搜索媒体</span></VBtn>
+      <template v-if="searchAvailable">
+        <VBtn v-if="isMobile" icon="mdi-magnify" variant="text" :aria-label="`打开${searchLabel}`" @click="openSearch" />
+        <VMenu v-else v-model="searchOpen" location="bottom start" offset="8" :close-on-content-click="false" :open-on-click="false">
+          <template #activator="{ props: searchProps }">
+            <div v-bind="searchProps" class="navbar-search navbar-search-desktop">
+              <VIcon icon="mdi-magnify" size="22" />
+              <input id="global-media-search" ref="desktopSearchInput" v-model="searchWord" class="navbar-context-search" type="search" autocomplete="off"
+                :aria-label="searchLabel" :placeholder="searchLabel" :disabled="searchDisabled" @focus="searchOpen = !activeContextSearch"
+                @keydown.enter.stop.prevent="submitSearch" @keydown.escape.stop="searchOpen = false"
+                @compositionstart="startSearchComposition" @compositionend="finishSearchComposition" />
+              <VBtn v-if="searchWord" icon="mdi-close" variant="text" size="x-small" aria-label="清空搜索" :disabled="searchDisabled" @click.stop="clearSearch" />
+              <kbd class="search-shortcut-badge">{{ searchShortcutLabel }}</kbd>
+            </div>
+          </template>
+          <VCard class="navbar-search-popover" min-width="280" max-width="calc(100vw - 24px)">
+            <VList class="pa-2">
+              <VListItem :title="searchLabel" :subtitle="searchWord || undefined" prepend-icon="mdi-magnify" :disabled="searchDisabled" @click="submitSearch" />
+            </VList>
+          </VCard>
+        </VMenu>
+      </template>
       <VMenu v-if="authStore.isAdmin && taskStatus?.is_running" location="bottom" :close-on-content-click="false">
         <template #activator="{ props: taskMenuProps }">
           <VBtn v-bind="taskMenuProps" variant="text" class="running-task" aria-label="查看当前任务">
@@ -517,7 +610,7 @@ const clearDragState = () => {
       </VMenu>
     </template>
     <template #navbar-actions>
-      <VBtn v-if="authStore.isAdmin" icon variant="text" title="通知中心" aria-label="通知中心" @click="notificationOpen = true">
+      <VBtn v-if="authStore.isAdmin" icon variant="text" color="default" title="通知中心" aria-label="通知中心" @click="notificationOpen = true">
         <VBadge :model-value="Boolean(taskStatus?.is_running)" color="primary" dot><VIcon icon="mdi-bell-outline" /></VBadge>
       </VBtn>
       <VBtn icon="mdi-palette-outline" variant="text" title="主题与壁纸" aria-label="主题与壁纸" @click="openThemeCustomizer" />
@@ -529,7 +622,18 @@ const clearDragState = () => {
             </VAvatar>
           </VBtn>
         </template>
-        <VList min-width="216"><VListItem :title="authStore.username" :subtitle="authStore.isAdmin ? '管理员' : '用户'" /><VDivider />
+        <VList min-width="240" class="user-profile-menu pt-0">
+          <VListItem class="user-profile-summary py-4">
+            <template #prepend>
+              <VAvatar size="60" rounded="sm" color="primary" variant="tonal" class="mr-3">
+                <VImg v-if="authStore.avatarUrl && !avatarLoadFailed" :src="authStore.avatarUrl" alt="" @error="avatarLoadFailed = true" />
+                <span v-else>{{ (authStore.username || 'U').slice(0, 1).toUpperCase() }}</span>
+              </VAvatar>
+            </template>
+            <span class="user-profile-role">{{ authStore.isAdmin ? '管理员' : '普通用户' }}</span>
+            <span class="user-profile-name">{{ authStore.username }}</span>
+          </VListItem>
+          <VDivider class="mb-2" />
           <VListItem v-for="item in userOptions" :key="item.key" :title="item.label" :prepend-icon="item.icon" @click="handleUserSelect(item.key)" />
         </VList>
       </VMenu>
@@ -542,6 +646,21 @@ const clearDragState = () => {
     <RouterView v-slot="{ Component }"><component :is="Component" :key="contentKey" :task-status="props.taskStatus" /></RouterView>
   </DefaultLayout>
 
+  <VDialog v-if="isMobile && searchAvailable" v-model="searchOpen" fullscreen max-width="640" scrollable>
+    <VCard>
+      <VCardTitle class="d-flex align-center justify-space-between"><span>{{ searchLabel }}</span><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭搜索" @click="searchOpen = false" /></VCardTitle>
+      <VCardText>
+        <div class="navbar-search navbar-search-mobile">
+          <VIcon icon="mdi-magnify" size="22" />
+          <input id="global-media-search" ref="mobileSearchInput" v-model="searchWord" class="navbar-context-search" type="search" autocomplete="off"
+            :aria-label="searchLabel" :placeholder="searchLabel" :disabled="searchDisabled" @keydown.enter.stop.prevent="submitSearch"
+            @compositionstart="startSearchComposition" @compositionend="finishSearchComposition" />
+          <VBtn v-if="searchWord" icon="mdi-close" variant="text" size="small" aria-label="清空搜索" :disabled="searchDisabled" @click="clearSearch" />
+          <VBtn icon="mdi-magnify" variant="text" aria-label="提交搜索" :loading="searchLoading" :disabled="searchDisabled" @click="submitSearch" />
+        </div>
+      </VCardText>
+    </VCard>
+  </VDialog>
   <VDialog v-model="notificationOpen" max-width="1100" scrollable>
     <VCard><NotificationCenter v-if="notificationOpen" :task="taskStatus" @close="notificationOpen = false" /></VCard>
   </VDialog>
@@ -549,7 +668,7 @@ const clearDragState = () => {
   <VDialog v-model="isMenuEditorVisible" max-width="760" scrollable>
     <VCard>
       <VCardItem title="自定义导航" subtitle="修改菜单名称、显示状态和顺序，全局生效">
-        <template #append><VBtn icon="mdi-close" variant="text" aria-label="关闭导航设置" @click="isMenuEditorVisible = false" /></template>
+        <template #append><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭导航设置" @click="isMenuEditorVisible = false" /></template>
       </VCardItem>
       <VCardText class="menu-editor-content">
         <VAlert v-if="menuConfigError" type="warning" variant="tonal" title="导航设置尚未读取" class="mb-4">
@@ -584,7 +703,7 @@ const clearDragState = () => {
         <VAlert type="info" variant="tonal" density="compact">支持跨组拖拽。关闭菜单组显示时，其下已开启的菜单会提升为一级。</VAlert>
       </VCardText>
       <VCardActions><VBtn color="error" :loading="isSavingMenu" :disabled="isMenuLoading" prepend-icon="mdi-restore" @click="confirmResetMenu">恢复默认</VBtn>
-        <VSpacer /><VBtn color="primary" variant="tonal" :loading="isSavingMenu" :disabled="!menuConfigLoaded" prepend-icon="mdi-content-save-outline" @click="saveMenuConfig">保存并应用</VBtn>
+        <VSpacer /><VBtn class="menu-apply-button" color="primary" variant="tonal" :loading="isSavingMenu" :disabled="!menuConfigLoaded" prepend-icon="mdi-content-save-outline" @click="saveMenuConfig">保存并应用</VBtn>
       </VCardActions>
     </VCard>
   </VDialog>
@@ -595,6 +714,18 @@ const clearDragState = () => {
 .app-brand img { inline-size: 36px; block-size: 36px; object-fit: contain; }
 .app-brand-name { font-size: 17px; font-weight: 700; white-space: nowrap; }
 .navbar-search { color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)) !important; }
+.navbar-search-desktop, .navbar-search-mobile { display: flex; align-items: center; gap: 10px; min-inline-size: 0; padding: 8px 12px; border-radius: var(--app-field-radius); }
+.navbar-search-desktop { inline-size: clamp(240px, 30vw, 440px); }
+.navbar-context-search { flex: 1; min-inline-size: 0; inline-size: 100%; color: inherit; font: inherit; font-size: 16px; line-height: 1.5; background: transparent; border: 0; outline: none; }
+.navbar-context-search::placeholder { color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); opacity: 1; }
+.navbar-context-search::-webkit-search-cancel-button { display: none; }
+.navbar-search:focus-within { outline: 2px solid rgba(var(--v-theme-primary), .5); outline-offset: -2px; }
+.search-shortcut-badge { flex: 0 0 auto; white-space: nowrap; font-size: 11px; line-height: 1.5; padding: 2px 5px; border: 1px solid rgba(var(--v-theme-on-surface), .2); border-radius: 4px; }
+.navbar-search-popover :deep(.v-list-item-title), .navbar-search-popover :deep(.v-list-item-subtitle) { display: block; white-space: normal; overflow: visible; overflow-wrap: anywhere; -webkit-line-clamp: unset; }
+.user-profile-summary { background: rgba(var(--v-theme-primary), .05); }
+.user-profile-role { display: block; font-size: 14px; font-weight: 500; color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); }
+.menu-apply-button :deep(.v-btn__content) { color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); }
+.user-profile-name { display: block; font-size: 18px; font-weight: 700; color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); overflow-wrap: anywhere; }
 .running-task { max-inline-size: min(280px, 30vw); min-inline-size: 0; }
 .running-task-content { display: grid; gap: 5px; min-inline-size: 0; inline-size: 100%; }
 .running-task-content strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }

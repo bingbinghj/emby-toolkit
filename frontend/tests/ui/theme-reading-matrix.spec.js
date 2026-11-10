@@ -2,19 +2,38 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { test, expect } from './fixtures.js';
 import { measureReadingContrast } from './reading-contrast.js';
 import { installFrameCaptureGate, pauseCaptureFrames, stepCaptureFrame, resumeCaptureFrames } from './frame-capture.js';
+import { navbarInteractionRegion } from './navbar-interaction.js';
 
 test.describe.configure({ timeout: 180_000 });
 test.use({ trace: { mode: 'retain-on-failure', screenshots: false, snapshots: false, sources: true } });
-const artifactRoot = '/root/emby-toolkit-mp-migration-verification/theme';
+const artifactRoot = '/root/emby-toolkit-mp-followup-verification/theme';
 mkdirSync(artifactRoot, { recursive: true });
 const appearances = ['clear', 'tinted', 'frosted'];
 const qualities = ['css', 'balanced', 'high'];
 const styles = ['adaptive', 'clear'];
 const walls = ['bright', 'dark', 'busy'];
+const capturesFrames = options => options.enabled && options.quality !== 'css';
+
+async function waitForRenderer(page, options) {
+  if (!options.enabled || options.scheme === 'light' || options.quality === 'css') return;
+  await expect.poll(async () => {
+    await stepCaptureFrame(page);
+    await stepCaptureFrame(page);
+    return page.locator('html').getAttribute('data-glass-renderer-state');
+  }, { timeout: 180000 }).toMatch(/ready|fallback/);
+}
+
+async function settleCaptureFrames(page, options) {
+  if (!capturesFrames(options)) return;
+  await stepCaptureFrame(page);
+  await stepCaptureFrame(page);
+  await page.waitForTimeout(250);
+  await stepCaptureFrame(page);
+}
 
 async function initialize(page, options) {
   const startedAt = Date.now();
-  if (options.representative) await installFrameCaptureGate(page, { paused: true });
+  if (capturesFrames(options)) await installFrameCaptureGate(page, { paused: true });
   await page.emulateMedia({ colorScheme: options.scheme === 'light' ? 'light' : 'dark', reducedMotion: options.dynamics === 'off' ? 'reduce' : 'no-preference' });
   await page.addInitScript(options => {
     const canvas = document.createElement('canvas'); canvas.width = canvas.height = 64;
@@ -44,20 +63,16 @@ async function initialize(page, options) {
   if (options.enabled && options.scheme !== 'light') {
     await expect(page.locator('.wallpaper-image').last()).toBeVisible();
   } else if (options.scheme === 'light') await expect(page.locator('.wallpaper-layer').last()).toBeHidden();
-  if (options.enabled && options.scheme !== 'light' && options.quality !== 'css') {
-    await expect.poll(async () => {
-      if (options.representative) {
-        await stepCaptureFrame(page);
-        await stepCaptureFrame(page);
-      }
-      return page.locator('html').getAttribute('data-glass-renderer-state');
-    }, { timeout: options.representative ? 180000 : 60000 }).toMatch(/ready|fallback/);
-  }
+  await waitForRenderer(page, options);
+  if (capturesFrames(options) && options.scheme === 'light') await settleCaptureFrames(page, options);
+  await expect(page.locator('[data-field="delay_between_items_sec"] input').first()).toHaveAttribute('type', 'number');
   const rendering = await page.evaluate(() => ({ state: document.documentElement.dataset.glassRendererState ?? 'css', contexts: window.__glassContexts,
     dynamics: document.documentElement.dataset.glassDynamicsMode, effectiveDynamics: document.documentElement.dataset.glassDynamicsEffectiveMode,
+    capture: window.__etkTestFrameCapture?.status(),
     viewport: { width: innerWidth, height: innerHeight, devicePixelRatio } }));
   rendering.preparationMs = Date.now() - startedAt;
   if (rendering.contexts.some(context => context.available)) expect(rendering.state).toBe('ready');
+  if (rendering.state === 'ready') expect(rendering.effectiveDynamics).toBe(options.dynamics);
   if (options.enabled && options.scheme !== 'light') {
     rendering.wallpaper = await page.locator('.wallpaper-layer-active').evaluate(element => ({
       filter: getComputedStyle(element).filter,
@@ -73,40 +88,41 @@ async function initialize(page, options) {
     if (options.layout === 'horizontal') await expect(shell).toHaveClass(/layout-horizontal-nav-active/);
     else if (options.layout === 'collapsed') await expect(shell).toHaveClass(/layout-vertical-nav-collapsed/);
     else await expect(page.locator('.layout-vertical-nav')).toBeVisible();
-    if (rendering.state === 'ready') expect(rendering.effectiveDynamics).toBe(options.dynamics);
   }
   return rendering;
 }
 
 function panelProbes(page) {
   const labelSelector = page.viewportSize().width < 960 ? '.app-responsive-input__label' : '.v-field-label--floating';
+  const desktop = page.viewportSize().width > 1280;
   return [
     { role: 'panel hint', locator: page.locator('[data-field="media_info_retry_interval"] .text-medium-emphasis').first() },
     { role: 'panel title', locator: page.locator('.setting-card .v-card-title').first() },
     { role: 'card subtitle', locator: page.locator('.setting-card .v-card-subtitle').first() },
     { role: 'input value', locator: page.locator('[data-field="delay_between_items_sec"] input').first() },
     { role: 'input label', locator: page.locator(`[data-field="delay_between_items_sec"] ${labelSelector}`).first() },
-    { role: 'status label', locator: page.locator('.setting-card__status .v-chip__content').first() },
-    { role: 'navbar search', locator: page.locator('.navbar-search').first() },
+    { role: 'settings navigation label', locator: page.getByRole('tab', { name: '存储 & 目录', exact: true }).locator('.v-btn__content') },
+    { role: desktop ? 'navbar search shortcut' : 'app navigation label', locator: desktop
+      ? page.locator('.navbar-search-desktop .search-shortcut-badge')
+      : page.locator('.footer-nav-btn .btn-content > span').first() },
   ];
 }
 
 async function recordInteraction(page, options, rendering, id) {
   if (!options.representative) return;
   rendering.framesBefore = await pauseCaptureFrames(page);
-  const box = await page.locator('.layout-navbar').boundingBox();
-  const clip = { x: Math.ceil(box.x + Math.min(160, box.width / 4)), y: Math.ceil(box.y + 2),
-    width: Math.floor(Math.min(400, box.width / 2)), height: Math.floor(Math.min(50, box.height - 4)) };
+  const region = await navbarInteractionRegion(page);
+  const { clip, start, end } = region;
   const before = await page.screenshot({ clip, animations: 'disabled' });
-  await page.mouse.move(clip.x + clip.width * .4, clip.y + clip.height * .5);
+  await page.mouse.move(start.x, start.y);
   await page.mouse.down();
-  await page.mouse.move(clip.x + clip.width * .6, clip.y + clip.height * .55, { steps: 6 });
+  await page.mouse.move(end.x, end.y, { steps: 6 });
   rendering.framesAfter = await stepCaptureFrame(page);
   const after = await page.screenshot({ clip, animations: 'disabled' });
   await page.mouse.up();
   writeFileSync(`${artifactRoot}/${id}-interaction-before.png`, before);
   writeFileSync(`${artifactRoot}/${id}-interaction-after.png`, after);
-  rendering.interaction = { requested: options.dynamics, effective: rendering.effectiveDynamics, changed: !before.equals(after) };
+  rendering.interaction = { requested: options.dynamics, effective: rendering.effectiveDynamics, changed: !before.equals(after), region };
   if (rendering.state === 'ready' && options.dynamics !== 'off') expect(rendering.interaction.changed).toBe(true);
 }
 
@@ -117,28 +133,24 @@ async function inspectSurfaces(page, options, rendering, id) {
   }
   const readings = await measureReadingContrast(page, panelProbes(page));
   await page.getByRole('button', { name: 'UI Test 的用户菜单', exact: true }).click();
-  if (options.representative) {
-    await stepCaptureFrame(page);
-    await stepCaptureFrame(page);
-    await page.waitForTimeout(250);
-    await stepCaptureFrame(page);
-  }
+  await settleCaptureFrames(page, options);
   const menu = page.locator('.v-menu.v-overlay--active');
   readings.push(...await measureReadingContrast(page, [
-    { role: 'menu title', locator: menu.locator('.v-list-item-title').first() },
-    { role: 'menu subtitle', locator: menu.locator('.v-list-item-subtitle').first() },
+    { role: 'menu title', locator: menu.locator('.user-profile-name') },
+    { role: 'menu subtitle', locator: menu.locator('.user-profile-role') },
   ]));
   await menu.getByText('自定义导航', { exact: true }).click();
-  if (options.representative) {
-    await stepCaptureFrame(page);
-    await stepCaptureFrame(page);
-    await page.waitForTimeout(250);
-    await stepCaptureFrame(page);
-  }
+  await settleCaptureFrames(page, options);
   const dialog = page.locator('.v-dialog.v-overlay--active');
+  const primaryAction = dialog.getByRole('button', { name: '保存并应用', exact: true });
+  const primaryActionText = primaryAction.locator('.v-btn__content');
+  await expect(primaryAction, 'dialog primary action button').toBeEnabled();
+  await expect(primaryAction, 'dialog primary action button').toBeInViewport({ ratio: 1 });
+  await expect(primaryActionText, 'dialog primary action text').toBeInViewport({ ratio: 1 });
   readings.push(...await measureReadingContrast(page, [
     { role: 'dialog title', locator: dialog.locator('.v-card-title').first() },
     { role: 'dialog subtitle', locator: dialog.locator('.v-card-subtitle').first() },
+    { role: 'dialog primary action', locator: primaryActionText },
   ]));
   const result = { ...options, rendering, measurementMs: Date.now() - measuredAt, readings };
   writeFileSync(`${artifactRoot}/${id}.json`, JSON.stringify(result, null, 2));
@@ -173,7 +185,7 @@ for (const [index, options] of cases.entries()) {
       if (options.representative) console.log(JSON.stringify({ id, stage: 'interaction', rendering }));
       await inspectSurfaces(page, options, rendering, id);
     } finally {
-      if (options.representative && !page.isClosed()) await resumeCaptureFrames(page);
+      if (capturesFrames(options) && !page.isClosed()) await resumeCaptureFrames(page);
     }
   });
 }
@@ -182,22 +194,32 @@ for (const quality of qualities) for (const style of styles) {
   const id = `auto-${quality}-${style}`;
   test(`${id} follows live system colors without changing material preferences`, async ({ page }) => {
     const options = { scheme: 'auto', appearance: 'clear', quality, style, wallpaper: 'busy', enabled: true, dynamics: 'off', layout: 'vertical' };
-    const rendering = await initialize(page, options);
-    const result = await inspectSurfaces(page, options, rendering, id);
-    await page.keyboard.press('Escape');
-    await page.emulateMedia({ colorScheme: 'light' });
-    await expect(page.locator('html')).toHaveAttribute('data-glass-color-scheme', 'light');
-    await expect(page.locator('.wallpaper-layer').last()).toBeHidden();
-    await expect(page.locator('.setting-card').first()).toBeVisible();
-    await expect(page.locator('html')).toHaveAttribute('data-glass-quality', quality);
-    await expect(page.locator('html')).toHaveAttribute('data-glass-ui-style', style);
-    const lightReadings = await measureReadingContrast(page, panelProbes(page));
-    for (const reading of lightReadings) expect(reading.contrast, `${id} system light: ${reading.role}`).toBeGreaterThanOrEqual(4.5);
-    await page.emulateMedia({ colorScheme: 'dark' });
-    await expect(page.locator('html')).toHaveAttribute('data-glass-color-scheme', 'dark');
-    await expect(page.locator('.wallpaper-image').last()).toBeVisible();
-    const darkReadings = await measureReadingContrast(page, panelProbes(page));
-    for (const reading of darkReadings) expect(reading.contrast, `${id} resumed dark: ${reading.role}`).toBeGreaterThanOrEqual(4.5);
-    writeFileSync(`${artifactRoot}/${id}.json`, JSON.stringify({ ...result, systemTransitions: { light: lightReadings, dark: darkReadings } }, null, 2));
+    try {
+      const rendering = await initialize(page, options);
+      const result = await inspectSurfaces(page, options, rendering, id);
+      await page.keyboard.press('Escape');
+      await page.emulateMedia({ colorScheme: 'light' });
+      await settleCaptureFrames(page, options);
+      await expect(page.locator('html')).toHaveAttribute('data-glass-color-scheme', 'light');
+      await expect(page.locator('.wallpaper-layer').last()).toBeHidden();
+      await expect(page.locator('.setting-card').first()).toBeVisible();
+      await expect(page.locator('html')).toHaveAttribute('data-glass-quality', quality);
+      await expect(page.locator('html')).toHaveAttribute('data-glass-ui-style', style);
+      const lightReadings = await measureReadingContrast(page, panelProbes(page));
+      for (const reading of lightReadings) expect(reading.contrast, `${id} system light: ${reading.role}`).toBeGreaterThanOrEqual(4.5);
+      await page.emulateMedia({ colorScheme: 'dark' });
+      await expect(page.locator('html')).toHaveAttribute('data-glass-color-scheme', 'dark');
+      await expect(page.locator('.wallpaper-image').last()).toBeVisible();
+      await waitForRenderer(page, options);
+      if (rendering.contexts.some(context => context.available)) {
+        await expect(page.locator('html')).toHaveAttribute('data-glass-renderer-state', 'ready');
+        await expect(page.locator('html')).toHaveAttribute('data-glass-dynamics-effective-mode', options.dynamics);
+      }
+      const darkReadings = await measureReadingContrast(page, panelProbes(page));
+      for (const reading of darkReadings) expect(reading.contrast, `${id} resumed dark: ${reading.role}`).toBeGreaterThanOrEqual(4.5);
+      writeFileSync(`${artifactRoot}/${id}.json`, JSON.stringify({ ...result, systemTransitions: { light: lightReadings, dark: darkReadings } }, null, 2));
+    } finally {
+      if (capturesFrames(options) && !page.isClosed()) await resumeCaptureFrames(page);
+    }
   });
 }

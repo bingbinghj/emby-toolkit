@@ -42,6 +42,10 @@ export const test = base.extend({
   authState: ['logged_in', { option: true }],
   admin: [true, { option: true }],
   api: [async ({ page, authState, admin }, use) => {
+    const goto = page.goto.bind(page);
+    page.goto = (url, options = {}) => goto(url, { waitUntil: 'domcontentloaded', ...options });
+    const reload = page.reload.bind(page);
+    page.reload = (options = {}) => reload({ waitUntil: 'domcontentloaded', ...options });
     const handlers = new Map(), requests = [], unexpected = [], errors = [];
     let auth = authState, currentTask = clone(idle), storedConfig = clone(config), storedCover = clone(cover), menu = [];
     const user = { id: 'ui-test-user', name: 'UI Test', username: 'UI Test', is_admin: admin, user_type: 'emby_user' };
@@ -53,18 +57,41 @@ export const test = base.extend({
     respond('POST', '/api/auth/setup', () => { auth = 'login_required'; return { status: 'ok' }; });
     respond('GET', '/api/config', () => storedConfig);
     respond('POST', '/api/config', request => { Object.assign(storedConfig, request.body); return { message: '配置已保存', saved_fields: request.body }; });
-    respond('POST', '/api/config/rename_preview', { movie: '浏览器验证电影 (2026)/浏览器验证电影.mkv', tv: '浏览器验证剧集 (2026)/Season 01/浏览器验证剧集.S01E01.mkv' });
+    respond('POST', '/api/config/rename_preview', { movie: '浏览器验证电影 (2026)/浏览器验证电影.mkv', tv: '浏览器验证剧集 (2026)/Season 01/浏览器验证剧集.S01E01.mkv', movie_sample: { id: '101', title: '浏览器验证电影' }, tv_sample: { id: 'episode-102', title: '浏览器验证剧集', season_episode: 'S02E09' }, errors: {} });
     respond('GET', '/api/status', () => currentTask);
     respond('GET', '/api/system/menu_config', () => menu);
     respond('POST', '/api/system/menu_config', request => { menu = clone(request.body); return { message: '导航已保存' }; });
     respond('POST', '/api/system/menu_config/reset', () => { menu = []; return { message: '导航已重置' }; });
     respond('GET', '/api/portal/account-info', { name: 'UI Test', status: 'active', registration_date: '2026-01-01T00:00:00Z', expiration_date: null, telegram_chat_id: '', telegram_channel_id: '', profile_image_tag: null });
-    respond('GET', '/api/portal/users', { users: [
+    const portalUsers = [
       { id: 'ui-test-user', name: 'UI Test', is_administrator: true, is_disabled: false, notes: '', telegram_chat_id: '', profile_image_tag: null },
       { id: 'member', name: 'Media Member', is_administrator: false, is_disabled: true, notes: '原备注', telegram_chat_id: '123', profile_image_tag: null },
-    ] });
-    respond('POST', '/api/portal/users/member', request => ({ message: 'Emby 用户资料已保存', id: 'member', user: { id: 'member', ...request.body } }));
-    respond('POST', '/api/portal/users/member/password', { message: 'Emby 用户密码已更新', id: 'member' });
+    ];
+    const portalDetails = item => ({
+      ...item,
+      policy: item.policy || { EnableRemoteAccess: true, EnableMediaPlayback: true, EnableAudioPlaybackTranscoding: false, EnableVideoPlaybackTranscoding: false, EnableContentDownloading: true, EnableAllFolders: true, EnabledFolders: [] },
+      configuration: item.configuration || { PlayDefaultAudioTrack: true, SubtitleMode: 'Smart', RememberAudioSelections: true, RememberSubtitleSelections: true, EnableNextEpisodeAutoPlay: true, HidePlayedInLatest: true, DisplayMissingEpisodes: false },
+    });
+    respond('GET', '/api/portal/users', () => ({ users: portalUsers }));
+    function registerPortalUser(item) {
+      respond('GET', `/api/portal/users/${item.id}`, () => ({ user: portalDetails(item), libraries: { items: [{ id: 'movies', name: '电影' }] } }));
+      respond('POST', `/api/portal/users/${item.id}`, request => {
+        const { policy, configuration, ...basic } = request.body;
+        const details = portalDetails(item);
+        Object.assign(item, basic, { policy: { ...details.policy, ...policy }, configuration: { ...details.configuration, ...configuration } });
+        return { message: 'Emby 用户资料已保存', id: item.id, user: portalDetails(item) };
+      });
+      respond('POST', `/api/portal/users/${item.id}/password`, { message: 'Emby 用户密码已更新', id: item.id });
+      respond('POST', `/api/portal/users/${item.id}/avatar`, () => { item.profile_image_tag = 'updated-avatar'; return { id: item.id, new_tag: 'updated-avatar', message: '头像已更新' }; });
+      respond('DELETE', `/api/portal/users/${item.id}/avatar`, () => { item.profile_image_tag = null; return { id: item.id, new_tag: null, message: '默认头像已恢复' }; });
+      respond('DELETE', `/api/portal/users/${item.id}`, () => { portalUsers.splice(portalUsers.findIndex(user => user.id === item.id), 1); return { id: item.id, message: '用户已删除' }; });
+    }
+    portalUsers.forEach(registerPortalUser);
+    respond('POST', '/api/portal/users', request => {
+      const item = { id: 'created-user', name: request.body.name, is_administrator: request.body.is_administrator, is_disabled: request.body.is_disabled, profile_image_tag: null };
+      portalUsers.push(item); registerPortalUser(item);
+      return { id: item.id, user: portalDetails(item), message: '用户已创建' };
+    });
     respond('POST', '/api/portal/telegram-chat-id', request => ({ telegram_chat_id: request.body.telegram_chat_id, message: '通知设置已保存' }));
     respond('GET', '/api/portal/telegram-bot-info', { username: 'fixture_bot' });
     respond('GET', '/api/media_center/libraries', { libraries: [library] });

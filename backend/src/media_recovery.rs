@@ -7,6 +7,7 @@ use crate::{
 use axum::{Json, extract::State, http::StatusCode};
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     future::Future,
     path::{Path, PathBuf},
 };
@@ -18,6 +19,8 @@ struct Record {
     target_ids: Value,
     reason: String,
     can_recover: bool,
+    json_conflicts: Vec<Value>,
+    conflict_backup_directories: Vec<PathBuf>,
 }
 
 pub(crate) async fn read_json(path: &Path) -> Result<Value> {
@@ -87,8 +90,14 @@ async fn mark_verified(directory: &Path, target_ids: &Value) -> Result<PathBuf> 
         ".cleanup-stage-{}.json",
         uuid::Uuid::new_v4().simple()
     ));
+    let index = directory.join("conflict-backups.json");
+    let retained = if tokio::fs::try_exists(&index).await? {
+        read_json(&index).await?
+    } else {
+        json!([])
+    };
     let value = json!({"kind":"verified-cleanup", "version":1, "directory_name":directory.file_name().and_then(|name| name.to_str()),
-        "target_ids":target_ids, "completed_at":chrono::Utc::now().to_rfc3339()});
+        "target_ids":target_ids, "completed_at":chrono::Utc::now().to_rfc3339(),"conflict_backup_directories":retained});
     tokio::fs::write(&stage, serde_json::to_vec(&value).unwrap()).await?;
     tokio::fs::File::open(&stage).await?.sync_all().await?;
     tokio::fs::rename(&stage, &marker).await?;
@@ -170,6 +179,15 @@ async fn records(state: &AppState) -> Result<Vec<Record>> {
                         .map(|_| "媒体及原配置已验收，备份清理尚未完成，可重试删除".into())
                         .unwrap_or_else(|error| error.1.clone()),
                     can_recover: material.is_ok(),
+                    json_conflicts: vec![],
+                    conflict_backup_directories: material
+                        .as_ref()
+                        .ok()
+                        .and_then(|value| {
+                            serde_json::from_value(value["conflict_backup_directories"].clone())
+                                .ok()
+                        })
+                        .unwrap_or_default(),
                 });
                 continue;
             }
@@ -185,6 +203,8 @@ async fn records(state: &AppState) -> Result<Vec<Record>> {
                         target_ids: json!([]),
                         reason: "恢复目录是符号链接，请核对原备份".into(),
                         can_recover: false,
+                        json_conflicts: vec![],
+                        conflict_backup_directories: vec![],
                     });
                 }
                 continue;
@@ -237,6 +257,29 @@ async fn records(state: &AppState) -> Result<Vec<Record>> {
                     }
                 })
                 .unwrap_or(json!([]));
+            let mut json_conflicts = vec![];
+            if can_recover {
+                match crate::media_reload::recovery_json_conflicts(state, &directory).await {
+                    Ok(conflicts) => json_conflicts = conflicts,
+                    Err(error) => {
+                        can_recover = false;
+                        reason = error.1;
+                    }
+                }
+            }
+            let conflict_backup_directories =
+                match crate::media_reload::conflict_backup_directories(state, &directory).await {
+                    Ok(directories) => directories,
+                    Err(error) => {
+                        can_recover = false;
+                        reason = error.1;
+                        vec![]
+                    }
+                };
+            if can_recover && !json_conflicts.is_empty() {
+                reason =
+                    "媒体 JSON 与恢复备份存在实际差异，请核对后确认备份当前 JSON 并恢复".into();
+            }
             records.push(Record {
                 id: format!("{prefix}:{name}"),
                 directory,
@@ -244,6 +287,8 @@ async fn records(state: &AppState) -> Result<Vec<Record>> {
                 target_ids,
                 reason,
                 can_recover,
+                json_conflicts,
+                conflict_backup_directories,
             });
         }
     }
@@ -256,7 +301,8 @@ pub async fn status(State(state): State<AppState>) -> Result<Json<Value>> {
     Ok(Json(
         json!({"pending":!records.is_empty(),"records":records.iter().map(|r|json!({
         "id":r.id,"directory":r.directory,"target_ids":r.target_ids,"kind":r.kind,
-        "reason":r.reason,"can_recover":r.can_recover
+        "reason":r.reason,"can_recover":r.can_recover,"json_conflicts":r.json_conflicts,
+        "conflict_backup_directories":r.conflict_backup_directories
     })).collect::<Vec<_>>()}),
     ))
 }
@@ -266,6 +312,21 @@ pub async fn submit(
     Json(body): Json<Value>,
 ) -> Result<(StatusCode, Json<Value>)> {
     let id = string(&body, "recovery_id");
+    let hashes: BTreeMap<String, String> = serde_json::from_value(
+        body.get("current_json_hashes")
+            .cloned()
+            .unwrap_or(json!({})),
+    )
+    .map_err(|_| ApiError::bad("当前 JSON 确认哈希必须是媒体 ID 与 SHA256 的对象"))?;
+    if hashes.iter().any(|(id, hash)| {
+        id.is_empty()
+            || hash.len() != 64
+            || !hash
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    }) {
+        return Err(ApiError::bad("当前 JSON 确认哈希无效，未修改媒体文件"));
+    }
     if !records(&state).await?.iter().any(|record| record.id == id) {
         return Err(ApiError::bad("未找到该待恢复记录，请重新检查恢复状态"));
     }
@@ -273,7 +334,7 @@ pub async fn submit(
         .jobs
         .clone()
         .submit_response("恢复媒体信息", move |context| async move {
-            recover(&state, &id, &context).await
+            recover_confirmed(&state, &id, &context, &hashes).await
         })
         .await?;
     Ok((
@@ -283,6 +344,15 @@ pub async fn submit(
 }
 
 pub async fn recover(state: &AppState, id: &str, context: &JobContext) -> Result<(u16, Value)> {
+    recover_confirmed(state, id, context, &BTreeMap::new()).await
+}
+
+async fn recover_confirmed(
+    state: &AppState,
+    id: &str,
+    context: &JobContext,
+    hashes: &BTreeMap<String, String>,
+) -> Result<(u16, Value)> {
     let mut pending = records(state).await?;
     let position = pending
         .iter()
@@ -291,6 +361,9 @@ pub async fn recover(state: &AppState, id: &str, context: &JobContext) -> Result
     let record = pending.remove(position);
     if !record.can_recover {
         return Err(ApiError(StatusCode::CONFLICT, record.reason));
+    }
+    if record.kind == "verified-cleanup" && !hashes.is_empty() {
+        return Err(ApiError::bad("已验收备份清理不接受媒体 JSON 覆盖确认"));
     }
     if record.kind != "verified-cleanup"
         && pending
@@ -308,14 +381,31 @@ pub async fn recover(state: &AppState, id: &str, context: &JobContext) -> Result
             &format!("正在核对 {}", record.directory.display()),
         )
         .await;
+    let mut retained = record.conflict_backup_directories.clone();
     let marker = if record.kind == "verified-cleanup" {
         cleanup_marker(&record.directory)?
     } else {
         let original = read_json(&record.directory.join("original-settings.json")).await?;
-        crate::strm::finish_media_recovery(state, &original, || async {
-            crate::media_reload::recover_record(state, &record.directory, context).await
+        let result = crate::strm::finish_media_recovery(state, &original, || async {
+            retained =
+                crate::media_reload::recover_record(state, &record.directory, context, hashes)
+                    .await?;
+            Ok(())
         })
-        .await?;
+        .await;
+        if let Err(mut error) = result {
+            if !retained.is_empty() && !error.1.contains(&retained[0].display().to_string()) {
+                error.1.push_str(&format!(
+                    "；当前 JSON 独立备份仍保留：{}",
+                    retained
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join("；")
+                ));
+            }
+            return Err(error);
+        }
         // Keep the proof outside the directory: a partial recursive deletion
         // must not remove the only record that allows a cleanup-only retry.
         mark_verified(&record.directory, &record.target_ids).await?
@@ -328,13 +418,13 @@ pub async fn recover(state: &AppState, id: &str, context: &JobContext) -> Result
             StatusCode::MULTI_STATUS.as_u16(),
             json!({"message":error.1, "recovered_id":id,
             "pending":pending, "backup_deleted":backup_deleted,
-            "warnings":1, "warning_details":[error.1]}),
+            "warnings":1, "warning_details":[error.1],"conflict_backup_directories":retained}),
         ));
     }
     Ok((
         StatusCode::OK.as_u16(),
-        json!({"message":"媒体恢复及原配置回读验收通过，备份已删除，可以继续保存", "recovered_id":id,"pending":!records(state).await?.is_empty(),
-        "backup_deleted":true, "warnings":0,"warning_details":[]}),
+        json!({"message":if retained.is_empty() { "媒体恢复及原配置回读验收通过，原恢复备份已删除，可以继续保存" } else { "媒体恢复及原配置回读验收通过，原恢复备份已删除，当前 JSON 独立备份已保留，可以继续保存" }, "recovered_id":id,"pending":!records(state).await?.is_empty(),
+        "backup_deleted":true, "warnings":0,"warning_details":[],"conflict_backup_directories":retained}),
     ))
 }
 

@@ -13,6 +13,10 @@ mod native {
     }
 
     async fn recover_from_editor(state: &AppState, id: &str) -> Value {
+        recover_from_editor_with_hashes(state, id, json!({})).await
+    }
+
+    async fn recover_from_editor_with_hashes(state: &AppState, id: &str, hashes: Value) -> Value {
         use tower::ServiceExt;
         let response = emby_toolkit::media_edit::router()
             .with_state(state.clone())
@@ -21,7 +25,9 @@ mod native {
                     .method("POST")
                     .uri("/api/media_info/recovery")
                     .header("Content-Type", "application/json")
-                    .body(Body::from(json!({"recovery_id":id}).to_string()))
+                    .body(Body::from(
+                        json!({"recovery_id":id,"current_json_hashes":hashes}).to_string(),
+                    ))
                     .unwrap(),
             )
             .await
@@ -122,6 +128,505 @@ mod native {
         );
         assert!(!recovery.exists());
         assert_eq!(recovery_status(&f.native.state).await["pending"], false);
+        f.close().await;
+    }
+
+    async fn failed_json_recovery_fixture() -> ThumbnailFixture {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        *f.proxy.protocol_fault.lock().await = "sync-failed".into();
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("原请求恢复标题");
+        f.save(json!({"mediainfo":edited}), false).await;
+        f
+    }
+
+    async fn change_current_recovery_json(f: &ThumbnailFixture, title: &str) -> Vec<u8> {
+        let file = f.native.directory.path().join("61616-mediainfo.json");
+        let mut current: Value =
+            serde_json::from_slice(&tokio::fs::read(&file).await.unwrap()).unwrap();
+        current[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!(title);
+        let bytes = serde_json::to_vec_pretty(&current).unwrap();
+        tokio::fs::write(file, &bytes).await.unwrap();
+        bytes
+    }
+
+    fn confirmed_json_hashes(record: &Value) -> Value {
+        let mut hashes = serde_json::Map::new();
+        for conflict in record["json_conflicts"].as_array().unwrap() {
+            hashes.insert(
+                conflict["item_id"].as_str().unwrap().into(),
+                conflict["current_sha256"].clone(),
+            );
+        }
+        Value::Object(hashes)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn editor_json_recovery_accepts_reserialized_semantically_identical_file() {
+        let f = failed_json_recovery_fixture().await;
+        let recovery = reload_recovery(&f);
+        let file = f.native.directory.path().join("61616-mediainfo.json");
+        let original = tokio::fs::read(&file).await.unwrap();
+        let parsed: Value = serde_json::from_slice(&original).unwrap();
+        let formatted = serde_json::to_vec_pretty(&parsed).unwrap();
+        assert_ne!(formatted, original);
+        tokio::fs::write(&file, formatted).await.unwrap();
+        let status = recovery_status(&f.native.state).await;
+        assert_eq!(status["records"][0]["json_conflicts"], json!([]));
+        *f.proxy.protocol_fault.lock().await = String::new();
+        let result = recover_from_editor(
+            &f.native.state,
+            status["records"][0]["id"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(result["state"], "completed", "{result}");
+        assert!(!recovery.exists());
+        assert_eq!(result["result"]["conflict_backup_directories"], json!([]));
+        assert_eq!(
+            f.native.host.item.lock().await["MediaStreams"][1]["Title"],
+            "原请求恢复标题"
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn editor_json_recovery_reports_true_differences_and_default_does_not_overwrite() {
+        let f = failed_json_recovery_fixture().await;
+        let current = change_current_recovery_json(&f, "失败之后的真实修改").await;
+        let file = f.native.directory.path().join("61616-mediainfo.json");
+        let recovery = reload_recovery(&f);
+        let temporary = f.native.host.settings.lock().await.clone();
+        let calls = f.proxy.metadata_ids.lock().await.len();
+        let status = recovery_status(&f.native.state).await;
+        let record = &status["records"][0];
+        assert_eq!(record["can_recover"], true);
+        let conflict = &record["json_conflicts"][0];
+        assert_eq!(conflict["item_id"], "61616");
+        assert_eq!(conflict["path"], json!(file));
+        assert_eq!(conflict["current_sha256"].as_str().unwrap().len(), 64);
+        assert!(
+            conflict["changes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|change| {
+                    change["path"].as_str().unwrap().ends_with("/Title")
+                        && change["current"] == "失败之后的真实修改"
+                })
+        );
+        let result = recover_from_editor(&f.native.state, record["id"].as_str().unwrap()).await;
+        assert_eq!(result["state"], "failed", "{result}");
+        assert_eq!(tokio::fs::read(&file).await.unwrap(), current);
+        assert_eq!(*f.native.host.settings.lock().await, temporary);
+        assert_eq!(f.proxy.metadata_ids.lock().await.len(), calls);
+        assert!(recovery.join("media-reload.json").is_file());
+        assert!(
+            !f.native
+                .state
+                .data_dir
+                .join("backups/media-info-conflicts")
+                .exists()
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn editor_json_recovery_preserves_confirmed_current_json_then_restores_original_request()
+    {
+        let f = failed_json_recovery_fixture().await;
+        let current = change_current_recovery_json(&f, "先独立备份的新标题").await;
+        let recovery = reload_recovery(&f);
+        let status = recovery_status(&f.native.state).await;
+        let record = &status["records"][0];
+        *f.proxy.protocol_fault.lock().await = String::new();
+        let result = recover_from_editor_with_hashes(
+            &f.native.state,
+            record["id"].as_str().unwrap(),
+            confirmed_json_hashes(record),
+        )
+        .await;
+        assert_eq!(result["state"], "completed", "{result}");
+        assert_eq!(result["result"]["backup_deleted"], true);
+        assert!(!recovery.exists());
+        let retained = PathBuf::from(
+            result["result"]["conflict_backup_directories"][0]
+                .as_str()
+                .unwrap(),
+        );
+        assert!(retained.starts_with(f.native.state.data_dir.join("backups/media-info-conflicts")));
+        assert!(!retained.starts_with(&recovery));
+        assert_eq!(
+            tokio::fs::read(retained.join("current-61616.json"))
+                .await
+                .unwrap(),
+            current
+        );
+        assert!(retained.join("manifest.json").is_file());
+        assert_eq!(
+            f.native.host.item.lock().await["MediaStreams"][1]["Title"],
+            "原请求恢复标题"
+        );
+        assert_eq!(
+            *f.native.host.settings.lock().await,
+            f.proxy.original_settings
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                tokio::fs::metadata(&retained)
+                    .await
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert_eq!(
+                tokio::fs::metadata(retained.join("current-61616.json"))
+                    .await
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn editor_json_recovery_rejects_a_hash_changed_after_the_confirmation_read() {
+        let f = failed_json_recovery_fixture().await;
+        change_current_recovery_json(&f, "确认页面看到的标题").await;
+        let status = recovery_status(&f.native.state).await;
+        let record = &status["records"][0];
+        let hashes = confirmed_json_hashes(record);
+        let newer = change_current_recovery_json(&f, "确认之后又变化的标题").await;
+        let calls = f.proxy.metadata_ids.lock().await.len();
+        let result = recover_from_editor_with_hashes(
+            &f.native.state,
+            record["id"].as_str().unwrap(),
+            hashes,
+        )
+        .await;
+        assert_eq!(result["state"], "failed", "{result}");
+        assert!(result["message"].as_str().unwrap().contains("再次变化"));
+        assert_eq!(
+            tokio::fs::read(f.native.directory.path().join("61616-mediainfo.json"))
+                .await
+                .unwrap(),
+            newer
+        );
+        assert_eq!(f.proxy.metadata_ids.lock().await.len(), calls);
+        assert!(
+            !f.native
+                .state
+                .data_dir
+                .join("backups/media-info-conflicts")
+                .exists()
+        );
+        assert!(reload_recovery(&f).join("media-reload.json").is_file());
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn editor_json_recovery_preserves_both_backups_on_sync_failure_and_reports_them_after_retry()
+     {
+        let f = failed_json_recovery_fixture().await;
+        let current = change_current_recovery_json(&f, "同步失败仍要保留的新标题").await;
+        let recovery = reload_recovery(&f);
+        let status = recovery_status(&f.native.state).await;
+        let record = &status["records"][0];
+        let result = recover_from_editor_with_hashes(
+            &f.native.state,
+            record["id"].as_str().unwrap(),
+            confirmed_json_hashes(record),
+        )
+        .await;
+        assert_eq!(result["state"], "failed", "{result}");
+        let next = recovery_status(&f.native.state).await;
+        assert_eq!(next["records"][0]["json_conflicts"], json!([]));
+        let retained = PathBuf::from(
+            next["records"][0]["conflict_backup_directories"][0]
+                .as_str()
+                .unwrap(),
+        );
+        assert!(
+            result["message"]
+                .as_str()
+                .unwrap()
+                .contains(retained.to_str().unwrap())
+        );
+        assert_eq!(
+            tokio::fs::read(retained.join("current-61616.json"))
+                .await
+                .unwrap(),
+            current
+        );
+        assert!(recovery.join("media-reload.json").is_file());
+        *f.proxy.protocol_fault.lock().await = String::new();
+        let result =
+            recover_from_editor(&f.native.state, next["records"][0]["id"].as_str().unwrap()).await;
+        assert_eq!(result["state"], "completed", "{result}");
+        assert!(!recovery.exists());
+        assert_eq!(
+            result["result"]["conflict_backup_directories"][0],
+            json!(retained)
+        );
+        assert_eq!(
+            tokio::fs::read(retained.join("current-61616.json"))
+                .await
+                .unwrap(),
+            current
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn editor_json_recovery_rejects_identity_change_before_preserving_or_overwriting() {
+        let f = failed_json_recovery_fixture().await;
+        let current = change_current_recovery_json(&f, "确认后文件身份变化").await;
+        let status = recovery_status(&f.native.state).await;
+        let record = &status["records"][0];
+        sqlx::query("UPDATE media_metadata SET file_sha1_json=$1")
+            .bind(json!([format!("{:040X}", 99)]))
+            .execute(&f.native.state.db)
+            .await
+            .unwrap();
+        let calls = f.proxy.metadata_ids.lock().await.len();
+        let result = recover_from_editor_with_hashes(
+            &f.native.state,
+            record["id"].as_str().unwrap(),
+            confirmed_json_hashes(record),
+        )
+        .await;
+        assert_eq!(result["state"], "failed", "{result}");
+        assert_eq!(
+            tokio::fs::read(f.native.directory.path().join("61616-mediainfo.json"))
+                .await
+                .unwrap(),
+            current
+        );
+        assert_eq!(f.proxy.metadata_ids.lock().await.len(), calls);
+        assert!(
+            !f.native
+                .state
+                .data_dir
+                .join("backups/media-info-conflicts")
+                .exists()
+        );
+        assert!(reload_recovery(&f).join("media-reload.json").is_file());
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn editor_json_recovery_keeps_a_json_changed_during_the_last_identity_rpc() {
+        let f = failed_json_recovery_fixture().await;
+        let file = f.native.directory.path().join("61616-mediainfo.json");
+        let before = tokio::fs::read(&file).await.unwrap();
+        let mut changed: Value = serde_json::from_slice(&before).unwrap();
+        changed[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] =
+            json!("身份回读 RPC 期间的新 JSON");
+        let changed = serde_json::to_vec_pretty(&changed).unwrap();
+        let status = recovery_status(&f.native.state).await;
+        assert_eq!(status["records"][0]["json_conflicts"], json!([]));
+        // Only the complete identity GET is counted: before observation,
+        // before preservation, after preservation, and the final prewrite RPC.
+        // Mutating on the fourth call reproduced the old check-then-RPC window.
+        *f.proxy.identity_json_mutation.lock().await = Some((4, file.clone(), changed.clone()));
+        *f.proxy.protocol_fault.lock().await = String::new();
+        let calls = f.proxy.metadata_ids.lock().await.len();
+        let temporary = f.native.host.settings.lock().await.clone();
+        let result = recover_from_editor(
+            &f.native.state,
+            status["records"][0]["id"].as_str().unwrap(),
+        )
+        .await;
+        assert!(
+            f.proxy.identity_json_mutated.load(Ordering::SeqCst),
+            "the final RPC mutation was not reached"
+        );
+        assert_eq!(result["state"], "failed", "{result}");
+        assert_eq!(result["result_status"], 409, "{result}");
+        assert_eq!(tokio::fs::read(&file).await.unwrap(), changed);
+        assert_eq!(
+            f.proxy.metadata_ids.lock().await.len(),
+            calls,
+            "no new Sync may follow the RPC mutation"
+        );
+        assert_eq!(*f.native.host.settings.lock().await, temporary);
+        assert!(reload_recovery(&f).join("media-reload.json").is_file());
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn editor_json_recovery_preserves_metadata_updated_after_the_original_failure() {
+        let f = failed_json_recovery_fixture().await;
+        let recovery = reload_recovery(&f);
+        let material: Value = serde_json::from_slice(
+            &tokio::fs::read(recovery.join("media-reload.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let latest = json!({"Name":"失败后合法更新的新片名",
+            "People":[{"Id":"person-latest","Name":"失败后新演员","Type":"Actor","Role":"主角"}],
+            "ImageTags":{"Primary":"latest-primary","Backdrop":"latest-backdrop"}});
+        for field in ["Name", "People", "ImageTags"] {
+            assert_ne!(material["observations"]["61616"][field], latest[field]);
+        }
+        let file = f.native.directory.path().join("61616-mediainfo.json");
+        let json_before = tokio::fs::read(&file).await.unwrap();
+        {
+            let mut item = f.native.host.item.lock().await;
+            for field in ["Name", "People", "ImageTags"] {
+                item[field] = latest[field].clone();
+            }
+        }
+        assert_eq!(tokio::fs::read(&file).await.unwrap(), json_before);
+        let status = recovery_status(&f.native.state).await;
+        assert_eq!(status["records"][0]["json_conflicts"], json!([]));
+        *f.proxy.protocol_fault.lock().await = String::new();
+        let result = recover_from_editor(
+            &f.native.state,
+            status["records"][0]["id"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(result["state"], "completed", "{result}");
+        assert_eq!(result["result"]["backup_deleted"], true);
+        let live = f.native.host.item.lock().await.clone();
+        for field in ["Name", "People", "ImageTags"] {
+            assert_eq!(live[field], latest[field], "{field}");
+        }
+        assert_eq!(live["MediaStreams"][1]["Title"], "原请求恢复标题");
+        assert!(!recovery.exists());
+        assert_eq!(
+            *f.native.host.settings.lock().await,
+            f.proxy.original_settings
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn editor_json_recovery_rejects_metadata_changed_during_sync_without_reverting_it() {
+        let f = failed_json_recovery_fixture().await;
+        let recovery = reload_recovery(&f);
+        let temporary = f.native.host.settings.lock().await.clone();
+        let syncs = f.native.host.syncs.load(Ordering::SeqCst);
+        let status = recovery_status(&f.native.state).await;
+        *f.proxy.protocol_fault.lock().await = "metadata-change-during-sync".into();
+        let result = recover_from_editor(
+            &f.native.state,
+            status["records"][0]["id"].as_str().unwrap(),
+        )
+        .await;
+        assert!(
+            f.native.host.syncs.load(Ordering::SeqCst) > syncs,
+            "the metadata mutation must happen in the actual Sync callback"
+        );
+        assert_eq!(result["state"], "failed", "{result}");
+        assert_eq!(result["result_status"], 409, "{result}");
+        assert!(
+            result["message"]
+                .as_str()
+                .unwrap()
+                .contains("元数据字段 Name"),
+            "{result}"
+        );
+        let live = f.native.host.item.lock().await.clone();
+        assert_eq!(live["Name"], "同步期间用户再次改名");
+        assert_eq!(
+            live["People"],
+            json!([{"Id":"person-during","Name":"同步期间用户新增演员","Type":"Actor"}])
+        );
+        assert_eq!(live["ImageTags"]["Primary"], "during-sync-primary");
+        assert!(recovery.join("media-reload.json").is_file());
+        assert!(recovery.join("original-settings.json").is_file());
+        assert_eq!(*f.native.host.settings.lock().await, temporary);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn editor_json_recovery_rejects_conflicting_requests_for_a_shared_actual_json_path() {
+        let f = failed_json_recovery_fixture().await;
+        f.add_episode().await;
+        let shared_path = f.native.directory.path().join("61616.strm");
+        {
+            let mut extra = f.proxy.extra.lock().await;
+            let second = extra.get_mut("61617").unwrap();
+            second["Path"] = json!(shared_path);
+            second["Guid"] = json!(native_guid(&shared_path, "Episode"));
+        }
+        sqlx::query("UPDATE media_metadata SET asset_details_json=jsonb_set(asset_details_json,'{0,path}',$1) WHERE emby_item_ids_json @> $2")
+            .bind(json!(shared_path)).bind(json!(["61617"])).execute(&f.native.state.db).await.unwrap();
+        let recovery = reload_recovery(&f);
+        let marker = recovery.join("media-reload.json");
+        let mut material: Value =
+            serde_json::from_slice(&tokio::fs::read(&marker).await.unwrap()).unwrap();
+        let first = material["json"][0].clone();
+        let mut second_info: Value = serde_json::from_slice(
+            &tokio::fs::read(first["backup"].as_str().unwrap())
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        second_info[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] =
+            json!("共享文件的另一份不同恢复请求");
+        let backup = recovery.join("requested-61617.json");
+        tokio::fs::write(&backup, serde_json::to_vec(&second_info).unwrap())
+            .await
+            .unwrap();
+        material["target_ids"] = json!(["61616", "61617"]);
+        material["json"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"item_id":"61617","path":first["path"],"backup":backup}));
+        tokio::fs::write(&marker, serde_json::to_vec(&material).unwrap())
+            .await
+            .unwrap();
+        let before = tokio::fs::read(first["path"].as_str().unwrap())
+            .await
+            .unwrap();
+        let status = recovery_status(&f.native.state).await;
+        assert_eq!(status["records"][0]["can_recover"], false);
+        assert!(
+            status["records"][0]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("同一 JSON 路径"),
+            "{status}"
+        );
+        let result = recover_from_editor(
+            &f.native.state,
+            status["records"][0]["id"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(result["state"], "failed", "{result}");
+        assert_eq!(
+            tokio::fs::read(first["path"].as_str().unwrap())
+                .await
+                .unwrap(),
+            before
+        );
+        assert!(marker.exists());
+        assert!(
+            !f.native
+                .state
+                .data_dir
+                .join("backups/media-info-conflicts")
+                .exists()
+        );
         f.close().await;
     }
 
@@ -419,6 +924,8 @@ mod native {
         }
     }
 
+    type IdentityJsonMutation = (usize, PathBuf, Vec<u8>);
+
     #[derive(Clone)]
     struct Proxy {
         original_url: String,
@@ -459,6 +966,8 @@ mod native {
         reject_features: Arc<AtomicBool>,
         guid_lookup_fault: Arc<Mutex<String>>,
         guid_lookups: Arc<AtomicUsize>,
+        identity_json_mutation: Arc<Mutex<Option<IdentityJsonMutation>>>,
+        identity_json_mutated: Arc<AtomicBool>,
     }
 
     impl Proxy {
@@ -509,6 +1018,16 @@ mod native {
             if self.drift_size_after_refresh.swap(false, Ordering::SeqCst) {
                 let mut item = self.host.item.lock().await;
                 item["Size"] = json!(item["Size"].as_u64().unwrap() + 1);
+            }
+            let metadata_changed =
+                self.protocol_fault.lock().await.as_str() == "metadata-change-during-sync";
+            if id == "61616" && metadata_changed {
+                let mut item = self.host.item.lock().await;
+                item["Name"] = json!("同步期间用户再次改名");
+                item["People"] =
+                    json!([{"Id":"person-during","Name":"同步期间用户新增演员","Type":"Actor"}]);
+                item["ImageTags"] =
+                    json!({"Primary":"during-sync-primary","Backdrop":"during-sync-backdrop"});
             }
             self.host.syncs.fetch_add(1, Ordering::SeqCst);
             info
@@ -567,6 +1086,23 @@ mod native {
                 .into_owned()
                 .collect();
         if request.method() == axum::http::Method::GET {
+            if path == "/Users/user/Items/61616" && query.get("Fields").is_some_and(|fields| fields ==
+                "Id,Name,Overview,Genres,People,ProviderIds,Album,Artists,AlbumArtists,Composers,IndexNumber,ParentIndexNumber,Path,Type,Guid,PresentationUniqueKey,ExtraType,PartCount,Size,RunTimeTicks,Chapters,MediaSources,MediaStreams,ImageTags") {
+                let mutation = {
+                    let mut pending = proxy.identity_json_mutation.lock().await;
+                    match pending.take() {
+                        Some((remaining, path, bytes)) if remaining > 1 => {
+                            *pending = Some((remaining - 1, path, bytes));
+                            None
+                        }
+                        mutation => mutation,
+                    }
+                };
+                if let Some((_, file, bytes)) = mutation {
+                    tokio::fs::write(file, bytes).await.unwrap();
+                    proxy.identity_json_mutated.store(true, Ordering::SeqCst);
+                }
+            }
             if path == "/Plugins" {
                 let mut plugins = pro_plugins();
                 match proxy.protocol_fault.lock().await.as_str() {
@@ -1150,6 +1686,8 @@ mod native {
                 reject_features: Arc::default(),
                 guid_lookup_fault: Arc::default(),
                 guid_lookups: Arc::default(),
+                identity_json_mutation: Arc::default(),
+                identity_json_mutated: Arc::default(),
             };
             let app = Router::new()
                 .fallback(self::proxy)

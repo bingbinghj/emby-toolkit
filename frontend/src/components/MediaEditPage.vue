@@ -2,7 +2,7 @@
   <div class="mp-page editor-page">
     <VRow align="center" class="mb-4">
       <VCol cols="auto"><VBtn icon="mdi-arrow-left" variant="text" aria-label="返回列表" @click="goBack" /></VCol>
-      <VCol><h1 class="text-h5">手动编辑媒体信息</h1><p class="text-body-2 text-medium-emphasis mt-1">管理演员、图像、媒体版本和音轨</p></VCol>
+      <h1 class="sr-only">手动编辑媒体信息</h1>
     </VRow>
 
     <VAlert v-if="mediaOperationFeedback" :type="mediaOperationFeedback.type" :title="mediaOperationFeedback.message" variant="tonal" class="mb-4">
@@ -13,7 +13,16 @@
       <p>{{ mediaRecoveryCleanupOnly ? '媒体信息与原神医配置已通过验收，恢复备份尚未删除。' : '完成恢复验收与备份清理后才能继续保存媒体信息。' }}</p>
       <div v-for="record in mediaRecoveryState.records" :key="record.id" class="mt-3">
         <div class="text-wrap">{{ record.reason }}</div><div class="text-break">恢复目录：{{ record.directory }}</div>
-        <VBtn class="mt-2" color="warning" variant="flat" :prepend-icon="record.kind === 'verified-cleanup' ? 'mdi-delete-outline' : 'mdi-restore'" :loading="isRecoveringMediaInfo" :disabled="!record.can_recover || isCheckingMediaRecovery || isConfirmingMediaRecovery" :data-testid="`media-recovery-${record.id}`" @click="confirmMediaRecovery(record)">{{ record.kind === 'verified-cleanup' ? '清理恢复备份' : '恢复媒体信息' }}</VBtn>
+        <div v-for="directory in record.conflict_backup_directories || []" :key="directory" class="text-break">当前 JSON 已另行备份并保留：{{ directory }}</div>
+        <div v-for="conflict in record.json_conflicts || []" :key="`${conflict.item_id}:${conflict.path}`" class="mt-3">
+          <div class="text-break">当前 JSON：{{ conflict.path }}（媒体 ID：{{ conflict.item_id }}）</div>
+          <div class="text-break">当前 SHA256：{{ conflict.current_sha256 || '尚未确认' }}</div>
+          <VTable density="compact" class="mt-2"><thead><tr><th>变化字段</th><th>原恢复值</th><th>当前值</th></tr></thead><tbody>
+            <tr v-for="change in conflict.changes || []" :key="change.path"><td class="text-break">{{ change.path }}</td><td class="text-break">{{ recoveryConflictValue(change.expected) }}</td><td class="text-break">{{ recoveryConflictValue(change.current) }}</td></tr>
+          </tbody></VTable>
+          <div v-if="conflict.change_count > (conflict.changes?.length || 0)" class="text-caption">另有 {{ conflict.change_count - (conflict.changes?.length || 0) }} 处字段变化</div>
+        </div>
+        <VBtn class="mt-2" color="warning" variant="flat" :prepend-icon="record.kind === 'verified-cleanup' ? 'mdi-delete-outline' : (record.json_conflicts?.length ? 'mdi-content-save-outline' : 'mdi-restore')" :loading="isRecoveringMediaInfo" :disabled="!record.can_recover || isCheckingMediaRecovery || isConfirmingMediaRecovery || (record.json_conflicts?.length && !recoveryJsonConflictHashes(record))" :data-testid="`media-recovery-${record.id}`" @click="confirmMediaRecovery(record)">{{ record.kind === 'verified-cleanup' ? '清理恢复备份' : (record.json_conflicts?.length ? '备份当前 JSON 并恢复' : '恢复媒体信息') }}</VBtn>
       </div>
       <div v-if="mediaRecoveryError" class="mt-3 text-wrap">{{ mediaRecoveryError }}</div>
       <VBtn class="mt-3" variant="text" :loading="isCheckingMediaRecovery" :disabled="isRecoveringMediaInfo" @click="loadMediaRecovery">重新检查恢复状态</VBtn>
@@ -36,9 +45,6 @@
           </VCardTitle>
           <VList density="compact">
             <VListItem title="Emby ItemID" :subtitle="String(itemDetails.item_id || '')" />
-            <VListItem v-if="itemDetails.original_score !== null && itemDetails.original_score !== undefined" title="原始记录评分">
-              <template #append><VChip color="warning" size="small">{{ itemDetails.original_score }}</VChip></template>
-            </VListItem>
             <VListItem v-if="itemDetails.review_reason" title="待复核原因" :subtitle="itemDetails.review_reason" class="text-error" />
           </VList>
           <VCardText class="d-flex flex-column ga-3">
@@ -79,7 +85,7 @@
                     </VCardTitle>
                     <VCardText>
                       <div class="actor-card-content">
-                        <VImg :src="getActorImageUrl(actor)" :alt="actor.name || '演员照片'" cover class="actor-avatar-image" @click="previewMediaImage(getActorImageUrl(actor), actor.name)">
+                        <VImg :src="getActorImageUrl(actor)" :alt="actor.name || '演员照片'" width="72" height="96" cover class="actor-avatar-image" @click="previewMediaImage(getActorImageUrl(actor), actor.name)">
                           <template #error><div class="avatar-placeholder"><VIcon icon="mdi-account-outline" size="24" /></div></template>
                         </VImg>
                         <div class="actor-inputs">
@@ -211,7 +217,16 @@
             <p>{{ mediaRecoveryCleanupOnly ? '媒体信息与原神医配置已通过验收，恢复备份尚未删除。' : '完成恢复验收与备份清理后才能继续保存媒体信息。' }}</p>
             <div v-for="record in mediaRecoveryState.records" :key="record.id" class="mt-3">
               <div class="text-wrap">{{ record.reason }}</div><div class="text-break">恢复目录：{{ record.directory }}</div>
-              <VBtn class="mt-2" color="warning" variant="flat" :prepend-icon="record.kind === 'verified-cleanup' ? 'mdi-delete-outline' : 'mdi-restore'" :loading="isRecoveringMediaInfo" :disabled="!record.can_recover || isCheckingMediaRecovery || isConfirmingMediaRecovery" :data-testid="`media-recovery-${record.id}`" @click="confirmMediaRecovery(record)">{{ record.kind === 'verified-cleanup' ? '清理恢复备份' : '恢复媒体信息' }}</VBtn>
+              <div v-for="directory in record.conflict_backup_directories || []" :key="directory" class="text-break">当前 JSON 已另行备份并保留：{{ directory }}</div>
+              <div v-for="conflict in record.json_conflicts || []" :key="`${conflict.item_id}:${conflict.path}`" class="mt-3">
+                <div class="text-break">当前 JSON：{{ conflict.path }}（媒体 ID：{{ conflict.item_id }}）</div>
+                <div class="text-break">当前 SHA256：{{ conflict.current_sha256 || '尚未确认' }}</div>
+                <VTable density="compact" class="mt-2"><thead><tr><th>变化字段</th><th>原恢复值</th><th>当前值</th></tr></thead><tbody>
+                  <tr v-for="change in conflict.changes || []" :key="change.path"><td class="text-break">{{ change.path }}</td><td class="text-break">{{ recoveryConflictValue(change.expected) }}</td><td class="text-break">{{ recoveryConflictValue(change.current) }}</td></tr>
+                </tbody></VTable>
+                <div v-if="conflict.change_count > (conflict.changes?.length || 0)" class="text-caption">另有 {{ conflict.change_count - (conflict.changes?.length || 0) }} 处字段变化</div>
+              </div>
+              <VBtn class="mt-2" color="warning" variant="flat" :prepend-icon="record.kind === 'verified-cleanup' ? 'mdi-delete-outline' : (record.json_conflicts?.length ? 'mdi-content-save-outline' : 'mdi-restore')" :loading="isRecoveringMediaInfo" :disabled="!record.can_recover || isCheckingMediaRecovery || isConfirmingMediaRecovery || (record.json_conflicts?.length && !recoveryJsonConflictHashes(record))" :data-testid="`media-recovery-${record.id}`" @click="confirmMediaRecovery(record)">{{ record.kind === 'verified-cleanup' ? '清理恢复备份' : (record.json_conflicts?.length ? '备份当前 JSON 并恢复' : '恢复媒体信息') }}</VBtn>
             </div>
             <div v-if="mediaRecoveryError" class="mt-3 text-wrap">{{ mediaRecoveryError }}</div>
             <VBtn class="mt-3" variant="text" :loading="isCheckingMediaRecovery" :disabled="isRecoveringMediaInfo" @click="loadMediaRecovery">重新检查恢复状态</VBtn>
@@ -609,8 +624,31 @@ const loadMediaRecovery = async () => {
   }
 };
 
-const recoverMediaInfo = async (record) => {
-  if (isRecoveringMediaInfo.value || isSavingMediaInfo.value || !mediaRecoveryState.value.records.some(item => item.id === record.id && item.can_recover)) return;
+const recoveryConflictValue = (value) => {
+  const text = value === undefined ? '（无该字段）' : typeof value === 'string' ? value : JSON.stringify(value);
+  return text.length > 300 ? `${text.slice(0, 300)}…（${text.length} 字符）` : text;
+};
+
+const recoveryJsonConflictHashes = (record) => {
+  const hashes = {};
+  for (const conflict of Array.isArray(record.json_conflicts) ? record.json_conflicts : []) {
+    if (!conflict.item_id || !/^[a-f0-9]{64}$/i.test(conflict.current_sha256 || '')) return null;
+    const hash = conflict.current_sha256.toLowerCase();
+    if (hashes[conflict.item_id] && hashes[conflict.item_id] !== hash) return null;
+    hashes[conflict.item_id] = hash;
+  }
+  return Object.fromEntries(Object.entries(hashes).sort());
+};
+
+const recoverMediaInfo = async (record, currentJsonHashes = null) => {
+  const currentRecord = mediaRecoveryState.value.records.find(item => item.id === record.id && item.can_recover);
+  if (isRecoveringMediaInfo.value || isSavingMediaInfo.value || !currentRecord) return;
+  const actualHashes = recoveryJsonConflictHashes(currentRecord);
+  if ((currentRecord.json_conflicts?.length && !currentJsonHashes) || (currentJsonHashes && JSON.stringify(currentJsonHashes) !== JSON.stringify(actualHashes))) {
+    mediaRecoveryError.value = '当前 JSON 已变化或缺少有效哈希，请重新检查差异并确认备份后恢复';
+    message.warning(mediaRecoveryError.value);
+    return;
+  }
   const session = mediaRecoverySession;
   const sequence = mediaInfoLoadSequence;
   const targetId = String(currentEditMediaId.value || '');
@@ -618,15 +656,20 @@ const recoverMediaInfo = async (record) => {
   isRecoveringMediaInfo.value = true;
   mediaRecoveryError.value = '';
   try {
-    const { data, status } = await axios.post('/api/media_info/recovery', { recovery_id: record.id });
+    const payload = { recovery_id: record.id };
+    if (currentJsonHashes) payload.current_json_hashes = { ...currentJsonHashes };
+    const { data, status } = await axios.post('/api/media_info/recovery', payload);
     if (session !== mediaRecoverySession) return;
     if (data?.recovered_id !== record.id || typeof data.pending !== 'boolean' || typeof data.backup_deleted !== 'boolean') throw new Error(data?.error || data?.message || '恢复或备份清理尚未通过验收');
     if (!await loadMediaRecovery() || session !== mediaRecoverySession) return;
     const warnings = mediaOperationDetails(Array.isArray(data.warning_details) ? data.warning_details : []);
+    const preservedDirectories = [...new Set([...(Array.isArray(data.conflict_backup_directories) ? data.conflict_backup_directories : []), ...(Array.isArray(record.conflict_backup_directories) ? record.conflict_backup_directories : [])])].filter(directory => typeof directory === 'string' && directory);
+    const preservedDetails = preservedDirectories.map(directory => `当前 JSON 已另行备份并保留：${directory}`);
+    if (preservedDetails.length) mediaOperationFeedback.value = { type: 'info', message: '当前 JSON 备份已保留', details: preservedDetails };
     if (status === 207 || !data.backup_deleted) {
       if (!warnings.length) warnings.push(data.message || `恢复备份尚未删除：${record.directory}`);
       mediaRecoveryError.value = warnings.join('；');
-      mediaOperationFeedback.value = { type: 'warning', message: '恢复备份尚未删除，请重试清理', details: warnings };
+      mediaOperationFeedback.value = { type: 'warning', message: '恢复备份尚未删除，请重试清理', details: [...warnings, ...preservedDetails] };
       if (sequence === mediaInfoLoadSequence && targetId === String(currentEditMediaId.value || '')) mediaInfoSaveFeedback.value = mediaOperationFeedback.value;
       message.warning(mediaOperationFeedback.value.message);
       return;
@@ -642,22 +685,28 @@ const recoverMediaInfo = async (record) => {
     if (mediaInfoSaveFeedback.value?.message === '恢复备份尚未删除，请重试清理') mediaInfoSaveFeedback.value = null;
     if (warnings.length) message.warning(mediaOperationFeedback.value.message);
     else message.success(data.message || (record.kind === 'verified-cleanup' ? '恢复备份已清理' : '媒体信息与原神医配置已验收，恢复备份已删除'));
-    if (record.kind === 'verified-cleanup') return;
+    if (record.kind === 'verified-cleanup') {
+      if (preservedDetails.length && showMediaInfoEditor.value && sequence === mediaInfoLoadSequence) mediaInfoSaveFeedback.value = { type: 'info', message: '当前 JSON 备份已保留', details: preservedDetails };
+      return;
+    }
     if (showMediaInfoEditor.value && sequence === mediaInfoLoadSequence && targetId === String(currentEditMediaId.value || '')) {
       const preserveDraft = draftSnapshot !== mediaInfoLoadedSnapshot || draftSnapshot !== JSON.stringify(mediaInfoData.value);
       if (!preserveDraft) {
         await openMediaInfoEditor(targetId);
         if (session !== mediaRecoverySession || mediaInfoLoadSequence !== sequence + 1 || targetId !== String(currentEditMediaId.value || '') || !showMediaInfoEditor.value) return;
       }
-      if (preserveDraft || warnings.length) mediaInfoSaveFeedback.value = {
+      if (preserveDraft || warnings.length || preservedDetails.length) mediaInfoSaveFeedback.value = {
         type: warnings.length ? 'warning' : 'info',
-        message: warnings.length ? '恢复已通过验收，仍有收尾提醒' : '恢复已完成，当前编辑草稿已保留',
-        details: [...warnings, ...(preserveDraft ? ['当前编辑草稿已保留；可重新打开编辑器读取恢复后的媒体信息。'] : [])],
+        message: warnings.length ? '恢复已通过验收，仍有收尾提醒' : preserveDraft ? '恢复已完成，当前编辑草稿已保留' : '当前 JSON 备份已保留',
+        details: [...warnings, ...preservedDetails, ...(preserveDraft ? ['当前编辑草稿已保留；可重新打开编辑器读取恢复后的媒体信息。'] : [])],
       };
     }
   } catch (error) {
     if (session !== mediaRecoverySession) return;
-    mediaRecoveryError.value = error.response?.data?.error || error.message || '恢复失败，请检查恢复目录';
+    const reason = error.response?.data?.error || error.message || '恢复失败，请检查恢复目录';
+    const checked = error.response ? await loadMediaRecovery() : true;
+    if (session !== mediaRecoverySession) return;
+    mediaRecoveryError.value = [reason, ...(!checked && mediaRecoveryError.value ? [mediaRecoveryError.value] : [])].join('；');
     message.error(mediaRecoveryError.value);
   } finally {
     isRecoveringMediaInfo.value = false;
@@ -667,13 +716,19 @@ const recoverMediaInfo = async (record) => {
 const confirmMediaRecovery = (record) => {
   if (isConfirmingMediaRecovery.value || isRecoveringMediaInfo.value || !record.can_recover) return;
   const session = mediaRecoverySession;
+  const conflict = Boolean(record.json_conflicts?.length);
+  const hashes = conflict ? recoveryJsonConflictHashes(record) : null;
+  if (conflict && !hashes) {
+    mediaRecoveryError.value = '当前 JSON 缺少有效哈希，请重新检查后恢复';
+    return;
+  }
   isConfirmingMediaRecovery.value = true;
   const cleanup = record.kind === 'verified-cleanup';
   mediaRecoveryDialog = dialog.warning({
-    title: cleanup ? '清理恢复备份' : '恢复媒体信息',
-    content: cleanup ? `媒体信息与原神医配置已通过验收。本次将删除已验收的恢复备份。当前编辑草稿会保留。\n备份目录：${record.directory}` : `将核对备份与 Emby 数据并恢复原神医配置，验收成功后删除备份。当前未保存的草稿会保留。\n恢复目录：${record.directory}`,
-    positiveText: cleanup ? '开始清理' : '开始恢复', negativeText: '取消',
-    onPositiveClick: () => session === mediaRecoverySession ? recoverMediaInfo(record) : undefined,
+    title: cleanup ? '清理恢复备份' : conflict ? '备份当前 JSON 并恢复' : '恢复媒体信息',
+    content: cleanup ? `媒体信息与原神医配置已通过验收。本次将删除已验收的恢复备份。当前编辑草稿会保留。\n备份目录：${record.directory}` : conflict ? `当前 JSON 已发生变化。将先把以下当前文件备份到独立留存目录，再恢复原请求 JSON；完整验收后删除原恢复备份，并保留当前 JSON 备份。当前编辑草稿会保留。\n${record.json_conflicts.map(item => `${item.item_id}：${item.path}\nSHA256：${hashes[item.item_id]}`).join('\n')}` : `将核对备份与 Emby 数据并恢复原神医配置，验收成功后删除备份。当前未保存的草稿会保留。\n恢复目录：${record.directory}`,
+    positiveText: cleanup ? '开始清理' : conflict ? '备份并恢复' : '开始恢复', negativeText: '取消',
+    onPositiveClick: () => session === mediaRecoverySession ? recoverMediaInfo(record, hashes) : undefined,
     onClose: () => { isConfirmingMediaRecovery.value = false; mediaRecoveryDialog = null; },
   });
 };
@@ -2202,7 +2257,7 @@ const handleSaveChanges = async () => {
   width:72px;
   height:96px;
   border-radius: var(--app-card-radius, 12px);
-  flex-shrink: 0;
+  flex: 0 0 72px;
 }
 
 .actor-inputs {

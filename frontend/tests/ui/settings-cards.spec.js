@@ -4,13 +4,13 @@ import { readFileSync } from 'node:fs';
 const card = (page, title) => page.locator('.setting-card').filter({ has: page.getByText(title, { exact: true }) });
 
 const allFields = {
-  system: ['delay_between_items_sec', 'media_info_retry_interval', 'media_info_retry_attempts', 'subtitle_chinese_default_language', 'min_score_for_review', 'max_actors_to_process', 'max_episode_actors_to_process', 'extract_thumb', 'actor_role_add_prefix', 'remove_actors_without_avatars', 'keyword_to_tags', 'studio_to_chinese', 'emby_server_url', 'emby_public_url', 'emby_api_key', 'emby_webhook_secret', 'emby_webhook_ingest_enabled', 'emby_user_id', 'emby_admin_user', 'emby_admin_pass', 'emby_api_timeout', 'ai_provider', 'ai_api_key', 'ai_model_name', 'ai_base_url', 'ai_request_timeout', 'ai_max_retries', 'ai_translation_batch_size', 'ai_translation_mode', 'log_rotation_size_mb', 'log_rotation_backup_count'],
+  system: ['delay_between_items_sec', 'media_info_retry_interval', 'media_info_retry_attempts', 'subtitle_chinese_default_language', 'max_actors_to_process', 'max_episode_actors_to_process', 'extract_thumb', 'actor_role_add_prefix', 'remove_actors_without_avatars', 'keyword_to_tags', 'studio_to_chinese', 'emby_server_url', 'emby_public_url', 'emby_api_key', 'emby_webhook_secret', 'emby_webhook_ingest_enabled', 'emby_user_id', 'emby_admin_user', 'emby_admin_pass', 'emby_api_timeout', 'ai_provider', 'ai_api_key', 'ai_model_name', 'ai_base_url', 'ai_request_timeout', 'ai_max_retries', 'ai_translation_batch_size', 'ai_translation_mode', 'log_rotation_size_mb', 'log_rotation_backup_count'],
   directory: ['p115_auth_method', 'p115_app_id', 'p115_api_priority', 'p115_request_interval', 'emby_metadata_path', 'local_strm_root', 'cd2_media_root', 'p115_fingerprint_media_root_path', 'p115_generate_mediainfo', 'p115_enable_sync_delete'],
   rule: ['monitor_enabled', 'monitor_paths', 'monitor_exclude_dirs', 'monitor_exclude_refresh_delay', 'monitor_extensions', 'tmdb_image_language_preference', 'monitor_sha1_pc_search', 'auto_repair_truehd_core_on_ingest', 'auto_fill_language_titles_on_ingest', 'auto_extract_intro_fingerprint_on_ingest', 'auto_extract_video_thumbnails_on_ingest', 'extract_video_thumbnails_after_save', 'movie_rename_format', 'tv_rename_format'],
   search: ['tmdb_api_key', 'tmdb_api_base_url', 'douban_enable_online_api', 'api_douban_default_cooldown_seconds', 'douban_cookie'],
 };
 
-test('all 60 original settings fields are reachable through the four MP settings tabs', async ({ page, api }) => {
+test('all 59 active settings fields are reachable through the four MP settings tabs', async ({ page, api }) => {
   test.setTimeout(60_000);
   const configuration = JSON.parse(readFileSync(new URL('./config.json', import.meta.url)));
   configuration.ai_provider = 'openai';
@@ -27,7 +27,7 @@ test('all 60 original settings fields are reachable through the four MP settings
       reached.push(field);
     }
   }
-  expect(new Set(reached).size).toBe(60);
+  expect(new Set(reached).size).toBe(59);
   expect(api.requests.filter(request => request.method === 'POST' && request.path === '/api/config')).toEqual([]);
 });
 
@@ -49,11 +49,12 @@ for (const [group, titles, fields] of groups) {
   });
 }
 
-test('service configuration remains visibly unverified while its settings are fully expanded', async ({ page, api }) => {
+test('service settings omit generic status badges and retain actual read errors', async ({ page, api }) => {
   api.respond('GET', '/api/emby_libraries', { error: 'Emby 尚未连接' }, 503);
   await page.goto('/setting?tab=system');
   const emby = card(page, '媒体服务器');
-  await expect(emby.getByText(/已配置.*未验证/)).toBeVisible();
+  await expect(emby.getByText(/已配置.*未验证/)).toHaveCount(0);
+  await expect(emby.locator('.v-alert')).toContainText('Emby 尚未连接');
   await expect(emby.locator('[data-field="emby_api_key"] input')).toBeVisible();
   await expect(emby.locator('[data-field="emby_api_key"] input')).toHaveAttribute('type', 'password');
 });
@@ -128,28 +129,28 @@ test('switching settings tabs retains an unsaved draft', async ({ page, api }) =
   await input.fill('unsaved-fixture-key');
   await page.getByRole('tab', { name: '系统', exact: true }).click();
   await expect(input).toBeHidden();
-  await page.getByRole('tab', { name: '搜索 & 下载', exact: true }).click();
+  await page.getByRole('tab', { name: '数据源', exact: true }).click();
   await expect(input).toHaveValue('unsaved-fixture-key');
   expect(api.requests.filter(request => request.method === 'POST' && request.path === '/api/config')).toEqual([]);
 });
 
-test('115 authorization remains unverified until the server confirms a connection', async ({ page, api }) => {
+test('115 settings show authorization actions without generic card connection badges', async ({ page, api }) => {
   api.respond('GET', '/api/p115/status', { data: { has_token: true, auth_method: 'web' } });
   await page.goto('/setting?tab=directory');
   const account = card(page, '存储');
-  await expect(account.getByText(/已授权.*未验证/)).toBeVisible();
+  await expect(account.getByRole('button', { name: '重新登录', exact: true })).toBeVisible();
   await expect(account.locator('[data-field="p115_request_interval"] input')).toBeVisible();
-  await expect(account.getByText('已连接', { exact: true })).toHaveCount(0);
-  api.respond('GET', '/api/p115/status', { data: { has_token: true, valid: true, auth_method: 'web' } });
+  await expect(account.locator('.setting-card__status')).toHaveCount(0);
+  api.respond('GET', '/api/p115/status', { data: { has_token: false, auth_method: 'web' } });
   await account.getByRole('button', { name: '刷新状态', exact: true }).click();
-  await expect(account.getByText('已连接', { exact: true })).toBeVisible();
+  await expect(account.getByRole('button', { name: '登录授权', exact: true })).toBeVisible();
 });
 
 test('a 115 status read failure remains visible and never saves credentials', async ({ page, api }) => {
   api.respond('GET', '/api/p115/status', { data: { has_token: true, valid: true } });
   await page.goto('/setting?tab=directory');
   const account = card(page, '存储');
-  await expect(account.getByText('已连接', { exact: true })).toBeVisible();
+  await expect(account.getByRole('button', { name: '重新登录', exact: true })).toBeVisible();
   await expect.poll(() => api.requests.some(request => request.path === '/api/config/rename_preview')).toBe(true);
   const writes = () => api.requests.filter(request => ['POST', 'PUT', 'PATCH', 'DELETE'].includes(request.method) && request.path !== '/api/config/rename_preview');
   expect(writes()).toEqual([]);
@@ -159,4 +160,84 @@ test('a 115 status read failure remains visible and never saves credentials', as
   await expect(account.getByRole('button', { name: '刷新状态', exact: true })).toBeEnabled();
   await expect(account.locator('[data-field="p115_request_interval"] input')).toBeVisible();
   expect(writes()).toEqual([]);
+});
+
+
+test('numeric settings use MP native spin controls and save numbers after keyboard stepping', async ({ page, api }) => {
+  await page.goto('/setting?tab=system');
+  const field = page.locator('[data-field="delay_between_items_sec"] input');
+  await expect(field).toHaveAttribute('type', 'number');
+  await expect(field).toHaveAttribute('min', '0');
+  await expect(field).toHaveAttribute('step', '0.1');
+  await expect(page.locator('.v-number-input__control')).toHaveCount(0);
+  await field.fill('0.5');
+  await field.press('ArrowUp');
+  await expect(field).toHaveValue('0.6');
+  await page.getByRole('button', { name: '保存基础设置', exact: true }).click();
+  await expect.poll(() => api.requests.some(request => request.method === 'POST' && request.path === '/api/config')).toBe(true);
+  const payload = api.requests.find(request => request.method === 'POST' && request.path === '/api/config').body;
+  expect(payload.delay_between_items_sec).toBe(0.6);
+  expect(payload).not.toHaveProperty('min_score_for_review');
+  await expect(page.locator('[data-field="min_score_for_review"]')).toHaveCount(0);
+});
+
+test('monitor formats have built-in media candidates and preserve custom selections', async ({ page, api }) => {
+  await page.goto('/setting?tab=rule');
+  const field = page.locator('[data-field="monitor_extensions"] input:not([type="hidden"])');
+  await field.click();
+  await page.getByRole('option', { name: '.rmvb', exact: true }).click();
+  await field.fill('custom-ext');
+  await field.press('Enter');
+  await field.press('Escape');
+  await page.getByRole('button', { name: '保存实时监控', exact: true }).click();
+  await expect.poll(() => api.requests.some(request => request.method === 'POST' && request.path === '/api/config')).toBe(true);
+  const payload = api.requests.find(request => request.method === 'POST' && request.path === '/api/config').body;
+  expect(payload.monitor_extensions).toContain('.rmvb');
+  expect(payload.monitor_extensions).toContain('custom-ext');
+  expect(payload.monitor_extensions).toContain('.strm');
+});
+
+test('rename examples display real recent movie and episode titles and preserve format drafts', async ({ page, api }) => {
+  api.respond('POST', '/api/config/rename_preview', { movie: '最新电影 (2026)/最新电影.mkv', tv: '最新电视剧 (2025)/S02E09.mp4', movie_sample: { id: 'new-movie', title: '最新电影' }, tv_sample: { id: 'new-episode', title: '最新电视剧', season_episode: 'S02E09' }, errors: {} });
+  await page.goto('/setting?tab=rule');
+  await expect(page.getByText('电影示例 · 最新电影', { exact: true })).toBeVisible();
+  await expect(page.getByText('电视剧示例 · 最新电视剧 S02E09', { exact: true })).toBeVisible();
+  const movie = page.locator('[data-field="movie_rename_format"] textarea').first();
+  await movie.fill('{{title}}.{{year}}.mkv');
+  await expect.poll(() => api.requests.filter(request => request.path === '/api/config/rename_preview').some(request => request.body.movie_format === '{{title}}.{{year}}.mkv')).toBe(true);
+  await expect(movie).toHaveValue('{{title}}.{{year}}.mkv');
+  expect(api.requests.filter(request => request.method === 'POST' && request.path === '/api/config')).toEqual([]);
+});
+
+test('empty recent examples and per-type failures display truthful messages', async ({ page, api }) => {
+  api.respond('POST', '/api/config/rename_preview', { movie: '', tv: '', movie_sample: null, tv_sample: null, errors: { tv: 'Emby 最近剧集读取失败' } });
+  await page.goto('/setting?tab=rule');
+  await expect(page.getByText('暂无最近入库的电影', { exact: true })).toBeVisible();
+  await expect(page.getByText('Emby 最近剧集读取失败', { exact: true })).toBeVisible();
+  await expect(page.getByText(/肖申克的救赎|凡人修仙传/)).toHaveCount(0);
+});
+
+
+test('cover style numeric settings keep native stepping and scoped numeric saves', async ({ page, api }) => {
+  await page.goto('/settings/cover-generator');
+  await page.getByRole('tab', { name: '单图风格设置', exact: true }).click();
+  const font = page.getByLabel('中文字体大小比例', { exact: true }).filter({ visible: true }).first();
+  await expect(font).toHaveAttribute('type', 'number');
+  await font.fill('1.0');
+  await font.press('ArrowUp');
+  await expect(font).toHaveValue('1.1');
+  await page.getByRole('button', { name: '保存单图风格', exact: true }).click();
+  await expect.poll(() => api.requests.some(request => request.method === 'POST' && request.path === '/api/config/cover_generator')).toBe(true);
+  const single = api.requests.find(request => request.method === 'POST' && request.path === '/api/config/cover_generator').body;
+  expect(single.zh_font_size).toBe(1.1);
+  await page.getByRole('tab', { name: '多图风格设置', exact: true }).click();
+  const blur = page.getByLabel('背景模糊程度', { exact: true }).filter({ visible: true }).first();
+  await page.getByRole('checkbox', { name: '启用模糊背景', exact: true }).uncheck();
+  await expect(blur).toBeDisabled();
+  await page.getByRole('checkbox', { name: '启用模糊背景', exact: true }).check();
+  await expect(blur).toBeEnabled();
+  await blur.fill('25');
+  await blur.press('ArrowUp');
+  await expect(blur).toHaveValue('26');
+  await expect(page.locator('.v-number-input__control')).toHaveCount(0);
 });

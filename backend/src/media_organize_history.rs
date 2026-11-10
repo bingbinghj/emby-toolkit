@@ -217,15 +217,48 @@ pub async fn finish(state: &AppState, event: &Value, result: &Result<Value>) -> 
         status = "processing";
         message = "ETK 预增强已完成，等待 Emby 入库回流验收".into();
     }
-    sqlx::query("UPDATE media_organize_history SET status=$1,message=$2,completed_at=CASE WHEN $1='processing' THEN NULL ELSE NOW() END,item_json=item_json || $4 WHERE id=ANY($3)")
-        .bind(status).bind(&message).bind(&ids).bind(preparation).execute(&state.db).await?;
+    let completed: Vec<Value> = sqlx::query_scalar("UPDATE media_organize_history SET status=$1,message=$2,completed_at=CASE WHEN $1='processing' THEN NULL ELSE NOW() END,item_json=item_json || $4 WHERE id=ANY($3) AND status='processing' RETURNING item_json || jsonb_build_object('item_id',item_id)")
+        .bind(status).bind(&message).bind(&ids).bind(preparation).fetch_all(&state.db).await?;
+    if completed.is_empty() {
+        return Ok(());
+    }
     if event["source"] == "emby" {
         // A MoviePilot admission remains pending until this exact file/episode
         // reaches Emby's finalization. Never promote its entire parent series.
         sqlx::query("UPDATE media_organize_history SET status=CASE WHEN $1='success' AND COALESCE(item_json->>'_preparation_warning','')<>'' THEN 'warning' ELSE $1 END,message=CASE WHEN COALESCE(item_json->>'_preparation_warning','')<>'' THEN $2 || '；预增强提醒：' || (item_json->>'_preparation_warning') ELSE $2 END,completed_at=NOW() WHERE source='moviepilot' AND status='processing' AND item_id IN (SELECT item_id FROM media_organize_history WHERE id=ANY($3) AND item_id IS NOT NULL)")
-            .bind(status).bind(message).bind(ids).execute(&state.db).await?;
+            .bind(status).bind(&message).bind(ids).execute(&state.db).await?;
+    }
+    if status == "failed" {
+        notify_failures(state, completed, &message);
     }
     Ok(())
+}
+
+fn notify_failures(state: &AppState, items: Vec<Value>, reason: &str) {
+    if items.is_empty() {
+        return;
+    }
+    // Persisted results are authoritative; notification delivery cannot block
+    // completion or change a failed admission into another outcome.
+    let state = state.clone();
+    let reason = reason.to_string();
+    let operator = crate::notifications::current_operator();
+    tokio::spawn(async move {
+        let notify = async {
+            for item in items {
+                let native =
+                    json!({"Id":item["item_id"],"Name":item["name"],"Type":item["item_type"]});
+                if let Err(error) = crate::notifications::failure(&state, &native, &reason).await {
+                    tracing::warn!("整理失败通知未能发送：{}", error.1);
+                }
+            }
+        };
+        if let Some(operator) = operator {
+            crate::notifications::with_operator(operator, notify).await;
+        } else {
+            notify.await;
+        }
+    });
 }
 
 fn outcome(result: &Result<Value>) -> (&'static str, String) {
@@ -257,6 +290,30 @@ fn outcome(result: &Result<Value>) -> (&'static str, String) {
         && let Some(error) = report["error"].as_str().filter(|error| !error.is_empty())
     {
         message = safe_text(error);
+    }
+    if status == "failed"
+        && let Ok(report) = result
+        && string(report, "error").is_empty()
+    {
+        let reasons = list(&report["failures"])
+            .iter()
+            .filter_map(|failure| {
+                failure.as_str().map(str::to_string).or_else(|| {
+                    let reason = ["reason", "error", "message"]
+                        .iter()
+                        .find_map(|key| failure[*key].as_str().filter(|value| !value.is_empty()))?;
+                    let id = string(failure, "item_id");
+                    Some(if id.is_empty() {
+                        reason.into()
+                    } else {
+                        format!("{id}：{reason}")
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+        if !reasons.is_empty() {
+            message = safe_text(&reasons.join("；"));
+        }
     }
     if message.is_empty() {
         message = match status {
@@ -322,8 +379,11 @@ pub async fn finish_reorganize(
         return Ok(());
     }
     let (status, message) = outcome(result);
-    sqlx::query("UPDATE media_organize_history SET status=$1,message=$2,completed_at=NOW() WHERE id=ANY($3) AND item_id=$4")
-        .bind(status).bind(message).bind(ids).bind(item_id).execute(&state.db).await?;
+    let completed: Vec<Value> = sqlx::query_scalar("UPDATE media_organize_history SET status=$1,message=$2,completed_at=NOW() WHERE id=ANY($3) AND item_id=$4 AND status='processing' RETURNING item_json || jsonb_build_object('item_id',item_id)")
+        .bind(status).bind(&message).bind(ids).bind(item_id).fetch_all(&state.db).await?;
+    if status == "failed" {
+        notify_failures(state, completed, &message);
+    }
     Ok(())
 }
 
@@ -363,4 +423,35 @@ async fn history(
     Ok(Json(
         json!({"items":items,"total":total,"page":page,"page_size":size,"tracking_since":tracking_since,"legacy_records_available":false}),
     ))
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::*;
+
+    #[test]
+    fn actual_failures_replace_a_generic_completion_message() {
+        let (status, message) = outcome(&Ok(
+            json!({"message":"本批已处理","failures":["电影原生导入失败",{"item_id":"episode-2","reason":"媒体 JSON 验收失败 password=private"}]}),
+        ));
+        assert_eq!(status, "failed");
+        assert!(message.contains("电影原生导入失败"));
+        assert!(message.contains("episode-2：媒体 JSON 验收失败"));
+        assert!(!message.contains("private"));
+        assert!(!message.contains("本批已处理"));
+    }
+
+    #[test]
+    fn legacy_quality_numbers_never_turn_success_into_failure() {
+        let result = Ok(json!({"updated":1,"score":0,"message":"入库已验收"}));
+        assert_eq!(outcome(&result), ("success", "入库已验收".into()));
+    }
+
+    #[test]
+    fn optional_enhancement_warnings_keep_their_warning_outcome() {
+        let result = Ok(
+            json!({"updated":1,"warning_details":["未启用可选字幕翻译"],"message":"媒体入库完成，有提醒"}),
+        );
+        assert_eq!(outcome(&result), ("warning", "媒体入库完成，有提醒".into()));
+    }
 }

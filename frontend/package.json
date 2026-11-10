@@ -8,10 +8,11 @@
     "build": "vite build",
     "preview": "vite preview",
     "build:icons": "node scripts/build-icons.mjs",
-    "predev": "npm run build:icons",
-    "prebuild": "npm run build:icons",
+    "predev": "npm run build:icons && npm run build:settings",
+    "prebuild": "npm run build:icons && npm run build:settings",
     "test": "node --test tests/*.test.mjs src/components/settings/general/*.test.mjs",
-    "test:ui": "playwright test"
+    "test:ui": "playwright test",
+    "build:settings": "node scripts/build-settings-search.mjs"
   },
   "dependencies": {
     "@iconify-json/mdi": "^1.2.3",

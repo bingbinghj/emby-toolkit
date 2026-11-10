@@ -125,17 +125,18 @@ test('mobile history cards preserve real status and disable unfinished records',
 test('history filters use real status and do not fall back to Emby recent items', async ({ page, api }) => {
   api.respond('GET', listPath, request => list(request.query.status === 'failed' ? [{ ...first, status: 'failed', message: '原生回读失败' }] : [first]));
   await page.goto('/media-organize');
-  await page.locator('.media-organize-page').getByRole('combobox').click();
-  await page.getByRole('option', { name: '失败', exact: true }).click();
+  await page.getByTestId('organize-status-filter').click();
+  await page.locator('.v-overlay--active').getByText('失败', { exact: true }).click();
   await expect(page.getByTestId('organize-items')).toContainText('原生回读失败');
   expect(api.requests.find(request => request.path === listPath && request.query.status === 'failed').query.page).toBe('1');
   expect(api.requests.some(request => request.path === '/api/dashboard/media' || request.path.startsWith('/api/media_center/libraries'))).toBe(false);
 });
 
-test('empty history shows its tracking start without claiming past records exist', async ({ page, api }) => {
+test('empty history omits the retired tracking banner without inventing prior records', async ({ page, api }) => {
   api.respond('GET', listPath, { items: [], total: 0, tracking_since: '2026-11-10T03:00:00Z', legacy_records_available: false });
   await page.goto('/media-organize');
-  await expect(page.getByTestId('organize-tracking')).toContainText('此前入库的历史记录不可用');
+  await expect(page.getByTestId('organize-tracking')).toHaveCount(0);
+  await expect(page.locator('.media-organize-page').getByRole('heading')).toHaveCount(0);
   await expect(page.getByTestId('organize-items')).toContainText('当前条件下没有入库处理记录');
   await expect(page.getByTestId('organize-selected')).toBeDisabled();
   expect(api.requests.filter(request => request.path === listPath)).toHaveLength(1);
@@ -168,4 +169,16 @@ test('repeated historical events for one movie submit all record IDs and one med
   await page.getByTestId('organize-confirm').click();
   await expect(page.getByTestId('organize-result')).toBeVisible();
   expect(posts(api)[0].body).toEqual({ item_ids: ['101'], history_ids: ['00000000-0000-4000-8000-000000000101', '00000000-0000-4000-8000-000000000111'] });
+});
+
+test('typing a history query applies the MP delay and keeps real failure records available for retry', async ({ page, api }) => {
+  api.respond('GET', listPath, request => list(request.query.search === '失败记录' ? [{ ...first, status: 'failed', message: '原生回读失败，恢复备份仍保留' }] : [first]));
+  await page.goto('/media-organize');
+  await page.getByRole('textbox', { name: '搜索入库记录', exact: true }).fill('失败记录');
+  await expect(page.getByTestId('organize-items')).toContainText('原生回读失败，恢复备份仍保留');
+  expect(api.requests.filter(request => request.path === listPath && request.query.search === '失败记录')).toHaveLength(1);
+  await selectRow(page);
+  await expect(page.getByTestId('organize-selected')).toBeEnabled();
+  expect(posts(api)).toHaveLength(0);
+  expect(api.requests.some(request => request.path === '/api/dashboard/media')).toBe(false);
 });

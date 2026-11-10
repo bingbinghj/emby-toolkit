@@ -13,5 +13,10 @@ defineProps({ title: { type: String, required: true }, subtitle: String });
 <style scoped>
 .mp-page-title { min-width: 0; }
 .mp-page-title__heading { margin: 0; font-size: 30px; line-height: 36px; font-weight: 700; overflow-wrap: anywhere; }
-@media (max-width: 599px) { .mp-page-title__heading { font-size: 24px; line-height: 28px; } }
+.mp-page-title__heading .text-moviepilot {
+  background-image: linear-gradient(to bottom right,
+    color-mix(in srgb, rgb(var(--v-theme-primary)) 10%, rgb(var(--v-theme-on-surface))),
+    color-mix(in srgb, rgb(var(--v-theme-primary)) 15%, rgb(var(--v-theme-on-surface))));
+}
+@media (max-width: 639px) { .mp-page-title__heading { font-size: 24px; line-height: 28px; } }
 </style>

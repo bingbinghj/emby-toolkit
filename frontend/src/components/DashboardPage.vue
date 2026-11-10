@@ -1,11 +1,5 @@
 <template>
   <div class="dashboard-page mp-page">
-    <header class="d-flex flex-wrap align-center justify-space-between ga-3 mb-4">
-      <MpPageTitle title="仪表盘" subtitle="115 网盘与 Emby 媒体概览" />
-      <div class="d-flex flex-wrap ga-2">
-        <VBtn variant="text" prepend-icon="mdi-refresh" :loading="loadingMedia || loadingStorage" @click="refresh">刷新</VBtn>
-      </div>
-    </header>
     <VAlert v-if="layoutError" type="warning" variant="tonal" class="mb-4">{{ layoutError }}</VAlert>
     <VAlert v-if="layoutSyncError" type="warning" variant="tonal" class="mb-4">{{ layoutSyncError }}<VBtn variant="text" size="small" class="ml-2" @click="loadRemoteLayout(layoutProfile)">重试布局同步</VBtn></VAlert>
     <VAlert v-if="isLayoutEditing" type="info" variant="tonal" class="mb-4">拖动卡片右上角调整位置，点击右下角勾选按钮保存布局。</VAlert>
@@ -18,7 +12,7 @@
               <VCardTitle class="dashboard-card-title">{{ element.title }}</VCardTitle>
               <template #append>
                 <span v-if="isLayoutEditing" class="dashboard-drag-handle" role="button" tabindex="0" :aria-label="`拖动${element.title}`"><VIcon icon="mdi-drag" size="small" /></span>
-                <VBtn v-else :icon="moduleError(element.id) ? undefined : 'mdi-refresh'" :prepend-icon="moduleError(element.id) ? 'mdi-refresh' : undefined" variant="text" size="small" :aria-label="`${moduleError(element.id) ? '重试' : '刷新'}${element.title}`" :loading="element.id === 'storage' ? loadingStorage : loadingMedia" @click="element.id === 'storage' ? loadStorage() : loadMedia()">{{ moduleError(element.id) ? '重试' : undefined }}</VBtn>
+                <VBtn v-else-if="moduleError(element.id)" prepend-icon="mdi-refresh" variant="text" size="small" :aria-label="`重试${element.title}`" :loading="element.id === 'storage' ? loadingStorage : loadingMedia" @click="element.id === 'storage' ? loadStorage() : loadMedia()">重试</VBtn>
               </template>
             </VCardItem>
             <VCardText v-if="element.id === 'storage'" class="storage-content">
@@ -54,7 +48,7 @@
                           <template #placeholder><VSkeletonLoader type="image" class="h-100" /></template>
                           <template #error><div class="dashboard-art-fallback"><VIcon :icon="mediaIcon(item.item_type)" size="40" /></div></template>
                         </VImg>
-                        <VChip class="dashboard-media-type" size="small" variant="flat" :color="item.item_type === 'Movie' ? '#2563eb' : '#6366f1'">{{ mediaType(item.item_type) }}</VChip>
+                        <VChip class="dashboard-media-type bg-opacity-80" size="small" variant="elevated" :color="item.item_type === 'Movie' ? 'rgba(37,99,235,.8)' : 'rgba(99,102,241,.8)'">{{ mediaType(item.item_type) }}</VChip>
                         <div class="dashboard-poster-overlay" :class="{ 'is-visible': hover.isHovering }">
                           <span class="dashboard-poster-subtitle" :title="String(item.production_year || 'Emby 新入库')">{{ String(item.production_year || 'Emby 新入库') }}</span>
                           <h3 class="dashboard-poster-title" :title="item.name">{{ item.name }}</h3>
@@ -88,7 +82,7 @@
     </div>
     <VDialog v-model="showModules" max-width="560" :fullscreen="width < 960" scrollable>
       <VCard class="dashboard-settings-card">
-        <VCardItem><VCardTitle><VIcon icon="mdi-tune" size="small" class="me-2" />仪表盘设置</VCardTitle><template #append><VBtn icon="mdi-close" variant="text" aria-label="关闭仪表盘设置" @click="showModules = false" /></template></VCardItem>
+        <VCardItem><VCardTitle><VIcon icon="mdi-tune" size="small" class="me-2" />仪表盘设置</VCardTitle><template #append><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭仪表盘设置" @click="showModules = false" /></template></VCardItem>
         <VDivider />
         <VCardText>
           <p class="text-body-2 text-medium-emphasis mb-4">选择仪表盘中显示的内容，位置与大小可通过右下角布局按钮调整。</p>
@@ -118,7 +112,6 @@ import { useDisplay } from 'vuetify';
 import { GridStack } from 'gridstack';
 import 'gridstack/dist/gridstack.min.css';
 import axios from 'axios';
-import MpPageTitle from './MpPageTitle.vue';
 import storageImage from '@/assets/mp-storage.png';
 import { useAuthStore } from '@/stores/auth';
 import { dashboardModules, normalizeDashboardProfile, dashboardLayoutProfile, dashboardColumns, storageFrom115, embyDashboardImage, formatDashboardCount, dashboardSnapshot, projectDashboardItems, projectDashboardStatistics } from '@/utils/dashboard';
@@ -430,16 +423,16 @@ onBeforeUnmount(() => { active = false; ++mediaSequence; ++storageSequence; ++gr
 .dashboard-poster-hover-area { width: 100%; height: 100%; }
 .dashboard-poster-image { height: 100%; width: 100%; }
 .dashboard-library-card :deep(.v-img) { border-radius: 9px; overflow: hidden; }
-.dashboard-media-type { position: absolute; top: 8px; left: 8px; color: #fff !important; font-weight: 700; }
+.dashboard-media-type { position: absolute; z-index: 1; top: 8px; left: 8px; background-image: linear-gradient(rgba(0,0,0,.2), rgba(0,0,0,.2)) !important; color: #fff !important; font-weight: 700; }
 .dashboard-media-type :deep(.v-chip__content) { color: #fff !important; }
-.dashboard-poster-overlay { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: flex-end; padding: 8px 8px 20px; background: linear-gradient(rgba(45, 55, 72, .4) 0%, rgba(45, 55, 72, .9) 100%); opacity: 0; transition: opacity .18s ease; pointer-events: none; }
+.dashboard-poster-overlay { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: flex-end; padding: 8px max(12px, var(--app-theme-surface-radius)) max(20px, var(--app-theme-surface-radius)); background: linear-gradient(rgba(45, 55, 72, .7) 0%, rgba(45, 55, 72, .9) 100%); opacity: 0; transition: opacity .18s ease; pointer-events: none; }
 .dashboard-poster-overlay.is-visible, .dashboard-media-card:focus-visible .dashboard-poster-overlay, .dashboard-poster-fallback .dashboard-poster-overlay { opacity: 1; }
 @media (hover: none) { .dashboard-poster-overlay { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .dashboard-poster-overlay { transition: none; } }
 .dashboard-library-count { position: absolute; top: 6px; right: 6px; min-width: 24px; height: 24px; padding: 0 5px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: #52b54b; color: #fff; font-size: .75rem; font-weight: 600; font-variant-numeric: tabular-nums; }
 .dashboard-poster-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; margin: 0 0 4px; color: #fff !important; font-size: 18px; font-weight: 700; line-height: 1.5; }
 .dashboard-poster-subtitle { color: #fff !important; font-size: 14px; font-weight: 600; line-height: 1.5; }
-.dashboard-library-title { padding: 8px 4px 4px; text-align: center; font-size: .9rem; font-weight: 400; line-height: 1.5; }
+.dashboard-library-title { padding: 8px 4px 4px; color: rgb(var(--v-theme-on-surface)); text-align: center; font-size: .75rem; font-weight: 700; line-height: 1.5; }
 .dashboard-settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .dashboard-setting-item { display: flex; align-items: center; gap: 8px; min-height: 48px; border: 1px solid rgba(var(--v-theme-on-surface), .1); border-radius: 10px; background: rgba(var(--v-theme-on-surface), .04); padding: 10px 12px; color: rgba(var(--v-theme-on-surface), .72); text-align: start; font-size: .9rem; font-weight: 550; line-height: 1.35; cursor: pointer; }
 .dashboard-setting-item.enabled { border-color: rgba(var(--v-theme-primary), .45); background: rgba(var(--v-theme-primary), .08); }

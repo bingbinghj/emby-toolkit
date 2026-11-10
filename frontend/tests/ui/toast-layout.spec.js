@@ -15,7 +15,7 @@ for (const width of [390, 1440]) {
     expect(bounds.document - bounds.app).toBeLessThanOrEqual(2);
 
     api.respond('GET', '/api/dashboard/media', { error: '模拟通知定位检查' }, 503);
-    await page.getByRole('button', { name: '刷新', exact: true }).click();
+    await page.reload();
     await expect(page.locator('.Vue-Toastification__container')).toHaveCount(6);
     expect(await containers.first().evaluate(element => getComputedStyle(element).position)).toBe('fixed');
   });

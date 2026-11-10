@@ -21,7 +21,7 @@ async function openGlassSettings(page, panel) {
 test.beforeEach(async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'light' });
   await page.goto('/user-management', { waitUntil: 'domcontentloaded' });
-  await expect(page.getByRole('heading', { name: '用户管理', exact: true })).toBeVisible();
+  await expect(page.locator('.user-management-page')).toBeVisible();
 });
 
 test('theme side panel takes keyboard focus and returns it to the trigger on close', async ({ page }) => {
@@ -50,7 +50,7 @@ test('glass settings are reachable and Escape only dismisses the active dialog',
   await page.keyboard.press('Escape');
   await expect(dialog).not.toBeVisible();
   await expect(panel).toBeVisible();
-  await expect(page.getByRole('heading', { name: '用户管理', exact: true })).toBeVisible();
+  await expect(page.locator('.user-management-page')).toBeVisible();
 });
 
 test('glass preview cancels without writes and saved quality survives reload', async ({ page }) => {
@@ -73,7 +73,7 @@ test('glass preview cancels without writes and saved quality survives reload', a
   await expect(dialog).not.toBeVisible();
   await expect.poll(() => page.evaluate(key => JSON.parse(localStorage.getItem(key))?.glassQuality, THEME_KEY)).toBe('high');
   await page.reload({ waitUntil: 'domcontentloaded' });
-  await expect(page.getByRole('heading', { name: '用户管理', exact: true })).toBeVisible();
+  await expect(page.locator('.user-management-page')).toBeVisible();
   await expect(page.locator('html')).toHaveAttribute('data-glass-quality', 'high');
   await expect(page.locator('html')).toHaveAttribute('data-glass-appearance', 'frosted');
 });

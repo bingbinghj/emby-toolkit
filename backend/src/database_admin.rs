@@ -377,7 +377,7 @@ async fn review(
         .bind(&types)
         .fetch_one(&state.db)
         .await?;
-    let items:Vec<Value>=sqlx::query_scalar(&format!("SELECT to_jsonb(r) FROM (SELECT item_id,item_name,failed_at,reason,item_type,score FROM failed_log {where_sql} ORDER BY failed_at DESC LIMIT $4 OFFSET $5) r")).bind(query).bind(reason).bind(&types).bind(size).bind((page-1)*size).fetch_all(&state.db).await?;
+    let items:Vec<Value>=sqlx::query_scalar(&format!("SELECT to_jsonb(r) FROM (SELECT item_id,item_name,failed_at,reason,item_type FROM failed_log {where_sql} ORDER BY failed_at DESC LIMIT $4 OFFSET $5) r")).bind(query).bind(reason).bind(&types).bind(size).bind((page-1)*size).fetch_all(&state.db).await?;
     Ok(Json(
         json!({"items":items,"total_items":total,"total_pages":(total+size-1)/size,"current_page":page,"per_page":size,"query":query,"reason":reason,"media_type":kind}),
     ))
@@ -394,8 +394,6 @@ async fn reasons(State(state): State<AppState>) -> Result<Json<Value>> {
             let s = s.trim();
             if s.starts_with("缺失媒体信息") {
                 "缺失媒体信息".to_string()
-            } else if s.starts_with("处理评分") {
-                "处理评分".to_string()
             } else {
                 s.to_string()
             }

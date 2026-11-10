@@ -415,10 +415,8 @@ async fn view(
     let name = params.get("filename").map(String::as_str).unwrap_or("");
     let text = read(&state, name).await?;
     let lines: Vec<_> = text.split_inclusive('\n').rev().collect();
-    if params
-        .get("format")
-        .is_some_and(|s| s.eq_ignore_ascii_case("html"))
-    {
+    let format = params.get("format").map(String::as_str).unwrap_or("");
+    if format.eq_ignore_ascii_case("json") || format.eq_ignore_ascii_case("html") {
         let pages = lines.len().div_ceil(500).max(1);
         let page = params
             .get("page")
@@ -427,6 +425,16 @@ async fn view(
             .clamp(1, pages);
         let start = (page - 1) * 500;
         let page_lines = &lines[start..(start + 500).min(lines.len())];
+        if format.eq_ignore_ascii_case("json") {
+            return Ok(Json(json!({
+                "file": name,
+                "lines": page_lines,
+                "page": page,
+                "pages": pages,
+                "total_lines": lines.len(),
+            }))
+            .into_response());
+        }
         return Ok((
             [
                 ("content-type", "text/html; charset=utf-8".to_string()),
@@ -477,7 +485,8 @@ async fn context(
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
         .ok_or_else(|| ApiError::bad("搜索关键词不能为空"))?;
-    let task_id = regex::Regex::new(r#"\btask_id=["']?([A-Za-z0-9_-]+)"#).unwrap();
+    let task_id =
+        regex::Regex::new(r#"(?:\btask_id=["']?|任务ID[：:]\s*)([A-Za-z0-9_-]+)"#).unwrap();
     let mut task: Option<(String, String, Vec<String>)> = None;
     let start = regex::Regex::new(r"Webhook: 收到入库事件\s'(.+?)'，已分派预检任务。").unwrap();
     let end =

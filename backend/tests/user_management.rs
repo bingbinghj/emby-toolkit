@@ -21,6 +21,11 @@ struct EmbyMock {
     writes: Arc<Mutex<Vec<(String, Value)>>>,
     fail_policy: Arc<AtomicBool>,
     ignore_profile: Arc<AtomicBool>,
+    fail_password: Arc<AtomicBool>,
+    fail_create: Arc<AtomicBool>,
+    avatar_success: Arc<AtomicBool>,
+    ignore_avatar_delete: Arc<AtomicBool>,
+    ignore_user_delete: Arc<AtomicBool>,
 }
 async fn native_get(State(mock): State<EmbyMock>, Path(id): Path<String>) -> Response {
     let users = mock.users.lock().await;
@@ -78,7 +83,32 @@ async fn native_password(
         .lock()
         .await
         .push((format!("Users/{id}/Password"), body));
+    if mock.fail_password.load(Ordering::SeqCst) {
+        return StatusCode::BAD_REQUEST;
+    }
+    mock.users
+        .lock()
+        .await
+        .iter_mut()
+        .find(|user| user["Id"] == id)
+        .unwrap()["HasPassword"] = json!(true);
     StatusCode::NO_CONTENT
+}
+async fn native_create(State(mock): State<EmbyMock>, Json(body): Json<Value>) -> Response {
+    mock.writes
+        .lock()
+        .await
+        .push(("Users/New".into(), body.clone()));
+    if mock.fail_create.load(Ordering::SeqCst) {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    let mut created = mock.users.lock().await[1].clone();
+    created["Id"] = json!("created-member");
+    created["Name"] = body["Name"].clone();
+    created["HasPassword"] = json!(false);
+    created["Policy"]["IsDisabled"] = json!(false);
+    mock.users.lock().await.push(created.clone());
+    Json(created).into_response()
 }
 struct Fixture {
     state: AppState,
@@ -121,8 +151,8 @@ impl Fixture {
         let native_user = |id: &str, name: &str, admin: bool, disabled: bool| {
             json!({
                 "Id":id,"Name":name,"PrimaryImageTag":"avatar-tag","HasPassword":true,
-                "Policy":{"IsAdministrator":admin,"IsDisabled":disabled,"UnneededSecret":"hidden-policy","EnableAllFolders":false,"EnabledFolders":["movies"]},
-                "Configuration":{"OrderedViews":["movies"],"AudioLanguagePreference":"chi"},
+                "Policy":{"IsAdministrator":admin,"IsDisabled":disabled,"UnneededSecret":"hidden-policy","EnableAllFolders":false,"EnabledFolders":["movies"],"EnableRemoteAccess":true,"EnableMediaPlayback":true,"EnableContentDownloading":true},
+                "Configuration":{"OrderedViews":["movies"],"AudioLanguagePreference":"chi","SubtitleMode":"Smart","PlayDefaultAudioTrack":true},
                 "AccessToken":"must-not-return-token", "LastActivityDate":"2026-11-10T10:00:00Z"
             })
         };
@@ -134,6 +164,11 @@ impl Fixture {
             writes: Arc::new(Mutex::new(vec![])),
             fail_policy: Arc::new(AtomicBool::new(false)),
             ignore_profile: Arc::new(AtomicBool::new(false)),
+            fail_password: Arc::new(AtomicBool::new(false)),
+            fail_create: Arc::new(AtomicBool::new(false)),
+            avatar_success: Arc::new(AtomicBool::new(false)),
+            ignore_avatar_delete: Arc::new(AtomicBool::new(false)),
+            ignore_user_delete: Arc::new(AtomicBool::new(false)),
         };
         let host =
             Router::new()
@@ -143,7 +178,18 @@ impl Fixture {
                         Json(mock.users.lock().await.clone())
                     }),
                 )
-                .route("/Users/{id}", get(native_get).post(native_profile))
+                .route("/Users/New",post(native_create))
+                .route("/Library/VirtualFolders",get(||async { Json(json!([{"ItemId":"movies","Name":"Movies","Locations":["private-path"]},{"ItemId":"tv","Name":"TV"}])) }))
+                .route("/Users/{id}", get(native_get).post(native_profile).delete(|State(mock):State<EmbyMock>,Path(id):Path<String>|async move {
+                    mock.writes.lock().await.push((format!("DELETE Users/{id}"),Value::Null));
+                    if !mock.ignore_user_delete.load(Ordering::SeqCst) { mock.users.lock().await.retain(|user|user["Id"] != id); }
+                    StatusCode::NO_CONTENT
+                }))
+                .route("/Users/{id}/Configuration",post(|State(mock):State<EmbyMock>,Path(id):Path<String>,Json(body):Json<Value>|async move {
+                    mock.writes.lock().await.push((format!("Users/{id}/Configuration"),body.clone()));
+                    if !mock.ignore_profile.load(Ordering::SeqCst) { mock.users.lock().await.iter_mut().find(|user|user["Id"] == id).unwrap()["Configuration"] = body; }
+                    StatusCode::NO_CONTENT
+                }))
                 .route("/Users/{id}/Policy", post(native_policy))
                 .route("/Users/{id}/Password", post(native_password))
                 .route(
@@ -154,7 +200,10 @@ impl Fixture {
                                 .lock()
                                 .await
                                 .push((format!("POST Users/{id}/Images/Primary"), Value::Null));
-                            StatusCode::SERVICE_UNAVAILABLE
+                            if mock.avatar_success.load(Ordering::SeqCst) {
+                                mock.users.lock().await.iter_mut().find(|user|user["Id"] == id).unwrap()["PrimaryImageTag"] = json!("updated-avatar");
+                                StatusCode::NO_CONTENT
+                            } else { StatusCode::SERVICE_UNAVAILABLE }
                         },
                     )
                     .delete(
@@ -163,12 +212,12 @@ impl Fixture {
                                 .lock()
                                 .await
                                 .push((format!("DELETE Users/{id}/Images/Primary"), Value::Null));
-                            mock.users
+                            if !mock.ignore_avatar_delete.load(Ordering::SeqCst) { mock.users
                                 .lock()
                                 .await
                                 .iter_mut()
                                 .find(|user| user["Id"] == id)
-                                .unwrap()["PrimaryImageTag"] = Value::Null;
+                                .unwrap()["PrimaryImageTag"] = Value::Null; }
                             StatusCode::NO_CONTENT
                         },
                     ),
@@ -386,7 +435,12 @@ async fn protects_current_administrator_and_keeps_login_name_after_rename() {
             .request("/api/portal/users/admin", &cookie, Some(body))
             .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert!(body["error"].as_str().unwrap().contains("当前登录用户"));
+        let reason = body["error"].as_str().unwrap();
+        assert!(
+            reason.contains("当前登录用户") || reason.contains("不能禁用管理员"),
+            "{body}"
+        );
+        assert!(f.native.writes.lock().await.is_empty());
     }
     f.native.users.lock().await[1]["Policy"]["IsAdministrator"] = json!(true);
     let (status, _, body) = f
@@ -498,10 +552,7 @@ async fn user_management_requires_current_administrator_for_profiles_and_passwor
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
 async fn failed_avatar_upload_does_not_delete_the_existing_emby_avatar() {
     let f = Fixture::new().await;
-    let request = Request::post("/api/portal/upload-avatar")
-        .header(header::COOKIE,f.cookie(true,false))
-        .header(header::CONTENT_TYPE,"multipart/form-data; boundary=avatar-fixture")
-        .body(Body::from("--avatar-fixture\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"avatar.png\"\r\nContent-Type: image/png\r\n\r\nfixture-image\r\n--avatar-fixture--\r\n")).unwrap();
+    let request = avatar_request("/api/portal/upload-avatar", &f.cookie(true, false));
     let response = f.app.clone().oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     let writes = f.native.writes.lock().await;
@@ -516,5 +567,298 @@ async fn failed_avatar_upload_does_not_delete_the_existing_emby_avatar() {
         f.native.users.lock().await[0]["PrimaryImageTag"],
         "avatar-tag"
     );
+    f.cleanup().await;
+}
+
+fn avatar_request(path: &str, cookie: &str) -> Request<Body> {
+    let mut image = std::io::Cursor::new(vec![]);
+    image::DynamicImage::new_rgb8(2, 2)
+        .write_to(&mut image, image::ImageFormat::Png)
+        .unwrap();
+    let mut body=b"--avatar-fixture\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"avatar.png\"\r\nContent-Type: image/png\r\n\r\n".to_vec();
+    body.extend_from_slice(image.get_ref());
+    body.extend_from_slice(b"\r\n--avatar-fixture--\r\n");
+    Request::post(path)
+        .header(header::COOKIE, cookie)
+        .header(
+            header::CONTENT_TYPE,
+            "multipart/form-data; boundary=avatar-fixture",
+        )
+        .body(Body::from(body))
+        .unwrap()
+}
+async fn delete_request(f: &Fixture, path: &str, cookie: &str) -> (StatusCode, Value) {
+    let request = Request::delete(path)
+        .header(header::COOKIE, cookie)
+        .body(Body::empty())
+        .unwrap();
+    let response = f.app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    (status, serde_json::from_slice(&body).unwrap())
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn details_show_confirmed_permissions_libraries_and_no_native_secrets() {
+    let f = Fixture::new().await;
+    let (status, _, body) = f
+        .request("/api/portal/users/member", &f.cookie(true, false), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["user"]["policy"]["EnableRemoteAccess"], true);
+    assert_eq!(body["user"]["configuration"]["SubtitleMode"], "Smart");
+    assert_eq!(
+        body["libraries"]["items"],
+        json!([{"id":"movies","name":"Movies"},{"id":"tv","name":"TV"}])
+    );
+    for secret in ["hidden-policy", "must-not-return-token", "private-path"] {
+        assert!(!body.to_string().contains(secret));
+    }
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn permission_and_configuration_patches_preserve_untouched_native_fields() {
+    let f = Fixture::new().await;
+    let mut body = details("Member", false, true);
+    body["policy"] = json!({"EnableRemoteAccess":false,"EnabledFolders":["tv"]});
+    body["configuration"] = json!({"SubtitleMode":"None"});
+    let (status, _, saved) = f
+        .request(
+            "/api/portal/users/member",
+            &f.cookie(true, false),
+            Some(body),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    let user = f.native.users.lock().await[1].clone();
+    assert_eq!(user["Policy"]["UnneededSecret"], "hidden-policy");
+    assert_eq!(user["Policy"]["EnableContentDownloading"], true);
+    assert_eq!(user["Configuration"]["OrderedViews"], json!(["movies"]));
+    assert_eq!(user["Configuration"]["AudioLanguagePreference"], "chi");
+    assert_eq!(user["Policy"]["EnableRemoteAccess"], false);
+    assert_eq!(user["Policy"]["EnabledFolders"], json!(["tv"]));
+    assert_eq!(user["Configuration"]["SubtitleMode"], "None");
+    assert_eq!(
+        f.native.writes.lock().await[0].0,
+        "Users/member/Configuration"
+    );
+    assert_eq!(f.native.writes.lock().await[1].0, "Users/member/Policy");
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn unsupported_permission_fields_and_unconfirmed_configuration_cannot_write() {
+    let f = Fixture::new().await;
+    for patch in [
+        json!({"IsAdministrator":true}),
+        json!({"AuthenticationProviderId":"other"}),
+        json!({"EnableRemoteAccess":1}),
+        json!({"EnabledFolders":["../path"]}),
+        json!({"Unknown":true}),
+    ] {
+        let mut body = details("Member", false, true);
+        body["policy"] = patch;
+        assert_eq!(
+            f.request(
+                "/api/portal/users/member",
+                &f.cookie(true, false),
+                Some(body)
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert!(f.native.writes.lock().await.is_empty());
+    f.native.ignore_profile.store(true, Ordering::SeqCst);
+    let mut body = details("Member", false, true);
+    body["configuration"] = json!({"SubtitleMode":"None"});
+    let (status, _, result) = f
+        .request(
+            "/api/portal/users/member",
+            &f.cookie(true, false),
+            Some(body),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(result["error"].as_str().unwrap().contains("未完整生效"));
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn creates_real_user_password_and_role_and_prevents_duplicate_creation() {
+    let f = Fixture::new().await;
+    let body = json!({"name":"New user","new_password":"test-secret","is_administrator":false,"is_disabled":true});
+    let (status, _, result) = f
+        .request(
+            "/api/portal/users",
+            &f.cookie(true, false),
+            Some(body.clone()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["id"], "created-member");
+    assert_eq!(result["user"]["is_disabled"], true);
+    assert!(!result.to_string().contains("test-secret"));
+    assert_eq!(
+        f.native
+            .writes
+            .lock()
+            .await
+            .iter()
+            .filter(|(path, _)| path == "Users/New")
+            .count(),
+        1
+    );
+    assert_eq!(
+        f.request("/api/portal/users", &f.cookie(true, false), Some(body))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        f.native
+            .writes
+            .lock()
+            .await
+            .iter()
+            .filter(|(path, _)| path == "Users/New")
+            .count(),
+        1
+    );
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn failed_creation_is_not_replayed_and_partial_creation_has_precise_id_receipt() {
+    let f = Fixture::new().await;
+    let body = json!({"name":"New user","new_password":"test-secret","is_administrator":false,"is_disabled":false});
+    f.native.fail_create.store(true, Ordering::SeqCst);
+    let (status, _, result) = f
+        .request(
+            "/api/portal/users",
+            &f.cookie(true, false),
+            Some(body.clone()),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert!(result.get("created").is_none());
+    assert_eq!(f.native.writes.lock().await.len(), 1);
+    f.native.fail_create.store(false, Ordering::SeqCst);
+    f.native.fail_password.store(true, Ordering::SeqCst);
+    let (status, _, result) = f
+        .request("/api/portal/users", &f.cookie(true, false), Some(body))
+        .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(result["created"], true);
+    assert_eq!(result["id"], "created-member");
+    assert_eq!(result["success"], false);
+    assert_eq!(result["user"]["has_password"], false);
+    assert!(!result.to_string().contains("test-secret"));
+    assert_eq!(f.native.users.lock().await.len(), 3);
+    let cached: String =
+        sqlx::query_scalar("SELECT name FROM emby_users WHERE id='created-member'")
+            .fetch_one(&f.state.db)
+            .await
+            .unwrap();
+    assert_eq!(cached, "New user");
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn any_user_avatar_updates_and_reset_require_native_readback() {
+    let f = Fixture::new().await;
+    f.native.avatar_success.store(true, Ordering::SeqCst);
+    let response = f
+        .app
+        .clone()
+        .oneshot(avatar_request(
+            "/api/portal/users/member/avatar",
+            &f.cookie(true, false),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+            .unwrap();
+    assert_eq!(body["id"], "member");
+    assert_eq!(body["new_tag"], "updated-avatar");
+    assert!(
+        f.native
+            .writes
+            .lock()
+            .await
+            .iter()
+            .all(|(path, _)| path == "POST Users/member/Images/Primary")
+    );
+    f.native.ignore_avatar_delete.store(true, Ordering::SeqCst);
+    let (status, body) = delete_request(
+        &f,
+        "/api/portal/users/member/avatar",
+        &f.cookie(true, false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(body["error"].as_str().unwrap().contains("尚未确认"));
+    f.native.ignore_avatar_delete.store(false, Ordering::SeqCst);
+    let (status, body) = delete_request(
+        &f,
+        "/api/portal/users/member/avatar",
+        &f.cookie(true, false),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["new_tag"], Value::Null);
+    assert_eq!(
+        f.native.users.lock().await[0]["PrimaryImageTag"],
+        "avatar-tag"
+    );
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn user_delete_protects_self_last_admin_and_unconfirmed_deletion() {
+    let f = Fixture::new().await;
+    assert_eq!(
+        delete_request(&f, "/api/portal/users/admin", &f.cookie(true, false))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    f.native.users.lock().await[0]["Policy"]["IsAdministrator"] = json!(false);
+    f.native.users.lock().await[1]["Policy"]["IsAdministrator"] = json!(true);
+    f.native.users.lock().await[1]["Policy"]["IsDisabled"] = json!(false);
+    assert_eq!(
+        delete_request(&f, "/api/portal/users/member", &f.cookie(true, false))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert!(f.native.writes.lock().await.is_empty());
+    f.native.users.lock().await[1]["Policy"]["IsAdministrator"] = json!(false);
+    f.native.ignore_user_delete.store(true, Ordering::SeqCst);
+    assert_eq!(
+        delete_request(&f, "/api/portal/users/member", &f.cookie(true, false))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    f.native.ignore_user_delete.store(false, Ordering::SeqCst);
+    assert_eq!(
+        delete_request(&f, "/api/portal/users/member", &f.cookie(true, false))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(f.native.users.lock().await.len(), 1);
     f.cleanup().await;
 }

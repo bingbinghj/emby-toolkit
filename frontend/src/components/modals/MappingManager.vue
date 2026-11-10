@@ -119,7 +119,7 @@
             <VExpansionPanelText>
               <div v-for="(rule, index) in ratingMapping[countryCode]" :key="index" class="rating-rule">
                 <VTextField v-model="rule.code" label="原始分级代码" placeholder="例如：R" :disabled="isSaving" class="rating-code" />
-                <VNumberInput v-model="rule.emby_value" label="Emby 等级值" :min="0" :max="100" :precision="0" control-variant="stacked" :disabled="isSaving" class="rating-value" />
+                <VTextField type="number" v-model.number="rule.emby_value" label="Emby 等级值" :min="0" :max="100" :step="1" :disabled="isSaving" class="rating-value" />
                 <VIcon icon="mdi-arrow-right" size="20" class="rating-rule-arrow" />
                 <VCombobox v-model="rule.label" :items="dynamicRatingOptions" item-title="label" item-value="value" :return-object="false" label="中文分级标签" placeholder="选择或输入标签" :disabled="isSaving" class="rating-label" />
                 <VBtn icon="mdi-delete-outline" variant="text" color="error" :disabled="isSaving" aria-label="删除此分级规则" @click="removeRatingRule(countryCode, index)" />

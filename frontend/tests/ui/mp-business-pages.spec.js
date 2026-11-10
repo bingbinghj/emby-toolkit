@@ -1,14 +1,14 @@
 import { test, expect } from './fixtures.js';
 
 const pages = [
-  ['/review', '手动处理'],
-  ['/media-organize', '媒体整理'],
-  ['/settings/scheduler', '任务中心'],
-  ['/settings/cover-generator', '媒体库封面生成'],
+  ['/review', '.review-page'],
+  ['/media-organize', '.media-organize-page'],
+  ['/settings/scheduler', '.scheduler-page'],
+  ['/settings/cover-generator', '.cover-page'],
 ];
 
 for (const width of [390, 1440]) {
-  test(`${width}px business pages preserve readable headings and full-width responsive content`, async ({ page, api }) => {
+  test(`${width}px business pages omit duplicate page headings and preserve responsive readable content`, async ({ page, api }) => {
     await page.setViewportSize({ width, height: 900 });
     await page.addInitScript(() => localStorage.setItem('moviepilot-theme-customizer', JSON.stringify({
       theme: 'dark', glassEnabled: true, glassQuality: 'css', glassAppearance: 'clear', layout: 'vertical',
@@ -20,13 +20,15 @@ for (const width of [390, 1440]) {
     }]);
     for (const [path, title] of pages) {
       await page.goto(path);
-      const heading = page.getByRole('heading', { name: title, exact: true });
-      await expect(heading).toBeVisible();
+      const content = page.locator(title);
+      await expect(content).toBeVisible();
+      const firstCard = content.locator('.v-card').first();
+      await expect(firstCard).toBeVisible();
       await expect.poll(async () => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      const headingBounds = await heading.boundingBox();
+      const headingBounds = await firstCard.boundingBox();
       const navbarBounds = await page.locator('.layout-navbar').boundingBox();
       expect(headingBounds.y).toBeGreaterThanOrEqual(navbarBounds.y + navbarBounds.height);
-      await expect(heading).toHaveCSS('font-size', width < 600 ? '24px' : '30px');
+      await expect(content.locator('h1:not(.sr-only)')).toHaveCount(0);
       if (path === '/settings/scheduler') {
         const copy = page.locator('.temp-task-description').first();
         await expect(copy).toContainText('完整换行');

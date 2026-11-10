@@ -98,6 +98,12 @@ impl Fixture {
     }
 
     async fn submit(&self, body: Value) -> (StatusCode, Value) {
+        let token = self.state.sessions.sign(&emby_toolkit::auth::Session {
+            user_id: "fixture-operator".into(),
+            name: "Fixture Operator".into(),
+            setup_mode: false,
+            expires: chrono::Utc::now().timestamp() + 120,
+        });
         let response = emby_toolkit::actions::router()
             .with_state(self.state.clone())
             .oneshot(
@@ -105,6 +111,7 @@ impl Fixture {
                     .method("POST")
                     .uri("/api/actions/reorganize")
                     .header("content-type", "application/json")
+                    .header("cookie", format!("etk_session={token}"))
                     .body(Body::from(body.to_string()))
                     .unwrap(),
             )

@@ -52,6 +52,7 @@ function fixture(overrides = {}) {
     window: { innerWidth: 1200, location: { origin: 'https://etk.test' }, screen: { width: 1200, height: 800 }, open: overrides.open || (() => null), removeEventListener() {} },
     useDisplay: () => ({ smAndDown: { value: false } }),
     useRoute: () => ({ query: { tab: 'system' } }),
+    useSettingsSearch: () => ({ query: { value: '' }, results: { value: [] }, notice: { value: '' }, showCard: () => true }),
     useMessage: () => toast, useDialog: () => ({ warning() {}, success() {}, error() {} }),
     useConfig: () => ({
       configModel: { value: model }, loadingConfig: { value: false }, savingConfig: { value: false }, configError: { value: '' },
@@ -65,7 +66,8 @@ function fixture(overrides = {}) {
     openQrcodeModal, closeQrcodeModal, qrcodeStatus, showQrcodeModal, componentIsMounted,
     startCookiePolling, closeCookieModal, cookieQrcodeSessionId, cookieQrcodeStatus, cookieAppType, showCookieModal,
     fetchLocalFolders, fetchP115Folders, showLocalFolderModal, showP115FolderModal, loadingLocalFolders, loadingP115Folders, currentLocalTargetField,
-    openP115FolderSelector, startWebAuth, isWebAuthing, p115Info
+    openP115FolderSelector, startWebAuth, isWebAuthing, p115Info, previewRenameFormats, renameFormatPreview,
+    monitorExtensionOptions, check115Status, p115StatusError, loading115Info
   };`, context);
   context.page.componentIsMounted.value = true;
   context.page.formRef.value = { validate: async () => ({ valid: overrides.valid ?? true }) };
@@ -335,4 +337,74 @@ test('confirmed web callback still waits for stored Token and does not erase old
   assert.equal(f.page.isWebAuthing.value, true);
   assert.equal(f.page.p115Info.value.has_token, true);
   assert.ok(!f.messages.some(item => item.kind === 'success'));
+});
+
+
+test('recent-admission preview displays both real examples without altering the saved templates', async () => {
+  const f = fixture({ post: async () => ({ data: { movie: '最新电影 (2026)/最新电影.mkv', tv: '最新剧集 (2025)/S02E09.mp4', movie_sample: { id: 'new-movie', title: '最新电影' }, tv_sample: { id: 'new-episode', title: '最新剧集' }, errors: {} } }) });
+  f.page.configModel.value.movie_rename_format = '{{title}}.mkv';
+  f.page.configModel.value.tv_rename_format = '{{title}}.mp4';
+  await f.page.previewRenameFormats();
+  assert.equal(f.page.renameFormatPreview.value.movie_sample.id, 'new-movie');
+  assert.equal(f.page.renameFormatPreview.value.tv_sample.id, 'new-episode');
+  assert.equal(f.page.configModel.value.movie_rename_format, '{{title}}.mkv');
+  assert.deepEqual(plain(f.requests[0].body), { movie_format: '{{title}}.mkv', tv_format: '{{title}}.mp4' });
+});
+
+test('out-of-order rename previews cannot replace the newest examples or errors', async () => {
+  const pending = [];
+  const f = fixture({ post: () => new Promise(resolve => pending.push(resolve)) });
+  const first = f.page.previewRenameFormats();
+  const latest = f.page.previewRenameFormats();
+  pending[1]({ data: { movie: 'new.mkv', movie_sample: { title: '最近电影' }, errors: { tv: 'Emby 查询失败' } } });
+  await latest;
+  pending[0]({ data: { movie: 'old.mkv', movie_sample: { title: '过去电影' }, errors: {} } });
+  await first;
+  assert.equal(f.page.renameFormatPreview.value.movie, 'new.mkv');
+  assert.equal(f.page.renameFormatPreview.value.errors.tv, 'Emby 查询失败');
+});
+
+test('failed and empty recent reads clear previous examples without altering format drafts', async () => {
+  let failed = false;
+  const f = fixture({ post: async () => {
+    if (failed) throw new Error('Emby unavailable');
+    return { data: { movie: '', tv: '', movie_sample: null, tv_sample: null, errors: {} } };
+  } });
+  f.page.renameFormatPreview.value = { movie: 'previous.mkv', movie_sample: { title: '旧示例' } };
+  await f.page.previewRenameFormats();
+  assert.equal(f.page.renameFormatPreview.value.movie, '');
+  assert.equal(f.page.renameFormatPreview.value.movie_sample, null);
+  failed = true;
+  await f.page.previewRenameFormats();
+  assert.equal(f.page.renameFormatPreview.value.movie, '');
+  assert.ok(f.page.renameFormatPreview.value.errors.movie);
+  assert.ok(f.page.renameFormatPreview.value.errors.tv);
+});
+
+test('an unmounted settings page rejects pending preview responses', async () => {
+  const pending = deferred();
+  const f = fixture({ post: () => pending.promise });
+  const request = f.page.previewRenameFormats();
+  for (const dispose of f.disposals) dispose();
+  pending.resolve({ data: { movie: 'late.mkv', movie_sample: { title: '迟到示例' } } });
+  await request;
+  assert.equal(f.page.renameFormatPreview.value.movie, '');
+});
+
+test('legacy scoring configuration is excluded from current basic settings saves', async () => {
+  const f = fixture();
+  await f.page.saveCard('basic');
+  const payload = f.requests.find(request => request.method === 'SAVE').body;
+  assert.equal(payload.min_score_for_review, undefined);
+  assert.equal(f.page.configModel.value.min_score_for_review, 6);
+});
+
+test('115 read failures clear stale account details and expose the read error', async () => {
+  const f = fixture({ get: async () => { throw new Error('115 unreachable'); } });
+  f.page.p115Info.value = { user_info: { user_name: '旧账号' }, has_token: true };
+  await f.page.check115Status();
+  assert.equal(f.page.p115Info.value, null);
+  assert.equal(f.page.p115StatusError.value, '状态读取失败');
+  assert.equal(f.page.loading115Info.value, false);
+  assert.ok(f.messages.some(item => item.kind === 'error'));
 });

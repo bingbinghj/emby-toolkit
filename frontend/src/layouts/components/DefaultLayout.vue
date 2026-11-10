@@ -68,8 +68,7 @@ function navigate(key) {
   emit('navigate', key);
 }
 function toggleNavigation() {
-  if (mdAndDown.value) overlayOpen.value = !overlayOpen.value;
-  else emit('update:layout', collapsed.value ? 'vertical' : 'collapsed');
+  overlayOpen.value = !overlayOpen.value;
 }
 function groupActive(group) {
   return (group.children || [group]).some(item => item.key === props.activeKey);
@@ -90,7 +89,7 @@ onBeforeUnmount(() => { window.removeEventListener('scroll', updateScroll); canc
 </script>
 
 <template>
-  <VLayout class="layout-wrapper layout-nav-type-vertical layout-navbar-sticky etk-default-layout"
+  <VLayout class="layout-wrapper layout-nav-type-vertical layout-navbar-fixed etk-default-layout"
     :class="{ 'layout-vertical-nav-collapsed': collapsed, 'layout-horizontal-nav': horizontal,
       'layout-horizontal-nav-active': horizontal, 'layout-navbar-floating-eligible': horizontal,
       'layout-navbar-away-from-top': navbarAwayFromTop, 'layout-horizontal-nav-scrolled': horizontal && navbarAwayFromTop,
@@ -111,7 +110,7 @@ onBeforeUnmount(() => { window.removeEventListener('scroll', updateScroll); canc
       @update:model-value="overlayOpen = $event">
       <div class="nav-header">
         <slot name="brand" :rail="collapsed" />
-        <VBtn v-if="mdAndDown" icon="mdi-close" variant="text" size="small" aria-label="关闭导航" @click="overlayOpen = false" />
+        <VBtn v-if="mdAndDown" icon="mdi-close" variant="text" color="default" size="small" aria-label="关闭导航" @click="overlayOpen = false" />
       </div>
       <VList v-model:opened="opened" class="nav-items" color="primary" nav density="comfortable">
         <template v-for="menu in menus" :key="menu.key">
@@ -130,12 +129,6 @@ onBeforeUnmount(() => { window.removeEventListener('scroll', updateScroll); canc
           </VTooltip>
         </template>
       </VList>
-      <template #append>
-        <div v-if="!mdAndDown" class="nav-footer">
-          <VBtn :icon="collapsed ? 'mdi-chevron-double-right' : 'mdi-chevron-double-left'" variant="text"
-            :aria-label="collapsed ? '展开导航' : '折叠导航'" @click="toggleNavigation" />
-        </div>
-      </template>
     </VNavigationDrawer>
 
     <VAppBar class="layout-navbar" :class="{ 'layout-navbar--horizontal': horizontal }" flat
@@ -143,8 +136,8 @@ onBeforeUnmount(() => { window.removeEventListener('scroll', updateScroll); canc
       <div class="navbar-content-container">
         <div class="theme-navbar-row">
           <slot v-if="horizontal" name="brand" :rail="false" />
-          <VBtn v-if="!horizontal" icon="mdi-menu" variant="text" aria-label="切换导航"
-            :aria-expanded="mdAndDown ? overlayOpen : !collapsed" @click="toggleNavigation" />
+          <VBtn v-if="mdAndDown" icon="mdi-menu" variant="text" color="default" aria-label="切换导航"
+            :aria-expanded="overlayOpen" @click="toggleNavigation" />
           <slot name="navbar-leading" />
           <VSpacer />
           <div class="theme-navbar-actions"><slot name="navbar-actions" /></div>
@@ -208,8 +201,11 @@ onBeforeUnmount(() => { window.removeEventListener('scroll', updateScroll); canc
 }
 .nav-header { display: flex; align-items: center; justify-content: space-between; min-block-size: 88px; padding: 20px; }
 .nav-items { padding: 8px 14px; }
-.nav-footer { display: flex; justify-content: flex-end; padding: 8px 16px; }
+// VApp already owns a Vuetify layout. Its nested VLayout otherwise registers these as
+// absolute items; retain Vuetify's offsets while attaching the shell to the viewport.
+.layout-vertical-nav, .layout-navbar { position: fixed !important; }
 .layout-vertical-nav { border-inline-end: 1px solid rgba(var(--v-theme-on-surface), .08); }
+.nav-items :deep(.v-list-item-title) { font-size: 17px; line-height: 1.5; }
 .navbar-content-container { inline-size: 100%; padding-inline: 8px; padding-block-start: env(safe-area-inset-top); }
 .theme-navbar-row, .theme-navbar-actions { display: flex; align-items: center; gap: 8px; min-inline-size: 0; }
 .theme-navbar-row { min-block-size: 64px; }

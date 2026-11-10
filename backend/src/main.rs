@@ -48,6 +48,10 @@ async fn main() -> anyhow::Result<()> {
         state.clone(),
         background.clone(),
     ));
+    let notifications = tokio::spawn(emby_toolkit::notifications::run(
+        state.clone(),
+        background.clone(),
+    ));
     let monitor = emby_toolkit::monitor::Service::new(state.clone());
     let watcher = tokio::spawn(monitor.run(background.clone()));
     let shutdown = background.clone();
@@ -73,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
     background.cancel();
     jobs.shutdown().await;
     bot.await?;
+    notifications.await?;
     watcher.await?;
     tracing::info!("应用程序已关闭，后台任务已结束");
     Ok(())

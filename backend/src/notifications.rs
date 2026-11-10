@@ -5,16 +5,218 @@ use crate::{
     state::string,
 };
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+tokio::task_local! { static OPERATOR: String; }
+
+pub fn current_operator() -> Option<String> {
+    OPERATOR
+        .try_with(Clone::clone)
+        .ok()
+        .filter(|id| !id.trim().is_empty())
+}
+
+pub async fn with_operator<F: std::future::Future>(
+    user_id: impl Into<String>,
+    future: F,
+) -> F::Output {
+    OPERATOR.scope(user_id.into(), future).await
+}
+
+/// Reject invalid notification controls before a configuration is persisted.
+pub fn validate_config(config: &Value) -> Result<()> {
+    if let Some(enabled) = config.get("telegram_enabled")
+        && !enabled.is_boolean()
+    {
+        return Err(ApiError::bad("通知渠道开关必须是布尔值"));
+    }
+    if let Some(scope) = config.get("notification_scope") {
+        let scope = scope
+            .as_object()
+            .ok_or_else(|| ApiError::bad("通知发送范围无效"))?;
+        for (kind, action) in scope {
+            if !matches!(kind.as_str(), "library_new" | "recognize_fail")
+                || !matches!(
+                    action.as_str(),
+                    Some("user" | "admin" | "user,admin" | "all")
+                )
+            {
+                return Err(ApiError::bad("通知消息类型或发送范围无效"));
+            }
+        }
+    }
+    if let Some(window) = config.get("notification_time")
+        && (!window.is_object()
+            || parse_time(&window["start"]).is_none()
+            || parse_time(&window["end"]).is_none())
+    {
+        return Err(ApiError::bad("通知发送时间必须为 HH:MM 格式"));
+    }
+    Ok(())
+}
+
+fn parse_time(value: &Value) -> Option<chrono::NaiveTime> {
+    let text = value.as_str()?;
+    if text.len() != 5
+        || text.as_bytes()[2] != b':'
+        || !text
+            .bytes()
+            .enumerate()
+            .all(|(i, b)| i == 2 || b.is_ascii_digit())
+    {
+        return None;
+    }
+    chrono::NaiveTime::parse_from_str(text, "%H:%M").ok()
+}
+
+pub fn in_send_window(config: &Value, now: chrono::NaiveTime) -> bool {
+    let Some(window) = config.get("notification_time") else {
+        return true;
+    };
+    let (Some(start), Some(end)) = (parse_time(&window["start"]), parse_time(&window["end"]))
+    else {
+        return false;
+    };
+    // The UI specifies minutes. Include the whole end minute, including 23:59.
+    let now = chrono::Timelike::with_second(&now, 0).unwrap();
+    let now = chrono::Timelike::with_nanosecond(&now, 0).unwrap();
+    if start <= end {
+        now >= start && now <= end
+    } else {
+        now >= start || now <= end
+    }
+}
+
+fn enabled(config: &Value, kind: &str) -> bool {
+    config["telegram_enabled"].as_bool().unwrap_or(true)
+        && !string(config, "telegram_bot_token").trim().is_empty()
+        && list(&config["telegram_notify_types"]).contains(&json!(kind))
+}
+
+/// Like MP, automatic admissions without an operating user fall back to administrators.
+/// Emby's configured service account must never be mistaken for that operating user.
+async fn targets(state: &AppState, config: &Value, kind: &str) -> BTreeSet<String> {
+    let action = config["notification_scope"][kind]
+        .as_str()
+        .unwrap_or("admin");
+    let mut actor = current_operator();
+    if matches!(action, "user" | "user,admin")
+        && let Some(id) = &actor
+        && !sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM emby_users WHERE id=$1)")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(false)
+    {
+        actor = None;
+    }
+    let all = action == "all";
+    let admin = matches!(action, "admin" | "user,admin") || (action == "user" && actor.is_none());
+    let user = matches!(action, "user" | "user,admin") && actor.is_some();
+    let mut targets: BTreeSet<String> = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT e.telegram_chat_id FROM emby_users u JOIN emby_users_extended e ON u.id=e.emby_user_id WHERE ($1 OR ($2 AND u.is_administrator=true) OR ($3 AND u.id=$4)) AND e.telegram_chat_id IS NOT NULL AND COALESCE(e.status,'active')='active' AND COALESCE(u.policy_json->>'IsDisabled','false')='false'",
+    )
+    .bind(all).bind(admin).bind(user).bind(actor.as_deref())
+    .fetch_all(&state.db).await
+    .unwrap_or_else(|error| {
+        tracing::warn!("[通知] 读取用户接收列表失败：{error}");
+        vec![]
+    })
+    .into_iter().flatten().collect();
+    let channel = string(config, "telegram_channel_id");
+    if (admin || all) && !channel.trim().is_empty() {
+        targets.insert(channel);
+    }
+    targets
+        .into_iter()
+        .filter_map(|target| {
+            let target = target.trim();
+            if target.is_empty() {
+                None
+            } else if target.starts_with("https://t.me/") {
+                Some(format!("@{}", target.rsplit('/').next().unwrap_or("")))
+            } else {
+                Some(target.to_string())
+            }
+        })
+        .collect()
+}
 
 pub struct Service {
     pub api_base: String,
+    queue: tokio::sync::Mutex<VecDeque<(String, String, Value)>>,
 }
 impl Default for Service {
     fn default() -> Self {
+        Self::with_api_base("https://api.telegram.org".into())
+    }
+}
+impl Service {
+    pub fn with_api_base(api_base: String) -> Self {
         Self {
-            api_base: "https://api.telegram.org".into(),
+            api_base,
+            queue: tokio::sync::Mutex::new(VecDeque::new()),
         }
+    }
+    pub async fn pending(&self) -> usize {
+        self.queue.lock().await.len()
+    }
+}
+
+pub async fn run(state: AppState, stop: tokio_util::sync::CancellationToken) {
+    let mut timer = tokio::time::interval(std::time::Duration::from_secs(10));
+    loop {
+        tokio::select! {
+            _ = stop.cancelled() => break,
+            _ = timer.tick() => {
+                tokio::select! {
+                    _ = stop.cancelled() => break,
+                    _ = flush(&state) => {},
+                }
+            },
+        }
+    }
+}
+
+pub async fn flush(state: &AppState) {
+    loop {
+        let config = state.config.read().await.clone();
+        if !in_send_window(&config, chrono::Local::now().time()) {
+            return;
+        }
+        let Some((kind, method, payload)) = state.notifications.queue.lock().await.pop_front()
+        else {
+            return;
+        };
+        if !enabled(&config, &kind) {
+            continue;
+        }
+        let token = string(&config, "telegram_bot_token");
+        if let Err(error) = send(state, &token, &method, &payload).await {
+            tracing::warn!("[通知] 延迟通知发送失败：{}", error.1);
+        }
+    }
+}
+
+async fn deliver(
+    state: &AppState,
+    kind: &str,
+    token: &str,
+    method: &str,
+    payload: &Value,
+) -> Result<bool> {
+    let config = state.config.read().await.clone();
+    if !in_send_window(&config, chrono::Local::now().time()) {
+        state.notifications.queue.lock().await.push_back((
+            kind.into(),
+            method.into(),
+            payload.clone(),
+        ));
+        tracing::info!("[通知] 当前不在发送时间内，通知已排队");
+        Ok(false)
+    } else {
+        send(state, token, method, payload).await?;
+        Ok(true)
     }
 }
 
@@ -189,7 +391,7 @@ pub async fn media(
 ) -> Result<()> {
     let config = state.config.read().await.clone();
     let token = string(&config, "telegram_bot_token");
-    if token.is_empty() || !list(&config["telegram_notify_types"]).contains(&json!("library_new")) {
+    if !enabled(&config, "library_new") {
         return Ok(());
     }
     let fallback_name = format!("ID:{}", string(item, "Id"));
@@ -263,25 +465,8 @@ pub async fn media(
     let image: Option<String> = sqlx::query_scalar("SELECT COALESCE(NULLIF(m.backdrop_path,''),NULLIF(m.poster_path,''),CASE WHEN m.item_type='Episode' THEN COALESCE(NULLIF(p.backdrop_path,''),NULLIF(p.poster_path,'')) END) FROM media_metadata m LEFT JOIN media_metadata p ON m.parent_series_tmdb_id=p.tmdb_id AND p.item_type='Series' WHERE m.emby_item_ids_json @> $1 LIMIT 1")
         .bind(json!([string(item,"Id")])).fetch_optional(&state.db).await
         .unwrap_or_else(|error| { tracing::warn!("[通知] 《{title}》读取通知图片失败：{error}"); None }).flatten();
-    let mut targets = sqlx::query_scalar::<_,Option<String>>("SELECT e.telegram_chat_id FROM emby_users u JOIN emby_users_extended e ON u.id=e.emby_user_id WHERE u.is_administrator=true AND e.telegram_chat_id IS NOT NULL")
-        .fetch_all(&state.db).await
-        .unwrap_or_else(|error| { tracing::warn!("[通知] 《{title}》读取管理员接收列表失败：{error}"); vec![] })
-        .into_iter().flatten().collect::<BTreeSet<_>>();
-    let channel = string(&config, "telegram_channel_id");
-    if !channel.is_empty() {
-        targets.insert(channel);
-    }
-    for target in targets {
-        let target = target.trim();
-        if target.is_empty() {
-            continue;
-        }
+    for target in targets(state, &config, "library_new").await {
         tracing::info!(item_id = %string(item, "Id"), "[通知] 开始发送《{title}》入库结果");
-        let target = if target.starts_with("https://t.me/") {
-            format!("@{}", target.rsplit('/').next().unwrap_or(""))
-        } else {
-            target.to_string()
-        };
         let (method, payload) = if let Some(image) = &image {
             (
                 "sendPhoto",
@@ -293,21 +478,78 @@ pub async fn media(
                 json!({"chat_id":target,"text":caption,"parse_mode":"MarkdownV2","disable_web_page_preview":true,"disable_notification":false}),
             )
         };
-        match send(state, &token, method, &payload).await {
-            Ok(()) => {
-                tracing::info!(item_id = %string(item, "Id"), "[通知] 《{title}》入库结果已发送")
+        match deliver(state, "library_new", &token, method, &payload).await {
+            Ok(sent) => {
+                let result = if sent { "已发送" } else { "已排队" };
+                tracing::info!(item_id = %string(item, "Id"), "[通知] 《{title}》入库结果{result}")
             }
             Err(error) => {
                 tracing::warn!(item_id = %string(item, "Id"), target, "[通知] 《{title}》入库结果发送失败：{}", error.1)
             }
         }
         for page in &pages {
-            if let Err(error) = send(state, &token, "sendMessage", &json!({"chat_id":target,"text":page,"parse_mode":"MarkdownV2","disable_web_page_preview":true,"disable_notification":false})).await {
+            if let Err(error) = deliver(state, "library_new", &token, "sendMessage", &json!({"chat_id":target,"text":page,"parse_mode":"MarkdownV2","disable_web_page_preview":true,"disable_notification":false})).await {
                 tracing::warn!(item_id = %string(item, "Id"), target, "[通知] 《{title}》后续消息发送失败：{}", error.1);
             }
         }
     }
     Ok(())
+}
+
+/// A failed admission is a real organization result, independently of success notifications.
+pub async fn failure(state: &AppState, item: &Value, reason: &str) -> Result<()> {
+    let config = state.config.read().await.clone();
+    if !enabled(&config, "recognize_fail") {
+        return Ok(());
+    }
+    let token = string(&config, "telegram_bot_token");
+    let name = item["Name"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("未知媒体");
+    let reason = crate::logs::redact(reason)
+        .chars()
+        .take(1500)
+        .collect::<String>();
+    let text = format!(
+        "❌ *整理失败*：{}\n\n{}\n\n请在媒体整理中查看失败记录。",
+        escape(name),
+        escape(&reason)
+    );
+    for target in targets(state, &config, "recognize_fail").await {
+        if let Err(error) = deliver(
+            state,
+            "recognize_fail",
+            &token,
+            "sendMessage",
+            &json!({
+                "chat_id": target, "text": text, "parse_mode":"MarkdownV2",
+                "disable_web_page_preview":true, "disable_notification":false
+            }),
+        )
+        .await
+        {
+            tracing::warn!(item_id = %string(item, "Id"), "[通知] 《{name}》整理失败通知发送失败：{}", error.1);
+        }
+    }
+    Ok(())
+}
+
+pub async fn test_message(state: &AppState, token: &str, chat: &str) -> Result<()> {
+    let text = format!(
+        "🔔 Emby Toolkit 测试消息\n\n这是一条测试消息。\n时间：{}",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    );
+    // A test is an explicit user action and, like MP, bypasses the scheduled window.
+    send(
+        state,
+        token,
+        "sendMessage",
+        &json!({
+            "chat_id":chat, "text":text, "disable_web_page_preview":true
+        }),
+    )
+    .await
 }
 
 async fn send(state: &AppState, token: &str, method: &str, payload: &Value) -> Result<()> {
@@ -325,11 +567,20 @@ async fn send(state: &AppState, token: &str, method: &str, payload: &Value) -> R
         .json(payload)
         .send()
         .await?;
-    // The Python sender considers HTTP 200 successful without inspecting the JSON `ok` field.
     if response.status() != reqwest::StatusCode::OK {
         return Err(ApiError(
             reqwest::StatusCode::BAD_GATEWAY,
             format!("Telegram 返回 HTTP {}", response.status().as_u16()),
+        ));
+    }
+    let response: Value = response.json().await?;
+    if response["ok"] != true {
+        return Err(ApiError(
+            reqwest::StatusCode::BAD_GATEWAY,
+            format!(
+                "Telegram 发送失败：{}",
+                crate::logs::redact(response["description"].as_str().unwrap_or("未确认发送成功"))
+            ),
         ));
     }
     Ok(())

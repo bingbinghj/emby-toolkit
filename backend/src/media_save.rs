@@ -218,6 +218,74 @@ pub(crate) async fn commit_json_stage(
     stage: &std::path::Path,
     destination: &std::path::Path,
 ) -> Result<()> {
+    commit_json_stage_with_validation(stage, destination, || async { Ok(()) }).await
+}
+
+pub(crate) async fn commit_json_stage_guarded(
+    stage: &std::path::Path,
+    destination: &std::path::Path,
+    expected: Option<&[u8]>,
+) -> Result<()> {
+    validate_json_destination(destination, expected).await?;
+    commit_json_stage_with_validation(stage, destination, || {
+        validate_json_destination(destination, expected)
+    })
+    .await
+}
+
+async fn validate_json_destination(
+    destination: &std::path::Path,
+    expected: Option<&[u8]>,
+) -> Result<()> {
+    let changed = || {
+        ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "媒体 JSON 在提交期间再次变化，保留当前文件及全部备份：{}",
+                destination.display()
+            ),
+        )
+    };
+    for parent in destination
+        .parent()
+        .into_iter()
+        .flat_map(std::path::Path::ancestors)
+    {
+        if !tokio::fs::symlink_metadata(parent)
+            .await
+            .is_ok_and(|metadata| metadata.is_dir())
+        {
+            return Err(changed());
+        }
+    }
+    let current = match tokio::fs::symlink_metadata(destination).await {
+        Ok(metadata) if metadata.is_file() => Some(tokio::fs::read(destination).await?),
+        Ok(_) => return Err(changed()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if current.as_deref() != expected {
+        return Err(changed());
+    }
+    if current.is_some()
+        && !tokio::fs::symlink_metadata(destination)
+            .await
+            .is_ok_and(|metadata| metadata.is_file())
+    {
+        return Err(changed());
+    }
+    Ok(())
+}
+
+async fn commit_json_stage_with_validation<F, Fut>(
+    stage: &std::path::Path,
+    destination: &std::path::Path,
+    validate: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
     let parent = destination
         .parent()
         .ok_or_else(|| ApiError::bad("媒体信息目标目录无效"))?;
@@ -225,6 +293,7 @@ pub(crate) async fn commit_json_stage(
     let outcome = async {
         tokio::fs::copy(stage, &commit).await?;
         tokio::fs::File::open(&commit).await?.sync_all().await?;
+        validate().await?;
         tokio::fs::rename(&commit, destination).await?;
         Ok(())
     }
@@ -1445,5 +1514,144 @@ mod cleanup_tests {
         assert!(cleanup_recovery(&recovery, &mut report).await.is_none());
         assert_eq!(report["state"], "verified");
         assert_eq!(report["warning_details"], json!([]));
+    }
+}
+
+#[cfg(test)]
+mod guarded_commit_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn guarded_commit_accepts_matching_bytes_and_expected_missing_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let stage = directory.path().join("stage.json");
+        let destination = directory.path().join("item.json");
+        let old = br#"{"Title":"observed"}"#;
+        let requested = br#"{"Title":"requested"}"#;
+        tokio::fs::write(&stage, requested).await.unwrap();
+        tokio::fs::write(&destination, old).await.unwrap();
+        commit_json_stage_guarded(&stage, &destination, Some(old))
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), requested);
+        tokio::fs::remove_file(&destination).await.unwrap();
+        commit_json_stage_guarded(&stage, &destination, None)
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), requested);
+        // The ordinary save entry remains an unconditional staged commit.
+        tokio::fs::write(&destination, b"ordinary unsnapshotted value")
+            .await
+            .unwrap();
+        commit_json_stage(&stage, &destination).await.unwrap();
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), requested);
+    }
+
+    #[tokio::test]
+    async fn guarded_commit_keeps_new_created_or_removed_destination_state() {
+        for (current, expected) in [
+            (Some(b"new bytes".as_slice()), Some(b"old bytes".as_slice())),
+            (Some(b"new bytes".as_slice()), None),
+            (None, Some(b"old bytes".as_slice())),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let stage = directory.path().join("stage.json");
+            let destination = directory.path().join("item.json");
+            tokio::fs::write(&stage, b"original recovery bytes")
+                .await
+                .unwrap();
+            if let Some(bytes) = current {
+                tokio::fs::write(&destination, bytes).await.unwrap();
+            }
+            let error = commit_json_stage_guarded(&stage, &destination, expected)
+                .await
+                .unwrap_err();
+            assert_eq!(error.0, StatusCode::CONFLICT);
+            assert_eq!(tokio::fs::read(&destination).await.ok().as_deref(), current);
+            assert_eq!(
+                tokio::fs::read(&stage).await.unwrap(),
+                b"original recovery bytes"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mutation_after_staging_is_not_overwritten_and_temporary_commit_is_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let stage = directory.path().join("stage.json");
+        let destination = directory.path().join("item.json");
+        let expected = b"observed current JSON";
+        let requested = b"original recovery JSON";
+        let changed = b"JSON changed while the staged file was copied and synchronized";
+        tokio::fs::write(&stage, requested).await.unwrap();
+        tokio::fs::write(&destination, expected).await.unwrap();
+        let error = commit_json_stage_with_validation(&stage, &destination, || async {
+            let mut entries = tokio::fs::read_dir(directory.path()).await.unwrap();
+            let mut staged = vec![];
+            while let Some(entry) = entries.next_entry().await.unwrap() {
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".etk-commit-")
+                {
+                    staged.push(entry.path());
+                }
+            }
+            assert_eq!(staged.len(), 1);
+            assert_eq!(tokio::fs::read(&staged[0]).await.unwrap(), requested);
+            tokio::fs::write(&destination, changed).await.unwrap();
+            validate_json_destination(&destination, Some(expected)).await
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(tokio::fs::read(&destination).await.unwrap(), changed);
+        assert_eq!(tokio::fs::read(&stage).await.unwrap(), requested);
+        let mut entries = tokio::fs::read_dir(directory.path()).await.unwrap();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            assert!(
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".etk-commit-")
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn guarded_commit_refuses_nonfiles_and_symlinked_destinations_or_parents() {
+        let directory = tempfile::tempdir().unwrap();
+        let stage = directory.path().join("stage.json");
+        let outside = directory.path().join("outside");
+        tokio::fs::create_dir(&outside).await.unwrap();
+        let kept = outside.join("keep.json");
+        tokio::fs::write(&kept, b"keep external bytes")
+            .await
+            .unwrap();
+        tokio::fs::write(&stage, b"recovery bytes").await.unwrap();
+        let symlink = directory.path().join("item.json");
+        std::os::unix::fs::symlink(&kept, &symlink).unwrap();
+        let parent_link = directory.path().join("parent-link");
+        std::os::unix::fs::symlink(&outside, &parent_link).unwrap();
+        let linked_destination = parent_link.join("keep.json");
+        for destination in [&symlink, &linked_destination, &outside] {
+            let error =
+                commit_json_stage_guarded(&stage, destination, Some(b"keep external bytes"))
+                    .await
+                    .unwrap_err();
+            assert_eq!(error.0, StatusCode::CONFLICT);
+            assert_eq!(
+                tokio::fs::read(&kept).await.unwrap(),
+                b"keep external bytes"
+            );
+        }
+        assert!(
+            tokio::fs::symlink_metadata(&symlink)
+                .await
+                .unwrap()
+                .is_symlink()
+        );
+        assert!(outside.is_dir());
     }
 }

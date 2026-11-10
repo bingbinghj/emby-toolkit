@@ -2,11 +2,12 @@ use axum::{
     Json, Router,
     body::{Body, to_bytes},
     http::{Request, StatusCode, header},
-    routing::get,
+    routing::{get, post},
 };
 use emby_toolkit::{AppState, auth::Session, error::ApiError, media_organize_history as history};
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
+use tokio::sync::{Mutex, Notify};
 use tower::ServiceExt;
 
 struct Fixture {
@@ -452,6 +453,9 @@ async fn service_restart_marks_only_unfinished_admissions_for_retry_and_keeps_th
             .unwrap(),
         ids
     );
+    history::begin_reorganize(&f.state, &ids, "ep1")
+        .await
+        .unwrap();
     history::finish_reorganize(
         &f.state,
         &ids,
@@ -517,5 +521,154 @@ async fn authenticated_episode_events_preserve_both_history_rows_through_queue_m
             .iter()
             .all(|row| row["item_id"] == "ep1" || row["item_id"] == "ep2")
     );
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL in DATABASE_URL; notification server is localhost"]
+async fn failed_admissions_keep_real_reasons_and_notify_once_without_blocking_completion() {
+    let mut f = Fixture::new().await;
+    let received = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let started = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let messages = received.clone();
+    let request_started = started.clone();
+    let response_release = release.clone();
+    let sender = Router::new().route(
+        "/botfixture/sendMessage",
+        post(move |Json(body): Json<Value>| {
+            let messages = messages.clone();
+            let request_started = request_started.clone();
+            let response_release = response_release.clone();
+            async move {
+                messages.lock().await.push(body);
+                request_started.notify_one();
+                response_release.notified().await;
+                Json(json!({"ok":true}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    f.state.notifications = Arc::new(emby_toolkit::notifications::Service::with_api_base(
+        format!("http://{}", listener.local_addr().unwrap()),
+    ));
+    let server = tokio::spawn(async move { axum::serve(listener, sender).await.unwrap() });
+    f.state.config.write().await.as_object_mut().unwrap().extend(json!({
+        "telegram_enabled":true,"notification_time":{"start":"00:00","end":"23:59"},"telegram_bot_token":"fixture", "telegram_channel_id":"-1000", "telegram_notify_types":["recognize_fail"]
+    }).as_object().unwrap().clone());
+    let ids = history::begin_emby(
+        &f.state,
+        "item.add",
+        &episode("ep-failure"),
+        "/media/ep-failure.strm",
+        None,
+    )
+    .await
+    .unwrap();
+    let event = json!({"source":"emby","history_ids":ids});
+    let failed = Ok(
+        json!({"message":"本批已处理","failed":1,"failures":[{"item_id":"ep-failure","reason":"JSON 回读验收失败 password=private"}]}),
+    );
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        history::finish(&f.state, &event, &failed),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), started.notified())
+        .await
+        .unwrap();
+    let original = f.rows().await[0].clone();
+    assert_eq!(original["status"], "failed");
+    assert!(
+        original["message"]
+            .as_str()
+            .unwrap()
+            .contains("ep-failure：JSON 回读验收失败")
+    );
+    assert!(!original["message"].as_str().unwrap().contains("private"));
+    assert!(!original["message"].as_str().unwrap().contains("本批已处理"));
+    history::finish(
+        &f.state,
+        &event,
+        &Ok(json!({"updated":1,"message":"过期成功响应"})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        f.rows().await[0],
+        original,
+        "a repeated terminal event must not overwrite a real failure"
+    );
+    assert_eq!(received.lock().await.len(), 1);
+    release.notify_one();
+    history::begin_reorganize(&f.state, &ids, "ep-failure")
+        .await
+        .unwrap();
+    history::finish_reorganize(
+        &f.state,
+        &ids,
+        "ep-failure",
+        &Ok(json!({"updated":1,"message":"重新整理成功"})),
+    )
+    .await
+    .unwrap();
+    let retried = f.rows().await[0].clone();
+    assert_eq!(retried["status"], "success");
+    assert_eq!(retried["created_at"], original["created_at"]);
+    history::finish_reorganize(
+        &f.state,
+        &ids,
+        "ep-failure",
+        &Err(ApiError::bad("过期失败响应")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.rows().await[0], retried);
+    assert_eq!(
+        received.lock().await.len(),
+        1,
+        "a repeated finish must not notify again"
+    );
+    server.abort();
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL in DATABASE_URL; upstream is localhost"]
+async fn repeated_completed_events_cannot_finalize_a_later_admission_of_the_same_file() {
+    let f = Fixture::new().await;
+    let item = episode("ep1");
+    let old_ids = history::begin_emby(&f.state, "item.add", &item, "/media/ep1.strm", None)
+        .await
+        .unwrap();
+    let old_event = json!({"source":"emby","history_ids":old_ids});
+    history::finish(&f.state, &old_event, &Err(ApiError::bad("上次真实失败")))
+        .await
+        .unwrap();
+    let mut later = json!({"source":"moviepilot","media_type":"tv","title":"后来再次入库","files":["/media/ep1.strm"]});
+    let later_ids = history::begin_moviepilot(&f.state, &later).await.unwrap();
+    later["history_ids"] = json!(later_ids);
+    history::bind_item(&f.state, &later, "/media/ep1.strm", &item)
+        .await
+        .unwrap();
+    history::finish(
+        &f.state,
+        &old_event,
+        &Ok(json!({"updated":1,"message":"过期响应"})),
+    )
+    .await
+    .unwrap();
+    let rows = f.rows().await;
+    let old = rows.iter().find(|row| row["id"] == old_ids[0]).unwrap();
+    let new = rows.iter().find(|row| row["id"] == later_ids[0]).unwrap();
+    assert_eq!(old["status"], "failed");
+    assert_eq!(old["message"], "上次真实失败");
+    assert_eq!(
+        new["status"], "processing",
+        "a stale event is no proof that a new admission completed"
+    );
+    assert!(new["completed_at"].is_null());
     f.close().await;
 }

@@ -19,7 +19,7 @@ function fixture({ get = async () => ({ data: list }), post = async () => ({ sta
   const calls = [], messages = [];
   const context = vm.createContext({
     active: true, itemSequence: 0, pageSize: 24,
-    statusFilter: { value: 'all' }, loadedQuery: { value: '[1,"","all"]' }, trackingSince: { value: '' },
+    statusFilter: { value: 'all' }, loadedQuery: { value: '[1,"","all"]' },
     items: { value: [movie] }, search: { value: '' }, appliedSearch: { value: '' }, page: { value: 1 }, total: { value: 48 },
     selectedItems: { value: [] }, confirmationItems: { value: [] }, confirmationOpen: { value: false },
     loadingItems: { value: false }, itemsError: { value: '' }, processing: { value: false }, feedback: { value: null },
@@ -178,10 +178,11 @@ for (const record of [{ ...movie, status: 'processing' }, { ...movie, item_id: n
   });
 }
 
-test('history tracking starts at the API timestamp without synthesizing older records', async () => {
+test('empty history does not synthesize records from the retired tracking timestamp', async () => {
   const f = fixture({ get: async () => ({ data: { items: [], total: 0, tracking_since: '2026-11-10T03:00:00Z', legacy_records_available: false } }) });
   await f.context.load();
-  assert.equal(f.context.trackingSince.value, '2026-11-10T03:00:00Z');
+  assert.ok(!source.includes('organize-tracking'));
+  assert.ok(!source.includes('此前入库的历史记录不可用'));
   assert.equal(f.context.items.value.length, 0);
   assert.equal(f.calls.filter(call => call.method === 'GET').length, 1);
 });
@@ -203,4 +204,34 @@ test('unverified organize results do not claim the history was updated', async (
   assert.equal(f.calls.filter(call => call.method === 'GET').length, 0);
   assert.equal(f.context.selectedItems.value[0].status, 'success');
   assert.equal(f.context.feedback.value.message, '媒体整理结果尚未确认');
+});
+
+test('history search ignores composing input and coalesces typed queries using MP delays', async () => {
+  const f = fixture(), timers = new Map();
+  let nextTimer = 0;
+  Object.assign(f.context, {
+    searchComposing: { value: true }, smAndDown: { value: false }, searchTimer: null,
+    setTimeout: (callback, delay) => { const id = ++nextTimer; timers.set(id, { callback, delay }); return id; },
+    clearTimeout: id => timers.delete(id),
+  });
+  vm.runInContext(source.match(/const searchItems = .*;/)[0] + '\n' + functionSource('scheduleSearch') + '\n' + source.match(/const finishSearchComposition = .*;/)[0] + '\nthis.schedule = scheduleSearch; this.submit = searchItems; this.finishComposition = finishSearchComposition;', f.context);
+  f.context.search.value = '中';
+  f.context.schedule();
+  f.context.submit();
+  assert.equal(timers.size, 0);
+  assert.deepEqual(f.calls, []);
+  f.context.search.value = '中国电影';
+  f.context.finishComposition();
+  assert.equal(timers.size, 1);
+  assert.equal([...timers.values()][0].delay, 1000);
+  f.context.search.value = '下一部电影';
+  f.context.smAndDown.value = true;
+  f.context.schedule();
+  assert.equal(timers.size, 1);
+  assert.equal([...timers.values()][0].delay, 600);
+  f.context.submit();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(timers.size, 0);
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(f.calls[0].options.params, { page: 1, page_size: 24, search: '下一部电影', status: 'all' });
 });

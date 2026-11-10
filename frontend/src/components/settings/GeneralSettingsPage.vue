@@ -2,6 +2,7 @@
 <template>
   <VContainer fluid class="mp-page settings-page settings-container pa-0">
     <h1 class="sr-only">设置</h1>
+    <SettingsSearchResults :query="settingsSearch.query.value" :results="settingsSearch.results.value" :notice="settingsSearch.notice.value" @select="settingsSearch.select" />
     <div class="d-flex ga-3 flex-column">
       <!-- ★★★ 最终修正: v-if, v-else-if, v-else 现在是正确的同级兄弟关系 ★★★ -->
       <div v-if="configModel">
@@ -9,49 +10,45 @@
           <VWindow :model-value="activeSettingsTab" class="settings-content-window disable-tab-transition" :touch="false">
             <VWindowItem value="system" eager>
               <VRow class="mp-aligned-grid settings-card-grid settings-grid">
-                <VCol cols="12">
+                <VCol cols="12" v-show="settingsSearch.showCard('基础设置')">
                   <SettingCard class="dashboard-card" title="基础设置" subtitle="媒体处理与语言显示">
-                    <template #status>
-                      <VChip v-for="status in settingCardStatus['basic']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
-
-                    </template>
 
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="delay_between_items_sec">
-                        <VNumberInput
-                          v-model="configModel.delay_between_items_sec"
+                        <VTextField type="number"
+                          v-model.number="configModel.delay_between_items_sec"
                           :min="0"
                           :step="0.1"
                           placeholder="例如: 0.5"
                           label="处理项目间的延迟 (秒)"
-                        ></VNumberInput>
+                        ></VTextField>
                       </div>
                       <div class="settings-field" data-field="media_info_retry_interval">
-                        <VNumberInput
-                          v-model="configModel.media_info_retry_interval"
+                        <VTextField type="number"
+                          v-model.number="configModel.media_info_retry_interval"
                           :min="5"
                           :max="1800"
                           :step="5"
                           placeholder="例如: 30"
                           label="媒体信息验收等待 (秒)"
-                        ></VNumberInput>
+                        ></VTextField>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             每轮单项补提取后等待该时长再验收。
                           </span>
                         </div>
                       </div>
                       <div class="settings-field" data-field="media_info_retry_attempts">
-                        <VNumberInput
-                          v-model="configModel.media_info_retry_attempts"
+                        <VTextField type="number"
+                          v-model.number="configModel.media_info_retry_attempts"
                           :min="0"
                           :max="20"
                           :step="1"
                           placeholder="例如: 3"
                           label="媒体信息验收重试次数"
-                        ></VNumberInput>
+                        ></VTextField>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             仅重试仍缺少有效媒体信息的项目；设为 0 时只验收，不补提取。
                           </span>
                         </div>
@@ -66,51 +63,36 @@
                           label="中文字幕默认语言"
                         ></VSelect>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             仅用于媒体信息编辑器中未明确简繁的中文字幕“修正语言
                             (Language)”选项，方便填充标题；保留明确的 chs、cht。
                           </span>
                         </div>
                       </div>
-                      <div class="settings-field" data-field="min_score_for_review">
-                        <VNumberInput
-                          v-model="configModel.min_score_for_review"
-                          :min="0.0"
-                          :max="10"
-                          :step="0.1"
-                          placeholder="例如: 6.0"
-                          label="需手动处理的最低评分阈值"
-                        ></VNumberInput>
-                        <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
-                            处理质量评分低于此值的项目将进入待复核列表。
-                          </span>
-                        </div>
-                      </div>
                       <div class="settings-field" data-field="max_actors_to_process">
-                        <VNumberInput
-                          v-model="configModel.max_actors_to_process"
+                        <VTextField type="number"
+                          v-model.number="configModel.max_actors_to_process"
                           :min="10"
                           :step="10"
                           placeholder="建议 30-100"
                           label="最大主要演员数"
-                        ></VNumberInput>
+                        ></VTextField>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             处理后最终演员表数量，超过会截断，优先保留有头像演员。
                           </span>
                         </div>
                       </div>
                       <div class="settings-field" data-field="max_episode_actors_to_process">
-                        <VNumberInput
-                          v-model="configModel.max_episode_actors_to_process"
+                        <VTextField type="number"
+                          v-model.number="configModel.max_episode_actors_to_process"
                           :min="0"
                           :step="1"
                           placeholder="例如: 5"
                           label="最大分集演员数"
-                        ></VNumberInput>
+                        ></VTextField>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             每集最多处理的演员数量，0代表不单独处理分集演员。
                           </span>
                         </div>
@@ -118,7 +100,7 @@
                       <div class="settings-field" data-field="extract_thumb">
                         <VSwitch v-model="configModel.extract_thumb" label="截取视频图片"></VSwitch>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             从视频流中截取高清画面作为分集图或背景图。
                           </span>
                         </div>
@@ -126,13 +108,13 @@
                       <div class="settings-field" data-field="actor_role_add_prefix">
                         <VSwitch v-model="configModel.actor_role_add_prefix" label="为角色名添加前缀"></VSwitch>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">角色名前加上“饰 ”或“配 ”。</span>
+                          <span class="text-medium-emphasis">角色名前加上“饰 ”或“配 ”。</span>
                         </div>
                       </div>
                       <div class="settings-field" data-field="remove_actors_without_avatars">
                         <VSwitch v-model="configModel.remove_actors_without_avatars" label="移除无头像的演员"></VSwitch>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             在最终演员表移除那些找不到任何可用头像的演员。
                           </span>
                         </div>
@@ -140,7 +122,7 @@
                       <div class="settings-field" data-field="keyword_to_tags">
                         <VSwitch v-model="configModel.keyword_to_tags" label="关键词写入标签"></VSwitch>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             将映射后的中文关键词写入标签。
                           </span>
                         </div>
@@ -148,7 +130,7 @@
                       <div class="settings-field" data-field="studio_to_chinese">
                         <VSwitch v-model="configModel.studio_to_chinese" label="工作室中文化"></VSwitch>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">将工作室名称转换为中文。</span>
+                          <span class="text-medium-emphasis">将工作室名称转换为中文。</span>
                         </div>
                       </div>
                     </VCardText>
@@ -168,12 +150,8 @@
                     </template>
                   </SettingCard>
                 </VCol>
-                <VCol cols="12">
+                <VCol cols="12" v-show="settingsSearch.showCard('媒体服务器')">
                   <SettingCard class="dashboard-card" title="媒体服务器" subtitle="媒体服务器与媒体库">
-                    <template #status>
-                      <VChip v-for="status in settingCardStatus['emby']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
-
-                    </template>
 
                     <VCardText class="settings-card-body">
                       <!-- ★★★ 调整点1: 恢复双列，但减小间距 x-gap="12" ★★★ -->
@@ -246,7 +224,7 @@
                           <div class="settings-field" data-field="emby_webhook_ingest_enabled">
                             <VSwitch v-model="configModel.emby_webhook_ingest_enabled" label="Webhook入库"></VSwitch>
                             <div class="settings-hint">
-                              <span style="font-size: 0.8em" class="text-medium-emphasis">
+                              <span class="text-medium-emphasis">
                                 关闭后忽略 Emby 的 item.add 和 library.new
                                 入库事件；MoviePilot完成通知、元数据更新和删除通知不受影响。
                               </span>
@@ -315,18 +293,18 @@
                         <!-- 7. 超时时间 (占满一行，保持长标签) -->
                         <VCol cols="12">
                           <div class="settings-field" data-field="emby_api_timeout">
-                            <VNumberInput
-                              v-model="configModel.emby_api_timeout"
+                            <VTextField type="number"
+                              v-model.number="configModel.emby_api_timeout"
                               :min="15"
                               :step="5"
                               placeholder="建议 30-90"
                               style="width: 100%"
                               label="Emby API 超时时间 (秒)"
-                            ></VNumberInput>
+                            ></VTextField>
                           </div>
                         </VCol>
                         <VCol cols="12">
-                          <div class="settings-field">
+                          <div class="settings-field" data-field="libraries_to_ignore">
                             <VAutocomplete v-model="configModel.libraries_to_ignore" :items="availableLibraries" item-title="Name" item-value="Id"
                               label="排除媒体库" chips multiple clearable prepend-inner-icon="mdi-library" :loading="loadingLibraries"
                               :disabled="loadingLibraries || Boolean(libraryError) || !availableLibraries.length"
@@ -353,16 +331,12 @@
                     </template>
                   </SettingCard>
                 </VCol>
-                <VCol cols="12">
+                <VCol cols="12" v-show="settingsSearch.showCard('AI 增强')">
                   <SettingCard class="dashboard-card" title="AI 增强" subtitle="翻译服务与处理策略">
-                    <template #status>
-                      <VChip v-for="status in settingCardStatus['ai']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
-
-                    </template>
 
                     <template #append>
                       <div class="d-flex ga-3 flex-wrap align-center">
-                        <VBtn color="info" @click="openPromptModal" variant="outlined" size="x-small">
+                        <VBtn data-field="ai_prompt_templates" data-settings-label="配置提示词" color="info" @click="openPromptModal" variant="outlined" size="x-small">
                           <template #prepend><UiIcon name="language" /></template>
                           配置提示词
                         </VBtn>
@@ -433,14 +407,14 @@
                         <VRow class="settings-grid">
                           <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
                             <div class="settings-field" data-field="ai_request_timeout">
-                              <VNumberInput
-                                v-model="configModel.ai_request_timeout"
+                              <VTextField type="number"
+                                v-model.number="configModel.ai_request_timeout"
                                 :min="30"
                                 :max="1800"
                                 :step="30"
                                 style="width: 100%"
                                 label="AI 翻译超时时间（秒）"
-                              ></VNumberInput>
+                              ></VTextField>
                             </div>
                 </VCol>
                           <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
@@ -449,14 +423,13 @@
                               class="settings-field"
                               data-field="ai_max_retries"
                             >
-                              <VNumberInput
-                                v-model="configModel.ai_max_retries"
+                              <VTextField type="number"
+                                v-model.number="configModel.ai_max_retries"
                                 :min="0"
-                                :precision="0"
-                                :step="1"
+                                  :step="1"
                                 style="width: 100%"
                                 label="失败重试次数"
-                              ></VNumberInput>
+                              ></VTextField>
                               <div class="settings-hint">
                                 0 表示不重试。超时或临时请求失败后重试当前请求；已成功翻译的词条会使用缓存。
                               </div>
@@ -464,14 +437,14 @@
                 </VCol>
                           <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
                             <div class="settings-field" data-field="ai_translation_batch_size">
-                              <VNumberInput
-                                v-model="configModel.ai_translation_batch_size"
+                              <VTextField type="number"
+                                v-model.number="configModel.ai_translation_batch_size"
                                 :min="1"
                                 :max="100"
                                 :step="1"
                                 style="width: 100%"
                                 label="单批最大翻译词条数"
-                              ></VNumberInput>
+                              ></VTextField>
                             </div>
                 </VCol>
                         </VRow>
@@ -487,22 +460,22 @@
                           <div class="settings-field-label text-body-2 font-weight-medium mb-2">启用功能</div>
                           <VRow class="settings-grid">
                             <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
-                              <VCheckbox v-model="configModel.ai_translate_actor_role" label="翻译演员与角色" />
+                              <VCheckbox data-field="ai_translate_actor_role" v-model="configModel.ai_translate_actor_role" label="翻译演员与角色" />
                   </VCol>
                             <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
-                              <VCheckbox v-model="configModel.ai_translate_on_sync" label="同步媒体数据时翻译" />
+                              <VCheckbox data-field="ai_translate_on_sync" v-model="configModel.ai_translate_on_sync" label="同步媒体数据时翻译" />
                   </VCol>
                             <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
-                              <VCheckbox v-model="configModel.ai_translate_title" label="翻译片名" />
+                              <VCheckbox data-field="ai_translate_title" v-model="configModel.ai_translate_title" label="翻译片名" />
                   </VCol>
                             <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
-                              <VCheckbox v-model="configModel.ai_translate_overview" label="翻译简介" />
+                              <VCheckbox data-field="ai_translate_overview" v-model="configModel.ai_translate_overview" label="翻译简介" />
                   </VCol>
                             <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
-                              <VCheckbox v-model="configModel.ai_translate_episode_overview" label="翻译分集简介" />
+                              <VCheckbox data-field="ai_translate_episode_overview" v-model="configModel.ai_translate_episode_overview" label="翻译分集简介" />
                   </VCol>
                             <VCol cols="12" :md="12 / (isMobile ? 1 : 2)">
-                              <VCheckbox v-model="configModel.ai_joke_fallback" label="无简介小笑话占位" />
+                              <VCheckbox data-field="ai_joke_fallback" v-model="configModel.ai_joke_fallback" label="无简介小笑话占位" />
                   </VCol>
                           </VRow>
                         </div>
@@ -542,38 +515,34 @@
                     </template>
                   </SettingCard>
                 </VCol>
-                <VCol cols="12">
+                <VCol cols="12" v-show="settingsSearch.showCard('日志配置')">
                   <SettingCard class="dashboard-card" title="日志配置" subtitle="日志保留与文件大小">
-                    <template #status>
-                      <VChip v-for="status in settingCardStatus['logs']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
-
-                    </template>
 
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="log_rotation_size_mb">
-                        <VNumberInput
-                          v-model="configModel.log_rotation_size_mb"
+                        <VTextField type="number"
+                          v-model.number="configModel.log_rotation_size_mb"
                           :min="1"
                           :step="1"
                           placeholder="例如: 5"
                           label="单个日志文件大小 (MB)"
-                        ></VNumberInput>
+                        ></VTextField>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             设置 app.log 文件的最大体积，超限后会轮转。
                           </span>
                         </div>
                       </div>
                       <div class="settings-field" data-field="log_rotation_backup_count">
-                        <VNumberInput
-                          v-model="configModel.log_rotation_backup_count"
+                        <VTextField type="number"
+                          v-model.number="configModel.log_rotation_backup_count"
                           :min="1"
                           :step="1"
                           placeholder="例如: 10"
                           label="日志备份数量"
-                        ></VNumberInput>
+                        ></VTextField>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             保留最近的日志文件数量 (app.log.1, app.log.2 ...)。
                           </span>
                         </div>
@@ -595,12 +564,8 @@
                     </template>
                   </SettingCard>
                 </VCol>
-                <VCol cols="12">
-                  <SettingCard class="dashboard-card" title="数据管理" subtitle="备份、还原与缓存维护">
-                    <template #status>
-                      <VChip v-for="status in settingCardStatus['data']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
-
-                    </template>
+                <VCol cols="12" v-show="settingsSearch.showCard('数据管理')">
+                  <SettingCard data-field="data_management" data-settings-label="数据管理" class="dashboard-card" title="数据管理" subtitle="备份、还原与缓存维护">
 
                     <VCardText class="settings-card-body">
                       <div class="d-flex ga-3 flex-column">
@@ -702,12 +667,8 @@
             </VWindowItem>
             <VWindowItem value="directory" eager>
               <VRow class="mp-aligned-grid settings-card-grid settings-grid">
-                <VCol cols="12">
+                <VCol cols="12" v-show="settingsSearch.showCard('存储')">
                   <SettingCard class="dashboard-card" title="存储" subtitle="115 授权方式与连接状态">
-                    <template #status>
-                      <VChip v-for="status in settingCardStatus['p115Account']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
-                      <span v-if="p115Info?.user_info?.user_name" class="text-body-2">{{ p115Info.user_info.user_name }}</span>
-                    </template>
 
                     <template #append>
                       <div class="d-flex ga-3 flex-wrap align-center">
@@ -724,6 +685,7 @@
                       </div>
                     </template>
                     <VCardText class="settings-card-body">
+                      <VAlert v-if="p115StatusError" type="error" variant="tonal" class="mb-3">{{ p115StatusError }}</VAlert>
                       <div
                         v-if="p115Info && p115Info.user_info"
                         style="
@@ -810,7 +772,7 @@
                             ></VTextField>
                           </div>
                           <div class="settings-hint">
-                            <span style="font-size: 0.8em" class="text-medium-emphasis">
+                            <span class="text-medium-emphasis">
                               请先填写 AppID 并保存此卡片，然后再扫码授权。
                             </span>
                           </div>
@@ -875,21 +837,21 @@
                           </div>
                         </VRadioGroup>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             默认优先 Cookie，失败后再尝试 OpenAPI。
                           </span>
                         </div>
                       </div>
                       <div class="settings-field" data-field="p115_request_interval">
-                        <VNumberInput
-                          v-model="configModel.p115_request_interval"
+                        <VTextField type="number"
+                          v-model.number="configModel.p115_request_interval"
                           :min="0.1"
                           :step="0.1"
                           placeholder="0.5"
                           label="API 请求间隔 (秒)"
-                        ></VNumberInput>
+                        ></VTextField>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             115 官方对 API 调用频率有严格限制，建议保持 0.5 秒以上。
                           </span>
                         </div>
@@ -911,12 +873,8 @@
                     </template>
                   </SettingCard>
                 </VCol>
-                <VCol cols="12">
+                <VCol cols="12" v-show="settingsSearch.showCard('目录')">
                   <SettingCard class="dashboard-card" title="目录" subtitle="媒体目录与文件身份">
-                    <template #status>
-                      <VChip v-for="status in settingCardStatus['fingerprints']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
-
-                    </template>
 
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="emby_metadata_path">
@@ -942,7 +900,7 @@
                           </VBtn>
                         </div>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             用于从 Emby 路径反查 115 缓存位置，辅助补齐 PC/SHA1。
                           </span>
                         </div>
@@ -989,7 +947,7 @@
                       <div class="settings-field" data-field="p115_generate_mediainfo">
                         <VSwitch v-model="configModel.p115_generate_mediainfo" label="媒体信息格式化"></VSwitch>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             Webhook 或指纹任务可将媒体信息写入本地缓存，用于备份与还原。
                           </span>
                         </div>
@@ -997,7 +955,7 @@
                       <div class="settings-field" data-field="p115_enable_sync_delete">
                         <VSwitch v-model="configModel.p115_enable_sync_delete" label="Emby 删除联动 115 删除"></VSwitch>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             通知到达时同步删除匹配的 115 文件。此操作不可逆，请确认删除链路可靠后再开启。
                           </span>
                         </div>
@@ -1023,12 +981,8 @@
             </VWindowItem>
             <VWindowItem value="rule" eager>
               <VRow class="mp-aligned-grid settings-card-grid settings-grid">
-                <VCol cols="12">
+                <VCol cols="12" v-show="settingsSearch.showCard('实时监控')">
                   <SettingCard class="dashboard-card" title="实时监控" subtitle="自动发现本地媒体变化">
-                    <template #status>
-                      <VChip v-for="status in settingCardStatus['monitor']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
-
-                    </template>
 
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="monitor_enabled">
@@ -1060,7 +1014,7 @@
                           </VBtn>
                         </div>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             请保持和 Emby 媒体库路径映射一致。
                           </span>
                         </div>
@@ -1091,7 +1045,7 @@
                           </VBtn>
                         </div>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             命中这些路径的文件将
                             <b>跳过刮削流程</b>
                             ，仅刷新。
@@ -1101,8 +1055,8 @@
                       </div>
                       <!-- 排除刷新延迟 -->
                       <div class="settings-field" data-field="monitor_exclude_refresh_delay">
-                        <VNumberInput
-                          v-model="configModel.monitor_exclude_refresh_delay"
+                        <VTextField type="number"
+                          v-model.number="configModel.monitor_exclude_refresh_delay"
                           :min="0"
                           :step="10"
                           placeholder="0"
@@ -1110,9 +1064,9 @@
                           label="排除刷新延迟"
                         >
                           <template #append-inner>秒</template>
-                        </VNumberInput>
+                        </VTextField>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             仅对
                             <b>排除路径</b>
                             生效。设为 0 则立即刷新。
@@ -1125,18 +1079,16 @@
                           v-model="configModel.monitor_extensions"
                           multiple
                           placeholder="输入扩展名并回车"
-                          :items="[]"
-                          item-title="label"
-                          item-value="value"
+                          :items="monitorExtensionOptions"
                           :return-object="false"
                           chips
                           closable-chips
                           label="监控扩展名"
                         ></VCombobox>
-                        <!-- 注意：options 设为空数组配合 tag 模式允许用户自由输入 -->
+
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
-                            仅处理这些后缀的文件，输入扩展名并回车添加新的监控文件类型。
+                          <span class="text-medium-emphasis">
+                            选择常见媒体格式，也可以输入扩展名并回车添加。
                           </span>
                         </div>
                       </div>
@@ -1153,7 +1105,7 @@
                           </div>
                         </VRadioGroup>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             控制下载 海报 等图片时的语言优先级。
                           </span>
                         </div>
@@ -1161,7 +1113,7 @@
                       <div class="settings-field" data-field="monitor_sha1_pc_search">
                         <VSwitch v-model="configModel.monitor_sha1_pc_search" label="SHA1检测"></VSwitch>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             文件SHA1查询，非115网盘勿启用。
                           </span>
                         </div>
@@ -1183,12 +1135,8 @@
                     </template>
                   </SettingCard>
                 </VCol>
-                <VCol cols="12">
+                <VCol cols="12" v-show="settingsSearch.showCard('入库自动处理')">
                   <SettingCard class="dashboard-card" title="入库自动处理" subtitle="新媒体入库后的增强任务">
-                    <template #status>
-                      <VChip v-for="status in settingCardStatus['ingest']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
-
-                    </template>
 
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="auto_repair_truehd_core_on_ingest">
@@ -1197,7 +1145,7 @@
                           label="入库自动纠正高清音轨"
                         ></VSwitch>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             仅在入库时执行安全的兼容核心纠正；手动音轨纠正任务不受此开关影响。默认关闭。
                           </span>
                         </div>
@@ -1208,7 +1156,7 @@
                           label="入库自动填充语言和标题"
                         ></VSwitch>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             根据原始标题识别语言，填充音轨和非中文字幕的语言及标题；中文字幕正常跳过并保留原样，未知语言需手动确认。默认关闭。
                           </span>
                         </div>
@@ -1219,7 +1167,7 @@
                           label="入库自动提取片头声纹"
                         ></VSwitch>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             电视剧入库且标题填充、回读验收完成后自动提取片头声纹，电影不处理。标题未完成时跳过。默认关闭。
                           </span>
                         </div>
@@ -1230,7 +1178,7 @@
                           label="入库自动提取视频预览缩略图"
                         ></VSwitch>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             电视剧和电影入库且标题填充、回读验收完成后生成视频预览缩略图，失败时自动尝试修复。标题未完成时跳过。默认关闭。
                           </span>
                         </div>
@@ -1241,7 +1189,7 @@
                           label="保存后提取视频缩略图"
                         ></VSwitch>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             手动保存媒体信息后运行神医视频缩略图任务，按神医当前配置范围处理。默认关闭。
                           </span>
                         </div>
@@ -1263,12 +1211,8 @@
                     </template>
                   </SettingCard>
                 </VCol>
-                <VCol cols="12">
+                <VCol cols="12" v-show="settingsSearch.showCard('整理 & 刮削')">
                   <SettingCard class="dashboard-card" title="整理 & 刮削" subtitle="电影与电视剧的目录和文件名">
-                    <template #status>
-                      <VChip v-for="status in settingCardStatus['rename']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
-
-                    </template>
 
                     <VCardText class="settings-card-body">
                       <div class="rename-format-grid">
@@ -1283,7 +1227,7 @@
                               label="电影重命名格式"
                             ></VTextarea>
                             <div class="settings-hint">
-                              <span style="font-size: 0.8em" class="text-medium-emphasis">
+                              <span class="text-medium-emphasis">
                                 与 MoviePilot「存储&目录 → 整理&刮削」使用相同的 Jinja2
                                 格式；扩展名始终使用源文件扩展名。
                               </span>
@@ -1291,7 +1235,7 @@
                           </div>
                         </div>
                         <div class="rename-preview-panel">
-                          <div class="rename-preview-title">电影示例 · 肖申克的救赎</div>
+                          <div class="rename-preview-title">电影示例<span v-if="renameFormatPreview.movie_sample?.title"> · {{ renameFormatPreview.movie_sample.title }}</span></div>
                           <div class="settings-loading">
                             <VProgressLinear
                               v-if="isPreviewingRenameFormats"
@@ -1313,8 +1257,8 @@
                                 <span>{{ part }}</span>
                               </div>
                             </div>
-                            <VAlert v-else :type="renameFormatPreview.error ? 'error' : 'info'" variant="tonal">
-                              {{ renameFormatPreview.error || '正在生成预览...' }}
+                            <VAlert v-else :type="renameFormatPreview.errors?.movie ? 'error' : 'info'" variant="tonal">
+                              {{ renameFormatPreview.errors?.movie || (isPreviewingRenameFormats ? '正在生成预览...' : renameFormatPreview.movie_sample ? '请输入电影重命名格式' : '暂无最近入库的电影') }}
                             </VAlert>
                           </div>
                         </div>
@@ -1329,7 +1273,7 @@
                               label="电视剧重命名格式"
                             ></VTextarea>
                             <div class="settings-hint">
-                              <span style="font-size: 0.8em" class="text-medium-emphasis">
+                              <span class="text-medium-emphasis">
                                 与 MoviePilot「存储&目录 → 整理&刮削」使用相同的 Jinja2 格式；可使用 `season`、`episode`
                                 和 `season_episode`。
                               </span>
@@ -1337,7 +1281,7 @@
                           </div>
                         </div>
                         <div class="rename-preview-panel">
-                          <div class="rename-preview-title">电视剧示例 · 凡人修仙传（动漫）</div>
+                          <div class="rename-preview-title">电视剧示例<span v-if="renameFormatPreview.tv_sample?.title"> · {{ renameFormatPreview.tv_sample.title }} {{ renameFormatPreview.tv_sample.season_episode }}</span></div>
                           <div class="settings-loading">
                             <VProgressLinear
                               v-if="isPreviewingRenameFormats"
@@ -1359,8 +1303,8 @@
                                 <span>{{ part }}</span>
                               </div>
                             </div>
-                            <VAlert v-else :type="renameFormatPreview.error ? 'error' : 'info'" variant="tonal">
-                              {{ renameFormatPreview.error || '正在生成预览...' }}
+                            <VAlert v-else :type="renameFormatPreview.errors?.tv ? 'error' : 'info'" variant="tonal">
+                              {{ renameFormatPreview.errors?.tv || (isPreviewingRenameFormats ? '正在生成预览...' : renameFormatPreview.tv_sample ? '请输入电视剧重命名格式' : '暂无最近入库的剧集') }}
                             </VAlert>
                           </div>
                         </div>
@@ -1386,12 +1330,8 @@
             </VWindowItem>
             <VWindowItem value="search" eager>
               <VRow class="mp-aligned-grid settings-card-grid settings-grid">
-                <VCol cols="12">
+                <VCol cols="12" v-show="settingsSearch.showCard('数据源与API')">
                   <SettingCard class="dashboard-card" title="数据源与API" subtitle="元数据服务与访问凭据">
-                    <template #status>
-                      <VChip v-for="status in settingCardStatus['sources']" :key="status.label" size="small" :color="status.color" variant="tonal" :prepend-icon="status.icon">{{ status.label }}</VChip>
-
-                    </template>
 
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="tmdb_api_key">
@@ -1419,7 +1359,7 @@
                           label="TMDB API服务地址"
                         ></VTextField>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">
+                          <span class="text-medium-emphasis">
                             TMDb API的基础URL，通常不需要修改。
                           </span>
                         </div>
@@ -1433,13 +1373,13 @@
                         </div>
                       </div>
                       <div class="settings-field" data-field="api_douban_default_cooldown_seconds">
-                        <VNumberInput
-                          v-model="configModel.api_douban_default_cooldown_seconds"
+                        <VTextField type="number"
+                          v-model.number="configModel.api_douban_default_cooldown_seconds"
                           :min="0.1"
                           :step="0.1"
                           placeholder="例如: 1.0"
                           label="豆瓣API冷却时间 (秒)"
-                        ></VNumberInput>
+                        ></VTextField>
                       </div>
                       <div class="settings-field" data-field="douban_cookie">
                         <VTextField
@@ -1453,7 +1393,7 @@
                           label="豆瓣登录 Cookie"
                         ></VTextField>
                         <div class="settings-hint">
-                          <span style="font-size: 0.8em" class="text-medium-emphasis">非必要不用配置，作用有限。</span>
+                          <span class="text-medium-emphasis">非必要不用配置，作用有限。</span>
                         </div>
                       </div>
                     </VCardText>
@@ -1494,7 +1434,7 @@
         <VCardTitle class="d-flex align-center justify-space-between ga-2">
           <span class="text-h6">扫码获取 Cookie</span>
           <VBtn
-            icon="mdi-close"
+            icon="mdi-close" color="default"
             variant="text"
             size="small"
             aria-label="关闭扫码获取 Cookie"
@@ -1593,7 +1533,7 @@
         <VCardTitle class="d-flex align-center justify-space-between ga-2">
           <span class="text-h6">115 扫码登录</span>
           <VBtn
-            icon="mdi-close"
+            icon="mdi-close" color="default"
             variant="text"
             size="small"
             aria-label="关闭115 扫码登录"
@@ -1658,7 +1598,7 @@
         <VCardTitle class="d-flex align-center justify-space-between ga-2">
           <span class="text-h6">选择本地路径</span>
           <VBtn
-            icon="mdi-close"
+            icon="mdi-close" color="default"
             variant="text"
             size="small"
             aria-label="关闭选择本地路径"
@@ -1725,7 +1665,7 @@
         <VCardTitle class="d-flex align-center justify-space-between ga-2">
           <span class="text-h6">选择 115 云端目录</span>
           <VBtn
-            icon="mdi-close"
+            icon="mdi-close" color="default"
             variant="text"
             size="small"
             aria-label="关闭选择 115 云端目录"
@@ -1791,7 +1731,7 @@
       <VCardTitle class="d-flex align-center justify-space-between ga-2">
         <span class="text-h6">选择要导出的数据表</span>
         <VBtn
-          icon="mdi-close"
+          icon="mdi-close" color="default"
           variant="text"
           size="small"
           aria-label="关闭选择要导出的数据表"
@@ -1836,7 +1776,7 @@
     <VCard class="settings-dialog">
       <VCardTitle class="d-flex align-center justify-space-between ga-2">
         <span class="text-h6">恢复数据库备份</span>
-        <VBtn icon="mdi-close" variant="text" size="small" aria-label="关闭恢复数据库备份" @click="cancelImport()" />
+        <VBtn icon="mdi-close" color="default" variant="text" size="small" aria-label="关闭恢复数据库备份" @click="cancelImport()" />
       </VCardTitle>
       <VCardText>
         <div class="d-flex ga-3 flex-column">
@@ -1906,7 +1846,7 @@
       <VCardTitle class="d-flex align-center justify-space-between ga-2">
         <span class="text-h6">清空指定数据表</span>
         <VBtn
-          icon="mdi-close"
+          icon="mdi-close" color="default"
           variant="text"
           size="small"
           aria-label="关闭清空指定数据表"
@@ -1964,7 +1904,7 @@
       <VCardTitle class="d-flex align-center justify-space-between ga-2">
         <span class="text-h6">确认重置Emby数据</span>
         <VBtn
-          icon="mdi-close"
+          icon="mdi-close" color="default"
           variant="text"
           size="small"
           aria-label="关闭确认重置Emby数据"
@@ -2005,7 +1945,7 @@
       <VCardTitle class="d-flex align-center justify-space-between ga-2">
         <span class="text-h6">配置 AI 提示词</span>
         <VBtn
-          icon="mdi-close"
+          icon="mdi-close" color="default"
           variant="text"
           size="small"
           aria-label="关闭配置 AI 提示词"
@@ -2158,6 +2098,8 @@ import { useDisplay } from 'vuetify';
 import SettingsQrCode from './general/SettingsQrCode.vue';
 import SettingCard from './general/SettingCard.vue';
 import LocalPathField from './general/LocalPathField.vue';
+import SettingsSearchResults from './general/SettingsSearchResults.vue';
+import { useSettingsSearch } from '@/composables/useSettingsSearch';
 import { useRoute } from 'vue-router';
 const ExportIcon = 'mdi-download';
 const ImportIcon = 'mdi-cloud-upload';
@@ -2263,8 +2205,11 @@ const handleImportSelectionChange = (currentSelection) => {
 
 const formRef = ref(null);
 const { configModel, loadingConfig, savingConfig, configError, handleSaveConfig } = useConfig();
+const settingsSearch = useSettingsSearch('general', { ready: computed(() => Boolean(configModel.value) && !loadingConfig.value), disabled: loadingConfig });
 const isPreviewingRenameFormats = ref(false);
-const renameFormatPreview = ref({ movie: '', tv: '' });
+const monitorExtensionOptions = ['.mp4', '.mkv', '.ts', '.iso', '.rmvb', '.avi', '.mov', '.mpeg', '.mpg', '.wmv', '.3gp', '.asf', '.m4v', '.flv', '.m2ts', '.tp', '.f4v', '.strm'];
+const renameFormatPreview = ref({ movie: '', tv: '', errors: {} });
+let renamePreviewRequest = 0;
 const movieRenamePreviewParts = computed(() => String(renameFormatPreview.value.movie || '').split('/').filter(Boolean));
 const tvRenamePreviewParts = computed(() => String(renameFormatPreview.value.tv || '').split('/').filter(Boolean));
 let renamePreviewTimer = null;
@@ -3051,34 +2996,6 @@ const check115Status = async () => {
     }
 };
 
-const p115ConnectionStatus = computed(() => {
-  if (loading115Info.value) return { label: '检测中', color: 'secondary', icon: 'mdi-progress-clock' };
-  if (p115StatusError.value) return { label: '状态读取失败', color: 'warning', icon: 'mdi-alert-circle-outline' };
-  const info = p115Info.value;
-  if (info?.valid === true) return { label: '已连接', color: 'success', icon: 'mdi-check-circle-outline' };
-  if (info?.valid === false) return { label: '连接异常，请重新检查授权', color: 'warning', icon: 'mdi-alert-circle-outline' };
-  if (info?.has_token || info?.has_cookie) return { label: '已授权，未验证', color: 'info', icon: 'mdi-key-outline' };
-  return { label: info ? '未授权' : '未检查', color: 'secondary', icon: 'mdi-link-off' };
-});
-const settingCardStatus = computed(() => {
-  const config = configModel.value || {};
-  const configured = (label, ready) => ({ label: `${label}${ready ? '已配置，未验证' : '未配置'}`, color: ready ? 'info' : 'secondary', icon: ready ? 'mdi-key-outline' : 'mdi-link-off' });
-  const enabled = (label, ready) => ({ label: `${label}${ready ? '已启用' : '已停用'}`, color: ready ? 'success' : 'secondary', icon: ready ? 'mdi-check-circle-outline' : 'mdi-pause-circle-outline' });
-  return {
-    basic: [{ label: '媒体处理参数', color: 'primary', icon: 'mdi-tune' }],
-    monitor: [enabled('监控', config.monitor_enabled)],
-    sources: [configured('TMDB ', Boolean(config.tmdb_api_key)), enabled('豆瓣辅助', config.douban_enable_online_api)],
-    p115Account: [p115ConnectionStatus.value],
-    fingerprints: [{ label: config.local_strm_root || config.cd2_media_root ? '媒体目录已配置' : '媒体目录未配置', color: 'info', icon: 'mdi-folder-outline' }],
-    emby: [configured('Emby ', Boolean(config.emby_server_url && config.emby_api_key))],
-    ai: [configured('API ', Boolean(config.ai_api_key)), enabled('翻译', config.ai_translate_actor_role || config.ai_translate_title || config.ai_translate_overview || config.ai_translate_episode_overview)],
-    logs: [{ label: '日志保留策略', color: 'primary', icon: 'mdi-file-document-outline' }],
-    ingest: [enabled('入库增强', config.auto_repair_truehd_core_on_ingest || config.auto_fill_language_titles_on_ingest || config.auto_extract_intro_fingerprint_on_ingest || config.auto_extract_video_thumbnails_on_ingest)],
-    rename: [{ label: '电影与电视剧模板', color: 'primary', icon: 'mdi-file-edit-outline' }],
-    data: [{ label: '备份与维护', color: 'primary', icon: 'mdi-database-outline' }],
-  };
-});
-
 // 辅助函数：获取规则摘要
 const genreOptions = computed(() => {
   const map = new Map();
@@ -3087,7 +3004,7 @@ const genreOptions = computed(() => {
 });
 
 const cardFields = {
-  basic: ['delay_between_items_sec', 'media_info_retry_interval', 'media_info_retry_attempts', 'subtitle_chinese_default_language', 'min_score_for_review', 'max_actors_to_process', 'max_episode_actors_to_process', 'extract_thumb', 'actor_role_add_prefix', 'remove_actors_without_avatars', 'keyword_to_tags', 'studio_to_chinese'],
+  basic: ['delay_between_items_sec', 'media_info_retry_interval', 'media_info_retry_attempts', 'subtitle_chinese_default_language', 'max_actors_to_process', 'max_episode_actors_to_process', 'extract_thumb', 'actor_role_add_prefix', 'remove_actors_without_avatars', 'keyword_to_tags', 'studio_to_chinese'],
   monitor: ['monitor_enabled', 'monitor_paths', 'monitor_exclude_dirs', 'monitor_exclude_refresh_delay', 'monitor_extensions', 'tmdb_image_language_preference', 'monitor_sha1_pc_search'],
   sources: ['tmdb_api_key', 'tmdb_api_base_url', 'douban_enable_online_api', 'api_douban_default_cooldown_seconds', 'douban_cookie'],
   p115Account: ['p115_auth_method', 'p115_app_id', 'p115_api_priority', 'p115_request_interval'],
@@ -3125,27 +3042,27 @@ const saveCard = async (cardKey) => {
 };
 const previewRenameFormats = async () => {
   if (!configModel.value) return;
+  const request = ++renamePreviewRequest;
   isPreviewingRenameFormats.value = true;
   try {
     const response = await axios.post('/api/config/rename_preview', {
       movie_format: configModel.value.movie_rename_format,
       tv_format: configModel.value.tv_rename_format,
     });
-    renameFormatPreview.value = { ...(response.data || {}), error: '' };
+    if (request !== renamePreviewRequest || !componentIsMounted.value) return;
+    renameFormatPreview.value = { ...(response.data || {}), errors: response.data?.errors || {} };
   } catch (error) {
-    renameFormatPreview.value = {
-      movie: '',
-      tv: '',
-      error: error.response?.data?.error || '预览重命名格式失败',
-    };
+    if (request !== renamePreviewRequest || !componentIsMounted.value) return;
+    const reason = error.response?.data?.error || '读取近期入库或预览重命名格式失败';
+    renameFormatPreview.value = { movie: '', tv: '', errors: { movie: reason, tv: reason } };
   } finally {
-    isPreviewingRenameFormats.value = false;
+    if (request === renamePreviewRequest) isPreviewingRenameFormats.value = false;
   }
 };
 watch(
   () => [configModel.value?.movie_rename_format, configModel.value?.tv_rename_format],
-  ([movieFormat, tvFormat]) => {
-    if (!movieFormat || !tvFormat) return;
+  () => {
+    if (!configModel.value) return;
     if (renamePreviewTimer) clearTimeout(renamePreviewTimer);
     renamePreviewTimer = setTimeout(previewRenameFormats, 250);
   },
@@ -3354,6 +3271,7 @@ onMounted(async () => {
 });
 onUnmounted(() => {
   componentIsMounted.value = false;
+  renamePreviewRequest += 1;
   if (renamePreviewTimer) clearTimeout(renamePreviewTimer);
   cookieQrcodeRequestVersion += 1;
   openApiQrcodeRequestVersion += 1;

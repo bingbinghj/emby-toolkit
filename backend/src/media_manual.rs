@@ -157,7 +157,7 @@ async fn edit_data(state: &AppState, id: &str) -> Result<Json<Value>> {
         title.clone()
     };
     let encoded: String = url_encode(&query);
-    let mut data = json!({"item_id":id,"item_name":item["Name"],"item_type":item["Type"],"image_tag":item["ImageTags"]["Primary"],"original_score":review["score"],"review_reason":review["error_message"],"current_emby_cast":actors.iter().map(front).collect::<Vec<_>>(),"search_links":{"baidu":format!("https://www.baidu.com/s?wd={encoded}"),"wikipedia":format!("https://www.google.com/search?q={encoded}+site%3Azh.wikipedia.org"),"google":format!("https://www.google.com/search?q={encoded}")}});
+    let mut data = json!({"item_id":id,"item_name":item["Name"],"item_type":item["Type"],"image_tag":item["ImageTags"]["Primary"],"review_reason":review["error_message"],"current_emby_cast":actors.iter().map(front).collect::<Vec<_>>(),"search_links":{"baidu":format!("https://www.baidu.com/s?wd={encoded}"),"wikipedia":format!("https://www.google.com/search?q={encoded}+site%3Azh.wikipedia.org"),"google":format!("https://www.google.com/search?q={encoded}")}});
     if id != original_id {
         data["redirect_item_id"] = json!(id);
     }
@@ -313,7 +313,7 @@ pub async fn save(state: &AppState, id: &str, body: &Value, context: &JobContext
             }
         }
     }
-    sqlx::query("INSERT INTO processed_log(item_id,item_name,score) VALUES($1,$2,10) ON CONFLICT(item_id) DO UPDATE SET score=10,processed_at=NOW()") .bind(id).bind(string(&item,"Name")).execute(&mut *transaction).await?;
+    sqlx::query("INSERT INTO processed_log(item_id,item_name) VALUES($1,$2) ON CONFLICT(item_id) DO UPDATE SET item_name=EXCLUDED.item_name,processed_at=NOW()") .bind(id).bind(string(&item,"Name")).execute(&mut *transaction).await?;
     sqlx::query("DELETE FROM failed_log WHERE item_id=$1")
         .bind(id)
         .execute(&mut *transaction)

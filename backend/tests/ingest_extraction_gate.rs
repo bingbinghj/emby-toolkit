@@ -290,7 +290,7 @@ impl TelegramCapture {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let api_base = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-        let service = emby_toolkit::notifications::Service { api_base };
+        let service = emby_toolkit::notifications::Service::with_api_base(api_base);
         fixture.state.notifications = Arc::new(service);
         fixture
             .state

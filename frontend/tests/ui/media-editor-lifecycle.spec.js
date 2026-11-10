@@ -5,7 +5,7 @@ const actorSavePath = '/api/update_media_cast_sa/101';
 async function leaveEditor(page) {
   await page.locator('.v-navigation-drawer').getByText('仪表盘', { exact: true }).click();
   await expect(page).toHaveURL(/\/dashboard$/);
-  await expect(page.getByRole('heading', { name: '仪表盘', exact: true })).toBeVisible();
+  await expect(page.locator('.dashboard-page')).toBeVisible();
 }
 
 async function finishRequest(page, release, result) {

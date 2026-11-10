@@ -1,25 +1,18 @@
 <template>
   <div ref="mediaPage" class="media-center-page">
-    <div ref="stickyControls" class="media-center-sticky-controls">
-      <header class="d-flex align-center justify-space-between ga-3 mb-4">
+    <div class="media-center-controls-slot" :style="{ height: `${controlsHeight}px` }">
+    <div ref="stickyControls" class="media-center-sticky-controls app-surface" :style="controlsStyle">
+      <header class="d-flex align-center justify-space-between ga-3">
         <div class="d-flex align-center ga-3 min-width-0">
           <VBtn v-if="libraryId" icon="mdi-arrow-left" variant="text" color="default"
             aria-label="返回仪表盘" title="返回我的媒体库" @click="goToLibraries" />
-          <MpPageTitle :title="libraryId ? (library?.name || '媒体库') : '我的媒体库'"
-            :subtitle="libraryId ? `浏览${mediaTypeLabel} · ${total} 项媒体` : '浏览和管理 Emby 媒体库'" />
+          <MpPageTitle :title="libraryId ? (library?.name || '媒体库') : '我的媒体库'" />
+          <VChip v-if="libraryId && library" size="small" variant="tonal" :aria-label="`媒体数量 ${total}`">{{ total.toLocaleString('zh-CN') }}</VChip>
         </div>
         <VBtn icon="mdi-refresh" variant="text" color="default" aria-label="刷新" title="刷新"
           :loading="loading" @click="refresh" />
       </header>
-      <VTextField v-if="libraryId" v-model="search" class="library-search"
-        :placeholder="`搜索当前${mediaTypeLabel}`" label="搜索媒体" prepend-inner-icon="mdi-magnify"
-        clearable variant="solo" flat rounded="pill" density="compact" hide-details
-        @update:model-value="onSearchInput" @keyup.enter="searchItems" @click:clear="searchItems">
-        <template #append-inner>
-          <VBtn icon="mdi-magnify" variant="text" size="small" aria-label="搜索" title="搜索"
-            @click.stop="searchItems" />
-        </template>
-      </VTextField>
+    </div>
     </div>
 
     <VAlert v-if="error" type="error" variant="tonal" closable class="my-4" @click:close="error = ''">{{ error }}</VAlert>
@@ -46,25 +39,25 @@
             <VHover v-if="itemsByIndex[index - 1]" v-slot="{ isHovering, props: hoverProps }">
               <div v-bind="hoverProps" class="media-card-hover-area" :data-media-index="index - 1">
                 <VCard tag="button" type="button" :ripple="false" class="media-card app-hover-lift-card"
-                  :class="{ 'app-hover-lift-card--hovering': isHovering }"
+                  :class="{ 'app-hover-lift-card--hovering': isHovering, 'media-card--image-loaded': posterIsLoaded(itemsByIndex[index - 1]) }"
                   :data-glass-optical-mode="posterIsLoaded(itemsByIndex[index - 1]) ? 'excluded' : undefined"
                   :aria-label="`编辑 ${itemsByIndex[index - 1].Name}`" @click="openMedia(itemsByIndex[index - 1].Id)">
                   <VImg :src="itemImage(itemsByIndex[index - 1]) || undefined" :aspect-ratio="2 / 3" cover
-                    class="media-poster-wrap" @load="markPosterLoaded">
+                    class="media-poster-wrap" @load="markPosterLoaded" @error="markPosterFailed">
                     <template #placeholder><div class="poster-fallback"><VProgressCircular v-if="itemImage(itemsByIndex[index - 1])" indeterminate size="24" width="2" /></div></template>
                     <template #error><div class="poster-fallback"><VIcon :icon="libraryIcon(itemsByIndex[index - 1].Type)" size="36" /></div></template>
                     <div v-if="!itemImage(itemsByIndex[index - 1])" class="poster-fallback"><VIcon :icon="libraryIcon(itemsByIndex[index - 1].Type)" size="36" /></div>
-                    <VChip v-if="itemsByIndex[index - 1].CommunityRating" class="media-rating" color="warning" variant="flat" size="x-small" prepend-icon="mdi-star">
+                    <VChip v-if="itemsByIndex[index - 1].CommunityRating" class="media-rating" color="#9333ea" variant="elevated" size="small" prepend-icon="mdi-star" :aria-label="`Emby 社区评分 ${Number(itemsByIndex[index - 1].CommunityRating).toFixed(1)}`">
                       {{ Number(itemsByIndex[index - 1].CommunityRating).toFixed(1) }}
                     </VChip>
                     <div v-if="isHovering" class="media-card-detail">
-                      <span class="text-caption">{{ itemsByIndex[index - 1].ProductionYear }}</span>
-                      <h2 class="text-body-1 font-weight-bold my-2">{{ itemsByIndex[index - 1].Name }}</h2>
-                      <p v-if="itemsByIndex[index - 1].Overview" class="media-overview text-caption mb-3">{{ itemsByIndex[index - 1].Overview }}</p>
+                      <span class="media-detail-year">{{ itemsByIndex[index - 1].ProductionYear }}</span>
+                      <h2 class="media-detail-title my-2" :title="itemsByIndex[index - 1].Name">{{ itemsByIndex[index - 1].Name }}</h2>
+                      <p v-if="itemsByIndex[index - 1].Overview" class="media-overview mb-3">{{ itemsByIndex[index - 1].Overview }}</p>
                       <span class="d-flex align-center ga-2 text-caption"><VIcon icon="mdi-pencil-outline" size="18" />打开媒体编辑</span>
                     </div>
                   </VImg>
-                  <VCardText class="pa-3">
+                  <VCardText class="media-card-caption">
                     <div class="media-card-title" :title="itemsByIndex[index - 1].Name">{{ itemsByIndex[index - 1].Name }}</div>
                     <div class="media-card-meta">
                       <span v-if="itemsByIndex[index - 1].ProductionYear">{{ itemsByIndex[index - 1].ProductionYear }}</span>
@@ -99,6 +92,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router';
 import axios from 'axios';
 import { libraryViewport, visibleLibraryPageStarts } from '../utils/mediaLibraryNavigation.js';
+import { useContextSearch } from '@/composables/useContextSearch';
 
 const route = useRoute();
 const router = useRouter();
@@ -112,6 +106,8 @@ const mediaPage = ref(null);
 const stickyControls = ref(null);
 const mediaGrid = ref(null);
 const alphabetStyle = ref({});
+const controlsStyle = ref({});
+const controlsHeight = ref(76);
 const letters = ['#', ...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'];
 const loading = ref(false);
 const error = ref('');
@@ -166,6 +162,7 @@ const itemImage = (item) => {
 const loadedPosterUrls = ref(new Set());
 const absolutePosterUrl = url => url ? new URL(url, window.location.href).href : '';
 const markPosterLoaded = url => { if (url) loadedPosterUrls.value.add(absolutePosterUrl(url)); };
+const markPosterFailed = url => { if (url) loadedPosterUrls.value.delete(absolutePosterUrl(url)); };
 const posterIsLoaded = item => loadedPosterUrls.value.has(absolutePosterUrl(itemImage(item)));
 
 
@@ -248,17 +245,31 @@ const loadPage = async (startIndex, { reset = false, target = null } = {}) => {
 const openLibrary = (id) => router.push({ name: 'MediaCenterLibrary', params: { libraryId: id } });
 const goToLibraries = () => router.push({ name: 'Dashboard' });
 const openMedia = (id) => router.push({ name: 'MediaEditPage', params: { itemId: id } });
-const navbarHeight = () => Math.ceil(document.querySelector('.layout-navbar')?.getBoundingClientRect().height || 64);
+const navbarBottom = () => Math.ceil(document.querySelector('.layout-navbar')?.getBoundingClientRect().bottom || 64);
+const contentTopGap = () => parseFloat(getComputedStyle(mediaPage.value?.closest('.layout-page-content') || document.body).paddingTop) || 0;
+const updateFixedControls = () => {
+  if (!mediaPage.value || !stickyControls.value) return;
+  const bounds = mediaPage.value.getBoundingClientRect();
+  const top = navbarBottom() + contentTopGap();
+  controlsStyle.value = { top: `${top}px`, left: `${bounds.left}px`, width: `${bounds.width - 4}px` };
+  controlsHeight.value = stickyControls.value.offsetHeight;
+  alphabetStyle.value = {
+    top: `${top + controlsHeight.value + 16}px`,
+    right: `${Math.max(window.innerWidth - bounds.right + 4, 4)}px`,
+    maxHeight: `${Math.max(window.innerHeight - top - controlsHeight.value - 48, 32)}px`,
+  };
+};
 const findScrollContainer = () => scrollContainer || document.scrollingElement;
 const resetBrowserPosition = () => {
   const container = findScrollContainer();
   const top = container === document.scrollingElement
-    ? Math.max((mediaPage.value?.getBoundingClientRect().top || 0) + container.scrollTop - navbarHeight(), 0)
+    ? Math.max((mediaPage.value?.getBoundingClientRect().top || 0) + container.scrollTop - navbarBottom() - contentTopGap(), 0)
     : 0;
   container?.scrollTo({ top, behavior: 'auto' });
 };
 const searchItems = () => {
   clearTimeout(searchTimer);
+  selectedLetter.value = '#';
   resetBrowserPosition();
   loadPage(0, { reset: true });
 };
@@ -267,6 +278,8 @@ const onSearchInput = (value) => {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => searchItems(), 320);
 };
+useContextSearch({ label: '搜索当前媒体库', query: search, submit: searchItems,
+  onInput: onSearchInput, clear: searchItems, loading });
 const selectLetter = (letter) => {
   if (selectedLetter.value === letter) return;
   clearTimeout(searchTimer);
@@ -281,9 +294,8 @@ const scrollToIndex = (index) => {
   const element = mediaGrid.value?.querySelector(`[data-media-index="${index}"]`);
   if (!container || !element) return;
   const viewport = libraryViewport(container, document.scrollingElement, window.innerHeight);
-  const top = element.getBoundingClientRect().top - viewport.top
-    + viewport.scrollTop - (stickyControls.value?.offsetHeight || 0)
-    - (container === document.scrollingElement ? navbarHeight() : 0) - 16;
+  const top = element.getBoundingClientRect().top + viewport.scrollTop
+    - (stickyControls.value?.getBoundingClientRect().bottom || viewport.top) - 16;
   container.scrollTo({ top: Math.max(top, 0), behavior: 'auto' });
 };
 const loadVisiblePages = (event) => {
@@ -350,24 +362,21 @@ const setupScrollListeners = () => {
   scrollTargets = scrollContainers.map(container => container === document.scrollingElement ? window : container);
   scrollTargets.forEach((container) => container.addEventListener('scroll', loadVisiblePages, { passive: true }));
   gridResizeObserver = new ResizeObserver(() => {
-    const controlsHeight = stickyControls.value?.offsetHeight || 0;
-    const topInset = scrollContainer === document.scrollingElement ? navbarHeight() : 0;
-    const viewportHeight = libraryViewport(scrollContainer, document.scrollingElement, window.innerHeight).height;
-    mediaPage.value?.style.setProperty('--library-navbar-height', `${topInset}px`);
-    alphabetStyle.value = {
-      top: `${topInset + controlsHeight + 16}px`,
-      maxHeight: `${Math.max(viewportHeight - topInset - controlsHeight - 48, 32)}px`,
-    };
+    updateFixedControls();
     loadVisiblePages();
   });
   gridResizeObserver.observe(sentinel);
   gridResizeObserver.observe(mediaPage.value);
   gridResizeObserver.observe(stickyControls.value);
+  const navbar = document.querySelector('.layout-navbar');
+  if (navbar) gridResizeObserver.observe(navbar);
 };
 
 watch(mediaGrid, setupScrollListeners, { flush: 'post' });
 onMounted(() => {
+  updateFixedControls();
   setupScrollListeners();
+  window.addEventListener('scroll', updateFixedControls, { passive: true });
   window.addEventListener('resize', setupScrollListeners);
 });
 
@@ -376,36 +385,41 @@ onBeforeUnmount(() => {
   clearTimeout(searchTimer);
   gridResizeObserver?.disconnect();
   scrollTargets.forEach((container) => container.removeEventListener('scroll', loadVisiblePages));
+  window.removeEventListener('scroll', updateFixedControls);
   window.removeEventListener('resize', setupScrollListeners);
 });
 </script>
 
 <style scoped>
 .media-center-page { position:relative; min-height:0; padding:0 4px 24px 0; }
-.media-center-sticky-controls { position:sticky; z-index:4; top:var(--library-navbar-height,64px); padding:12px 0 16px; background:rgb(var(--v-theme-surface)); border-radius:12px; }
+.media-center-sticky-controls { position:fixed; z-index:4; padding:12px 16px 16px; background:rgb(var(--v-theme-surface)); border-radius:var(--app-theme-surface-radius); }
 .min-width-0 { min-width:0; }
 .library-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,220px),1fr)); gap:24px; margin-top:20px; }
 .library-card { min-width:0; width:100%; text-align:left; cursor:pointer; }
 .library-art { background:rgba(var(--v-theme-on-surface),.06); }
 .library-count { position:absolute; top:12px; right:12px; }
-.library-search { width:min(480px,100%); }
-.media-browser { position:relative; display:grid; grid-template-columns:minmax(0,1fr) 34px; gap:16px; align-items:start; }
+.media-browser { position:relative; padding-right:50px; }
 .media-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,144px),1fr)); gap:16px; margin-top:16px; }
 .media-card-hover-area { min-width:0; height:100%; }
 .media-card { min-width:0; width:100%; height:100%; text-align:left; cursor:pointer; }
+.media-card-caption { padding:12px max(12px, var(--app-theme-surface-radius)) max(12px, var(--app-theme-surface-radius)); }
 .media-poster-wrap { position:relative; background:rgba(var(--v-theme-on-surface),.06); }
 .media-card-placeholder::before { content:''; display:block; aspect-ratio:2/3; }
-.media-card-placeholder::after { content:''; display:block; height:72px; }
+.media-card-placeholder::after { content:''; display:block; height:calc(76px + max(12px, var(--app-theme-surface-radius))); }
 .poster-fallback { display:flex; align-items:center; justify-content:center; height:100%; width:100%; color:rgba(var(--v-theme-on-surface),.45); }
-.media-card-detail { position:absolute; inset:0; display:flex; flex-direction:column; justify-content:flex-end; padding:12px; color:#fff; text-align:left; background:linear-gradient(rgba(45,55,72,.4),rgba(45,55,72,.9)); }
-.media-overview { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
-.media-rating { position:absolute; top:8px; right:8px; }
-.media-card-title { overflow:hidden; font-size:14px; font-weight:600; line-height:20px; text-align:center; text-overflow:ellipsis; white-space:nowrap; }
-.media-card-meta { display:flex; min-height:18px; justify-content:center; gap:8px; margin-top:6px; color:rgba(var(--v-theme-on-surface),.6); font-size:12px; line-height:18px; }
+.media-card-detail { position:absolute; inset:0; display:flex; flex-direction:column; justify-content:flex-end; padding:12px max(12px, var(--app-theme-surface-radius)); color:#fff; text-align:left; background:linear-gradient(rgba(45,55,72,.7),rgba(45,55,72,.9)); }
+.media-detail-year { font-size:14px; font-weight:600; line-height:20px; }
+.media-detail-title { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; overflow-wrap:anywhere; flex-shrink:0; color:#fff; font-size:18px; font-weight:700; line-height:20px; }
+.media-overview { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; font-size:14px; line-height:16px; }
+.media-rating { position:absolute; z-index:1; top:8px; right:8px; background-color:rgba(147,51,234,.8) !important; background-image:linear-gradient(rgba(0,0,0,.2),rgba(0,0,0,.2)) !important; color:#fff !important; font-weight:700; }
+.media-rating :deep(.v-chip__content), .media-rating :deep(.v-chip__prepend) { color:#fff !important; }
+.media-card-title { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; min-height:40px; overflow:hidden; overflow-wrap:anywhere; font-size:14px; font-weight:600; line-height:20px; text-align:center; }
+.media-card-meta { display:flex; min-height:18px; justify-content:center; gap:8px; margin-top:6px; color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity)); font-size:12px; line-height:18px; }
 .media-empty { margin:50px 0; }
-.alphabet-nav { position:sticky; z-index:3; top:0; grid-column:2; display:flex; flex-direction:column; gap:2px; margin-top:16px; padding:4px 2px; overflow-y:auto; border:1px solid rgba(var(--v-border-color),var(--v-border-opacity)); border-radius:12px; background:rgb(var(--v-theme-surface)); scrollbar-width:none; }
+.alphabet-nav { position:fixed; z-index:3; display:flex; flex-direction:column; gap:2px; padding:4px 2px; overflow-y:auto; border:1px solid rgba(var(--v-border-color),var(--v-border-opacity)); border-radius:12px; background:rgb(var(--v-theme-surface)); scrollbar-width:none; }
 .alphabet-nav::-webkit-scrollbar { display:none; }
+.alphabet-nav :deep(.v-btn[aria-pressed='true'] .v-btn__content) { color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); }
 .alphabet-nav :deep(.v-btn) { flex:0 0 22px; min-width:28px; width:28px; height:22px; padding:0; font-size:12px; }
 .media-center-loading { position:absolute; inset:100px 0 0; display:grid; place-items:center; pointer-events:none; }
-@media (max-width:600px) { .library-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px 12px; } .media-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:20px 12px; } .media-browser { gap:10px; } }
+@media (max-width:600px) { .library-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px 12px; } .media-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:20px 12px; } .media-browser { padding-right:44px; } .media-center-sticky-controls { padding-inline:12px; } }
 </style>
