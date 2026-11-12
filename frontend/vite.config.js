@@ -76,7 +76,6 @@ export default defineConfig({
           if (!id.includes('node_modules')) return;
           if (id.includes('/three/')) return 'three';
           if (id.includes('/vuetify/')) return 'vuetify';
-          if (id.includes('/echarts/')) return 'charts';
         },
       },
     },

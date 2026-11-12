@@ -213,7 +213,7 @@ test('my media wraps in rows with at most seven Emby covers and actual count bad
     expect(metrics.ratio).toBeCloseTo(16 / 9, 1);
     expect(metrics.rowSize).toBe(columns);
     expect(metrics.secondTop).toBeGreaterThan(metrics.firstTop);
-    expect(metrics.weight).toBe('400');
+    expect(metrics.weight).toBe('700');
     expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.clientWidth + 1);
     await expect(row.locator('.dashboard-library-count').first()).toHaveText('0');
     await expect(row.locator('.dashboard-library-count').nth(1)).toHaveText('101');

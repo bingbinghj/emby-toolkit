@@ -93,6 +93,7 @@ async fn submit_with_batch(
         "generate-all-covers",
         "clear-emby-activity-log",
         "repair-video-thumbnails",
+        "extract-episode-credits",
     ]
     .contains(&task)
     {
@@ -151,6 +152,7 @@ async fn submit_with_batch(
                 "generate-all-covers"=>crate::covers::generate(&work,None,&context).await,
                 "clear-emby-activity-log"=>crate::activity::clear(&work,&context).await,
                 "repair-video-thumbnails"=>crate::thumbnails::repair(&work,&context).await,
+                "extract-episode-credits"=>crate::credits::extract_all(&work,&context).await,
                 _=>backup_info(&work,&context).await,
             }
         })

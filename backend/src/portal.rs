@@ -370,13 +370,20 @@ async fn save_user_details(
     let name = string(&saved, "Name");
     let mut response_headers = HeaderMap::new();
     if session.user_id == id && session.name != name {
+        let remember = state.sessions.remember_claim(&headers).unwrap_or(true);
         let mut updated = session;
         updated.name = name;
         response_headers.insert(
             header::SET_COOKIE,
-            crate::auth::cookie(&state.sessions.sign_administrator(&updated))
-                .parse()
-                .map_err(|_| ApiError::bad("登录资料更新失败"))?,
+            crate::auth::cookie(
+                &state
+                    .sessions
+                    .sign_administrator_with_remember(&updated, remember),
+                updated.expires,
+                remember,
+            )
+            .parse()
+            .map_err(|_| ApiError::bad("登录资料更新失败"))?,
         );
     }
     Ok((
@@ -588,29 +595,32 @@ async fn chat_id(
     ))
 }
 async fn bot_info(State(state): State<AppState>) -> Result<Json<Value>> {
-    let token = string(&*state.config.read().await, "telegram_bot_token");
-    lookup_bot_info(&state, &token).await
+    let config = state.config.read().await.clone();
+    let token = string(&config, "telegram_bot_token");
+    lookup_bot_info(&state, &token, &config).await
 }
 async fn bot_info_draft(
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>> {
+    let mut config = state.config.read().await.clone();
     let mut token = string(&body, "token");
     if token == "********" {
-        token = string(&*state.config.read().await, "telegram_bot_token");
+        token = string(&config, "telegram_bot_token");
     }
-    lookup_bot_info(&state, token.trim()).await
+    if let Some(api_url) = body.get("api_url") {
+        config["telegram_api_url"] = api_url.clone();
+    }
+    lookup_bot_info(&state, token.trim(), &config).await
 }
-async fn lookup_bot_info(state: &AppState, token: &str) -> Result<Json<Value>> {
+async fn lookup_bot_info(state: &AppState, token: &str, config: &Value) -> Result<Json<Value>> {
     if token.is_empty() {
         return Ok(Json(json!({"bot_username":null,"error":"Bot Token未配置"})));
     }
+    let api_base = crate::notifications::telegram_api_base(config, &state.notifications.api_base)?;
     let response = state
         .http
-        .get(format!(
-            "{}/bot{token}/getMe",
-            state.notifications.api_base.trim_end_matches('/')
-        ))
+        .get(format!("{}/bot{token}/getMe", api_base))
         .timeout(std::time::Duration::from_secs(20))
         .send()
         .await;
@@ -635,7 +645,7 @@ async fn lookup_bot_info(state: &AppState, token: &str) -> Result<Json<Value>> {
         Ok(Json(json!({"bot_username":info["result"]["username"]})))
     } else {
         Ok(Json(
-            json!({"bot_username":null,"error":format!("Telegram API 错误: {}", crate::logs::redact(info["description"].as_str().unwrap_or("未知API错误")))}),
+            json!({"bot_username":null,"error":format!("Telegram API 错误: {}", crate::logs::redact(&info["description"].as_str().unwrap_or("未知API错误").replace(token, "********").replace(&api_base, "Telegram API")))}),
         ))
     }
 }

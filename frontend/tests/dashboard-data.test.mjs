@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { dashboardModules, normalizeDashboardLayout, normalizeDashboardProfile, dashboardLayoutProfile, dashboardColumns, reorderVisibleDashboard, storageFrom115, formatDashboardBytes, embyDashboardImage, formatDashboardCount, dashboardSnapshot, projectDashboardItems, projectDashboardStatistics } from '../src/utils/dashboard.js';
+import { dashboardModules, normalizeDashboardLayout, normalizeDashboardProfile, dashboardLayoutProfile, dashboardColumns, storageFrom115, formatDashboardBytes, embyDashboardImage, formatDashboardCount, dashboardSnapshot, projectDashboardItems, projectDashboardStatistics, dashboardMonthlyCount } from '../src/utils/dashboard.js';
 
 const response = rt_space_info => ({ data: { valid: true, user_info: { rt_space_info } } });
 
@@ -47,10 +47,6 @@ test('persisted dashboard layout repairs unknown and duplicate module entries', 
     order: ['recent', 'storage', 'statistics', 'libraries'], hidden: ['statistics'],
   });
   assert.deepEqual(normalizeDashboardLayout(null).order, dashboardModules.map(item => item.id));
-});
-
-test('dragging visible modules preserves the positions of hidden module slots', () => {
-  assert.deepEqual(reorderVisibleDashboard(['storage', 'statistics', 'recent', 'libraries'], ['libraries', 'recent', 'storage']), ['libraries', 'statistics', 'recent', 'storage']);
 });
 
 test('library covers and recent posters always use Emby primary images', () => {
@@ -125,6 +121,37 @@ test('statistics replace atomically only when the whole widget has a confirmed s
   assert.deepEqual(projectDashboardStatistics(valid), valid);
   assert.throws(() => projectDashboardStatistics({ ...valid, movie_count: { count: 0, error: '未确认' } }));
   assert.throws(() => projectDashboardStatistics({ ...valid, episode_count: { count: null } }));
+});
+
+test('monthly additions preserve actual history counts, source and partial recording metadata', () => {
+  const current = new Date(2026, 10, 15);
+  const value = Object.fromEntries(['movie_count', 'tv_count', 'episode_count', 'music_count'].map((key, index) => [key, { count: 100, month_count: index }]));
+  value.month = { period: '2026-11', state: 'recording', source: 'etk-history', recording_since: '2026-11-10T18:30:57Z', partial: true, private_token: 'must-not-cache' };
+  const projected = projectDashboardStatistics(value);
+  assert.equal(dashboardMonthlyCount(projected, 'movie_count', current), 0);
+  assert.equal(dashboardMonthlyCount(projected, 'episode_count', current), 2);
+  assert.equal(projected.month.partial, true);
+  assert.equal(projected.month.recording_since, '2026-11-10T18:30:57Z');
+  assert.equal(projected.month.private_token, undefined);
+});
+
+test('legacy, cross-month and failed monthly statistics never become a confirmed zero', () => {
+  const current = new Date(2026, 10, 15);
+  const base = { movie_count: { count: 11 }, tv_count: { count: 7 }, episode_count: { count: 42 }, music_count: { count: 3 } };
+  assert.equal(dashboardMonthlyCount(projectDashboardStatistics(base), 'movie_count', current), null);
+  const value = { ...base, movie_count: { count: 12, month_count: null }, month: { period: '2026-11', state: 'unavailable', source: 'etk-history', error: '历史记录读取失败' } };
+  const projected = projectDashboardStatistics(value);
+  assert.equal(projected.movie_count.count, 12, 'Emby totals can still update while admissions are unavailable');
+  assert.equal(dashboardMonthlyCount(projected, 'movie_count', current), null);
+  assert.equal(projected.month.error, '历史记录读取失败');
+  assert.equal(dashboardMonthlyCount({ ...value, movie_count: { count: 12, month_count: 3 }, month: { period: '2025-11', state: 'recording', source: 'etk-history' } }, 'movie_count', current), null);
+  assert.equal(dashboardMonthlyCount({ ...value, movie_count: { count: 12, month_count: 3 }, month: { period: '2026-10', state: 'recording', source: 'etk-history' } }, 'movie_count', current), null);
+});
+
+test('malformed monthly numbers and identity metadata cannot become a successful snapshot', () => {
+  const valid = { movie_count: { count: 1 }, tv_count: { count: 2 }, episode_count: { count: 3 }, music_count: { count: 0 } };
+  for (const count of ['3', -1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1]) assert.throws(() => projectDashboardStatistics({ ...valid, movie_count: { count: 1, month_count: count } }));
+  for (const month of [{ period: '2026-13', state: 'recording', source: 'etk-history' }, { period: '2026-11', state: 'recording', source: 'emby-created-date' }, { period: '2026-11', state: 'recording', source: 'etk-history', error: { token: 'private' } }]) assert.throws(() => projectDashboardStatistics({ ...valid, month }));
 });
 
 

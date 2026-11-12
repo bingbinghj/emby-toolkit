@@ -59,7 +59,9 @@ pub(crate) async fn valid_video_sidecar(path: &std::path::Path) -> bool {
         })
 }
 
-async fn sync(state: &AppState, id: &str, data: &Value) -> Result<Value> {
+async fn sync(state: &AppState, id: &str, data: &Value, context: &JobContext) -> Result<Value> {
+    let _slot = crate::strm::slot(state, "main", Some(context)).await?;
+    context.checkpoint().await?;
     let config = state.config.read().await.clone();
     let base = string(&config, "emby_server_url");
     let key = string(&config, "emby_api_key");
@@ -175,7 +177,7 @@ async fn restore(
             context.checkpoint().await?;
             let guard = SYNC_GATE.lock().await;
             context.checkpoint().await?;
-            let response = sync(state, id, &data).await;
+            let response = sync(state, id, &data, context).await;
             tokio::time::sleep(Duration::from_secs(1)).await;
             drop(guard);
             context.checkpoint().await?;
@@ -309,4 +311,45 @@ async fn preflight(state: &AppState, item: &Value, context: &JobContext) -> Resu
         tracing::info!("入库媒体信息预检完成：《{media_name}》，Emby {id}，有效视频流已就绪");
     }
     Ok(report)
+}
+
+#[cfg(test)]
+mod extraction_thread_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    mod support {
+        include!("../tests/support/extraction_threads.rs");
+    }
+
+    #[tokio::test]
+    async fn preflight_sync_waits_for_shared_main_thread_and_plugin_cooldown() {
+        let fixture = support::Fixture::new().await;
+        let context = JobContext::for_recovery(None).await;
+        let primary = crate::strm::slot(&fixture.state, "main", Some(&context))
+            .await
+            .unwrap();
+        let data = Value::Null;
+        let request = sync(&fixture.state, "61616", &data, &context);
+        tokio::pin!(request);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut request)
+                .await
+                .is_err()
+        );
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+        let released = tokio::time::Instant::now();
+        drop(primary);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(700), &mut request)
+                .await
+                .is_err()
+        );
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+        tokio::time::timeout(Duration::from_secs(2), &mut request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(released.elapsed() >= Duration::from_millis(900));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+    }
 }

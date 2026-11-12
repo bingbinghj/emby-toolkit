@@ -24,7 +24,7 @@ struct EnhancedItem {
     path: String,
     expires: Instant,
 }
-type MovieNotices = BTreeMap<(String, String), (Value, Vec<Value>)>;
+type MovieNotices = BTreeMap<(String, String), (Value, Vec<Value>, BTreeMap<String, Value>)>;
 fn collect_movie_notice(notices: &mut MovieNotices, item: &Value, report: &Value) {
     let tmdb = string(&item["ProviderIds"], "Tmdb");
     let name = string(item, "Name");
@@ -40,11 +40,11 @@ fn collect_movie_notice(notices: &mut MovieNotices, item: &Value, report: &Value
         .filter(|year| *year != 0)
         .map(|year| year.to_string())
         .unwrap_or_else(|| string(item, "ProductionYear"));
-    notices
+    let notice = notices
         .entry((key, year.trim().to_string()))
-        .or_insert_with(|| (item.clone(), vec![]))
-        .1
-        .extend(list(&report["pending"]));
+        .or_insert_with(|| (item.clone(), vec![], BTreeMap::new()));
+    notice.1.extend(list(&report["pending"]));
+    notice.2.insert(string(item, "Id"), item.clone());
 }
 
 #[derive(Default)]
@@ -903,7 +903,7 @@ pub async fn process_emby(
         }
     }?;
     let finalization = finalize(state, &id, &episodes, !episodes.is_empty(), context).await?;
-    let titles_completed = finalization["title_fill"]["completed"] == true;
+    let extraction_ready = extraction_ready(&finalization);
     add_report_warnings(&mut result, &finalization);
     result["finalization"] = finalization;
     tracing::info!(
@@ -914,7 +914,8 @@ pub async fn process_emby(
         state,
         item["Type"] == "Series" && !episodes.is_empty(),
         item["Type"] == "Movie" || item["Type"] == "Series" && !episodes.is_empty(),
-        titles_completed,
+        &episodes,
+        extraction_ready,
         &format!("《{media_name}》"),
         context,
     )
@@ -1086,27 +1087,38 @@ fn extraction_state_label(report: &Value) -> &'static str {
     }
 }
 
+fn extraction_ready(finalization: &Value) -> bool {
+    finalization["metadata_refresh"]["completed"] == true
+        && (finalization["title_fill"]["completed"] == true
+            || finalization["title_fill"]["skipped"] == true)
+}
+
 async fn automatic_extraction(
     state: &AppState,
     series: bool,
     videos: bool,
-    titles_completed: bool,
+    episode_ids: &[String],
+    finalization_ready: bool,
     label: &str,
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
     let config = state.config.read().await.clone();
     let intro_enabled = series && config["auto_extract_intro_fingerprint_on_ingest"] == true;
+    let credits_enabled = series && config["auto_extract_credits_on_ingest"] == true;
     let thumbnails_enabled = videos && config["auto_extract_video_thumbnails_on_ingest"] == true;
-    if !intro_enabled && !thumbnails_enabled {
+    if !intro_enabled && !credits_enabled && !thumbnails_enabled {
         return Ok(Value::Null);
     }
-    if !titles_completed {
-        let reason = "标题填充与 Emby 回读尚未完成，已跳过入库片头声纹和视频预览缩略图提取";
+    if !finalization_ready {
+        let reason = "入库元数据刷新或已启用的标题填充尚未完成验收，已跳过片头声纹、片尾和视频预览缩略图提取";
         tracing::info!("[入库自动处理] {label}{reason}");
         let mut report =
             json!({"state":"skipped","reason":reason,"warnings":0,"warning_details":[]});
         if intro_enabled {
             report["intro"] = json!({"state":"skipped","reason":reason});
+        }
+        if credits_enabled {
+            report["credits"] = json!({"state":"skipped","reason":reason});
         }
         if thumbnails_enabled {
             report["video_thumbnails"] = json!({"state":"skipped","reason":reason});
@@ -1147,10 +1159,64 @@ async fn automatic_extraction(
         }
         let ended = intro["native_ended"] == true || intro["native_state"] == "not_started";
         report["intro"] = intro;
-        if thumbnails_enabled && !ended {
-            let reason = "片头声纹任务尚未确认结束，跳过视频预览缩略图提取";
-            report["video_thumbnails"] = json!({"state":"skipped","reason":reason});
+        if (credits_enabled || thumbnails_enabled) && !ended {
+            let reason = "片头声纹任务尚未确认结束，跳过片尾和视频预览缩略图提取";
+            if credits_enabled {
+                report["credits"] = json!({"state":"skipped","reason":reason});
+            }
+            if thumbnails_enabled {
+                report["video_thumbnails"] = json!({"state":"skipped","reason":reason});
+            }
             tracing::warn!("[入库自动处理] {label}{reason}");
+            report["warnings"] = json!(warning_details.len());
+            report["warning_details"] = json!(warning_details);
+            return Ok(report);
+        }
+    }
+    if credits_enabled {
+        context.checkpoint().await?;
+        context
+            .activity(
+                "片尾提取",
+                &format!("{label}开始提取本次入库电视剧分集片尾，逐集核对 Emby 标记"),
+            )
+            .await;
+        let credits = if episode_ids.is_empty() {
+            json!({"state":"failed","failed":1,"native_ended":true,"reason":"本次入库分集范围为空，未扩大至全库提取"})
+        } else {
+            match crate::credits::extract_ids(state, episode_ids, context).await {
+                Ok(result) => result,
+                Err(error) if context.is_cancelled() => return Err(error),
+                Err(error) => {
+                    json!({"state":"failed","failed":1,"native_ended":true,"reason":error.1})
+                }
+            }
+        };
+        let failed = credits["failed"].as_u64().unwrap_or(0) > 0
+            || matches!(credits["state"].as_str(), Some("failed" | "unverified"));
+        warning_details.extend(
+            list(&credits["warning_details"])
+                .iter()
+                .filter_map(|warning| warning.as_str().map(str::to_string)),
+        );
+        if failed {
+            let warning = format!(
+                "{label}片尾提取或 Emby 标记回读未全部通过：{}；保留已完成的入库结果",
+                string(&credits, "reason")
+            );
+            tracing::warn!("[入库自动处理] {warning}");
+            warning_details.push(warning);
+        } else {
+            tracing::info!(
+                "[入库自动处理] {label}片尾处理结果：{}；{}",
+                extraction_state_label(&credits),
+                string(&credits, "reason")
+            );
+        }
+        let ended = credits["native_ended"] == true;
+        report["credits"] = credits;
+        if thumbnails_enabled && (failed || !ended) {
+            report["video_thumbnails"] = json!({"state":"skipped","reason":"片尾提取或标记回读尚未完成验收，跳过视频预览缩略图提取"});
             report["warnings"] = json!(warning_details.len());
             report["warning_details"] = json!(warning_details);
             return Ok(report);
@@ -1238,6 +1304,75 @@ async fn automatic_extraction(
     report["warnings"] = json!(warning_details.len());
     report["warning_details"] = json!(warning_details);
     Ok(report)
+}
+
+#[cfg(test)]
+mod automatic_credits_tests {
+    use super::*;
+    mod fixture {
+        include!("../tests/support/extraction_threads.rs");
+    }
+
+    #[test]
+    fn disabled_title_fill_requires_verified_refresh_and_enabled_fill_requires_completion() {
+        let disabled = json!({"title_fill":{"completed":false,"skipped":true},"metadata_refresh":{"completed":true}});
+        assert!(extraction_ready(&disabled));
+        let mut unverified = disabled;
+        unverified["metadata_refresh"]["completed"] = json!(false);
+        assert!(!extraction_ready(&unverified));
+        assert!(!extraction_ready(
+            &json!({"title_fill":{"completed":false,"skipped":1},"metadata_refresh":{"completed":true}})
+        ));
+        assert!(extraction_ready(
+            &json!({"title_fill":{"completed":true},"metadata_refresh":{"completed":true}})
+        ));
+        assert!(!extraction_ready(
+            &json!({"title_fill":{"completed":true},"metadata_refresh":{"completed":false}})
+        ));
+    }
+
+    #[tokio::test]
+    async fn unfinished_titles_skip_all_three_extraction_stages() {
+        let fixture = fixture::Fixture::new().await;
+        *fixture.state.config.write().await = json!({"auto_extract_intro_fingerprint_on_ingest":true,"auto_extract_credits_on_ingest":true,"auto_extract_video_thumbnails_on_ingest":true});
+        let context = crate::jobs::JobContext::for_recovery(None).await;
+        let report = automatic_extraction(
+            &fixture.state,
+            true,
+            true,
+            &["101".into()],
+            false,
+            "测试分集",
+            &context,
+        )
+        .await
+        .unwrap();
+        for key in ["intro", "credits", "video_thumbnails"] {
+            assert_eq!(report[key]["state"], "skipped", "{report}");
+        }
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_credits_do_not_start_thumbnails_or_expand_to_whole_library() {
+        let fixture = fixture::Fixture::new().await;
+        fixture.state.config.write().await["auto_extract_credits_on_ingest"] = json!(true);
+        fixture.state.config.write().await["auto_extract_video_thumbnails_on_ingest"] = json!(true);
+        let context = crate::jobs::JobContext::for_recovery(None).await;
+        let report =
+            automatic_extraction(&fixture.state, true, true, &[], true, "测试分集", &context)
+                .await
+                .unwrap();
+        assert_eq!(report["credits"]["state"], "failed", "{report}");
+        assert!(
+            report["credits"]["reason"]
+                .as_str()
+                .unwrap()
+                .contains("分集范围为空")
+        );
+        assert_eq!(report["video_thumbnails"]["state"], "skipped", "{report}");
+        assert_eq!(report["warnings"], 1);
+        assert_eq!(fixture.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
 }
 
 async fn mirror(state: &AppState, id: &str) -> Result<Value> {
@@ -1357,7 +1492,13 @@ async fn missing_moviepilot_media_info(
     Ok(pending)
 }
 
-async fn sync_moviepilot_media_info(state: &AppState, path: &str) -> Result<()> {
+async fn sync_moviepilot_media_info(
+    state: &AppState,
+    path: &str,
+    context: &crate::jobs::JobContext,
+) -> Result<()> {
+    let _slot = crate::strm::slot(state, "main", Some(context)).await?;
+    context.checkpoint().await?;
     let config = state.config.read().await.clone();
     let base = string(&config, "emby_server_url");
     let key = string(&config, "emby_api_key");
@@ -1379,6 +1520,47 @@ async fn sync_moviepilot_media_info(state: &AppState, path: &str) -> Result<()> 
         return Ok(());
     }
     unreachable!()
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod extraction_thread_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+    mod support {
+        include!("../tests/support/extraction_threads.rs");
+    }
+
+    #[tokio::test]
+    async fn moviepilot_sync_waits_for_shared_main_thread_and_plugin_cooldown() {
+        let fixture = support::Fixture::new().await;
+        let context = crate::jobs::JobContext::for_recovery(None).await;
+        let primary = crate::strm::slot(&fixture.state, "main", Some(&context))
+            .await
+            .unwrap();
+        let request = sync_moviepilot_media_info(&fixture.state, "/media/episode.strm", &context);
+        tokio::pin!(request);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut request)
+                .await
+                .is_err()
+        );
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+        let released = tokio::time::Instant::now();
+        drop(primary);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(700), &mut request)
+                .await
+                .is_err()
+        );
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 0);
+        tokio::time::timeout(Duration::from_secs(2), &mut request)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(released.elapsed() >= Duration::from_millis(900));
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+    }
 }
 
 async fn ensure_moviepilot_media_info(
@@ -1408,7 +1590,7 @@ async fn ensure_moviepilot_media_info(
             if id.is_some() {
                 let result = tokio::select! {
                     _ = context.cancelled() => return context.checkpoint().await,
-                    result = sync_moviepilot_media_info(state, path) => result,
+                    result = sync_moviepilot_media_info(state, path, context) => result,
                 };
                 if let Err(error) = result {
                     tracing::warn!("MoviePilot 单项媒体信息提取失败：{}", error.1);
@@ -1457,7 +1639,8 @@ pub async fn process_moviepilot(
     let mut postprocessing = json!({});
     let mut automatic_series = false;
     let mut automatic_videos = false;
-    let mut titles_completed = true;
+    let mut automatic_episode_ids = vec![];
+    let mut extraction_ready_for_batch = true;
     let tmdb = string(event, "tmdb_id");
     let rows: Vec<Value> = if tmdb.is_empty() {
         vec![]
@@ -1682,13 +1865,20 @@ pub async fn process_moviepilot(
                                 if item["Type"] == "Movie"
                                     || item["Type"] == "Series" && !episodes.is_empty()
                                 {
-                                    titles_completed &= report["title_fill"]["completed"] == true;
+                                    extraction_ready_for_batch &= extraction_ready(&report);
                                 }
                                 add_report_warnings(&mut postprocessing, &report);
                                 finalizations
                                     .push(json!({"item_id":id,"name":media_name,"report":report}));
                                 automatic_series |=
                                     item["Type"] == "Series" && !episodes.is_empty();
+                                if item["Type"] == "Series" {
+                                    for episode in &episodes {
+                                        if !automatic_episode_ids.contains(episode) {
+                                            automatic_episode_ids.push(episode.clone());
+                                        }
+                                    }
+                                }
                                 automatic_videos |= item["Type"] == "Movie"
                                     || item["Type"] == "Series" && !episodes.is_empty();
                             }
@@ -1719,14 +1909,16 @@ pub async fn process_moviepilot(
             }
         }
     }
-    for (item, pending) in movie_notices.into_values() {
+    for (item, pending, native) in movie_notices.into_values() {
         context.checkpoint().await?;
         if let Err(error) = crate::notifications::media(
             state,
             &item,
             !known.is_empty(),
-            &[],
+            &native.keys().cloned().collect::<Vec<_>>(),
             &json!({"pending":pending}),
+            &native.into_values().collect::<Vec<_>>(),
+            Some(context),
         )
         .await
         {
@@ -1760,7 +1952,8 @@ pub async fn process_moviepilot(
             state,
             automatic_series,
             automatic_videos,
-            titles_completed,
+            &automatic_episode_ids,
+            extraction_ready_for_batch,
             "本批媒体",
             context,
         )
@@ -1804,7 +1997,7 @@ async fn finalize_inner(
     let item = details(
         state,
         id,
-        "Id,Type,Name,Path,Overview,ProductionYear,ProviderIds",
+        "Id,Type,Name,Path,Overview,ProductionYear,ProviderIds,Genres,MediaSources",
     )
     .await?;
     let media_name = string(&item, "Name");
@@ -1904,6 +2097,8 @@ async fn finalize_inner(
     let refresh_guard = (&confirmed, recovery.as_path());
     let refresh_item = &item;
     let refresh_name = &media_name;
+    let refresh_completed = std::sync::atomic::AtomicBool::new(false);
+    let refresh_verified = &refresh_completed;
     let final_refresh = |guarded: bool| async move {
         context
             .activity(
@@ -1934,6 +2129,7 @@ async fn finalize_inner(
             )
         })?;
         tracing::info!("入库最终元数据刷新完成：《{refresh_name}》，Emby {id}");
+        refresh_verified.store(true, std::sync::atomic::Ordering::Release);
         Ok::<_, ApiError>(())
     };
     // Prepare title JSON before the existing final refresh, then verify Emby.
@@ -2089,7 +2285,16 @@ async fn finalize_inner(
         collect_movie_notice(notices, &item, &title_report);
         Ok(())
     } else {
-        crate::notifications::media(state, &item, updated, episode_ids, &title_report).await
+        crate::notifications::media(
+            state,
+            &item,
+            updated,
+            episode_ids,
+            &title_report,
+            std::slice::from_ref(&item),
+            Some(context),
+        )
+        .await
     };
     if let Err(error) = notification {
         if context.is_cancelled() {
@@ -2108,6 +2313,6 @@ async fn finalize_inner(
         list(&title_report["pending"]).len()
     );
     Ok(
-        json!({"title_fill":title_report,"fingerprints":fingerprint_report,"audio_repair":audio_report,"warnings":warnings,"warning_details":warning_details}),
+        json!({"title_fill":title_report,"metadata_refresh":{"completed":refresh_completed.load(std::sync::atomic::Ordering::Acquire)},"fingerprints":fingerprint_report,"audio_repair":audio_report,"warnings":warnings,"warning_details":warning_details}),
     )
 }

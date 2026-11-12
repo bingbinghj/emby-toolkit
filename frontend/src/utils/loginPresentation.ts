@@ -43,31 +43,3 @@ export function getLoginGlassOpticalSettings(preference: LoginGlassPreference) {
     transparencyStrength: preference.transparencyStrength,
   }
 }
-
-/** 建立两个始终存在的背景槽位，避免角色变化时复用错误的 DOM 合成层。 */
-export function createLoginBackgroundLayers(activeUrl = ''): LoginBackgroundLayer[] {
-  return [
-    { key: 'front', role: 'active', url: activeUrl },
-    { key: 'back', role: 'standby', url: '' },
-  ]
-}
-
-/** 把下一张壁纸放入隐藏槽位，不改变当前可见层。 */
-export function prepareLoginBackgroundLayer(layers: LoginBackgroundLayer[], url: string): LoginBackgroundLayer[] {
-  return layers.map(layer => (layer.role === 'standby' ? { ...layer, url } : { ...layer }))
-}
-
-/** 在壁纸与纹理均就绪后原子交换两个槽位的职责。 */
-export function activateLoginBackgroundLayer(layers: LoginBackgroundLayer[]): LoginBackgroundLayer[] {
-  if (!layers.some(layer => layer.role === 'standby' && layer.url)) return layers
-
-  return layers.map(layer => ({
-    ...layer,
-    role: layer.role === 'active' ? 'previous' : layer.role === 'standby' ? 'active' : layer.role,
-  }))
-}
-
-/** 交叉淡化完成后清空旧图，使该稳定槽位可准备下一次切换。 */
-export function settleLoginBackgroundLayers(layers: LoginBackgroundLayer[]): LoginBackgroundLayer[] {
-  return layers.map(layer => (layer.role === 'previous' ? { ...layer, role: 'standby', url: '' } : { ...layer }))
-}

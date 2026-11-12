@@ -137,7 +137,8 @@
                     <template #actions>
                       <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
-                          color="primary"
+                          color="default"
+                          variant="text"
                           :loading="savingCard === 'basic'"
                           :disabled="savingConfig"
                           aria-label="保存基础设置"
@@ -152,183 +153,182 @@
                 </VCol>
                 <VCol cols="12" v-show="settingsSearch.showCard('媒体服务器')">
                   <SettingCard class="dashboard-card" title="媒体服务器" subtitle="媒体服务器与媒体库">
-
-                    <VCardText class="settings-card-body">
-                      <!-- ★★★ 调整点1: 恢复双列，但减小间距 x-gap="12" ★★★ -->
-                      <VRow class="settings-grid">
-                        <!-- 1. Emby URL (左) -->
-                        <!-- ★★★ 调整点2: label-width="100" 覆盖全局的200，让输入框更长、更紧凑 ★★★ -->
-                        <VCol cols="12" md="6">
-                          <div class="settings-field" data-field="emby_server_url">
-                            <VTextField
-                              v-model="configModel.emby_server_url"
-                              prepend-inner-icon="mdi-server"
-                              hint="服务端地址，格式：http(s)://ip:port"
-                              persistent-hint
-                              placeholder="http(s)://ip:port"
-                              label="地址"
-                            ></VTextField>
-                          </div>
-                        </VCol>
-                        <!-- 2. 外网访问 URL (右) -->
-                        <VCol cols="12" md="6">
-                          <div class="settings-field" data-field="emby_public_url">
-                            <VTextField
-                              v-model="configModel.emby_public_url"
-                              prepend-inner-icon="mdi-play-network"
-                              hint="跳转播放页面使用的地址，格式：http(s)://domain:port"
-                              persistent-hint
-                              placeholder="http(s)://domain:port"
-                              label="外网播放地址"
-                            ></VTextField>
-                          </div>
-                        </VCol>
-                        <!-- 3. API Key (左) -->
-                        <VCol cols="12" md="6">
-                          <div class="settings-field" data-field="emby_api_key">
-                            <VTextField
-                              v-model="configModel.emby_api_key"
-                              prepend-inner-icon="mdi-key"
-                              hint="Emby设置->高级->API密钥中生成的密钥"
-                              persistent-hint
-                              placeholder="输入 API Key"
-                              :type="revealedPasswords['emby_api_key'] ? 'text' : 'password'"
-                              :append-inner-icon="
-                                revealedPasswords['emby_api_key'] ? 'mdi-eye-off-outline' : 'mdi-eye-outline'
-                              "
-                              @click:append-inner="
-                                revealedPasswords['emby_api_key'] = !revealedPasswords['emby_api_key']
-                              "
-                              label="API密钥"
-                            ></VTextField>
-                          </div>
-                        </VCol>
-
-                        <VCol cols="12" md="6">
-                          <div class="settings-field" data-field="emby_webhook_secret">
-                            <VTextField
-                              v-model="configModel.emby_webhook_secret"
-                              placeholder="用于 /webhook/emby?token=..."
-                              :type="revealedPasswords['emby_webhook_secret'] ? 'text' : 'password'"
-                              :append-inner-icon="
-                                revealedPasswords['emby_webhook_secret'] ? 'mdi-eye-off-outline' : 'mdi-eye-outline'
-                              "
-                              @click:append-inner="
-                                revealedPasswords['emby_webhook_secret'] = !revealedPasswords['emby_webhook_secret']
-                              "
-                              label="Webhook密钥"
-                            ></VTextField>
-                          </div>
-                        </VCol>
-                        <VCol cols="12">
-                          <div class="settings-field" data-field="emby_webhook_ingest_enabled">
-                            <VSwitch v-model="configModel.emby_webhook_ingest_enabled" label="Webhook入库"></VSwitch>
-                            <div class="settings-hint">
-                              <span class="text-medium-emphasis">
-                                关闭后忽略 Emby 的 item.add 和 library.new
-                                入库事件；MoviePilot完成通知、元数据更新和删除通知不受影响。
-                              </span>
-                            </div>
-                          </div>
-                        </VCol>
-                        <!-- 4. 用户 ID (右) -->
-                        <VCol cols="12" md="6">
-                          <div class="settings-field" data-field="emby_user_id">
-                            <VTextField
-                              v-model="configModel.emby_user_id"
-                              placeholder="32位用户ID"
-                              label="用户ID"
-                              :rules="embyUserIdValidation"
-                            ></VTextField>
-                            <div class="settings-hint">
-                              <div v-if="isInvalidUserId" style="color: var(--ui-error-color); font-size: 12px">
-                                格式错误！ID应为32位。
-                              </div>
-                            </div>
-                          </div>
-                        </VCol>
-                        <!-- 分割线 (占满一行) -->
-                        <VCol cols="12">
-                          <div
-                            style="margin: 8px 0; font-size: 0.9em; color: var(--ui-text-muted)"
-                            class="settings-divider text-body-2 text-medium-emphasis"
-                          >
-                            管理员凭证 (选填)
-                            <VDivider class="mt-2" />
-                          </div>
-                        </VCol>
-                        <!-- 5. 管理员用户 (左) -->
-                        <VCol cols="12" md="6">
-                          <div class="settings-field" data-field="emby_admin_user">
-                            <VTextField
-                              v-model="configModel.emby_admin_user"
-                              prepend-inner-icon="mdi-account"
-                              hint="登录用户名"
-                              persistent-hint
-                              placeholder="管理员用户名"
-                              label="用户名"
-                            ></VTextField>
-                          </div>
-                        </VCol>
-                        <!-- 6. 管理员密码 (右) -->
-                        <VCol cols="12" md="6">
-                          <div class="settings-field" data-field="emby_admin_pass">
-                            <VTextField
-                              v-model="configModel.emby_admin_pass"
-                              prepend-inner-icon="mdi-lock"
-                              hint="登录密码"
-                              persistent-hint
-                              placeholder="管理员密码"
-                              :type="revealedPasswords['emby_admin_pass'] ? 'text' : 'password'"
-                              :append-inner-icon="
-                                revealedPasswords['emby_admin_pass'] ? 'mdi-eye-off-outline' : 'mdi-eye-outline'
-                              "
-                              @click:append-inner="
-                                revealedPasswords['emby_admin_pass'] = !revealedPasswords['emby_admin_pass']
-                              "
-                              label="密码"
-                            ></VTextField>
-                          </div>
-                        </VCol>
-                        <!-- 7. 超时时间 (占满一行，保持长标签) -->
-                        <VCol cols="12">
-                          <div class="settings-field" data-field="emby_api_timeout">
-                            <VTextField type="number"
-                              v-model.number="configModel.emby_api_timeout"
-                              :min="15"
-                              :step="5"
-                              placeholder="建议 30-90"
-                              style="width: 100%"
-                              label="Emby API 超时时间 (秒)"
-                            ></VTextField>
-                          </div>
-                        </VCol>
-                        <VCol cols="12">
-                          <div class="settings-field" data-field="libraries_to_ignore">
-                            <VAutocomplete v-model="configModel.libraries_to_ignore" :items="availableLibraries" item-title="Name" item-value="Id"
-                              label="排除媒体库" chips multiple clearable prepend-inner-icon="mdi-library" :loading="loadingLibraries"
-                              :disabled="loadingLibraries || Boolean(libraryError) || !availableLibraries.length"
-                              hint="选中的媒体库不会参与处理；不选则处理全部媒体库。" persistent-hint />
-                            <VBtn class="mt-2" size="small" variant="text" prepend-icon="mdi-refresh" :loading="loadingLibraries" @click="fetchEmbyLibrariesInternal">刷新媒体库</VBtn>
-                            <VAlert v-if="libraryError" type="warning" variant="tonal" density="compact" class="mt-2">{{ libraryError }}</VAlert>
-                          </div>
-                        </VCol>
-                      </VRow>
-                    </VCardText>
-                    <template #actions>
-                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
-                        <VBtn
-                          color="primary"
-                          :loading="savingCard === 'emby'"
-                          :disabled="savingConfig"
-                          aria-label="保存媒体服务器"
-                          @click="saveCard('emby')"
-                        >
-                          <template #prepend><VIcon :icon="SaveIcon" /></template>
-                          保存
-                        </VBtn>
+                    <VCardText>
+                      <div class="media-server-card-grid">
+                        <EmbyMediaServerCard :ready="Boolean(configModel.emby_server_url && configModel.emby_api_key)"
+                          :disabled="savingConfig || loadingConfig" :refresh-key="mediaServerRevision" @edit="openMediaServerDialog" />
                       </div>
-                    </template>
+                      <VAlert v-if="libraryError" type="warning" variant="tonal" density="compact" class="mt-3">{{ libraryError }}</VAlert>
+                    </VCardText>
+                    <VDialog v-model="mediaServerDialogOpen" scrollable max-width="40rem" :fullscreen="isMobile"
+                      :persistent="mediaServerBusy" @update:model-value="!$event && closeMediaServerDialog()"
+                      @after-enter="focusMediaServerSearchField" @after-leave="clearMediaServerDraft">
+                      <VCard class="media-server-dialog settings-dialog">
+                        <VCardItem class="py-2">
+                          <template #prepend><VIcon icon="mdi-cog" class="me-2" /></template>
+                          <VCardTitle>配置</VCardTitle>
+                          <VCardSubtitle>Emby</VCardSubtitle>
+                          <template #append><VBtn icon="mdi-close" color="default" variant="text" aria-label="关闭媒体服务器配置"
+                            :disabled="mediaServerBusy" @click="closeMediaServerDialog" /></template>
+                        </VCardItem>
+                        <VDivider />
+                        <VCardText v-if="mediaServerDraft">
+                          <VForm ref="mediaServerFormRef" @submit.prevent="saveMediaServer">
+                            <VRow class="settings-grid">
+                              <VCol cols="12" md="6">
+                                <div class="settings-field" data-field="emby_server_url">
+                                  <VTextField
+                                    :disabled="mediaServerSaving"
+                                    v-model="mediaServerDraft.emby_server_url"
+                                    prepend-inner-icon="mdi-server"
+                                    hint="服务端地址，格式：http(s)://ip:port"
+                                    persistent-hint
+                                    placeholder="http(s)://ip:port"
+                                    label="地址"
+                                  ></VTextField>
+                                </div>
+                              </VCol>
+                              <VCol cols="12" md="6">
+                                <div class="settings-field" data-field="emby_admin_user">
+                                  <VTextField
+                                    :disabled="mediaServerSaving"
+                                    v-model="mediaServerDraft.emby_admin_user"
+                                    prepend-inner-icon="mdi-account"
+                                    hint="登录用户名"
+                                    persistent-hint
+                                    placeholder="管理员用户名"
+                                    label="用户名"
+                                  ></VTextField>
+                                </div>
+                              </VCol>
+                              <VCol cols="12" md="6">
+                                <div class="settings-field" data-field="emby_api_key">
+                                  <VTextField
+                                    :disabled="mediaServerSaving"
+                                    v-model="mediaServerDraft.emby_api_key"
+                                    prepend-inner-icon="mdi-key"
+                                    hint="Emby设置->高级->API密钥中生成的密钥"
+                                    persistent-hint
+                                    placeholder="输入 API Key"
+                                    :type="revealedPasswords['emby_api_key'] ? 'text' : 'password'"
+                                    :append-inner-icon="
+                                      revealedPasswords['emby_api_key'] ? 'mdi-eye-off-outline' : 'mdi-eye-outline'
+                                    "
+                                    @click:append-inner="
+                                      revealedPasswords['emby_api_key'] = !revealedPasswords['emby_api_key']
+                                    "
+                                    label="API密钥"
+                                  ></VTextField>
+                                </div>
+                              </VCol>
+                              <VCol cols="12" md="6">
+                                <div class="settings-field" data-field="emby_admin_pass">
+                                  <VTextField
+                                    :disabled="mediaServerSaving"
+                                    v-model="mediaServerDraft.emby_admin_pass"
+                                    prepend-inner-icon="mdi-lock"
+                                    hint="登录密码"
+                                    persistent-hint
+                                    placeholder="管理员密码"
+                                    :type="revealedPasswords['emby_admin_pass'] ? 'text' : 'password'"
+                                    :append-inner-icon="
+                                      revealedPasswords['emby_admin_pass'] ? 'mdi-eye-off-outline' : 'mdi-eye-outline'
+                                    "
+                                    @click:append-inner="
+                                      revealedPasswords['emby_admin_pass'] = !revealedPasswords['emby_admin_pass']
+                                    "
+                                    label="密码"
+                                  ></VTextField>
+                                </div>
+                              </VCol>
+                              <VCol cols="12" md="6">
+                                <div class="settings-field" data-field="emby_user_id">
+                                  <VTextField
+                                    :disabled="mediaServerSaving"
+                                    v-model="mediaServerDraft.emby_user_id"
+                                    placeholder="32位用户ID"
+                                    label="用户ID"
+                                    :rules="embyUserIdValidation"
+                                  ></VTextField>
+                                  <div class="settings-hint">
+                                    <div v-if="isInvalidUserId" style="color: var(--ui-error-color); font-size: 12px">
+                                      格式错误！ID应为32位。
+                                    </div>
+                                  </div>
+                                </div>
+                              </VCol>
+                              <VCol cols="12" md="6">
+                                <div class="settings-field" data-field="emby_api_timeout">
+                                  <VTextField :disabled="mediaServerSaving" type="number"
+                                    v-model.number="mediaServerDraft.emby_api_timeout"
+                                    :min="15"
+                                    :step="5"
+                                    placeholder="建议 30-90"
+                                    style="width: 100%"
+                                    label="Emby API 超时时间 (秒)"
+                                  ></VTextField>
+                                </div>
+                              </VCol>
+                              <VCol cols="12">
+                                <div class="settings-field" data-field="libraries_to_ignore">
+                                  <VAutocomplete v-model="mediaServerDraft.libraries_to_ignore" :items="availableLibraries" item-title="Name" item-value="Id"
+                                    label="排除媒体库" chips multiple clearable prepend-inner-icon="mdi-library" :loading="loadingLibraries"
+                                    :disabled="mediaServerSaving || loadingLibraries || Boolean(libraryError) || !availableLibraries.length"
+                                    hint="选中的媒体库不会参与处理；不选则处理全部媒体库。" persistent-hint />
+                                  <VBtn class="mt-2" size="small" variant="text" prepend-icon="mdi-refresh" :loading="loadingLibraries" :disabled="mediaServerSaving" @click="fetchEmbyLibrariesInternal">刷新媒体库</VBtn>
+                                  <VAlert v-if="libraryError" type="warning" variant="tonal" density="compact" class="mt-2">{{ libraryError }}</VAlert>
+                                </div>
+                              </VCol>
+                              <VCol cols="12" md="6">
+                                <div class="settings-field" data-field="emby_webhook_secret">
+                                  <VTextField
+                                    :disabled="mediaServerSaving"
+                                    v-model="mediaServerDraft.emby_webhook_secret"
+                                    placeholder="用于 /webhook/emby?token=..."
+                                    :type="revealedPasswords['emby_webhook_secret'] ? 'text' : 'password'"
+                                    :append-inner-icon="
+                                      revealedPasswords['emby_webhook_secret'] ? 'mdi-eye-off-outline' : 'mdi-eye-outline'
+                                    "
+                                    @click:append-inner="
+                                      revealedPasswords['emby_webhook_secret'] = !revealedPasswords['emby_webhook_secret']
+                                    "
+                                    label="Webhook密钥"
+                                  ></VTextField>
+                                </div>
+                              </VCol>
+                              <VCol cols="12">
+                                <div class="settings-field" data-field="emby_webhook_ingest_enabled">
+                                  <VSwitch :disabled="mediaServerSaving" v-model="mediaServerDraft.emby_webhook_ingest_enabled" label="Webhook入库"></VSwitch>
+                                  <div class="settings-hint">
+                                    <span class="text-medium-emphasis">
+                                      关闭后忽略 Emby 的 item.add 和 library.new
+                                      入库事件；MoviePilot完成通知、元数据更新和删除通知不受影响。
+                                    </span>
+                                  </div>
+                                </div>
+                              </VCol>
+                            </VRow>
+                          </VForm>
+                          <VAlert v-if="mediaServerTestResult" :type="mediaServerTestResult.success ? 'success' : 'error'"
+                            variant="tonal" density="compact" class="mt-4" data-testid="media-server-connection-result">
+                            {{ mediaServerTestResult.message }}
+                            <template v-if="mediaServerTestResult.success && mediaServerTestResult.data">
+                              <div>{{ mediaServerTestResult.data.name }}<span v-if="mediaServerTestResult.data.version"> · {{ mediaServerTestResult.data.version }}</span></div>
+                            </template>
+                          </VAlert>
+                          <VAlert v-if="mediaServerSaveError" type="error" variant="tonal" density="compact" class="mt-4">{{ mediaServerSaveError }}</VAlert>
+                        </VCardText>
+                        <VDivider />
+                        <VCardActions class="app-dialog-actions">
+                          <VBtn variant="tonal" prepend-icon="mdi-lan-connect" aria-label="测试媒体服务器连接"
+                            :loading="isTestingMediaServer" :disabled="mediaServerSaving" @click="testMediaServerConnection">测试连接</VBtn>
+                          <VSpacer />
+                          <VBtn color="default" variant="text" aria-label="取消媒体服务器配置" :disabled="mediaServerBusy" @click="closeMediaServerDialog">取消</VBtn>
+                          <VBtn color="default" variant="text" aria-label="保存媒体服务器" prepend-icon="mdi-content-save-outline"
+                            :loading="savingCard === 'emby'" :disabled="mediaServerBusy || !mediaServerDraft" @click="saveMediaServer">保存</VBtn>
+                        </VCardActions>
+                      </VCard>
+                    </VDialog>
                   </SettingCard>
                 </VCol>
                 <VCol cols="12" v-show="settingsSearch.showCard('AI 增强')">
@@ -502,7 +502,8 @@
                     <template #actions>
                       <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
-                          color="primary"
+                          color="default"
+                          variant="text"
                           :loading="savingCard === 'ai'"
                           :disabled="savingConfig"
                           aria-label="保存AI 增强"
@@ -551,7 +552,8 @@
                     <template #actions>
                       <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
-                          color="primary"
+                          color="default"
+                          variant="text"
                           :loading="savingCard === 'logs'"
                           :disabled="savingConfig"
                           aria-label="保存日志配置"
@@ -669,208 +671,216 @@
               <VRow class="mp-aligned-grid settings-card-grid settings-grid">
                 <VCol cols="12" v-show="settingsSearch.showCard('存储')">
                   <SettingCard class="dashboard-card" title="存储" subtitle="115 授权方式与连接状态">
-
-                    <template #append>
-                      <div class="d-flex ga-3 flex-wrap align-center">
-                        <VBtn
-                          size="small"
-                          color="success"
-                          @click="check115Status(false)"
-                          :loading="loading115Info"
-                          variant="tonal"
-                        >
-                          <template #prepend><UiIcon name="refresh" /></template>
-                          刷新状态
-                        </VBtn>
+                    <VCardText>
+                      <div class="storage-card-grid">
+                        <P115StorageCard :info="p115Info" :disabled="savingConfig || loadingConfig" @edit="openStorageDialog" />
                       </div>
-                    </template>
-                    <VCardText class="settings-card-body">
-                      <VAlert v-if="p115StatusError" type="error" variant="tonal" class="mb-3">{{ p115StatusError }}</VAlert>
-                      <div
-                        v-if="p115Info && p115Info.user_info"
-                        style="
-                          margin-bottom: 16px;
-                          padding: 12px;
-                          background: rgba(var(--v-theme-on-surface), 0.05);
-                          border-radius: 8px;
-                          display: flex;
-                          align-items: center;
-                          gap: 12px;
-                        "
-                      >
-                        <VAvatar :image="p115Info.user_info.user_face_m" size="large"></VAvatar>
-                        <div style="flex: 1; overflow: hidden">
-                          <div style="font-weight: bold; font-size: 14px; display: flex; align-items: center; gap: 6px">
-                            {{ p115Info.user_info.user_name }}
-                            <VChip size="x-small" color="warning">
-                              {{ p115Info.user_info.vip_info?.level_name || '普通用户' }}
-                            </VChip>
+                      <VAlert v-if="p115StatusError && !storageDialogOpen" type="error" variant="tonal" density="compact" class="mt-3">{{ p115StatusError }}</VAlert>
+                    </VCardText>
+                    <VDialog v-model="storageDialogOpen" class="storage-settings-dialog" scrollable max-width="40rem" :fullscreen="isMobile"
+                      :persistent="storageBusy || showCookieModal || showQrcodeModal" @update:model-value="!$event && closeStorageDialog()"
+                      @after-enter="focusStorageSearchField" @after-leave="clearStorageDraft">
+                      <VCard class="storage-dialog settings-dialog">
+                        <VCardItem class="py-2">
+                          <template #prepend><VIcon icon="mdi-shield-key" class="me-2" /></template>
+                          <VCardTitle>115网盘授权</VCardTitle>
+                          <template #append><VBtn icon="mdi-close" color="default" variant="text" aria-label="关闭存储配置"
+                            :disabled="storageBusy" @click="closeStorageDialog" /></template>
+                        </VCardItem>
+                        <VDivider />
+                        <VCardText v-if="storageDraft">
+                          <div class="d-flex justify-end mb-3">
+                            <VBtn class="storage-status-refresh" size="small" color="success" variant="tonal" prepend-icon="mdi-refresh" :loading="loading115Info"
+                              :disabled="storageBusy" @click="check115Status(false)">刷新状态</VBtn>
                           </div>
-                          <div style="font-size: 12px; color: rgba(var(--v-theme-on-surface), 0.68); margin-top: 4px">
-                            剩余空间: {{ p115Info.user_info.rt_space_info?.all_remain?.size_format || '未知' }}
-                          </div>
-                        </div>
-                      </div>
-                      <div class="settings-field" data-field="p115_auth_method">
-                        <VRadioGroup
-                          v-model="configModel.p115_auth_method"
-                          name="auth_method_group"
-                          label="授权方式"
-                          inline
-                        >
-                          <div class="d-flex ga-3 flex-wrap align-center">
-                            <VRadio value="web"><template #label>网页登录授权</template></VRadio>
-                            <VRadio value="qrcode"><template #label>自定义 AppID 扫码</template></VRadio>
-                          </div>
-                        </VRadioGroup>
-                      </div>
-                      <!-- 方式一：网页登录授权 -->
-                      <div
-                        v-if="configModel.p115_auth_method === 'web' || !configModel.p115_auth_method"
-                        class="settings-field"
-                      >
-                        <div class="settings-field-label text-body-2 font-weight-medium mb-2">OpenAPI</div>
-                        <div style="width: 100%" class="d-flex ga-3 flex-column">
-                          <div class="d-flex ga-3 flex-wrap align-center justify-space-between">
-                            <VChip size="small" :color="p115Info?.has_token ? 'success' : 'secondary'">
-                              <template #prepend>
-                                <VIcon :icon="p115Info?.has_token ? CheckIcon : CloseIcon" />
-                              </template>
-                              {{ p115Info?.has_token ? `${openApiAuthLabel}` : `未授权：${openApiAuthLabel}` }}
-                            </VChip>
-                            <VBtn size="small" color="warning" @click="startWebAuth" :loading="isWebAuthing">
-                              <template #prepend><UiIcon name="key" /></template>
-                              {{ p115Info?.has_token ? '重新登录' : '登录授权' }}
-                            </VBtn>
-                          </div>
-                        </div>
-                      </div>
-                      <!-- 方式二：自定义 AppID 扫码 -->
-                      <div
-                        v-if="configModel.p115_auth_method === 'qrcode'"
-                        class="settings-field"
-                        data-field="p115_app_id"
-                      >
-                        <div style="width: 100%" class="d-flex ga-3 flex-column">
-                          <div class="d-flex ga-3 flex-wrap align-center justify-space-between">
-                            <VChip size="small" :color="p115Info?.has_token ? 'success' : 'secondary'">
-                              <template #prepend>
-                                <VIcon :icon="p115Info?.has_token ? CheckIcon : CloseIcon" />
-                              </template>
-                              {{ p115Info?.has_token ? `${openApiAuthLabel}` : `未授权：${openApiAuthLabel}` }}
-                            </VChip>
-                            <VBtn size="small" color="primary" @click="handleOpenQrcodeModal">
-                              <template #prepend><UiIcon name="key" /></template>
-                              {{ p115Info?.has_token ? '重新扫码' : '扫码授权' }}
-                            </VBtn>
-                          </div>
-                          <div class="settings-input-group d-flex align-start ga-2">
-                            <VTextField
-                              v-model="configModel.p115_app_id"
-                              placeholder="先保存此卡片的自定义 AppID 再扫码"
-                              label="OpenAPI"
-                            ></VTextField>
-                          </div>
-                          <div class="settings-hint">
-                            <span class="text-medium-emphasis">
-                              请先填写 AppID 并保存此卡片，然后再扫码授权。
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                      <!--  Cookie  -->
-                      <div class="settings-field">
-                        <div class="settings-field-label text-body-2 font-weight-medium mb-2">Cookie</div>
-                        <div style="width: 100%" class="d-flex ga-3 flex-column">
-                          <div class="d-flex ga-3 flex-wrap align-center justify-space-between">
-                            <VChip
-                              size="small"
-                              :color="
-                                !p115Info?.has_cookie
-                                  ? 'secondary'
-                                  : p115Info?.cookie_valid === false
-                                    ? 'error'
-                                    : 'success'
+                          <VForm ref="storageFormRef" @submit.prevent="saveStorageSettings">
+                            <VAlert v-if="p115StatusError" type="error" variant="tonal" class="mb-3">{{ p115StatusError }}</VAlert>
+                            <div
+                              v-if="p115Info && p115Info.user_info"
+                              style="
+                                margin-bottom: 16px;
+                                padding: 12px;
+                                background: rgba(var(--v-theme-on-surface), 0.05);
+                                border-radius: 8px;
+                                display: flex;
+                                align-items: center;
+                                gap: 12px;
                               "
                             >
-                              <template #prepend>
-                                <VIcon :icon="p115Info?.has_cookie ? CheckIcon : CloseIcon" />
-                              </template>
-                              {{ p115Info?.has_cookie ? cookieAppLabel : '未配置' }}
-                            </VChip>
-                            <div class="d-flex ga-3 flex-wrap align-center">
-                              <VBtn size="small" color="primary" @click="openCookieModal">
-                                <template #prepend><UiIcon name="refresh" /></template>
-                                {{ p115Info?.has_cookie ? '重新获取' : '扫码获取' }}
-                              </VBtn>
-                              <VBtn
-                                size="small"
-                                color="error"
-                                :loading="clearing115Cookie"
-                                @click="
-                                  confirmSettingAction(
-                                    '清理后将保留 OpenAPI Token，但 Cookie 直链缓存会同时失效。确定继续吗？',
-                                    handleClear115Cookie,
-                                    '清理',
-                                  )
-                                "
-                                v-if="p115Info?.has_cookie"
-                                variant="tonal"
-                              >
-                                <template #prepend><VIcon :icon="ClearIcon" /></template>
-                                清理 Cookie
-                              </VBtn>
+                              <VAvatar :image="p115Info.user_info.user_face_m" size="large"></VAvatar>
+                              <div style="flex: 1; min-width: 0; overflow-wrap: anywhere">
+                                <div style="font-weight: bold; font-size: 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px">
+                                  {{ p115Info.user_info.user_name }}
+                                  <VChip class="storage-membership" size="x-small" color="warning">
+                                    {{ p115Info.user_info.vip_info?.level_name || '普通用户' }}
+                                  </VChip>
+                                </div>
+                                <div class="storage-remaining-space">
+                                  剩余空间: {{ p115Info.user_info.rt_space_info?.all_remain?.size_format || '未知' }}
+                                </div>
+                              </div>
                             </div>
-                          </div>
-                        </div>
-                      </div>
-                      <div class="settings-field" data-field="p115_api_priority">
-                        <VRadioGroup
-                          v-model="configModel.p115_api_priority"
-                          name="api_priority_group"
-                          label="115接口"
-                          inline
-                        >
-                          <div class="d-flex ga-3 flex-wrap align-center">
-                            <VRadio value="cookie"><template #label>优先 Cookie（默认）</template></VRadio>
-                            <VRadio value="openapi"><template #label>优先 OpenAPI（备用）</template></VRadio>
-                          </div>
-                        </VRadioGroup>
-                        <div class="settings-hint">
-                          <span class="text-medium-emphasis">
-                            默认优先 Cookie，失败后再尝试 OpenAPI。
-                          </span>
-                        </div>
-                      </div>
-                      <div class="settings-field" data-field="p115_request_interval">
-                        <VTextField type="number"
-                          v-model.number="configModel.p115_request_interval"
-                          :min="0.1"
-                          :step="0.1"
-                          placeholder="0.5"
-                          label="API 请求间隔 (秒)"
-                        ></VTextField>
-                        <div class="settings-hint">
-                          <span class="text-medium-emphasis">
-                            115 官方对 API 调用频率有严格限制，建议保持 0.5 秒以上。
-                          </span>
-                        </div>
-                      </div>
-                    </VCardText>
-                    <template #actions>
-                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
-                        <VBtn
-                          color="primary"
-                          :loading="savingCard === 'p115Account'"
-                          :disabled="savingConfig"
-                          aria-label="保存存储"
-                          @click="saveCard('p115Account')"
-                        >
-                          <template #prepend><VIcon :icon="SaveIcon" /></template>
-                          保存
-                        </VBtn>
-                      </div>
-                    </template>
+                            <div class="settings-field" data-field="p115_auth_method">
+                              <VRadioGroup
+                                :disabled="storageSaving"
+                                v-model="storageDraft.p115_auth_method"
+                                name="auth_method_group"
+                                label="授权方式"
+                                inline
+                              >
+                                <div class="d-flex ga-3 flex-wrap align-center">
+                                  <VRadio value="web"><template #label>网页登录授权</template></VRadio>
+                                  <VRadio value="qrcode"><template #label>自定义 AppID 扫码</template></VRadio>
+                                </div>
+                              </VRadioGroup>
+                            </div>
+                            <!-- 方式一：网页登录授权 -->
+                            <div
+                              v-if="storageDraft.p115_auth_method === 'web' || !storageDraft.p115_auth_method"
+                              class="settings-field"
+                            >
+                              <div class="settings-field-label text-body-2 font-weight-medium mb-2">OpenAPI</div>
+                              <div style="width: 100%" class="d-flex ga-3 flex-column">
+                                <div class="d-flex ga-3 flex-wrap align-center justify-space-between">
+                                  <VChip size="small" :color="p115Info?.has_token ? 'success' : 'secondary'">
+                                    <template #prepend>
+                                      <VIcon :icon="p115Info?.has_token ? CheckIcon : CloseIcon" />
+                                    </template>
+                                    {{ p115Info?.has_token ? `${openApiAuthLabel}` : `未授权：${openApiAuthLabel}` }}
+                                  </VChip>
+                                  <VBtn size="small" color="warning" @click="startWebAuth" :loading="isWebAuthing" :disabled="storageBusy">
+                                    <template #prepend><UiIcon name="key" /></template>
+                                    {{ p115Info?.has_token ? '重新登录' : '登录授权' }}
+                                  </VBtn>
+                                </div>
+                              </div>
+                            </div>
+                            <!-- 方式二：自定义 AppID 扫码 -->
+                            <div
+                              v-if="storageDraft.p115_auth_method === 'qrcode'"
+                              class="settings-field"
+                              data-field="p115_app_id"
+                            >
+                              <div style="width: 100%" class="d-flex ga-3 flex-column">
+                                <div class="d-flex ga-3 flex-wrap align-center justify-space-between">
+                                  <VChip size="small" :color="p115Info?.has_token ? 'success' : 'secondary'">
+                                    <template #prepend>
+                                      <VIcon :icon="p115Info?.has_token ? CheckIcon : CloseIcon" />
+                                    </template>
+                                    {{ p115Info?.has_token ? `${openApiAuthLabel}` : `未授权：${openApiAuthLabel}` }}
+                                  </VChip>
+                                  <VBtn size="small" color="primary" @click="handleOpenQrcodeModal" :disabled="storageBusy">
+                                    <template #prepend><UiIcon name="key" /></template>
+                                    {{ p115Info?.has_token ? '重新扫码' : '扫码授权' }}
+                                  </VBtn>
+                                </div>
+                                <div class="settings-input-group d-flex align-start ga-2">
+                                  <VTextField
+                                    :disabled="storageSaving"
+                                    v-model="storageDraft.p115_app_id"
+                                    placeholder="先保存此卡片的自定义 AppID 再扫码"
+                                    label="OpenAPI"
+                                  ></VTextField>
+                                </div>
+                                <div class="settings-hint">
+                                  <span class="text-medium-emphasis">
+                                    请先填写 AppID 并保存此卡片，然后再扫码授权。
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                            <!--  Cookie  -->
+                            <div class="settings-field">
+                              <div class="settings-field-label text-body-2 font-weight-medium mb-2">Cookie</div>
+                              <div style="width: 100%" class="d-flex ga-3 flex-column">
+                                <div class="d-flex ga-3 flex-wrap align-center justify-space-between">
+                                  <VChip
+                                    size="small"
+                                    :color="
+                                      !p115Info?.has_cookie
+                                        ? 'secondary'
+                                        : p115Info?.cookie_valid === false
+                                          ? 'error'
+                                          : 'success'
+                                    "
+                                  >
+                                    <template #prepend>
+                                      <VIcon :icon="p115Info?.has_cookie ? CheckIcon : CloseIcon" />
+                                    </template>
+                                    {{ p115Info?.has_cookie ? cookieAppLabel : '未配置' }}
+                                  </VChip>
+                                  <div class="d-flex ga-3 flex-wrap align-center">
+                                    <VBtn size="small" color="primary" @click="openCookieModal" :disabled="storageBusy">
+                                      <template #prepend><UiIcon name="refresh" /></template>
+                                      {{ p115Info?.has_cookie ? '重新获取' : '扫码获取' }}
+                                    </VBtn>
+                                    <VBtn
+                                      size="small"
+                                      color="error"
+                                      :loading="clearing115Cookie"
+                                      :disabled="storageBusy"
+                                      @click="
+                                        confirmSettingAction(
+                                          '清理后将保留 OpenAPI Token，但 Cookie 直链缓存会同时失效。确定继续吗？',
+                                          handleClear115Cookie,
+                                          '清理',
+                                        )
+                                      "
+                                      v-if="p115Info?.has_cookie"
+                                      variant="tonal"
+                                    >
+                                      <template #prepend><VIcon :icon="ClearIcon" /></template>
+                                      清理 Cookie
+                                    </VBtn>
+                                  </div>
+                                </div>
+                              </div>
+                            </div>
+                            <div class="settings-field" data-field="p115_api_priority">
+                              <VRadioGroup
+                                :disabled="storageSaving"
+                                v-model="storageDraft.p115_api_priority"
+                                name="api_priority_group"
+                                label="115接口"
+                                inline
+                              >
+                                <div class="d-flex ga-3 flex-wrap align-center">
+                                  <VRadio value="cookie"><template #label>优先 Cookie（默认）</template></VRadio>
+                                  <VRadio value="openapi"><template #label>优先 OpenAPI（备用）</template></VRadio>
+                                </div>
+                              </VRadioGroup>
+                              <div class="settings-hint">
+                                <span class="text-medium-emphasis">
+                                  默认优先 Cookie，失败后再尝试 OpenAPI。
+                                </span>
+                              </div>
+                            </div>
+                            <div class="settings-field" data-field="p115_request_interval">
+                              <VTextField :disabled="storageSaving" type="number"
+                                v-model.number="storageDraft.p115_request_interval"
+                                :min="0.1"
+                                :step="0.1"
+                                placeholder="0.5"
+                                label="API 请求间隔 (秒)"
+                              ></VTextField>
+                              <div class="settings-hint">
+                                <span class="text-medium-emphasis">
+                                  115 官方对 API 调用频率有严格限制，建议保持 0.5 秒以上。
+                                </span>
+                              </div>
+                            </div>
+                          </VForm>
+                          <VAlert v-if="storageSaveError" type="error" variant="tonal" density="compact" class="mt-4">{{ storageSaveError }}</VAlert>
+                        </VCardText>
+                        <VDivider />
+                        <VCardActions class="app-dialog-actions">
+                          <VSpacer />
+                          <VBtn color="default" variant="text" aria-label="取消存储配置" :disabled="storageBusy" @click="closeStorageDialog">取消</VBtn>
+                          <VBtn color="default" variant="text" prepend-icon="mdi-content-save-outline" aria-label="保存存储"
+                            :loading="savingCard === 'p115Account'" :disabled="storageBusy" @click="saveStorageSettings">保存</VBtn>
+                        </VCardActions>
+                      </VCard>
+                    </VDialog>
                   </SettingCard>
                 </VCol>
                 <VCol cols="12" v-show="settingsSearch.showCard('目录')">
@@ -944,6 +954,14 @@
                           </VBtn>
                         </div>
                       </div>
+                      <div class="settings-field" data-field="monitor_sha1_pc_search">
+                        <VSwitch v-model="configModel.monitor_sha1_pc_search" label="SHA1检测"></VSwitch>
+                        <div class="settings-hint">
+                          <span class="text-medium-emphasis">
+                            按此开关查询 115 文件 SHA1，不受文件系统监控开关影响；非 115 网盘请关闭。
+                          </span>
+                        </div>
+                      </div>
                       <div class="settings-field" data-field="p115_generate_mediainfo">
                         <VSwitch v-model="configModel.p115_generate_mediainfo" label="媒体信息格式化"></VSwitch>
                         <div class="settings-hint">
@@ -964,7 +982,8 @@
                     <template #actions>
                       <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
-                          color="primary"
+                          color="default"
+                          variant="text"
                           :loading="savingCard === 'fingerprints'"
                           :disabled="savingConfig"
                           aria-label="保存目录"
@@ -1092,37 +1111,12 @@
                           </span>
                         </div>
                       </div>
-                      <div class="settings-field" data-field="tmdb_image_language_preference">
-                        <VRadioGroup
-                          v-model="configModel.tmdb_image_language_preference"
-                          name="image_lang_group"
-                          label="图片语言偏好"
-                          inline
-                        >
-                          <div class="d-flex ga-3 flex-wrap align-center">
-                            <VRadio value="zh"><template #label>简体中文优先</template></VRadio>
-                            <VRadio value="original"><template #label>原语言优先</template></VRadio>
-                          </div>
-                        </VRadioGroup>
-                        <div class="settings-hint">
-                          <span class="text-medium-emphasis">
-                            控制下载 海报 等图片时的语言优先级。
-                          </span>
-                        </div>
-                      </div>
-                      <div class="settings-field" data-field="monitor_sha1_pc_search">
-                        <VSwitch v-model="configModel.monitor_sha1_pc_search" label="SHA1检测"></VSwitch>
-                        <div class="settings-hint">
-                          <span class="text-medium-emphasis">
-                            文件SHA1查询，非115网盘勿启用。
-                          </span>
-                        </div>
-                      </div>
                     </VCardText>
                     <template #actions>
                       <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
-                          color="primary"
+                          color="default"
+                          variant="text"
                           :loading="savingCard === 'monitor'"
                           :disabled="savingConfig"
                           aria-label="保存实时监控"
@@ -1172,6 +1166,17 @@
                           </span>
                         </div>
                       </div>
+                      <div class="settings-field" data-field="auto_extract_credits_on_ingest">
+                        <VSwitch
+                          v-model="configModel.auto_extract_credits_on_ingest"
+                          label="入库完成后提取片尾"
+                        ></VSwitch>
+                        <div class="settings-hint">
+                          <span class="text-medium-emphasis">
+                            仅处理电视剧分集；片头提取完成后提取片尾，片尾完成后再提取视频预览缩略图。默认关闭。
+                          </span>
+                        </div>
+                      </div>
                       <div class="settings-field" data-field="auto_extract_video_thumbnails_on_ingest">
                         <VSwitch
                           v-model="configModel.auto_extract_video_thumbnails_on_ingest"
@@ -1198,7 +1203,8 @@
                     <template #actions>
                       <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
-                          color="primary"
+                          color="default"
+                          variant="text"
                           :loading="savingCard === 'ingest'"
                           :disabled="savingConfig"
                           aria-label="保存入库自动处理"
@@ -1215,6 +1221,24 @@
                   <SettingCard class="dashboard-card" title="整理 & 刮削" subtitle="电影与电视剧的目录和文件名">
 
                     <VCardText class="settings-card-body">
+                      <div class="settings-field" data-field="tmdb_image_language_preference">
+                        <VRadioGroup
+                          v-model="configModel.tmdb_image_language_preference"
+                          name="image_lang_group"
+                          label="图片语言偏好"
+                          inline
+                        >
+                          <div class="d-flex ga-3 flex-wrap align-center">
+                            <VRadio value="zh"><template #label>简体中文优先</template></VRadio>
+                            <VRadio value="original"><template #label>原语言优先</template></VRadio>
+                          </div>
+                        </VRadioGroup>
+                        <div class="settings-hint">
+                          <span class="text-medium-emphasis">
+                            控制刮削海报等图片时的语言优先级，不受文件系统监控开关影响。
+                          </span>
+                        </div>
+                      </div>
                       <div class="rename-format-grid">
                         <div class="rename-format-form">
                           <div class="settings-field" data-field="movie_rename_format">
@@ -1228,8 +1252,7 @@
                             ></VTextarea>
                             <div class="settings-hint">
                               <span class="text-medium-emphasis">
-                                与 MoviePilot「存储&目录 → 整理&刮削」使用相同的 Jinja2
-                                格式；扩展名始终使用源文件扩展名。
+                                使用Jinja2语法，格式参考：https://jinja.palletsprojects.com/en/3.0.x/templates
                               </span>
                             </div>
                           </div>
@@ -1274,8 +1297,7 @@
                             ></VTextarea>
                             <div class="settings-hint">
                               <span class="text-medium-emphasis">
-                                与 MoviePilot「存储&目录 → 整理&刮削」使用相同的 Jinja2 格式；可使用 `season`、`episode`
-                                和 `season_episode`。
+                                使用Jinja2语法，格式参考：https://jinja.palletsprojects.com/en/3.0.x/templates
                               </span>
                             </div>
                           </div>
@@ -1313,7 +1335,8 @@
                     <template #actions>
                       <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
-                          color="primary"
+                          color="default"
+                          variant="text"
                           :loading="savingCard === 'rename'"
                           :disabled="savingConfig"
                           aria-label="保存整理与刮削"
@@ -1400,7 +1423,8 @@
                     <template #actions>
                       <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
-                          color="primary"
+                          color="default"
+                          variant="text"
                           :loading="savingCard === 'sources'"
                           :disabled="savingConfig"
                           aria-label="保存数据源与API"
@@ -2080,7 +2104,7 @@
           </VBtn>
           <div class="d-flex ga-3 flex-wrap align-center">
             <VBtn @click="promptModalVisible = false" color="secondary">取消</VBtn>
-            <VBtn color="primary" @click="savePrompts" :loading="savingPrompts">
+            <VBtn color="default" @click="savePrompts" :loading="savingPrompts">
               <template #prepend><UiIcon name="save" /></template>
               保存配置
             </VBtn>
@@ -2097,12 +2121,14 @@ import { useMessage, useDialog } from '@/composables/useFeedback';
 import { useDisplay } from 'vuetify';
 import SettingsQrCode from './general/SettingsQrCode.vue';
 import SettingCard from './general/SettingCard.vue';
+import EmbyMediaServerCard from './general/EmbyMediaServerCard.vue';
+import P115StorageCard from './general/P115StorageCard.vue';
 import LocalPathField from './general/LocalPathField.vue';
 import SettingsSearchResults from './general/SettingsSearchResults.vue';
 import { useSettingsSearch } from '@/composables/useSettingsSearch';
 import { useRoute } from 'vue-router';
 const ExportIcon = 'mdi-download';
-const ImportIcon = 'mdi-cloud-upload';
+
 const ClearIcon = 'mdi-delete-outline';
 const BuildIcon = 'mdi-wrench';
 const SyncIcon = 'mdi-sync';
@@ -2113,7 +2139,7 @@ const ArrowUpIcon = 'mdi-arrow-up';
 const RefreshIcon = 'mdi-refresh';
 const FileIcon = 'mdi-file-document-outline';
 const SaveIcon = 'mdi-content-save-outline';
-const SelectAllIcon = 'mdi-select-all';
+
 import { useConfig } from '../../composables/useConfig.js';
 import axios from 'axios';
 
@@ -2203,9 +2229,160 @@ const handleImportSelectionChange = (currentSelection) => {
   }
 };
 
+const mediaServerFields = ['emby_server_url', 'emby_api_key', 'emby_webhook_secret', 'emby_webhook_ingest_enabled', 'emby_user_id', 'emby_admin_user', 'emby_admin_pass', 'emby_api_timeout', 'libraries_to_ignore'];
+const mediaServerDialogOpen = ref(false), mediaServerDraft = ref(null), mediaServerFormRef = ref(null);
+const mediaServerRevision = ref(0), mediaServerSaveError = ref(''), mediaServerTestResult = ref(null), isTestingMediaServer = ref(false);
+const savingCard = ref(null);
+let mediaServerProbeVersion = 0, mediaServerProbeController = null;
 const formRef = ref(null);
 const { configModel, loadingConfig, savingConfig, configError, handleSaveConfig } = useConfig();
 const settingsSearch = useSettingsSearch('general', { ready: computed(() => Boolean(configModel.value) && !loadingConfig.value), disabled: loadingConfig });
+const mediaServerSaving = computed(() => savingConfig.value || savingCard.value === 'emby');
+const mediaServerBusy = computed(() => mediaServerSaving.value || isTestingMediaServer.value);
+function cancelMediaServerProbe() {
+  mediaServerProbeVersion += 1;
+  mediaServerProbeController?.abort();
+  mediaServerProbeController = null;
+  isTestingMediaServer.value = false;
+  mediaServerTestResult.value = null;
+}
+function openMediaServerDialog() {
+  if (!configModel.value || loadingConfig.value || savingConfig.value || mediaServerDialogOpen.value) return;
+  mediaServerDraft.value = JSON.parse(JSON.stringify(Object.fromEntries(mediaServerFields.map(field => [field, configModel.value[field]]))));
+  mediaServerSaveError.value = '';
+  cancelMediaServerProbe();
+  mediaServerDialogOpen.value = true;
+}
+function closeMediaServerDialog() {
+  if (mediaServerBusy.value) return;
+  cancelMediaServerProbe();
+  mediaServerDialogOpen.value = false;
+}
+function clearMediaServerDraft() {
+  if (!mediaServerDialogOpen.value) mediaServerDraft.value = null;
+}
+async function focusMediaServerSearchField() {
+  await nextTick();
+  const entry = settingsSearch.selected.value;
+  if (!mediaServerDialogOpen.value || !entry || entry.card !== '媒体服务器') return;
+  document.querySelector(`[data-field="${CSS.escape(entry.field)}"] input:not([type="hidden"])`)?.focus({ preventScroll: true });
+}
+watch([settingsSearch.selected, loadingConfig], ([entry]) => {
+  if (entry?.route === 'general' && entry.card === '媒体服务器') openMediaServerDialog();
+}, { immediate: true, flush: 'sync' });
+watch(() => [mediaServerDraft.value?.emby_server_url, mediaServerDraft.value?.emby_api_key, mediaServerDraft.value?.emby_api_timeout], cancelMediaServerProbe, { flush: 'sync' });
+async function testMediaServerConnection() {
+  if (!mediaServerDraft.value || mediaServerBusy.value) return;
+  const draft = mediaServerDraft.value;
+  if (!draft.emby_server_url?.trim() || !draft.emby_api_key?.trim()) {
+    mediaServerTestResult.value = { success: false, message: '请填写地址和API密钥' };
+    return;
+  }
+  const version = ++mediaServerProbeVersion;
+  const controller = new AbortController();
+  mediaServerProbeController = controller;
+  isTestingMediaServer.value = true;
+  mediaServerTestResult.value = null;
+  try {
+    const { data } = await axios.post('/api/config/emby_check', {
+      emby_server_url: draft.emby_server_url, emby_api_key: draft.emby_api_key, emby_api_timeout: draft.emby_api_timeout,
+    }, { signal: controller.signal });
+    if (version !== mediaServerProbeVersion || !mediaServerDialogOpen.value) return;
+    mediaServerTestResult.value = data?.success === true
+      ? { success: true, message: data.message || '连接测试成功', data: data.data }
+      : { success: false, message: data?.message || data?.error || '连接测试失败' };
+  } catch (failed) {
+    if (version === mediaServerProbeVersion && !controller.signal.aborted) {
+      mediaServerTestResult.value = { success: false, message: failed.response?.data?.message || failed.response?.data?.error || failed.message || '连接测试失败' };
+    }
+  } finally {
+    if (version === mediaServerProbeVersion) isTestingMediaServer.value = false;
+    if (mediaServerProbeController === controller) mediaServerProbeController = null;
+  }
+}
+async function saveMediaServer() {
+  if (!mediaServerDraft.value || mediaServerBusy.value) return;
+  const draft = mediaServerDraft.value;
+  savingCard.value = 'emby';
+  mediaServerSaveError.value = '';
+  try {
+    const validation = await mediaServerFormRef.value?.validate();
+    if (validation?.valid === false || !mediaServerDialogOpen.value || mediaServerDraft.value !== draft) return;
+    const payload = JSON.parse(JSON.stringify(Object.fromEntries(mediaServerFields.map(field => [field, draft[field]]))));
+    if (await handleSaveConfig(payload)) {
+      mediaServerRevision.value += 1;
+      message.success('此卡片设置已保存！');
+      cancelMediaServerProbe();
+      mediaServerDialogOpen.value = false;
+    } else {
+      mediaServerSaveError.value = configError.value || '配置保存失败，请检查后端日志。';
+    }
+  } catch (failed) {
+    mediaServerSaveError.value = failed.message || '请检查媒体服务器中的配置项。';
+  } finally {
+    savingCard.value = null;
+  }
+}
+
+const storageConfigFields = ['p115_auth_method', 'p115_app_id', 'p115_api_priority', 'p115_request_interval'];
+const storageDialogOpen = ref(false), storageDraft = ref(null), storageFormRef = ref(null), storageSaveError = ref('');
+const storageSaving = computed(() => savingConfig.value || savingCard.value === 'p115Account');
+const storageBusy = computed(() => storageSaving.value || clearing115Cookie.value);
+function openStorageDialog() {
+  if (!configModel.value || loadingConfig.value || savingConfig.value || storageDialogOpen.value) return;
+  storageDraft.value = JSON.parse(JSON.stringify(Object.fromEntries(storageConfigFields.map(field => [field, configModel.value[field]]))));
+  storageDraft.value.p115_auth_method ||= 'web';
+  storageDraft.value.p115_api_priority ||= 'cookie';
+  storageDraft.value.p115_app_id ??= '';
+  storageDraft.value.p115_request_interval ??= 0.5;
+  storageSaveError.value = '';
+  storageDialogOpen.value = true;
+}
+function closeStorageDialog() {
+  if (storageBusy.value) return;
+  storageDialogOpen.value = false;
+}
+function clearStorageDraft() {
+  if (storageDialogOpen.value) return;
+  storageDraft.value = null;
+  closeQrcodeModal();
+  closeCookieModal();
+  webAuthRequestVersion += 1;
+  stopWebAuth();
+}
+async function focusStorageSearchField() {
+  await nextTick();
+  const entry = settingsSearch.selected.value;
+  if (!storageDialogOpen.value || !entry || entry.card !== '存储') return;
+  const field = document.querySelector(`[data-field="${CSS.escape(entry.field)}"]`)
+    || (entry.field === 'p115_app_id' && document.querySelector('[data-field="p115_auth_method"]'));
+  field?.querySelector('input:not([type="hidden"])')?.focus({ preventScroll: true });
+}
+watch([settingsSearch.selected, loadingConfig], ([entry]) => {
+  if (entry?.route === 'general' && entry.card === '存储') openStorageDialog();
+}, { immediate: true, flush: 'sync' });
+async function saveStorageSettings() {
+  if (!storageDraft.value || storageBusy.value) return;
+  const draft = storageDraft.value;
+  savingCard.value = 'p115Account';
+  storageSaveError.value = '';
+  try {
+    const validation = await storageFormRef.value?.validate();
+    if (validation?.valid === false || !storageDialogOpen.value || storageDraft.value !== draft) return;
+    const payload = JSON.parse(JSON.stringify(Object.fromEntries(storageConfigFields.map(field => [field, draft[field]]))));
+    if (await handleSaveConfig(payload)) {
+      message.success('此卡片设置已保存！');
+      storageDialogOpen.value = false;
+    } else {
+      storageSaveError.value = configError.value || '配置保存失败，请检查后端日志。';
+    }
+  } catch (failed) {
+    storageSaveError.value = failed.message || '请检查存储中的配置项。';
+  } finally {
+    savingCard.value = null;
+  }
+}
+
 const isPreviewingRenameFormats = ref(false);
 const monitorExtensionOptions = ['.mp4', '.mkv', '.ts', '.iso', '.rmvb', '.avi', '.mov', '.mpeg', '.mpg', '.wmv', '.3gp', '.asf', '.m4v', '.flv', '.m2ts', '.tp', '.f4v', '.strm'];
 const renameFormatPreview = ref({ movie: '', tv: '', errors: {} });
@@ -2231,8 +2408,8 @@ const embyUserIdRegex = /^[a-f0-9]{32}$/i;
 const isCleaningOfflineMedia = ref(false);
 const isTestingAI = ref(false);
 const isInvalidUserId = computed(() => {
-  if (!configModel.value || !configModel.value.emby_user_id) return false;
-  return configModel.value.emby_user_id.trim() !== '' && !embyUserIdRegex.test(configModel.value.emby_user_id);
+  const id = mediaServerDraft.value?.emby_user_id;
+  return Boolean(id?.trim()) && !embyUserIdRegex.test(id);
 });
 const embyUserIdValidation = [value => !value || embyUserIdRegex.test(value) || 'ID格式不正确，应为32位。'];
 const confirmSettingAction = (content, action, positiveText = '确认') => {
@@ -2815,8 +2992,11 @@ const qrcodeLoading = ref(false);
 const qrcodePolling = ref(null);
 let openApiQrcodeRequestVersion = 0;
 const handleOpenQrcodeModal = () => {
-  if (!configModel.value.p115_app_id || !configModel.value.p115_app_id.trim()) {
-    message.warning('请先填写自定义 AppID 并点击底部保存设置，然后再扫码授权！');
+  const selectedConfig = storageDraft.value || configModel.value;
+  if (!selectedConfig?.p115_app_id?.trim()
+      || selectedConfig.p115_app_id !== configModel.value.p115_app_id
+      || selectedConfig.p115_auth_method !== configModel.value.p115_auth_method) {
+    message.warning('请先保存自定义 AppID 和授权方式，再扫码授权。');
     return;
   }
   openQrcodeModal();
@@ -2901,6 +3081,7 @@ const isWebAuthing = ref(false);
 let webAuthPolling = null;
 let webAuthTimeout = null;
 let webAuthRequestVersion = 0;
+let webAuthWindow = null;
 
 const stopWebAuth = () => {
   if (webAuthPolling) clearInterval(webAuthPolling);
@@ -2908,6 +3089,8 @@ const stopWebAuth = () => {
   webAuthPolling = null;
   webAuthTimeout = null;
   isWebAuthing.value = false;
+  if (webAuthWindow && !webAuthWindow.closed) webAuthWindow.close?.();
+  webAuthWindow = null;
 };
 
 const startWebAuth = () => {
@@ -2930,6 +3113,7 @@ const startWebAuth = () => {
     return;
   }
 
+  webAuthWindow = authWindow;
   isWebAuthing.value = true;
   message.info('请在新弹出的窗口中完成 115 授权...', { duration: 5000 });
   let callbackConfirmed = false;
@@ -2997,33 +3181,22 @@ const check115Status = async () => {
 };
 
 // 辅助函数：获取规则摘要
-const genreOptions = computed(() => {
-  const map = new Map();
-  [...rawMovieGenres.value, ...rawTvGenres.value].forEach(g => { if (g && g.value) map.set(g.value, g); });
-  return Array.from(map.values());
-});
 
 const cardFields = {
   basic: ['delay_between_items_sec', 'media_info_retry_interval', 'media_info_retry_attempts', 'subtitle_chinese_default_language', 'max_actors_to_process', 'max_episode_actors_to_process', 'extract_thumb', 'actor_role_add_prefix', 'remove_actors_without_avatars', 'keyword_to_tags', 'studio_to_chinese'],
-  monitor: ['monitor_enabled', 'monitor_paths', 'monitor_exclude_dirs', 'monitor_exclude_refresh_delay', 'monitor_extensions', 'tmdb_image_language_preference', 'monitor_sha1_pc_search'],
+  monitor: ['monitor_enabled', 'monitor_paths', 'monitor_exclude_dirs', 'monitor_exclude_refresh_delay', 'monitor_extensions'],
   sources: ['tmdb_api_key', 'tmdb_api_base_url', 'douban_enable_online_api', 'api_douban_default_cooldown_seconds', 'douban_cookie'],
-  p115Account: ['p115_auth_method', 'p115_app_id', 'p115_api_priority', 'p115_request_interval'],
-  fingerprints: ['emby_metadata_path', 'local_strm_root', 'cd2_media_root', 'p115_fingerprint_media_root_cid', 'p115_fingerprint_media_root_path', 'p115_generate_mediainfo', 'p115_enable_sync_delete'],
-  emby: ['emby_server_url', 'emby_public_url', 'emby_api_key', 'emby_webhook_secret', 'emby_webhook_ingest_enabled', 'emby_user_id', 'emby_admin_user', 'emby_admin_pass', 'emby_api_timeout', 'libraries_to_ignore'],
+  p115Account: storageConfigFields,
+  fingerprints: ['monitor_sha1_pc_search', 'emby_metadata_path', 'local_strm_root', 'cd2_media_root', 'p115_fingerprint_media_root_cid', 'p115_fingerprint_media_root_path', 'p115_generate_mediainfo', 'p115_enable_sync_delete'],
   ai: ['ai_provider', 'ai_api_key', 'ai_model_name', 'ai_base_url', 'ai_request_timeout', 'ai_max_retries', 'ai_translation_batch_size', 'ai_translate_actor_role', 'ai_translate_on_sync', 'ai_translate_title', 'ai_translate_overview', 'ai_translate_episode_overview', 'ai_joke_fallback', 'ai_translation_mode'],
   logs: ['log_rotation_size_mb', 'log_rotation_backup_count'],
-  ingest: ['auto_repair_truehd_core_on_ingest', 'auto_fill_language_titles_on_ingest', 'auto_extract_intro_fingerprint_on_ingest', 'auto_extract_video_thumbnails_on_ingest', 'extract_video_thumbnails_after_save'],
-  rename: ['movie_rename_format', 'tv_rename_format'],
+  ingest: ['auto_repair_truehd_core_on_ingest', 'auto_fill_language_titles_on_ingest', 'auto_extract_intro_fingerprint_on_ingest', 'auto_extract_credits_on_ingest', 'auto_extract_video_thumbnails_on_ingest', 'extract_video_thumbnails_after_save'],
+  rename: ['tmdb_image_language_preference', 'movie_rename_format', 'tv_rename_format'],
 };
-const savingCard = ref(null);
 const saveCard = async (cardKey) => {
   const fields = cardFields[cardKey];
   if (!fields || savingConfig.value || !configModel.value) return;
   try {
-    if (fields.includes('emby_user_id')) {
-      const validation = await formRef.value?.validate();
-      if (validation?.valid === false) throw new Error('Emby 用户 ID 格式不正确');
-    }
     const payload = JSON.parse(JSON.stringify(Object.fromEntries(
       fields.map(field => [field, configModel.value[field]])
     )));
@@ -3271,6 +3444,7 @@ onMounted(async () => {
 });
 onUnmounted(() => {
   componentIsMounted.value = false;
+  cancelMediaServerProbe();
   renamePreviewRequest += 1;
   if (renamePreviewTimer) clearTimeout(renamePreviewTimer);
   cookieQrcodeRequestVersion += 1;
@@ -3288,6 +3462,36 @@ onUnmounted(() => {
 
 <style scoped>
 .settings-container { min-width: 0; }
+.storage-card-grid { display:grid; grid-template-columns:minmax(0,360px); gap:12px; }
+.storage-dialog :deep(.v-card-text) { min-width:0; }
+.media-server-card-grid { display:grid; grid-template-columns:minmax(0,360px); gap:12px; }
+.media-server-dialog :deep(.v-card-text) { min-width:0; }
+:is(.media-server-dialog, .storage-dialog) :deep(.app-responsive-input__native input::placeholder) {
+  color:rgba(var(--v-theme-on-surface),0.95);
+  -webkit-text-fill-color:currentColor;
+  opacity:1;
+}
+:is(.media-server-dialog, .storage-dialog) :deep(.v-field:not(.v-field--disabled) :is(.v-field__prepend-inner, .v-field__append-inner) > .v-icon),
+.storage-dialog :deep(.v-selection-control:not(.v-selection-control--disabled) .v-selection-control__input > .v-icon) {
+  opacity: 1;
+}
+.media-server-dialog :deep(.v-btn[aria-label="测试媒体服务器连接"]:not(.v-btn--disabled) .v-btn__prepend > .v-icon),
+.storage-dialog :deep(.storage-status-refresh:not(.v-btn--disabled) .v-btn__prepend > .v-icon) {
+  color: color-mix(in srgb, rgb(var(--v-theme-on-surface)) 95%, currentColor);
+}
+.storage-remaining-space { margin-top:4px; font-size:12px; color:rgba(var(--v-theme-on-surface),0.68); }
+html[data-theme='glass'][data-glass-color-scheme='dark'] .storage-dialog .storage-remaining-space { color:rgba(var(--v-theme-on-surface),0.9); }
+html[data-theme='glass'][data-glass-color-scheme='dark'] .storage-dialog .storage-membership { background-color:rgba(var(--v-theme-surface),0.4) !important; }
+html[data-theme='glass'][data-glass-color-scheme='dark'] .media-server-dialog :deep(.v-selection-control--dirty:not(.v-selection-control--disabled) .v-selection-control__input > .v-icon),
+html[data-theme='glass'][data-glass-color-scheme='dark'] .storage-dialog :deep(.v-selection-control--dirty:not(.v-selection-control--disabled) .v-selection-control__input > .v-icon) {
+  color:color-mix(in srgb, rgb(var(--v-theme-on-surface)) 95%, rgb(var(--v-theme-primary))) !important;
+}
+html[data-theme='glass'][data-glass-color-scheme='dark'] .media-server-dialog :deep([data-field='libraries_to_ignore'] .v-btn:not(.v-btn--disabled) .v-btn__prepend > .v-icon) {
+  color:color-mix(in srgb, rgb(var(--v-theme-on-surface)) 95%, currentColor);
+}
+html[data-theme='glass'][data-glass-color-scheme='dark'] .storage-dialog :deep(.v-btn.bg-primary:not(.v-btn--disabled) .v-btn__prepend > .ui-icon) {
+  color:rgb(var(--v-theme-on-surface)) !important;
+}
 .settings-header { margin-block-end: 24px; }
 .settings-grid { align-items: stretch; }
 .settings-grid > .v-col { min-width: 0; }

@@ -10,26 +10,28 @@
       <SettingCard v-show="settingsSearch.showCard('通知渠道')" class="mb-6" title="通知渠道" subtitle="设置消息发送渠道参数">
         <VProgressLinear v-if="loadingConfig" indeterminate />
         <VCardText v-if="configModel">
-          <VCard class="notification-channel" data-field="notification_channel" data-settings-label="Telegram" variant="tonal" role="button" tabindex="0" aria-label="编辑 Telegram 通知渠道" @click="editChannel" @keydown.enter.prevent="editChannel" @keydown.space.prevent="editChannel">
-            <VCardText class="d-flex align-center ga-4">
-              <div class="flex-grow-1">
-                <div class="d-flex align-center ga-2"><VBadge v-if="configModel.telegram_enabled && configModel.telegram_bot_token" dot inline color="success" /><span class="text-h6">Telegram</span></div>
-                <div class="text-body-1 mt-1">Telegram</div>
+          <div class="grid gap-3 grid-app-card">
+          <VCard class="notification-channel app-card-shell app-card-colorful" style="--app-card-accent-rgb:36,169,224" data-field="notification_channel" data-settings-label="Telegram" variant="tonal" role="button" tabindex="0" aria-label="编辑 Telegram 通知渠道" @click="editChannel" @keydown.enter.prevent="editChannel" @keydown.space.prevent="editChannel">
+            <VCardText class="app-card-summary app-card-summary--title-subtitle">
+              <div class="app-card-summary__content">
+                <div class="app-card-summary__title-row"><VBadge v-if="configModel.telegram_enabled" dot inline color="success" class="me-1" /><span class="app-card-summary__title text-h6">{{ configModel.telegram_channel_name || 'Telegram' }}</span></div>
+                <div class="app-card-summary__subtitle text-body-1">Telegram</div>
               </div>
-              <VIcon icon="mdi-telegram" size="48" color="primary" />
+              <div class="app-card-summary__media" aria-hidden="true"><VImg :src="telegramLogo" contain class="app-card-summary__image" /></div>
             </VCardText>
           </VCard>
+          </div>
         </VCardText>
         <VCardText v-else><VSkeletonLoader v-if="loadingConfig" type="list-item-two-line" /><VAlert v-else type="warning" variant="tonal">尚未读取通知配置，请重新读取后保存。</VAlert></VCardText>
       </SettingCard>
 
       <SettingCard v-show="settingsSearch.showCard('通知发送范围')" class="mb-6" title="通知发送范围" subtitle="对应消息类型只会发送给设定的用户。">
         <VCardText v-if="configModel">
-          <div class="notification-scope-table" data-field="telegram_notify_types" data-settings-label="消息类型" role="table" aria-label="通知发送范围">
+          <div class="notification-scope-table" role="table" aria-label="通知发送范围">
             <div class="scope-header" role="row"><span role="columnheader">消息类型</span><span role="columnheader">范围</span></div>
             <div v-for="kind in notificationKinds" :key="kind.value" class="scope-row" role="row">
-              <VCheckbox v-model="configModel.telegram_notify_types" multiple :value="kind.value" :label="kind.title" :disabled="busy" hide-details role="cell" />
-              <VRadioGroup data-field="notification_scope" data-settings-label="通知发送范围" v-model="configModel.notification_scope[kind.value]" inline hide-details :aria-label="`${kind.title}通知发送范围`" :disabled="busy || !configModel.telegram_notify_types.includes(kind.value)" role="cell">
+              <span role="cell">{{ kind.title }}</span>
+              <VRadioGroup data-field="notification_scope" data-settings-label="通知发送范围" v-model="configModel.notification_scope[kind.value]" inline hide-details :aria-label="`${kind.title}通知发送范围`" :disabled="busy" role="cell">
                 <VRadio v-for="scope in scopeOptions" :key="scope.value" :value="scope.value" :label="scope.title" />
               </VRadioGroup>
             </div>
@@ -47,20 +49,34 @@
         </VCardText>
       </SettingCard>
       <div v-show="!settingsSearch.query.value.trim() || settingsSearch.results.value.some(entry => entry.route === 'notification')" class="notification-actions">
-        <VBtn type="submit" prepend-icon="mdi-content-save" :loading="isSavingChatId" :disabled="busy || !canSave">保存通知设置</VBtn>
+        <VBtn color="default" type="submit" variant="text" prepend-icon="mdi-content-save" aria-label="保存通知设置" :loading="isSavingChatId" :disabled="busy || !canSave">保存</VBtn>
       </div>
     </VForm>
 
-    <VDialog v-model="channelDialogOpen" max-width="720" :persistent="busy">
-      <VCard v-if="channelDraft">
-        <VCardTitle class="d-flex align-center justify-space-between ga-3"><span>通知渠道</span><VBtn icon="mdi-close" color="default" variant="text" :disabled="busy" aria-label="关闭通知渠道" @click="channelDialogOpen = false" /></VCardTitle>
+    <VDialog v-model="channelDialogOpen" scrollable max-width="40rem" :fullscreen="!display.mdAndUp.value" :persistent="busy">
+      <VCard v-if="channelDraft" data-settings-card="通知渠道">
+        <VCardItem class="py-2">
+          <template #prepend><VIcon icon="mdi-cog" class="me-2" /></template>
+          <VCardTitle>配置</VCardTitle><VCardSubtitle>{{ configModel.telegram_channel_name || 'Telegram' }}</VCardSubtitle>
+        </VCardItem>
+        <VBtn class="absolute right-3 top-3 z-10" icon="mdi-close" color="default" variant="text" :disabled="busy" aria-label="关闭通知渠道" @click="channelDialogOpen = false" />
+        <VDivider />
         <VCardText>
-          <VSwitch data-field="telegram_enabled" v-model="channelDraft.telegram_enabled" label="启用" color="primary" :disabled="busy" hide-details class="mb-4" />
           <VRow>
+            <VCol cols="12" md="6"><VSwitch data-field="telegram_enabled" v-model="channelDraft.telegram_enabled" label="启用" color="primary" :disabled="busy" /></VCol>
+            <VCol cols="12"><VAutocomplete data-field="telegram_notify_types" v-model="channelDraft.telegram_notify_types" :items="notificationKinds" item-title="title" item-value="value" label="类型" hint="通知渠道类型" multiple clearable chips persistent-hint prepend-inner-icon="mdi-bell-outline" :disabled="busy" /></VCol>
+          </VRow>
+          <VRow>
+            <VCol cols="12" md="6"><VTextField data-field="telegram_channel_name" v-model="channelDraft.telegram_channel_name" label="名称" placeholder="名称" hint="通知渠道名称" persistent-hint prepend-inner-icon="mdi-label" :disabled="busy" /></VCol>
             <VCol cols="12" md="6"><VTextField data-field="telegram_bot_token" v-model="channelDraft.telegram_bot_token" label="Bot Token" :type="showBotToken ? 'text' : 'password'" :append-inner-icon="showBotToken ? 'mdi-eye-off-outline' : 'mdi-eye-outline'" hint="Telegram机器人token，格式：123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11" persistent-hint prepend-inner-icon="mdi-key" autocomplete="off" :disabled="busy" @click:append-inner="showBotToken = !showBotToken" /></VCol>
             <VCol cols="12" md="6"><VTextField data-field="telegram_channel_id" v-model="channelDraft.telegram_channel_id" label="Chat ID" hint="接受消息通知的用户、群组或频道Chat ID" persistent-hint prepend-inner-icon="mdi-chat" :disabled="busy" /></VCol>
+            <VCol cols="12" md="6"><VTextField data-field="telegram_topic_id" v-model="channelDraft.telegram_topic_id" label="话题 ID" hint="可选，向该群组的指定话题发送通知；留空发送到默认话题" persistent-hint prepend-inner-icon="mdi-forum" :disabled="busy" /></VCol>
+            <VCol cols="12" md="6"><VTextField data-field="telegram_users" v-model="channelDraft.telegram_users" label="用户白名单" placeholder="用户ID列表，多个ID使用,分隔" hint="可使用Telegram机器人的用户ID清单，多个用户用,分隔，不填写则所有用户都能使用" persistent-hint prepend-inner-icon="mdi-account-group" :disabled="busy" /></VCol>
+            <VCol cols="12" md="6"><VTextField data-field="telegram_admins" v-model="channelDraft.telegram_admins" label="管理员白名单" placeholder="用户ID列表，多个ID使用,分隔" hint="可使用管理菜单及命令的用户ID列表，多个ID使用,分隔；维护任务还需绑定 Emby 管理员账号" persistent-hint prepend-inner-icon="mdi-account-supervisor" :disabled="busy" /></VCol>
+            <VCol cols="12" md="6"><VTextField data-field="telegram_api_url" v-model="channelDraft.telegram_api_url" label="代理API地址" placeholder="https://api.telegram.org" hint="自定义代理API地址，格式：https://api.telegram.org" persistent-hint prepend-inner-icon="mdi-web" :disabled="busy" /></VCol>
           </VRow>
-          <VTextField data-field="telegram_chat_id" v-model="channelDraft.chat_id" label="个人 Chat ID" placeholder="例如 123456789" hint="先向 Telegram 机器人发送 /start，再填写私聊ID，用于接收个人通知。" persistent-hint :disabled="busy || loading || Boolean(accountError)" />
+          <VDivider class="my-4" />
+          <VTextField data-field="telegram_chat_id" v-model="channelDraft.chat_id" label="个人 Chat ID" placeholder="例如 123456789" hint="先向 Telegram 机器人发送 /start，再填写私聊ID，用于接收个人通知。" persistent-hint prepend-inner-icon="mdi-account" :disabled="busy || loading || Boolean(accountError)" />
           <div v-if="globalChannelLink" class="global-notification-link mt-4"><VBtn variant="text" :href="globalChannelLink" target="_blank" rel="noopener noreferrer" prepend-icon="mdi-open-in-new">加入频道 / 群组</VBtn></div>
         </VCardText>
         <VCardActions class="notification-actions px-6 pb-4">
@@ -68,7 +84,7 @@
           <VBtn variant="tonal" prepend-icon="mdi-send-outline" :loading="isTestingTelegram" :disabled="busy || !canTest" @click="testTelegram">发送测试</VBtn>
           <VSpacer />
           <VBtn variant="text" :disabled="busy" @click="channelDialogOpen = false">取消</VBtn>
-          <VBtn color="primary" variant="flat" :disabled="busy" @click="applyChannelDraft">确定</VBtn>
+          <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save" class="px-5" :disabled="busy" @click="applyChannelDraft">确定</VBtn>
         </VCardActions>
       </VCard>
     </VDialog>
@@ -77,6 +93,8 @@
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import axios from 'axios';
+import { useDisplay } from 'vuetify';
+import telegramLogo from '@/assets/mp-telegram.webp';
 import { useAuthStore } from '@/stores/auth';
 import { useConfig } from '@/composables/useConfig';
 import { useMessage } from '@/composables/useFeedback';
@@ -87,6 +105,7 @@ import { notificationKinds, scopeOptions } from '@/utils/notificationOptions';
 
 const authStore = useAuthStore();
 const message = useMessage();
+const display = useDisplay();
 const { configModel, loadingConfig, handleSaveConfig, configError, fetchConfigData } = useConfig();
 const loading = ref(true), accountError = ref(''), telegramChatId = ref('');
 const showBotToken = ref(false), isSavingChatId = ref(false), isTestingTelegram = ref(false), isFetchingBotLink = ref(false);
@@ -115,18 +134,29 @@ if (personalDraft) {
 watch(configModel, config => {
   if (!config) return;
   config.telegram_enabled ??= true;
+  config.telegram_channel_name ??= 'Telegram';
+  config.telegram_topic_id ??= '';
+  config.telegram_users ??= '';
+  config.telegram_admins ??= '';
+  config.telegram_api_url ??= '';
   config.telegram_notify_types ??= ['library_new', 'recognize_fail'];
   config.notification_scope ??= { library_new: 'admin', recognize_fail: 'admin' };
   config.notification_time ??= { start: '00:00', end: '23:59' };
 }, { immediate: true });
 function editChannel() {
   if (!canSave.value || busy.value) return;
-  channelDraft.value = { telegram_bot_token: configModel.value.telegram_bot_token || '', telegram_channel_id: configModel.value.telegram_channel_id || '', telegram_enabled: configModel.value.telegram_enabled, chat_id: telegramChatId.value };
+  const config = configModel.value;
+  channelDraft.value = { telegram_bot_token: config.telegram_bot_token || '', telegram_channel_id: config.telegram_channel_id || '', telegram_enabled: config.telegram_enabled,
+    telegram_channel_name: config.telegram_channel_name || 'Telegram', telegram_topic_id: config.telegram_topic_id || '', telegram_users: config.telegram_users || '', telegram_admins: config.telegram_admins || '', telegram_api_url: config.telegram_api_url || '',
+    telegram_notify_types: [...(config.telegram_notify_types || [])], chat_id: telegramChatId.value };
   showBotToken.value = false;
   channelDialogOpen.value = true;
 }
 function applyChannelDraft() {
   if (!channelDraft.value || busy.value) return;
+  const name = channelDraft.value.telegram_channel_name?.trim();
+  if (!name) { message.error('通知渠道名称不能为空'); return; }
+  channelDraft.value.telegram_channel_name = name;
   const { chat_id, ...config } = channelDraft.value;
   Object.assign(configModel.value, config);
   telegramChatId.value = chat_id;
@@ -168,6 +198,7 @@ const saveChatId = async () => {
   const chatId = telegramChatId.value.trim();
   const config = configModel.value;
   const submitted = { telegram_bot_token: config.telegram_bot_token, telegram_channel_id: config.telegram_channel_id,
+    telegram_channel_name: config.telegram_channel_name || 'Telegram', telegram_topic_id: config.telegram_topic_id || '', telegram_users: config.telegram_users || '', telegram_admins: config.telegram_admins || '', telegram_api_url: config.telegram_api_url || '',
     telegram_notify_types: (config.telegram_notify_types || []).filter(kind => ['library_new', 'recognize_fail'].includes(kind)),
     telegram_enabled: config.telegram_enabled ?? true, notification_scope: { ...config.notification_scope }, notification_time: { ...config.notification_time } };
   isSavingChatId.value = true;
@@ -196,7 +227,9 @@ const testTelegram = async () => {
   isTestingTelegram.value = true;
   try {
     const { data } = await axios.post('/api/telegram/test', { token: channelDraft.value?.telegram_bot_token ?? configModel.value.telegram_bot_token,
-      chat_id: channelDraft.value ? (channelDraft.value.chat_id?.trim() || channelDraft.value.telegram_channel_id) : (telegramChatId.value.trim() || configModel.value.telegram_channel_id) });
+      chat_id: channelDraft.value ? (channelDraft.value.chat_id?.trim() || channelDraft.value.telegram_channel_id) : (telegramChatId.value.trim() || configModel.value.telegram_channel_id),
+      api_url: channelDraft.value?.telegram_api_url ?? configModel.value.telegram_api_url ?? '',
+      topic_id: channelDraft.value?.chat_id?.trim() || (!channelDraft.value && telegramChatId.value.trim()) ? '' : (channelDraft.value?.telegram_topic_id ?? configModel.value.telegram_topic_id ?? '') });
     if (!isCurrentAccount(user)) return;
     if (data.success === true) message.success(data.message || '测试消息已发送');
     else message.error(data.error || data.message || '测试消息发送失败');
@@ -211,7 +244,7 @@ const openBotChat = async () => {
   const user = authStore.user;
   isFetchingBotLink.value = true;
   try {
-    const { data } = await axios.post('/api/portal/telegram-bot-info', { token });
+    const { data } = await axios.post('/api/portal/telegram-bot-info', { token, api_url: channelDraft.value?.telegram_api_url ?? configModel.value?.telegram_api_url ?? '' });
     if (!isCurrentAccount(user)) return;
     if (data.bot_username) window.open(`https://t.me/${encodeURIComponent(data.bot_username)}`, '_blank', 'noopener,noreferrer');
     else message.error(data.error || '未能获取到机器人信息');
@@ -229,7 +262,8 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .notification-actions { display:flex; flex-wrap:wrap; gap:12px; }
-.notification-channel { max-width:380px; cursor:pointer; }
+.notification-channel { cursor:pointer; }
+.notification-channel .app-card-summary__content { padding-inline-end:4rem; }
 .notification-channel:focus-visible { outline:2px solid rgb(var(--v-theme-primary)); outline-offset:3px; }
 .notification-scope-table { min-width:0; }
 .scope-header, .scope-row { display:grid; grid-template-columns:130px minmax(0,1fr); gap:16px; align-items:center; padding:12px 0; border-bottom:1px solid var(--ui-border); }

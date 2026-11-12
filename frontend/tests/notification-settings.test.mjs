@@ -10,7 +10,7 @@ function fixture({ save = async () => true, post = async () => ({ data: { messag
   const context = vm.createContext({
     pageActive: true, loadedChatId: '', user, window: { open: url => opened.push(url) },
     authStore: { user, isLoggedIn: true, accountInfo: {}, fetchAccountInfo: account },
-    configModel: { value: { telegram_bot_token: 'fixture-token', telegram_channel_id: '@fixture', telegram_notify_types: ['library_new'], telegram_enabled: true, notification_scope: { library_new: 'admin', recognize_fail: 'admin' }, notification_time: { start: '00:00', end: '23:59' }, unrelated: 'keep' } },
+    configModel: { value: { telegram_bot_token: 'fixture-token', telegram_channel_id: '@fixture', telegram_notify_types: ['library_new'], telegram_enabled: true, telegram_channel_name: 'Telegram', telegram_topic_id: '', telegram_users: '', telegram_admins: '', telegram_api_url: '', notification_scope: { library_new: 'admin', recognize_fail: 'admin' }, notification_time: { start: '00:00', end: '23:59' }, unrelated: 'keep' } },
     channelDraft: { value: null }, telegramChatId: { value: '456' }, loading: { value: false }, accountError: { value: '' }, configError: { value: '' },
     isSavingChatId: { value: false }, isTestingTelegram: { value: false }, isFetchingBotLink: { value: false },
     canSave: { value: true }, canTest: { value: true }, busy: { value: false },
@@ -26,7 +26,7 @@ test('notification save submits only notification fields then the selected perso
   const f = fixture();
   await f.context.save();
   assert.deepEqual(f.calls, [
-    { path: '/api/config', payload: { telegram_bot_token: 'fixture-token', telegram_channel_id: '@fixture', telegram_notify_types: ['library_new'], telegram_enabled: true, notification_scope: { library_new: 'admin', recognize_fail: 'admin' }, notification_time: { start: '00:00', end: '23:59' } } },
+    { path: '/api/config', payload: { telegram_bot_token: 'fixture-token', telegram_channel_id: '@fixture', telegram_notify_types: ['library_new'], telegram_enabled: true, telegram_channel_name: 'Telegram', telegram_topic_id: '', telegram_users: '', telegram_admins: '', telegram_api_url: '', notification_scope: { library_new: 'admin', recognize_fail: 'admin' }, notification_time: { start: '00:00', end: '23:59' } } },
     { path: '/api/portal/telegram-chat-id', payload: { chat_id: '456' } },
   ]);
   assert.equal(f.context.authStore.accountInfo.telegram_chat_id, '456');
@@ -102,7 +102,7 @@ test('test notification requires an explicit action and sends the chosen receive
   const f = fixture({ post: async () => ({ data: { success: true, message: '模拟测试成功' } }) });
   assert.deepEqual(f.calls, []);
   await f.context.test();
-  assert.deepEqual(f.calls, [{ path: '/api/telegram/test', payload: { token: 'fixture-token', chat_id: '456' } }]);
+  assert.deepEqual(f.calls, [{ path: '/api/telegram/test', payload: { token: 'fixture-token', chat_id: '456', api_url: '', topic_id: '' } }]);
   assert.equal(f.messages.at(-1).text, '模拟测试成功');
 });
 
@@ -111,7 +111,7 @@ test('notification test uses dialog drafts and cannot silently substitute saved 
   const f = fixture({ post: async () => ({ data: { success: true } }) });
   f.context.channelDraft.value = { telegram_bot_token: 'draft-token', telegram_channel_id: '@draft-channel', chat_id: '' };
   await f.context.test();
-  assert.deepEqual(f.calls, [{ path: '/api/telegram/test', payload: { token: 'draft-token', chat_id: '@draft-channel' } }]);
+  assert.deepEqual(f.calls, [{ path: '/api/telegram/test', payload: { token: 'draft-token', chat_id: '@draft-channel', api_url: '', topic_id: '' } }]);
 });
 
 test('notification save removes the nonfunctional intercept switch while preserving real scope and time', async () => {
@@ -131,9 +131,32 @@ test('opening a bot uses the unsaved channel token in a POST body and cannot fal
   const f = fixture({ post: async () => ({ data: { bot_username: 'draft_bot' } }) });
   f.context.channelDraft.value = { telegram_bot_token: 'draft-bot-token' };
   await f.context.openBot();
-  assert.deepEqual(f.calls, [{ path: '/api/portal/telegram-bot-info', payload: { token: 'draft-bot-token' } }]);
+  assert.deepEqual(f.calls, [{ path: '/api/portal/telegram-bot-info', payload: { token: 'draft-bot-token', api_url: '' } }]);
   assert.deepEqual(f.opened, ['https://t.me/draft_bot']);
   f.context.channelDraft.value.telegram_bot_token = '';
   await f.context.openBot();
   assert.equal(f.calls.length, 1);
+});
+
+test('MP Telegram channel fields persist in their own configuration scope', async () => {
+  const f = fixture();
+  Object.assign(f.context.configModel.value, { telegram_channel_name: '媒体通知', telegram_topic_id: '22', telegram_users: '123,456', telegram_admins: '123', telegram_api_url: 'https://proxy.invalid/telegram' });
+  await f.context.save();
+  assert.equal(f.calls[0].payload.telegram_channel_name, '媒体通知');
+  assert.equal(f.calls[0].payload.telegram_topic_id, '22');
+  assert.equal(f.calls[0].payload.telegram_users, '123,456');
+  assert.equal(f.calls[0].payload.telegram_admins, '123');
+  assert.equal(f.calls[0].payload.telegram_api_url, 'https://proxy.invalid/telegram');
+  assert.equal(Object.hasOwn(f.calls[0].payload, 'unrelated'), false);
+});
+
+test('Telegram draft test uses its proxy and topic only for the channel receiver', async () => {
+  const f = fixture({ post: async () => ({ data: { success: true } }) });
+  f.context.channelDraft.value = { telegram_bot_token: 'draft-token', telegram_channel_id: '-1234', chat_id: '', telegram_api_url: 'https://proxy.invalid/telegram', telegram_topic_id: '22' };
+  await f.context.test();
+  assert.deepEqual(f.calls[0].payload, { token: 'draft-token', chat_id: '-1234', api_url: 'https://proxy.invalid/telegram', topic_id: '22' });
+  f.context.channelDraft.value.chat_id = '456';
+  await f.context.test();
+  assert.equal(f.calls[1].payload.chat_id, '456');
+  assert.equal(f.calls[1].payload.topic_id, '');
 });

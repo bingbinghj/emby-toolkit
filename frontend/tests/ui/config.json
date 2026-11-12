@@ -1,6 +1,5 @@
 {
   "emby_server_url": "http://emby.invalid:8096",
-  "emby_public_url": "http://emby.invalid:8096",
   "emby_api_key": "fixture-only",
   "emby_user_id": "0123456789abcdef0123456789abcdef",
   "emby_metadata_path": "/metadata",
@@ -54,6 +53,7 @@
   "auto_repair_truehd_core_on_ingest": false,
   "auto_fill_language_titles_on_ingest": false,
   "auto_extract_intro_fingerprint_on_ingest": false,
+  "auto_extract_credits_on_ingest": false,
   "auto_extract_video_thumbnails_on_ingest": false,
   "extract_video_thumbnails_after_save": false,
   "movie_rename_format": "{{title}}{% if year %} ({{year}}){% endif %}{% if tmdbid %} {tmdbid={{tmdbid}}}{% endif %}/{{title}}{% if en_title %}.{{en_title}}{% endif %}{% if year %}.{{year}}{% endif %}{% if webSource %}.{{webSource}}{% endif %}{% if edition %}.{{edition}}{% endif %}{% if videoFormat %}.{{videoFormat}}{% endif %}{% if videoCodec %}.{{videoCodec}}{% endif %}{% if audioCodec %}.{{audioCodec}}{% endif %}{% if part %}.{{part}}{% endif %}{% if customization %}-{{customization}}{% endif %}{% if releaseGroup %}-{{releaseGroup}}{% endif %}{{fileExt}}",

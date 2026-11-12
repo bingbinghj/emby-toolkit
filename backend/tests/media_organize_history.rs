@@ -4,6 +4,7 @@ use axum::{
     http::{Request, StatusCode, header},
     routing::{get, post},
 };
+use chrono::TimeZone;
 use emby_toolkit::{AppState, auth::Session, error::ApiError, media_organize_history as history};
 use serde_json::{Value, json};
 use std::{sync::Arc, time::Duration};
@@ -154,6 +155,158 @@ async fn admissions_keep_exact_episodes_and_exclude_metadata_updates_and_parent_
     assert!(!value.to_string().contains("must-not-store"));
     assert!(!value.to_string().contains("private-extra"));
     assert!(value["items"][0].get("source_identity").is_none());
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL in DATABASE_URL; no real Emby writes"]
+async fn monthly_admissions_follow_mp_success_identity_and_calendar_rules_without_double_counting_webhook_sources()
+ {
+    let f = Fixture::new().await;
+    let at = |year, month, day, hour| {
+        chrono::Local
+            .with_ymd_and_hms(year, month, day, hour, 0, 0)
+            .earliest()
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    };
+    let now = at(2026, 11, 15, 12).with_timezone(&chrono::Local);
+    let empty = history::monthly_statistics(&f.state, now).await.unwrap();
+    assert_eq!(empty["movie_count"], 0);
+    assert_eq!(empty["episode_count"], 0);
+    assert_eq!(empty["month"]["state"], "recording");
+    assert_eq!(empty["month"]["source"], "etk-history");
+    let movie = |name| json!({"item_type":"Movie","name":name,"production_year":2026,"media_source":"tmdb","media_id":"700"});
+    let episode = |id, name, year| json!({"item_type":"Episode","series_id":id,"series_name":name,"production_year":year});
+    for (path, source, status, item, time) in [
+        (
+            "movie-path-a",
+            "emby",
+            "success",
+            movie("同一电影"),
+            at(2026, 11, 1, 0),
+        ),
+        (
+            "movie-path-b",
+            "emby",
+            "success",
+            movie("同一电影"),
+            at(2026, 11, 5, 0),
+        ),
+        (
+            "movie-path-c",
+            "emby",
+            "warning",
+            movie("另一电影"),
+            at(2026, 11, 5, 0),
+        ),
+        (
+            "episode-path-a",
+            "moviepilot",
+            "success",
+            episode("series-a", "同一剧", 2026),
+            at(2026, 11, 1, 0),
+        ),
+        (
+            "episode-path-a",
+            "emby",
+            "success",
+            episode("series-a", "同一剧", 2026),
+            at(2026, 11, 1, 1),
+        ),
+        (
+            "episode-path-b",
+            "emby",
+            "warning",
+            episode("series-a", "同一剧", 2027),
+            at(2026, 11, 5, 0),
+        ),
+        (
+            "episode-path-c",
+            "emby",
+            "success",
+            episode("", "另一剧", 2026),
+            at(2026, 11, 5, 0),
+        ),
+        (
+            "failed-path",
+            "emby",
+            "failed",
+            movie("失败电影"),
+            at(2026, 11, 5, 0),
+        ),
+        (
+            "pending-path",
+            "emby",
+            "processing",
+            episode("series-pending", "处理中剧", 2026),
+            at(2026, 11, 5, 0),
+        ),
+        (
+            "prior-month",
+            "emby",
+            "success",
+            movie("上月电影"),
+            at(2026, 10, 31, 23),
+        ),
+        (
+            "prior-year",
+            "emby",
+            "success",
+            movie("去年同月电影"),
+            at(2025, 11, 5, 0),
+        ),
+        (
+            "next-month",
+            "emby",
+            "success",
+            movie("下月电影"),
+            at(2026, 12, 1, 0),
+        ),
+        (
+            "track-a",
+            "emby",
+            "success",
+            json!({"item_type":"Audio"}),
+            at(2026, 11, 5, 0),
+        ),
+        (
+            "track-b",
+            "emby",
+            "success",
+            json!({"item_type":"Audio"}),
+            at(2026, 11, 5, 0),
+        ),
+    ] {
+        sqlx::query("INSERT INTO media_organize_history(id,source,source_identity,item_json,status,created_at) VALUES($1,$2,$3,$4,$5,$6)")
+            .bind(uuid::Uuid::new_v4().to_string()).bind(source).bind(path).bind(item).bind(status).bind(time).execute(&f.state.db).await.unwrap();
+    }
+    sqlx::query("UPDATE app_settings SET value_json=$1 WHERE setting_key='media_organize_history_started_at'")
+        .bind(json!(at(2026, 11, 2, 0).to_rfc3339())).execute(&f.state.db).await.unwrap();
+    let monthly = history::monthly_statistics(&f.state, now).await.unwrap();
+    assert_eq!(monthly["movie_count"], 2);
+    assert_eq!(
+        monthly["tv_count"], 2,
+        "episode years must not split an already identified series"
+    );
+    assert_eq!(
+        monthly["episode_count"], 3,
+        "MP preparation and Emby finalization of the same file count once"
+    );
+    assert_eq!(monthly["music_count"], 2);
+    assert_eq!(monthly["month"]["period"], "2026-11");
+    assert_eq!(monthly["month"]["partial"], true);
+    sqlx::query("UPDATE app_settings SET value_json=$1 WHERE setting_key='media_organize_history_started_at'")
+        .bind(json!(at(2026, 10, 1, 0).to_rfc3339())).execute(&f.state.db).await.unwrap();
+    assert_eq!(
+        history::monthly_statistics(&f.state, now).await.unwrap()["month"]["partial"],
+        false
+    );
+    f.state.db.close().await;
+    assert!(
+        history::monthly_statistics(&f.state, now).await.is_err(),
+        "an unavailable history database cannot be interpreted as no monthly admissions"
+    );
     f.close().await;
 }
 

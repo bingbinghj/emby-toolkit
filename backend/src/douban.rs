@@ -243,9 +243,6 @@ pub fn best_role(current: &str, candidate: &str) -> String {
         current
     }
 }
-pub fn premerge(raw: &[Value], douban: &[Value]) -> Vec<Value> {
-    premerge_cast(raw, douban, false)
-}
 fn premerge_cast(raw: &[Value], douban: &[Value], marked: bool) -> Vec<Value> {
     let mut actors = raw.to_vec();
     let mut seen = HashSet::new();
@@ -496,9 +493,6 @@ async fn supplement_report(
     }
     Ok((actors, warning_details))
 }
-pub async fn premerge_online(state: &AppState, item: &Value, data: &mut Value) -> Result<()> {
-    premerge_online_report(state, item, data).await.map(|_| ())
-}
 pub async fn premerge_online_report(
     state: &AppState,
     item: &Value,
@@ -539,16 +533,6 @@ pub async fn premerge_online_report(
     }
 }
 
-pub async fn premerge_in_job(
-    state: &AppState,
-    item: &Value,
-    data: &mut Value,
-    context: &crate::jobs::JobContext,
-) -> Result<()> {
-    premerge_in_job_report(state, item, data, context)
-        .await
-        .map(|_| ())
-}
 pub async fn premerge_in_job_report(
     state: &AppState,
     item: &Value,

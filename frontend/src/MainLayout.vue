@@ -8,6 +8,7 @@ import { refreshTaskStatus } from '@/composables/useTaskStatus';
 import { useMessage, useDialog } from '@/composables/useFeedback';
 import { useThemeCustomizer, THEME_CUSTOMIZER_OPEN_EVENT } from '@/composables/useThemeCustomizer';
 import { activeContextSearch } from '@/composables/useContextSearch';
+import { mergeNavigationConfig, moveNavigationItem } from '@/utils/navigationConfig';
 import DefaultLayout from '@/layouts/components/DefaultLayout.vue';
 import NotificationCenter from '@/components/NotificationCenter.vue';
 import ThemeCustomizer from '@/components/theme/ThemeCustomizer.vue';
@@ -160,6 +161,17 @@ function moveMenuItem(groupIndex, childIndex, delta) {
   if (target < 0 || target >= children.length) return;
   children.splice(target, 0, children.splice(childIndex, 1)[0]);
 }
+function moveRootMenu(index, delta) {
+  const target = index + delta;
+  if (target < 0 || target >= menuConfigTree.value.length) return;
+  menuConfigTree.value.splice(target, 0, menuConfigTree.value.splice(index, 1)[0]);
+}
+function promoteMenuItem(groupKey, key) {
+  moveNavigationItem(menuConfigTree.value, key, null, groupKey);
+}
+function moveMenuToGroup(key, groupKey) {
+  moveNavigationItem(menuConfigTree.value, key, groupKey);
+}
 onMounted(() => { initMenuConfig(); window.addEventListener(THEME_CUSTOMIZER_OPEN_EVENT, openThemeCustomizer); window.addEventListener('keydown', searchShortcut); });
 onBeforeUnmount(() => { window.removeEventListener(THEME_CUSTOMIZER_OPEN_EVENT, openThemeCustomizer); window.removeEventListener('keydown', searchShortcut); });
 
@@ -204,6 +216,7 @@ const isMenuLoading = ref(false);
 const menuConfigLoaded = ref(false);
 const menuConfigError = ref('');
 const menuConfigTree = ref([]); // 树形配置数据
+const menuRevision = ref(0);
 
 // 1. 基础菜单（包含所有权限允许的菜单，带有 defaultLabel 用于重置）
 const baseMenuOptions = computed(() => {
@@ -257,88 +270,11 @@ const baseMenuMap = computed(() => {
 const getOriginalLabel = (key) => {
   return baseMenuMap.value.get(key)?.defaultLabel || '';
 };
+const menuGroups = computed(() => menuConfigTree.value.filter(item => item.children));
 
 // 核心合并算法：将后端保存的树与当前代码中的 baseMenuOptions 合并
 const syncMenuConfig = (savedTree) => {
-  const resultTree = [];
-  const usedKeys = new Set();
-
-  // 1. 遍历保存的树，保留存在的项
-  if (Array.isArray(savedTree)) {
-    savedTree.forEach(savedGroup => {
-      const baseGroup = baseMenuMap.value.get(savedGroup.key);
-      if (!baseGroup || !baseGroup.isGroup) return; // 废弃的组
-
-      usedKeys.add(savedGroup.key);
-      const newGroup = {
-        key: savedGroup.key,
-        label: savedGroup.label || baseGroup.defaultLabel,
-        visible: savedGroup.visible !== false,
-        expanded: savedGroup.expanded !== false, // 默认展开
-        user_management_order_version: savedGroup.user_management_order_version,
-        children: []
-      };
-
-      if (Array.isArray(savedGroup.children)) {
-        savedGroup.children.forEach(savedChild => {
-          const key = { MediaCenter: 'Dashboard', UserCenter: 'UserManagement', 'settings-notifications': 'settings-general' }[savedChild.key] || savedChild.key;
-          const baseChild = baseMenuMap.value.get(key);
-          if (!baseChild || baseChild.isGroup) return; // 废弃的子项
-          if (usedKeys.has(key)) return;
-          usedKeys.add(key);
-          const oldDefault = { MediaCenter: '媒体中心', UserCenter: '用户中心', 'settings-notifications': '通知设置', 'settings-general': '通用设置' }[savedChild.key];
-          newGroup.children.push({
-            key,
-            label: savedChild.label && savedChild.label !== oldDefault ? savedChild.label : baseChild.defaultLabel,
-            visible: savedChild.visible !== false
-          });
-        });
-      }
-      resultTree.push(newGroup);
-    });
-  }
-
-  // 2. 找出 baseOptions 中有，但 savedTree 中没有的新增项
-  baseMenuOptions.value.forEach(baseGroup => {
-    if (!usedKeys.has(baseGroup.key)) {
-      // 整个组都是新的
-      resultTree.push({
-        key: baseGroup.key,
-        label: baseGroup.defaultLabel,
-        visible: true,
-        expanded: true,
-        children: baseGroup.children ? baseGroup.children.filter(c => !usedKeys.has(c.key)).map(c => {
-          usedKeys.add(c.key);
-          return { key: c.key, label: c.defaultLabel, visible: true };
-        }) : []
-      });
-    } else {
-      // 组存在，检查是否有新的子项
-      const targetGroup = resultTree.find(g => g.key === baseGroup.key);
-      if (baseGroup.children) {
-        baseGroup.children.forEach(baseChild => {
-          if (!usedKeys.has(baseChild.key)) {
-            usedKeys.add(baseChild.key);
-            targetGroup.children.push({
-              key: baseChild.key,
-              label: baseChild.defaultLabel,
-              visible: true
-            });
-          }
-        });
-      }
-    }
-  });
-
-  // Migrate existing navigation once; a later explicit reorder retains its saved position.
-  resultTree.forEach(group => {
-    if (group.user_management_order_version !== 1) {
-      const userIndex = group.children.findIndex(child => child.key === 'UserManagement');
-      if (userIndex >= 0) group.children.push(...group.children.splice(userIndex, 1));
-    }
-    group.user_management_order_version = 1;
-  });
-  return resultTree;
+  return mergeNavigationConfig(savedTree, baseMenuOptions.value);
 };
 
 // 初始化配置
@@ -382,9 +318,7 @@ const saveMenuConfig = async () => {
     isMenuEditorVisible.value = false;
     message.success('菜单配置已保存，全局生效');
 
-    // 强制重新渲染菜单以应用新的展开状态
-    isMenuReady.value = false;
-    nextTick(() => { isMenuReady.value = true; });
+    menuRevision.value += 1;
   } catch (error) {
     message.error(error.response?.data?.error || '保存菜单配置失败');
   } finally {
@@ -403,8 +337,7 @@ const resetMenuConfig = async () => {
     menuConfigError.value = '';
     message.success('已恢复默认菜单');
 
-    isMenuReady.value = false;
-    nextTick(() => { isMenuReady.value = true; });
+    menuRevision.value += 1;
   } catch (error) {
     message.error(error.response?.data?.error || '重置菜单配置失败');
   } finally {
@@ -414,7 +347,7 @@ const resetMenuConfig = async () => {
 
 // 计算默认展开的 keys
 const defaultExpandedKeys = computed(() => {
-  return menuConfigTree.value.filter(g => g.expanded).map(g => g.key);
+  return menuConfigTree.value.filter(g => g.children && g.expanded).map(g => g.key);
 });
 
 // 最终渲染的菜单
@@ -426,6 +359,10 @@ const menuOptions = computed(() => {
   menuConfigTree.value.forEach(group => {
     const baseGroup = baseMenuMap.value.get(group.key);
     if (!baseGroup) return;
+    if (!baseGroup.isGroup) {
+      if (group.visible) finalMenu.push({ key: group.key, label: group.label || baseGroup.defaultLabel, icon: baseGroup.icon });
+      return;
+    }
 
     // 1. 先筛选出该组下所有可见的二级菜单
     const visibleChildren = [];
@@ -465,81 +402,47 @@ const menuOptions = computed(() => {
 });
 
 // ================= 原生拖拽逻辑 =================
-const dragSource = ref(null); // { gIndex, cIndex }
-const dragTarget = ref(null); // { gIndex, cIndex }
-const dragPosition = ref(''); // 'top' 或 'bottom'
+const dragSource = ref(null); // { key, groupKey }; null group means a top-level item.
+const dragTarget = ref(null);
+const dragPosition = ref('');
 
-const onDragStart = (e, gIndex, cIndex) => {
-  dragSource.value = { gIndex, cIndex };
+const onDragStart = (e, key, groupKey = null) => {
+  dragSource.value = { key, groupKey };
   e.dataTransfer.effectAllowed = 'move';
-  // 设置一个透明的拖拽图像，或者让浏览器默认处理
+  e.dataTransfer.setData('text/plain', key);
 };
 
-const onDragOver = (e, gIndex, cIndex) => {
+const onDragOver = (e, key, groupKey = null) => {
   e.preventDefault();
   e.dataTransfer.dropEffect = 'move';
-
-  // 计算鼠标在元素上半部还是下半部
   const rect = e.currentTarget.getBoundingClientRect();
   const midY = rect.top + rect.height / 2;
   dragPosition.value = e.clientY < midY ? 'top' : 'bottom';
-  dragTarget.value = { gIndex, cIndex };
+  dragTarget.value = { key, groupKey };
 };
 
-const onDragOverEmpty = (e, gIndex) => {
+const onDragOverEmpty = (e, groupKey = null) => {
   e.preventDefault();
   e.dataTransfer.dropEffect = 'move';
-  // 拖入空组
-  if (menuConfigTree.value[gIndex].children.length === 0) {
-    dragTarget.value = { gIndex, cIndex: -1 };
-    dragPosition.value = 'inside';
-  }
+  dragTarget.value = { key: null, groupKey };
+  dragPosition.value = 'inside';
+};
+const onDragOverRootGap = (e, key) => {
+  onDragOver(e, key);
+  dragPosition.value = 'top';
 };
 
-const onDrop = (e, targetGIndex, targetCIndex) => {
+const onDrop = (e, targetKey, groupKey = null) => {
   e.preventDefault();
   if (!dragSource.value) return;
-
-  const { gIndex: fromGIndex, cIndex: fromCIndex } = dragSource.value;
-
-  // 如果是同一个元素，不操作
-  if (fromGIndex === targetGIndex && fromCIndex === targetCIndex) {
-    clearDragState();
-    return;
-  }
-
-  // 1. 取出被拖拽的元素
-  const item = menuConfigTree.value[fromGIndex].children.splice(fromCIndex, 1)[0];
-
-  // 2. 计算插入位置
-  let insertIndex = targetCIndex;
-
-  // 如果在同一个组内往下拖，因为前面删除了一个元素，目标索引需要 -1
-  if (fromGIndex === targetGIndex && fromCIndex < targetCIndex) {
-    insertIndex -= 1;
-  }
-
-  // 如果放在下半部，插入到目标后面
-  if (dragPosition.value === 'bottom') {
-    insertIndex += 1;
-  }
-
-  // 3. 插入元素
-  menuConfigTree.value[targetGIndex].children.splice(insertIndex, 0, item);
-
+  moveNavigationItem(menuConfigTree.value, dragSource.value.key, groupKey, targetKey, dragPosition.value);
   clearDragState();
 };
 
-const onDropEmpty = (e, targetGIndex) => {
+const onDropEmpty = (e, groupKey = null) => {
   e.preventDefault();
   if (!dragSource.value) return;
-
-  // 只有当目标组真的为空时才处理
-  if (menuConfigTree.value[targetGIndex].children.length === 0) {
-    const { gIndex: fromGIndex, cIndex: fromCIndex } = dragSource.value;
-    const item = menuConfigTree.value[fromGIndex].children.splice(fromCIndex, 1)[0];
-    menuConfigTree.value[targetGIndex].children.push(item);
-  }
+  moveNavigationItem(menuConfigTree.value, dragSource.value.key, groupKey);
   clearDragState();
 };
 
@@ -558,7 +461,7 @@ const clearDragState = () => {
 <template>
   <DefaultLayout :menus="isMenuReady ? menuOptions : []" :active-key="String(activeMenuKey || '')"
     :has-header-tabs="settingsPage"
-    :expanded-keys="defaultExpandedKeys" :layout="appearance.settings.value.layout" @navigate="handleMenuUpdate" @update:layout="setLayout">
+    :expanded-keys="defaultExpandedKeys" :menu-revision="menuRevision" :layout="appearance.settings.value.layout" @navigate="handleMenuUpdate" @update:layout="setLayout">
     <template #brand="{ rail }">
       <RouterLink :to="{ name: 'Dashboard' }" class="app-brand"><img src="./assets/logo.png" alt="Emby Toolkit" />
         <span v-if="!rail" class="app-brand-name">Emby Toolkit</span>
@@ -575,7 +478,7 @@ const clearDragState = () => {
                 :aria-label="searchLabel" :placeholder="searchLabel" :disabled="searchDisabled" @focus="searchOpen = !activeContextSearch"
                 @keydown.enter.stop.prevent="submitSearch" @keydown.escape.stop="searchOpen = false"
                 @compositionstart="startSearchComposition" @compositionend="finishSearchComposition" />
-              <VBtn v-if="searchWord" icon="mdi-close" variant="text" size="x-small" aria-label="清空搜索" :disabled="searchDisabled" @click.stop="clearSearch" />
+              <VBtn v-if="searchWord" icon="mdi-close" color="default" variant="text" size="x-small" aria-label="清空搜索" :disabled="searchDisabled" @click.stop="clearSearch" />
               <kbd class="search-shortcut-badge">{{ searchShortcutLabel }}</kbd>
             </div>
           </template>
@@ -610,10 +513,10 @@ const clearDragState = () => {
       </VMenu>
     </template>
     <template #navbar-actions>
-      <VBtn v-if="authStore.isAdmin" icon variant="text" color="default" title="通知中心" aria-label="通知中心" @click="notificationOpen = true">
-        <VBadge :model-value="Boolean(taskStatus?.is_running)" color="primary" dot><VIcon icon="mdi-bell-outline" /></VBadge>
+      <VBtn v-if="authStore.isAdmin" icon variant="text" color="default" title="实时日志" aria-label="实时日志" @click="notificationOpen = true">
+        <VBadge :model-value="Boolean(taskStatus?.is_running)" color="primary" dot><VIcon icon="mdi-console-line" /></VBadge>
       </VBtn>
-      <VBtn icon="mdi-palette-outline" variant="text" title="主题与壁纸" aria-label="主题与壁纸" @click="openThemeCustomizer" />
+      <VBtn icon="mdi-palette-outline" color="default" variant="text" title="主题与壁纸" aria-label="主题与壁纸" @click="openThemeCustomizer" />
       <VMenu v-if="authStore.isLoggedIn" location="bottom end" offset="8">
         <template #activator="{ props: userMenuProps }">
           <VBtn v-bind="userMenuProps" icon variant="text" :aria-label="`${authStore.username} 的用户菜单`">
@@ -655,14 +558,14 @@ const clearDragState = () => {
           <input id="global-media-search" ref="mobileSearchInput" v-model="searchWord" class="navbar-context-search" type="search" autocomplete="off"
             :aria-label="searchLabel" :placeholder="searchLabel" :disabled="searchDisabled" @keydown.enter.stop.prevent="submitSearch"
             @compositionstart="startSearchComposition" @compositionend="finishSearchComposition" />
-          <VBtn v-if="searchWord" icon="mdi-close" variant="text" size="small" aria-label="清空搜索" :disabled="searchDisabled" @click="clearSearch" />
+          <VBtn v-if="searchWord" icon="mdi-close" color="default" variant="text" size="small" aria-label="清空搜索" :disabled="searchDisabled" @click="clearSearch" />
           <VBtn icon="mdi-magnify" variant="text" aria-label="提交搜索" :loading="searchLoading" :disabled="searchDisabled" @click="submitSearch" />
         </div>
       </VCardText>
     </VCard>
   </VDialog>
-  <VDialog v-model="notificationOpen" max-width="1100" scrollable>
-    <VCard><NotificationCenter v-if="notificationOpen" :task="taskStatus" @close="notificationOpen = false" /></VCard>
+  <VDialog v-model="notificationOpen" max-width="1100">
+    <VCard class="notification-dialog-card"><NotificationCenter v-if="notificationOpen" :task="taskStatus" @close="notificationOpen = false" /></VCard>
   </VDialog>
   <ThemeCustomizer v-if="themeCustomizerOpen" @close="themeCustomizerOpen = false"><WallpaperSettings /></ThemeCustomizer>
   <VDialog v-model="isMenuEditorVisible" max-width="760" scrollable>
@@ -676,34 +579,53 @@ const clearDragState = () => {
           <p class="mt-2">默认导航仍可使用，成功读取后才能保存更改。</p>
           <VBtn size="small" variant="tonal" class="mt-2" prepend-icon="mdi-refresh" :loading="isMenuLoading" @click="initMenuConfig">重试读取</VBtn>
         </VAlert>
-        <VCard v-for="(group, groupIndex) in menuConfigTree" :key="group.key" variant="outlined" class="menu-editor-group">
-          <VCardText>
-            <div class="menu-editor-group-heading">
-              <VSwitch v-model="group.visible" density="compact" hide-details :aria-label="`显示 ${getOriginalLabel(group.key)} 菜单组`" />
-              <VTextField v-model="group.label" :placeholder="getOriginalLabel(group.key)" label="菜单组名称" density="compact" hide-details />
-              <VSwitch v-model="group.expanded" label="默认展开" density="compact" hide-details />
-            </div>
-            <div class="menu-editor-children" @dragover.prevent="onDragOverEmpty($event, groupIndex)" @drop="onDropEmpty($event, groupIndex)">
-              <div v-for="(child, childIndex) in group.children" :key="child.key" class="menu-editor-item" draggable="true"
-                :class="{ 'drag-over-top': dragTarget?.gIndex === groupIndex && dragTarget?.cIndex === childIndex && dragPosition === 'top',
-                  'drag-over-bottom': dragTarget?.gIndex === groupIndex && dragTarget?.cIndex === childIndex && dragPosition === 'bottom',
-                  'is-dragging': dragSource?.gIndex === groupIndex && dragSource?.cIndex === childIndex }"
-                @dragstart="onDragStart($event, groupIndex, childIndex)" @dragover.prevent="onDragOver($event, groupIndex, childIndex)"
-                @drop="onDrop($event, groupIndex, childIndex)" @dragend="onDragEnd">
-                <VIcon icon="mdi-drag" class="menu-drag-handle" />
-                <VSwitch v-model="child.visible" density="compact" hide-details :aria-label="`显示 ${getOriginalLabel(child.key)}`" />
-                <VTextField v-model="child.label" :placeholder="getOriginalLabel(child.key)" label="菜单名称" density="compact" hide-details />
-                <VBtn icon="mdi-chevron-up" variant="text" size="small" :disabled="childIndex === 0" aria-label="上移菜单" @click="moveMenuItem(groupIndex, childIndex, -1)" />
-                <VBtn icon="mdi-chevron-down" variant="text" size="small" :disabled="childIndex === group.children.length - 1" aria-label="下移菜单" @click="moveMenuItem(groupIndex, childIndex, 1)" />
-              </div>
-              <div v-if="!group.children.length" class="empty-group-dropzone">拖拽菜单至此处</div>
-            </div>
-          </VCardText>
-        </VCard>
-        <VAlert type="info" variant="tonal" density="compact">支持跨组拖拽。关闭菜单组显示时，其下已开启的菜单会提升为一级。</VAlert>
+        <div class="menu-editor-roots" :class="{ 'menu-editor-roots--dragging': dragSource }">
+          <template v-for="(group, groupIndex) in menuConfigTree" :key="group.key">
+            <div class="menu-editor-root-dropzone" :data-before-key="group.key"
+              :class="{ 'drag-over-top': dragTarget?.key === group.key && dragTarget?.groupKey === null && dragPosition === 'top' }"
+              @dragover.prevent.stop="onDragOverRootGap($event, group.key)" @drop.stop="onDrop($event, group.key)">拖至此处设为一级导航</div>
+            <VCard variant="outlined" class="menu-editor-node" :class="{ 'menu-editor-group': group.children, 'menu-editor-standalone': !group.children }" :data-menu-key="group.key">
+              <VCardText>
+                <div class="menu-editor-group-heading" draggable="true" :class="{ 'is-dragging': dragSource?.key === group.key }"
+                  @dragstart.stop="onDragStart($event, group.key)" @dragover.prevent.stop="onDragOver($event, group.key)"
+                  @drop.stop="onDrop($event, group.key)" @dragend="onDragEnd">
+                  <VIcon icon="mdi-drag" class="menu-drag-handle" />
+                  <VSwitch v-model="group.visible" density="compact" hide-details :aria-label="group.children ? `显示 ${getOriginalLabel(group.key)} 菜单组` : `显示 ${getOriginalLabel(group.key)}`" />
+                  <VTextField v-model="group.label" :placeholder="getOriginalLabel(group.key)" :label="group.children ? '菜单组名称' : '菜单名称'" density="compact" hide-details />
+                  <VSwitch v-if="group.children" v-model="group.expanded" label="默认展开" density="compact" hide-details />
+                  <VMenu v-else>
+                    <template #activator="{ props: moveProps }"><VBtn v-bind="moveProps" icon="mdi-folder-plus-outline" color="default" variant="text" size="small" :aria-label="`将 ${group.label} 移入分组`" /></template>
+                    <VList><VListItem v-for="target in menuGroups" :key="target.key" :title="target.label" @click="moveMenuToGroup(group.key, target.key)" /></VList>
+                  </VMenu>
+                  <VBtn icon="mdi-chevron-up" color="default" variant="text" size="small" :disabled="groupIndex === 0" aria-label="上移一级导航" @click="moveRootMenu(groupIndex, -1)" />
+                  <VBtn icon="mdi-chevron-down" color="default" variant="text" size="small" :disabled="groupIndex === menuConfigTree.length - 1" aria-label="下移一级导航" @click="moveRootMenu(groupIndex, 1)" />
+                </div>
+                <div v-if="group.children" class="menu-editor-children" @dragover.prevent.stop="onDragOverEmpty($event, group.key)" @drop.stop="onDropEmpty($event, group.key)">
+                  <div v-for="(child, childIndex) in group.children" :key="child.key" class="menu-editor-item" :data-menu-key="child.key" draggable="true"
+                    :class="{ 'drag-over-top': dragTarget?.groupKey === group.key && dragTarget?.key === child.key && dragPosition === 'top',
+                      'drag-over-bottom': dragTarget?.groupKey === group.key && dragTarget?.key === child.key && dragPosition === 'bottom', 'is-dragging': dragSource?.key === child.key }"
+                    @dragstart.stop="onDragStart($event, child.key, group.key)" @dragover.prevent.stop="onDragOver($event, child.key, group.key)"
+                    @drop.stop="onDrop($event, child.key, group.key)" @dragend="onDragEnd">
+                    <VIcon icon="mdi-drag" class="menu-drag-handle" />
+                    <VSwitch v-model="child.visible" density="compact" hide-details :aria-label="`显示 ${getOriginalLabel(child.key)}`" />
+                    <VTextField v-model="child.label" :placeholder="getOriginalLabel(child.key)" label="菜单名称" density="compact" hide-details />
+                    <div class="menu-editor-item-actions">
+                      <VBtn icon="mdi-arrow-top-right" color="default" variant="text" size="small" :aria-label="`将 ${child.label} 提升为一级导航`" @click="promoteMenuItem(group.key, child.key)" />
+                      <VBtn icon="mdi-chevron-up" color="default" variant="text" size="small" :disabled="childIndex === 0" aria-label="上移菜单" @click="moveMenuItem(groupIndex, childIndex, -1)" />
+                      <VBtn icon="mdi-chevron-down" color="default" variant="text" size="small" :disabled="childIndex === group.children.length - 1" aria-label="下移菜单" @click="moveMenuItem(groupIndex, childIndex, 1)" />
+                    </div>
+                  </div>
+                  <div v-if="!group.children.length" class="empty-group-dropzone">拖拽菜单至此处</div>
+                </div>
+              </VCardText>
+            </VCard>
+          </template>
+          <div class="menu-editor-root-dropzone menu-editor-root-dropzone--last" @dragover.prevent.stop="onDragOverEmpty($event)" @drop.stop="onDropEmpty($event)">拖至此处设为一级导航</div>
+        </div>
+        <VAlert type="info" variant="tonal" density="compact">拖到分组之间可设为独立一级导航，拖入分组可设为二级导航。支持一级排序和跨组拖拽；关闭分组显示时，其下开启的菜单会提升为一级。</VAlert>
       </VCardText>
       <VCardActions><VBtn color="error" :loading="isSavingMenu" :disabled="isMenuLoading" prepend-icon="mdi-restore" @click="confirmResetMenu">恢复默认</VBtn>
-        <VSpacer /><VBtn class="menu-apply-button" color="primary" variant="tonal" :loading="isSavingMenu" :disabled="!menuConfigLoaded" prepend-icon="mdi-content-save-outline" @click="saveMenuConfig">保存并应用</VBtn>
+          <VSpacer /><VBtn class="menu-apply-button" color="default" variant="text" :loading="isSavingMenu" :disabled="!menuConfigLoaded" prepend-icon="mdi-content-save-outline" @click="saveMenuConfig">保存</VBtn>
       </VCardActions>
     </VCard>
   </VDialog>
@@ -716,7 +638,7 @@ const clearDragState = () => {
 .navbar-search { color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)) !important; }
 .navbar-search-desktop, .navbar-search-mobile { display: flex; align-items: center; gap: 10px; min-inline-size: 0; padding: 8px 12px; border-radius: var(--app-field-radius); }
 .navbar-search-desktop { inline-size: clamp(240px, 30vw, 440px); }
-.navbar-context-search { flex: 1; min-inline-size: 0; inline-size: 100%; color: inherit; font: inherit; font-size: 16px; line-height: 1.5; background: transparent; border: 0; outline: none; }
+.navbar-context-search { flex: 1; min-inline-size: 0; inline-size: 100%; color: inherit; font: inherit; font-size: 15px; line-height: 1.5; background: transparent; border: 0; outline: none; }
 .navbar-context-search::placeholder { color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); opacity: 1; }
 .navbar-context-search::-webkit-search-cancel-button { display: none; }
 .navbar-search:focus-within { outline: 2px solid rgba(var(--v-theme-primary), .5); outline-offset: -2px; }
@@ -724,26 +646,36 @@ const clearDragState = () => {
 .navbar-search-popover :deep(.v-list-item-title), .navbar-search-popover :deep(.v-list-item-subtitle) { display: block; white-space: normal; overflow: visible; overflow-wrap: anywhere; -webkit-line-clamp: unset; }
 .user-profile-summary { background: rgba(var(--v-theme-primary), .05); }
 .user-profile-role { display: block; font-size: 14px; font-weight: 500; color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); }
-.menu-apply-button :deep(.v-btn__content) { color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); }
 .user-profile-name { display: block; font-size: 18px; font-weight: 700; color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); overflow-wrap: anywhere; }
 .running-task { max-inline-size: min(280px, 30vw); min-inline-size: 0; }
 .running-task-content { display: grid; gap: 5px; min-inline-size: 0; inline-size: 100%; }
 .running-task-content strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
 .task-message { margin-block-start: 12px; overflow-wrap: anywhere; }
 .menu-editor-content { max-block-size: 70dvh; }
-.menu-editor-group { margin-block-end: 16px; }
+.menu-editor-node { min-inline-size: 0; }
+.menu-editor-root-dropzone { block-size: 32px; padding: 4px; border-block: 2px solid transparent; font-size: 12px; line-height: 20px; text-align: center; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); }
+.menu-editor-roots:not(.menu-editor-roots--dragging) .menu-editor-root-dropzone { color: transparent; }
+.menu-editor-roots--dragging .menu-editor-root-dropzone { border-style: dashed; border-color: rgba(var(--v-theme-primary), .3); }
+.menu-editor-root-dropzone--last { margin-block-end: 16px; }
 .menu-editor-group-heading, .menu-editor-item { display: flex; align-items: center; gap: 8px; }
 .menu-editor-group-heading { margin-block-end: 16px; flex-wrap: wrap; }
 .menu-editor-group-heading :deep(.v-input) { flex: 0 0 auto; }
 .menu-editor-group-heading :deep(.v-text-field) { flex: 1 1 180px; }
 .menu-editor-item { padding-block: 10px; border-block: 2px solid transparent; }
 .menu-editor-item :deep(.v-switch) { flex: 0 0 auto; }
-.menu-editor-item :deep(.v-text-field) { min-inline-size: 80px; }
+.menu-editor-item :deep(.v-text-field) { min-inline-size: 80px; flex: 1 1 120px; }
+.menu-editor-item-actions { display: flex; flex: 0 0 auto; gap: 3px; }
 .menu-editor-children { min-block-size: 44px; }
 .menu-drag-handle { cursor: grab; }
 .drag-over-top { border-block-start-color: rgb(var(--v-theme-primary)); }
 .drag-over-bottom { border-block-end-color: rgb(var(--v-theme-primary)); }
 .is-dragging { opacity: .45; }
 .empty-group-dropzone { text-align: center; color: rgba(var(--v-theme-on-surface), .55); padding: 16px; border: 1px dashed rgba(var(--v-theme-on-surface), .2); }
-@media (width <= 600px) { .running-task { max-inline-size: 25vw; } .app-brand-name { font-size: 15px; } .menu-editor-item { gap: 3px; } }
+@media (width <= 600px) {
+  .running-task { max-inline-size: 25vw; }
+  .app-brand-name { font-size: 15px; }
+  .menu-editor-item { display: grid; grid-template-columns: 24px 40px minmax(0, 1fr); gap: 8px; }
+  .menu-editor-item :deep(.v-text-field) { min-inline-size: 0; }
+  .menu-editor-item-actions { grid-column: 3; }
+}
 </style>

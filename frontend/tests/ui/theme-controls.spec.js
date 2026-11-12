@@ -91,6 +91,7 @@ test('custom middle-gray accents keep readable text on visible plain buttons', a
   await expect.poll(() => page.evaluate(key => JSON.parse(localStorage.getItem(key))?.primaryColor, THEME_KEY)).toBe('#999999');
   await page.keyboard.press('Escape');
   await page.getByRole('tab', { name: '存储 & 目录', exact: true }).click();
+  await page.getByRole('button', { name: '编辑 115 存储', exact: true }).click();
   const button = page.getByRole('button', { name: '扫码获取', exact: true });
   await expect(button).toBeVisible();
   const colors = await button.evaluate(element => {

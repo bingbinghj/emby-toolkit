@@ -55,6 +55,12 @@
                 </button>
               </template>
             </VTextField>
+            <div class="d-flex align-center justify-space-between flex-wrap mb-6">
+              <label class="native-login-checkbox login-checkbox">
+                <input v-model="remember" class="native-login-checkbox__input" type="checkbox" name="remember" :disabled="loading" />
+                <span class="native-login-checkbox__label">保持登录</span>
+              </label>
+            </div>
             <VBtn block type="submit" prepend-icon="mdi-login" :loading="loading" size="large" class="login-submit">登录</VBtn>
             <VAlert v-if="errorMessage" type="error" variant="tonal" class="mt-4" closable @click:close="errorMessage = ''">{{ errorMessage }}</VAlert>
             <div class="footer-links">
@@ -105,6 +111,7 @@ const { settings } = useThemeCustomizer();
 const glassEnabled = computed(() => settings.value.glassEnabled);
 const formRef = ref(null);
 const credentials = ref({ username: '', password: '' });
+const remember = ref(true);
 const loading = ref(false);
 const isPasswordVisible = ref(false);
 const errorMessage = ref('');
@@ -123,7 +130,7 @@ async function handleLogin() {
   try {
     const validation = await formRef.value?.validate();
     if (!isPageActive || !validation?.valid) return;
-    await authStore.login({ ...credentials.value });
+    await authStore.login({ ...credentials.value, remember: remember.value });
     if (!isPageActive) return;
     message.success('登录成功');
     router.push({ name: 'Dashboard' });
@@ -194,6 +201,75 @@ async function verifyToken() {
 .login-subtitle { margin:0; color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity,.6)); font-size:.875rem; }
 .password-toggle { display:flex; align-items:center; color:inherit; padding:4px; border-radius:50%; cursor:pointer; }
 .password-toggle:focus-visible { outline:2px solid rgb(var(--v-theme-primary)); outline-offset:2px; }
+/* 原生保持登录复选框，避免使用全局 VCheckbox 小屏适配布局。 */
+.native-login-checkbox {
+  display: inline-flex;
+  align-items: center;
+  color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity));
+  cursor: pointer;
+  gap: 10px;
+  min-block-size: 40px;
+  user-select: none;
+}
+
+.native-login-checkbox__input {
+  position: relative;
+  display: inline-grid;
+  flex: 0 0 18px;
+  border: 2px solid rgba(var(--v-theme-on-surface), 0.54);
+  border-radius: 4px;
+  margin: 0;
+  appearance: none;
+  background: transparent;
+  block-size: 18px;
+  cursor: pointer;
+  inline-size: 18px;
+  place-content: center;
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.native-login-checkbox__input::before {
+  block-size: 5px;
+  border-block-end: 2px solid rgb(var(--v-theme-on-primary));
+  border-inline-start: 2px solid rgb(var(--v-theme-on-primary));
+  content: '';
+  inline-size: 9px;
+  transform: translateY(-1px) rotate(-45deg) scale(0);
+  transform-origin: center;
+  transition: transform 120ms ease;
+}
+
+.native-login-checkbox__input:checked {
+  border-color: rgb(var(--v-theme-primary));
+  background-color: rgb(var(--v-theme-primary));
+}
+
+.native-login-checkbox__input:checked::before {
+  transform: translateY(-1px) rotate(-45deg) scale(1);
+}
+
+.native-login-checkbox__input:focus-visible {
+  box-shadow: 0 0 0 3px rgba(var(--v-theme-primary), 0.18);
+  outline: none;
+}
+
+.native-login-checkbox__label {
+  font-size: 0.9375rem;
+  line-height: 1.4;
+}
+
+/* Remember me 复选框样式优化 */
+.login-checkbox {
+  opacity: 0.85;
+  transition: opacity 150ms ease;
+
+}
+
+.login-checkbox:hover { opacity: 1; }
+
 .login-submit { font-weight:600; }
 .footer-links { margin-top:16px; text-align:center; }
 .login-foot { margin-top:24px; text-align:center; color:rgba(var(--v-theme-on-surface),var(--v-disabled-opacity,.4)); font-size:.75rem; }

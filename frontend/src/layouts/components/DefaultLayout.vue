@@ -19,6 +19,7 @@ const props = defineProps({
   activeKey: String,
   layout: { type: String, default: 'vertical' },
   expandedKeys: { type: Array, default: () => [] },
+  menuRevision: { type: Number, default: 0 },
   hasHeaderTabs: Boolean,
 });
 const emit = defineEmits(['navigate', 'update:layout']);
@@ -49,7 +50,7 @@ const scrollProgress = ref(0);
 const navbarAwayFromTop = ref(false), floatingNavbarScale = ref(1);
 let scrollFrame;
 
-watch(() => props.expandedKeys, keys => { opened.value = [...keys]; }, { immediate: true, deep: true });
+watch([() => props.expandedKeys, () => props.menuRevision], ([keys]) => { opened.value = [...keys]; }, { immediate: true, deep: true });
 watch(() => route.fullPath, () => {
   overlayOpen.value = false;
   openHorizontalGroup.value = null;
@@ -112,11 +113,11 @@ onBeforeUnmount(() => { window.removeEventListener('scroll', updateScroll); canc
         <slot name="brand" :rail="collapsed" />
         <VBtn v-if="mdAndDown" icon="mdi-close" variant="text" color="default" size="small" aria-label="关闭导航" @click="overlayOpen = false" />
       </div>
-      <VList v-model:opened="opened" class="nav-items" color="primary" nav density="comfortable">
+      <VList v-model:opened="opened" class="nav-items" color="primary" nav density="comfortable" open-strategy="multiple">
         <template v-for="menu in menus" :key="menu.key">
           <VListGroup v-if="menu.children" :value="menu.key">
-            <template #activator="{ props: groupProps }">
-              <VListItem v-bind="groupProps" :title="menu.label" :prepend-icon="menu.icon" />
+            <template #activator="{ props: groupProps, isOpen }">
+              <VListItem v-bind="groupProps" :title="menu.label" :prepend-icon="menu.icon" :aria-expanded="isOpen" />
             </template>
             <VListItem v-for="item in menu.children" :key="item.key" :title="item.label" :prepend-icon="item.icon"
               :active="item.key === activeKey" :value="item.key" @click="navigate(item.key)" />
@@ -199,13 +200,24 @@ onBeforeUnmount(() => { window.removeEventListener('scroll', updateScroll); canc
   min-block-size: 100dvh;
   background: transparent;
 }
-.nav-header { display: flex; align-items: center; justify-content: space-between; min-block-size: 88px; padding: 20px; }
-.nav-items { padding: 8px 14px; }
+.nav-header { display: flex; align-items: center; justify-content: space-between; flex: 0 0 auto; min-block-size: 88px; padding: 20px; }
+.layout-vertical-nav :deep(.v-navigation-drawer__content) { display: flex; flex-direction: column; }
+.nav-items { flex: 1 0 auto; inline-size: 100%; padding: 8px 10px 24px; }
+.nav-items :deep(.v-list-item) { min-block-size: 52px; margin-block-end: 6px; }
+.nav-items :deep(.v-list-group) { margin-block-end: 12px; }
 // VApp already owns a Vuetify layout. Its nested VLayout otherwise registers these as
 // absolute items; retain Vuetify's offsets while attaching the shell to the viewport.
 .layout-vertical-nav, .layout-navbar { position: fixed !important; }
 .layout-vertical-nav { border-inline-end: 1px solid rgba(var(--v-theme-on-surface), .08); }
-.nav-items :deep(.v-list-item-title) { font-size: 17px; line-height: 1.5; }
+.nav-items :deep(.v-list-item-title) { font-size: 17px; line-height: 1.5; white-space: normal; overflow-wrap: anywhere; }
+html[data-theme='glass'][data-glass-color-scheme='dark'] .nav-items :deep(.v-list-item--active),
+html[data-theme='glass'][data-glass-color-scheme='dark'] .theme-horizontal-nav__item.text-primary,
+html[data-theme='glass'][data-glass-color-scheme='dark'] .footer-nav-btn.text-primary {
+  color: color-mix(in srgb, rgb(var(--v-theme-on-surface)) 95%, rgb(var(--v-theme-primary))) !important;
+}
+html[data-theme='glass'][data-glass-color-scheme='dark'] .theme-horizontal-nav__item.text-primary :deep(.v-btn__underlay) {
+  background-color: rgb(var(--v-theme-primary));
+}
 .navbar-content-container { inline-size: 100%; padding-inline: 8px; padding-block-start: env(safe-area-inset-top); }
 .theme-navbar-row, .theme-navbar-actions { display: flex; align-items: center; gap: 8px; min-inline-size: 0; }
 .theme-navbar-row { min-block-size: 64px; }

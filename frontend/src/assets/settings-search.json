@@ -155,15 +155,15 @@
     "route": "general"
   },
   {
-    "field": "emby_public_url",
-    "label": "外网播放地址",
+    "field": "emby_admin_user",
+    "label": "用户名",
     "card": "媒体服务器",
     "category": "system",
     "keywords": [
-      "外网播放地址",
+      "用户名",
       "媒体服务器",
       "媒体服务器与媒体库",
-      "跳转播放页面使用的地址，格式：http(s)://domain:port"
+      "登录用户名"
     ],
     "route": "general"
   },
@@ -181,27 +181,15 @@
     "route": "general"
   },
   {
-    "field": "emby_webhook_secret",
-    "label": "Webhook密钥",
+    "field": "emby_admin_pass",
+    "label": "密码",
     "card": "媒体服务器",
     "category": "system",
     "keywords": [
-      "Webhook密钥",
-      "媒体服务器",
-      "媒体服务器与媒体库"
-    ],
-    "route": "general"
-  },
-  {
-    "field": "emby_webhook_ingest_enabled",
-    "label": "Webhook入库",
-    "card": "媒体服务器",
-    "category": "system",
-    "keywords": [
-      "Webhook入库",
+      "密码",
       "媒体服务器",
       "媒体服务器与媒体库",
-      "关闭后忽略 Emby 的 item.add 和 library.new 入库事件；MoviePilot完成通知、元数据更新和删除通知不受影响。"
+      "登录密码"
     ],
     "route": "general"
   },
@@ -215,32 +203,6 @@
       "媒体服务器",
       "媒体服务器与媒体库",
       "格式错误！ID应为32位。"
-    ],
-    "route": "general"
-  },
-  {
-    "field": "emby_admin_user",
-    "label": "用户名",
-    "card": "媒体服务器",
-    "category": "system",
-    "keywords": [
-      "用户名",
-      "媒体服务器",
-      "媒体服务器与媒体库",
-      "登录用户名"
-    ],
-    "route": "general"
-  },
-  {
-    "field": "emby_admin_pass",
-    "label": "密码",
-    "card": "媒体服务器",
-    "category": "system",
-    "keywords": [
-      "密码",
-      "媒体服务器",
-      "媒体服务器与媒体库",
-      "登录密码"
     ],
     "route": "general"
   },
@@ -267,6 +229,31 @@
       "媒体服务器与媒体库",
       "选中的媒体库不会参与处理；不选则处理全部媒体库。",
       "刷新媒体库"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "emby_webhook_secret",
+    "label": "Webhook密钥",
+    "card": "媒体服务器",
+    "category": "system",
+    "keywords": [
+      "Webhook密钥",
+      "媒体服务器",
+      "媒体服务器与媒体库"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "emby_webhook_ingest_enabled",
+    "label": "Webhook入库",
+    "card": "媒体服务器",
+    "category": "system",
+    "keywords": [
+      "Webhook入库",
+      "媒体服务器",
+      "媒体服务器与媒体库",
+      "关闭后忽略 Emby 的 item.add 和 library.new 入库事件；MoviePilot完成通知、元数据更新和删除通知不受影响。"
     ],
     "route": "general"
   },
@@ -605,6 +592,19 @@
     "route": "general"
   },
   {
+    "field": "monitor_sha1_pc_search",
+    "label": "SHA1检测",
+    "card": "目录",
+    "category": "directory",
+    "keywords": [
+      "SHA1检测",
+      "目录",
+      "媒体目录与文件身份",
+      "按此开关查询 115 文件 SHA1，不受文件系统监控开关影响；非 115 网盘请关闭。"
+    ],
+    "route": "general"
+  },
+  {
     "field": "p115_generate_mediainfo",
     "label": "媒体信息格式化",
     "card": "目录",
@@ -695,34 +695,6 @@
     "route": "general"
   },
   {
-    "field": "tmdb_image_language_preference",
-    "label": "图片语言偏好",
-    "card": "实时监控",
-    "category": "rule",
-    "keywords": [
-      "图片语言偏好",
-      "实时监控",
-      "自动发现本地媒体变化",
-      "控制下载 海报 等图片时的语言优先级。",
-      "简体中文优先",
-      "原语言优先"
-    ],
-    "route": "general"
-  },
-  {
-    "field": "monitor_sha1_pc_search",
-    "label": "SHA1检测",
-    "card": "实时监控",
-    "category": "rule",
-    "keywords": [
-      "SHA1检测",
-      "实时监控",
-      "自动发现本地媒体变化",
-      "文件SHA1查询，非115网盘勿启用。"
-    ],
-    "route": "general"
-  },
-  {
     "field": "auto_repair_truehd_core_on_ingest",
     "label": "入库自动纠正高清音轨",
     "card": "入库自动处理",
@@ -762,6 +734,19 @@
     "route": "general"
   },
   {
+    "field": "auto_extract_credits_on_ingest",
+    "label": "入库完成后提取片尾",
+    "card": "入库自动处理",
+    "category": "rule",
+    "keywords": [
+      "入库完成后提取片尾",
+      "入库自动处理",
+      "新媒体入库后的增强任务",
+      "仅处理电视剧分集；片头提取完成后提取片尾，片尾完成后再提取视频预览缩略图。默认关闭。"
+    ],
+    "route": "general"
+  },
+  {
     "field": "auto_extract_video_thumbnails_on_ingest",
     "label": "入库自动提取视频预览缩略图",
     "card": "入库自动处理",
@@ -788,6 +773,21 @@
     "route": "general"
   },
   {
+    "field": "tmdb_image_language_preference",
+    "label": "图片语言偏好",
+    "card": "整理 & 刮削",
+    "category": "rule",
+    "keywords": [
+      "图片语言偏好",
+      "整理 & 刮削",
+      "电影与电视剧的目录和文件名",
+      "控制刮削海报等图片时的语言优先级，不受文件系统监控开关影响。",
+      "简体中文优先",
+      "原语言优先"
+    ],
+    "route": "general"
+  },
+  {
     "field": "movie_rename_format",
     "label": "电影重命名格式",
     "card": "整理 & 刮削",
@@ -796,7 +796,7 @@
       "电影重命名格式",
       "整理 & 刮削",
       "电影与电视剧的目录和文件名",
-      "与 MoviePilot「存储&目录 → 整理&刮削」使用相同的 Jinja2 格式；扩展名始终使用源文件扩展名。"
+      "使用Jinja2语法，格式参考：https://jinja.palletsprojects.com/en/3.0.x/templates"
     ],
     "route": "general"
   },
@@ -809,7 +809,7 @@
       "电视剧重命名格式",
       "整理 & 刮削",
       "电影与电视剧的目录和文件名",
-      "与 MoviePilot「存储&目录 → 整理&刮削」使用相同的 Jinja2 格式；可使用 `season`、`episode` 和 `season_episode`。"
+      "使用Jinja2语法，格式参考：https://jinja.palletsprojects.com/en/3.0.x/templates"
     ],
     "route": "general"
   },
@@ -890,18 +890,6 @@
     "route": "notification"
   },
   {
-    "field": "telegram_notify_types",
-    "label": "消息类型",
-    "card": "通知发送范围",
-    "category": "notification",
-    "keywords": [
-      "消息类型",
-      "通知发送范围",
-      "对应消息类型只会发送给设定的用户。"
-    ],
-    "route": "notification"
-  },
-  {
     "field": "notification_scope",
     "label": "通知发送范围",
     "card": "通知发送范围",
@@ -948,6 +936,30 @@
     "route": "notification"
   },
   {
+    "field": "telegram_notify_types",
+    "label": "类型",
+    "card": "通知渠道",
+    "category": "notification",
+    "keywords": [
+      "类型",
+      "通知渠道",
+      "通知渠道类型"
+    ],
+    "route": "notification"
+  },
+  {
+    "field": "telegram_channel_name",
+    "label": "名称",
+    "card": "通知渠道",
+    "category": "notification",
+    "keywords": [
+      "名称",
+      "通知渠道",
+      "通知渠道名称"
+    ],
+    "route": "notification"
+  },
+  {
     "field": "telegram_bot_token",
     "label": "Bot Token",
     "card": "通知渠道",
@@ -968,6 +980,54 @@
       "Chat ID",
       "通知渠道",
       "接受消息通知的用户、群组或频道Chat ID"
+    ],
+    "route": "notification"
+  },
+  {
+    "field": "telegram_topic_id",
+    "label": "话题 ID",
+    "card": "通知渠道",
+    "category": "notification",
+    "keywords": [
+      "话题 ID",
+      "通知渠道",
+      "可选，向该群组的指定话题发送通知；留空发送到默认话题"
+    ],
+    "route": "notification"
+  },
+  {
+    "field": "telegram_users",
+    "label": "用户白名单",
+    "card": "通知渠道",
+    "category": "notification",
+    "keywords": [
+      "用户白名单",
+      "通知渠道",
+      "可使用Telegram机器人的用户ID清单，多个用户用,分隔，不填写则所有用户都能使用"
+    ],
+    "route": "notification"
+  },
+  {
+    "field": "telegram_admins",
+    "label": "管理员白名单",
+    "card": "通知渠道",
+    "category": "notification",
+    "keywords": [
+      "管理员白名单",
+      "通知渠道",
+      "可使用管理菜单及命令的用户ID列表，多个ID使用,分隔；维护任务还需绑定 Emby 管理员账号"
+    ],
+    "route": "notification"
+  },
+  {
+    "field": "telegram_api_url",
+    "label": "代理API地址",
+    "card": "通知渠道",
+    "category": "notification",
+    "keywords": [
+      "代理API地址",
+      "通知渠道",
+      "自定义代理API地址，格式：https://api.telegram.org"
     ],
     "route": "notification"
   },

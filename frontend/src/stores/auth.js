@@ -5,6 +5,7 @@ import axios from 'axios';
 
 export const useAuthStore = defineStore('auth', () => {
   const isLoggedIn = ref(false);
+  const remember = ref(false);
   const user = ref({});
   const accountInfo = ref(null);
   let accountRequest = null;
@@ -51,9 +52,11 @@ export const useAuthStore = defineStore('auth', () => {
       if (status === 'logged_in') {
         if (user.value?.id !== response.data.user?.id) accountInfo.value = null;
         isLoggedIn.value = true;
+        remember.value = response.data.remember ?? true;
         user.value = response.data.user || {};
       } else {
         isLoggedIn.value = false;
+        remember.value = false;
         user.value = {};
         accountInfo.value = null;
         // 这里可以抛出特定错误供路由守卫捕获，或者直接返回状态
@@ -64,6 +67,7 @@ export const useAuthStore = defineStore('auth', () => {
       return status;
     } catch (error) {
       isLoggedIn.value = false;
+      remember.value = false;
       accountInfo.value = null;
       throw error;
     }
@@ -73,6 +77,7 @@ export const useAuthStore = defineStore('auth', () => {
     const response = await axios.post('/api/auth/login', credentials);
     accountInfo.value = null;
     isLoggedIn.value = true;
+    remember.value = response.data.remember ?? credentials.remember ?? true;
     // 确保把后端返回的 user 对象完整存进去
     user.value = response.data.user || {};
   }
@@ -80,6 +85,7 @@ export const useAuthStore = defineStore('auth', () => {
   async function logout() {
     await axios.post('/api/auth/logout');
     isLoggedIn.value = false;
+    remember.value = false;
     user.value = {};
     accountInfo.value = null;
     systemStatus.value = 'login_required';
@@ -87,6 +93,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   return {
     isLoggedIn,
+    remember,
     user,
     accountInfo,
     avatarUrl,

@@ -1,6 +1,5 @@
 /* ETK business surfaces inside the MoviePilot v3 shell. */
 html, body, #app { min-height: 100%; }
-html, body { font-family: 'Inter', 'Noto Sans SC', sans-serif; }
 .etk-app { background: transparent !important; }
 .mp-page, .mp-card { background: transparent; }
 .mp-page-header { margin-block-end: 1.25rem; }

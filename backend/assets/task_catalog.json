@@ -79,6 +79,14 @@
       "category": "system-maintenance",
       "category_name": "系统维护",
       "description": "删除没有有效关联作品的幽灵演员，清理人物库冗余数据。"
+    },
+    {
+      "key": "extract-episode-credits",
+      "name": "提取片尾",
+      "help": "仅对电视剧分集提取尾部音频声纹并匹配同季片尾；逐集回读 CreditsStart，电影不参与。与神医助手共用线程和单主线程冷却设置。",
+      "category": "media-info",
+      "category_name": "媒体信息",
+      "description": "提取全库电视剧分集片尾，已存在有效标记的分集跳过。需要 Emby Chapter API 或 ETKMediaInfoBridge 以安全写入章节。"
     }
   ],
   "manual": [
@@ -153,6 +161,14 @@
       "category": "media-info",
       "category_name": "媒体信息",
       "description": "先运行神医提取，按本次日志定点验收章节图或 BIF；对剩余失败项临时修正自定义 ffmpeg 参数并再次提取，结束后恢复配置。补图需要 ETK 可访问 Emby 所在主机的 Docker socket。"
+    },
+    {
+      "key": "extract-episode-credits",
+      "name": "提取片尾",
+      "help": "仅对电视剧分集提取尾部音频声纹并匹配同季片尾；逐集回读 CreditsStart，电影不参与。与神医助手共用线程和单主线程冷却设置。",
+      "category": "media-info",
+      "category_name": "媒体信息",
+      "description": "提取全库电视剧分集片尾，已存在有效标记的分集跳过。需要 Emby Chapter API 或 ETKMediaInfoBridge 以安全写入章节。"
     },
     {
       "key": "repair-p115-fingerprints",
@@ -283,6 +299,15 @@
       "category": "media-info",
       "category_name": "媒体信息",
       "description": "先运行神医提取，按本次日志定点验收章节图或 BIF；对剩余失败项临时修正自定义 ffmpeg 参数并再次提取，结束后恢复配置。补图需要 ETK 可访问 Emby 所在主机的 Docker socket。",
+      "processor_type": "media"
+    },
+    {
+      "key": "extract-episode-credits",
+      "name": "提取片尾",
+      "help": "仅对电视剧分集提取尾部音频声纹并匹配同季片尾；逐集回读 CreditsStart，电影不参与。与神医助手共用线程和单主线程冷却设置。",
+      "category": "media-info",
+      "category_name": "媒体信息",
+      "description": "提取全库电视剧分集片尾，已存在有效标记的分集跳过。需要 Emby Chapter API 或 ETKMediaInfoBridge 以安全写入章节。",
       "processor_type": "media"
     },
     {

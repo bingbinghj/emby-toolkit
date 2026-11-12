@@ -31,10 +31,11 @@
               <div class="dashboard-stat-grid">
                 <div v-for="item in statisticTypes" :key="item.key" class="dashboard-stat-item">
                   <VAvatar :color="item.color" size="46"><VIcon :icon="item.icon" size="24" /></VAvatar>
-                  <div class="dashboard-stat-copy"><span class="dashboard-stat-label">{{ item.label }}</span><div class="dashboard-number" :data-testid="`dashboard-${item.key}`">{{ formatDashboardCount(statistics[item.key]?.count) }}</div><div v-if="statistics[item.key]?.error" class="text-caption text-warning">读取未确认</div></div>
+                  <div class="dashboard-stat-copy"><span class="dashboard-stat-label">{{ item.label }}</span><div class="dashboard-number" :data-testid="`dashboard-${item.key}`">{{ formatDashboardCount(statistics[item.key]?.count) }}</div><span class="dashboard-stat-addition" :data-testid="`dashboard-${item.key}-month`" :title="monthlySourceText">本月新增 {{ formatDashboardCount(dashboardMonthlyCount(statistics, item.key)) }}</span><div v-if="statistics[item.key]?.error" class="text-caption text-warning">读取未确认</div></div>
                 </div>
               </div>
               <VAlert v-if="mediaErrors.statistics" type="warning" variant="tonal" class="mt-3" density="compact">{{ mediaErrors.statistics }}；{{ staleMessage(snapshotTimes.statistics) }}</VAlert>
+              <VAlert v-else-if="statistics.month?.error" type="warning" variant="tonal" class="mt-3" density="compact">本月入库统计读取失败：{{ statistics.month.error }}</VAlert>
             </VCardText>
             <VCardText v-else-if="element.id === 'recent'" class="pt-1">
               <VAlert v-if="mediaErrors.recent" type="warning" variant="tonal" class="mb-3" density="compact">{{ mediaErrors.recent }}；{{ staleMessage(snapshotTimes.recent) }}</VAlert>
@@ -89,11 +90,11 @@
           <div class="dashboard-settings-grid">
             <button v-for="element in dashboardModules" :key="element.id" type="button" class="dashboard-setting-item" :class="{ enabled: !settingsHidden.includes(element.id) }" :aria-pressed="!settingsHidden.includes(element.id)" @click="toggleSettingsModule(element.id)">
               <VIcon :icon="settingsHidden.includes(element.id) ? 'mdi-circle-outline' : 'mdi-check-circle'" :color="settingsHidden.includes(element.id) ? undefined : 'primary'" size="small" />
-              <span>{{ element.title }}</span>
+              <span class="dashboard-setting-label">{{ element.title }}</span>
             </button>
           </div>
         </VCardText>
-        <VCardActions class="app-dialog-actions"><VSpacer /><VBtn variant="flat" prepend-icon="mdi-content-save" @click="saveModules">保存</VBtn></VCardActions>
+        <VCardActions class="app-dialog-actions"><VSpacer /><VBtn color="default" variant="text" prepend-icon="mdi-content-save" @click="saveModules">保存</VBtn></VCardActions>
       </VCard>
     </VDialog>
     <Teleport to="body">
@@ -114,7 +115,7 @@ import 'gridstack/dist/gridstack.min.css';
 import axios from 'axios';
 import storageImage from '@/assets/mp-storage.png';
 import { useAuthStore } from '@/stores/auth';
-import { dashboardModules, normalizeDashboardProfile, dashboardLayoutProfile, dashboardColumns, storageFrom115, embyDashboardImage, formatDashboardCount, dashboardSnapshot, projectDashboardItems, projectDashboardStatistics } from '@/utils/dashboard';
+import { dashboardModules, normalizeDashboardProfile, dashboardLayoutProfile, dashboardColumns, storageFrom115, embyDashboardImage, formatDashboardCount, dashboardSnapshot, projectDashboardItems, projectDashboardStatistics, dashboardMonthlyCount } from '@/utils/dashboard';
 
 const authStore = useAuthStore();
 const snapshotUserId = String(authStore.user?.id || '');
@@ -328,6 +329,13 @@ const readSnapshot = key => {
 const initialSnapshots = Object.fromEntries(Object.keys(projections).map(key => [key, readSnapshot(key)]));
 const snapshotTimes = ref(Object.fromEntries(Object.keys(projections).map(key => [key, initialSnapshots[key]?.savedAt])));
 const statistics = ref(initialSnapshots.statistics?.value || {});
+const monthlySourceText = computed(() => {
+  const month = statistics.value.month;
+  if (!month) return '本月入库统计尚未读取';
+  if (month.error) return month.error;
+  const since = month.recording_since && new Date(month.recording_since);
+  return `按 ETK 成功入库记录统计${month.partial && since && !Number.isNaN(since.getTime()) ? `；记录始于 ${since.toLocaleString('zh-CN')}` : ''}`;
+});
 const recent = ref(initialSnapshots.recent?.value ?? null);
 const recentCapacity = ref(24);
 const failedPosterImages = ref(new Set());
@@ -343,7 +351,7 @@ let mediaSequence = 0;
 let storageSequence = 0;
 let active = true;
 const isCurrentDashboard = () => active && String(authStore.user?.id || '') === snapshotUserId;
-const moduleError = id => id === 'storage' ? storageError.value : mediaErrors.value[id];
+const moduleError = id => id === 'storage' ? storageError.value : mediaErrors.value[id] || (id === 'statistics' ? statistics.value.month?.error : '');
 const staleMessage = time => time ? `显示上次成功数据（${new Date(time).toLocaleString('zh-CN')}），请重试` : '尚未成功读取，请重试';
 const loadMedia = async () => {
   const sequence = ++mediaSequence;
@@ -414,6 +422,9 @@ onBeforeUnmount(() => { active = false; ++mediaSequence; ++storageSequence; ++gr
 .dashboard-stat-item + .dashboard-stat-item { border-left: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
 .dashboard-stat-copy { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
 .dashboard-stat-label { color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: .72rem; }
+.dashboard-stat-addition { color: var(--ui-success-text, rgb(var(--v-theme-success))); font-size: .72rem; line-height: 1.5; overflow-wrap: anywhere; }
+:global(html.light .dashboard-stat-addition) { color: #187142; }
+:global(html.dark .dashboard-stat-addition) { color: #d5f5e3; }
 .dashboard-number { color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); font-size: 1.15rem; font-weight: 700; line-height: 1.4; font-variant-numeric: tabular-nums; }
 .dashboard-poster-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(144px, 1fr)); gap: 16px; padding: 4px 0; }
 .dashboard-library-row { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 20px; padding: 4px 0 8px; }
@@ -434,9 +445,15 @@ onBeforeUnmount(() => { active = false; ++mediaSequence; ++storageSequence; ++gr
 .dashboard-poster-subtitle { color: #fff !important; font-size: 14px; font-weight: 600; line-height: 1.5; }
 .dashboard-library-title { padding: 8px 4px 4px; color: rgb(var(--v-theme-on-surface)); text-align: center; font-size: .75rem; font-weight: 700; line-height: 1.5; }
 .dashboard-settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
-.dashboard-setting-item { display: flex; align-items: center; gap: 8px; min-height: 48px; border: 1px solid rgba(var(--v-theme-on-surface), .1); border-radius: 10px; background: rgba(var(--v-theme-on-surface), .04); padding: 10px 12px; color: rgba(var(--v-theme-on-surface), .72); text-align: start; font-size: .9rem; font-weight: 550; line-height: 1.35; cursor: pointer; }
-.dashboard-setting-item.enabled { border-color: rgba(var(--v-theme-primary), .45); background: rgba(var(--v-theme-primary), .08); }
-.dashboard-setting-item:focus-visible { outline: 2px solid rgb(var(--v-theme-primary)); outline-offset: 2px; }
+.dashboard-setting-item { appearance: none; position: relative; overflow: hidden; display: flex; align-items: center; gap: 8px; min-height: 48px; border: 1px solid rgba(var(--v-theme-on-surface), .1); border-radius: 10px; background: rgba(var(--v-theme-on-surface), .04); padding: 10px 12px; font: inherit; cursor: pointer; transition: border-color .2s ease, background-color .2s ease, transform .2s ease; }
+.dashboard-setting-label { flex: 1; color: rgba(var(--v-theme-on-surface), .72); text-align: start; font-size: .9rem; font-weight: 550; line-height: 1.35; transition: color .2s ease; }
+.dashboard-setting-item::before { position: absolute; content: ''; background: rgb(var(--v-theme-primary)); width: 3px; inset-block: 0; inset-inline-start: 0; opacity: 0; transition: opacity .2s ease; }
+.dashboard-setting-item.enabled { border-color: rgba(var(--v-theme-primary), .3); background: rgba(var(--v-theme-primary), .08); }
+.dashboard-setting-item.enabled::before { opacity: 1; }
+.dashboard-setting-item.enabled .dashboard-setting-label { color: rgb(var(--v-theme-on-surface)); }
+.dashboard-setting-item:hover { border-color: rgba(var(--v-theme-primary), .32); background: rgba(var(--v-theme-primary), .06); }
+.dashboard-setting-item:active { transform: scale(.99); }
+.dashboard-setting-item:focus-visible { outline: 3px solid rgba(var(--v-theme-primary), .28); outline-offset: 2px; }
 @media (max-width: 599px) { .dashboard-settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @container (max-width: 680px) {
   .dashboard-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 8px; }

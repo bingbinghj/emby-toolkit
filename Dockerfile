@@ -25,6 +25,7 @@ ENV LANG=C.UTF-8 TZ=Asia/Shanghai CONFIG_DIR=/config APP_DATA_DIR=/config \
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates tzdata curl bash gosu dumb-init ffmpeg procps bzip2 xz-utils && \
+    ffmpeg -hide_banner -muxers 2>/dev/null | grep -q 'chromaprint' && \
     rm -rf /var/lib/apt/lists/* && \
     groupadd -r -g 918 embytoolkit && \
     useradd -r -g embytoolkit -d /embytoolkit -s /bin/bash -u 918 embytoolkit && \

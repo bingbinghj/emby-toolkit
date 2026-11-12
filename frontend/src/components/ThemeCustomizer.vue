@@ -28,7 +28,6 @@ async function save(action: () => unknown) {
 }
 
 const {
-  isCustomized,
   resetSettings,
   updateSettings,
   setGlassEnabled,
@@ -141,33 +140,6 @@ const layoutOptions = computed<Array<{ icon: string; title: string; value: Theme
 
 const showLayoutSection = computed(() => !appMode.value)
 
-const hasAppModeCustomization = computed(() => {
-  return (
-    settings.value.primaryColor !== defaultPrimaryColor ||
-    !settings.value.glassEnabled ||
-    settings.value.glassAppearance !== defaultAppModeGlassSettings.glassAppearance ||
-    settings.value.glassUIStyle !== defaultAppModeGlassSettings.glassUIStyle ||
-    settings.value.glassDeformationStrength !== defaultAppModeGlassSettings.glassDeformationStrength ||
-    settings.value.glassDynamicsMode !== defaultAppModeGlassSettings.glassDynamicsMode ||
-    settings.value.glassFlowStrength !== defaultAppModeGlassSettings.glassFlowStrength ||
-    settings.value.glassQuality !== defaultAppModeGlassSettings.glassQuality ||
-    settings.value.glassReflectionStrength !== defaultAppModeGlassSettings.glassReflectionStrength ||
-    settings.value.glassTransmissionStrength !== defaultAppModeGlassSettings.glassTransmissionStrength ||
-    settings.value.glassTranslationStrength !== defaultAppModeGlassSettings.glassTranslationStrength ||
-    settings.value.glassTransparencyStrength !== defaultAppModeGlassSettings.glassTransparencyStrength ||
-    settings.value.radius !== 'default' ||
-    settings.value.theme !== 'auto'
-  )
-})
-
-const showResetBadge = computed(() =>
-  nativeChromeActive.value
-    ? settings.value.primaryColor !== defaultPrimaryColor || settings.value.theme !== 'auto'
-    : appMode.value
-      ? hasAppModeCustomization.value
-      : isCustomized.value,
-)
-
 // 打开原生颜色选择器。
 function openColorPicker() {
   customColorInput.value?.click()
@@ -230,11 +202,9 @@ async function handleResetSettings() {
           <h2 class="theme-customizer-title">{{ t('theme.customizer.title') }}</h2>
         </div>
         <div class="theme-customizer-header-actions">
-          <VBadge color="error" dot :model-value="showResetBadge" location="top end" offset-x="2" offset-y="2">
-            <IconBtn :aria-label="t('theme.customizer.reset')" @click="save(handleResetSettings)">
-              <VIcon class="text-high-emphasis" icon="mdi-refresh" />
-            </IconBtn>
-          </VBadge>
+          <IconBtn :aria-label="t('theme.customizer.reset')" @click="save(handleResetSettings)">
+            <VIcon class="text-high-emphasis" icon="mdi-refresh" />
+          </IconBtn>
           <IconBtn data-native-dialog-close :aria-label="t('common.close')" @click="emit('close')">
             <VIcon class="text-high-emphasis" icon="mdi-close" />
           </IconBtn>

@@ -43,7 +43,7 @@ test('topbar confirmed stop submits only the task named in its confirmation', as
 async function openMenuEditor(page) {
   await page.getByRole('button', { name: 'UI Test 的用户菜单', exact: true }).click();
   await page.getByText('自定义导航', { exact: true }).click();
-  return page.locator('.v-overlay--active').filter({ has: page.getByRole('button', { name: '保存并应用', exact: true }) });
+  return page.locator('.v-overlay--active').filter({ has: page.getByRole('button', { name: '保存', exact: true }) });
 }
 
 test('failed menu read preserves fallback navigation and blocks save until a successful null read', async ({ page, api }) => {
@@ -52,7 +52,7 @@ test('failed menu read preserves fallback navigation and blocks save until a suc
   await page.locator('.v-navigation-drawer').getByText('仪表盘', { exact: true }).click();
   await expect(page).toHaveURL(/\/dashboard$/);
   const editor = await openMenuEditor(page);
-  const save = editor.getByRole('button', { name: '保存并应用', exact: true });
+  const save = editor.getByRole('button', { name: '保存', exact: true });
   await expect(editor.getByText('菜单配置暂时无法读取', { exact: true })).toBeVisible();
   await expect(save).toBeDisabled();
   expect(api.requests.filter(request => request.method === 'POST' && request.path === '/api/system/menu_config')).toEqual([]);
@@ -69,12 +69,12 @@ test('explicit reset is allowed after a failed menu read and unlocks saving the 
   api.respond('GET', '/api/system/menu_config', { error: '菜单配置暂时无法读取' }, 503);
   await page.goto('/user-management');
   const editor = await openMenuEditor(page);
-  await expect(editor.getByRole('button', { name: '保存并应用', exact: true })).toBeDisabled();
+  await expect(editor.getByRole('button', { name: '保存', exact: true })).toBeDisabled();
   await editor.getByRole('button', { name: '恢复默认', exact: true }).click();
   const confirmation = page.locator('.v-overlay--active').filter({ has: page.getByText('确定恢复菜单名称、顺序及显示状态吗？', { exact: true }) });
   await confirmation.getByRole('button', { name: '恢复默认', exact: true }).click();
   await expect.poll(() => api.requests.some(request => request.method === 'POST' && request.path === '/api/system/menu_config/reset')).toBe(true);
-  const save = editor.getByRole('button', { name: '保存并应用', exact: true });
+  const save = editor.getByRole('button', { name: '保存', exact: true });
   await expect(save).toBeEnabled();
   await expect(editor.getByRole('button', { name: '重试读取', exact: true })).toHaveCount(0);
   await save.click();

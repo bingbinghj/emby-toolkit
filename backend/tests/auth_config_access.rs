@@ -123,6 +123,73 @@ impl Fixture {
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL in DATABASE_URL; Emby is localhost"]
+async fn login_remember_preference_controls_cookie_and_survives_status_recheck() {
+    let f = Fixture::new().await;
+    for remember in [false, true] {
+        let before = chrono::Utc::now().timestamp();
+        let (status, headers, result) = f
+            .request(
+                "/api/auth/login",
+                "",
+                Some(json!({"username":"Fixture", "password":"fixture", "remember":remember})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(result["remember"], remember);
+        let cookie = headers[header::SET_COOKIE].to_str().unwrap();
+        assert_eq!(cookie.contains("Max-Age="), remember);
+        let signed = f
+            .state
+            .sessions
+            .from_headers(&HeaderMap::from_iter([(
+                header::COOKIE,
+                cookie.parse().unwrap(),
+            )]))
+            .unwrap();
+        assert!(signed.expires >= before + emby_toolkit::auth::LOGIN_SESSION_SECONDS);
+        assert!(
+            signed.expires
+                <= chrono::Utc::now().timestamp() + emby_toolkit::auth::LOGIN_SESSION_SECONDS
+        );
+        let (_, _, rechecked) = f.request("/api/auth/check_status", cookie, None).await;
+        assert_eq!(rechecked["status"], "logged_in");
+        assert_eq!(rechecked["remember"], remember);
+        let (_, logout_headers, _) = f.request("/api/auth/logout", cookie, Some(json!({}))).await;
+        assert!(
+            logout_headers[header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .contains("Max-Age=0")
+        );
+    }
+    let (_, headers, body) = f
+        .request(
+            "/api/auth/login",
+            "",
+            Some(json!({"username":"Fixture", "password":"fixture"})),
+        )
+        .await;
+    assert_eq!(body["remember"], true);
+    assert!(
+        headers[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .contains("Max-Age=")
+    );
+    let (status, headers, _) = f
+        .request(
+            "/api/auth/login",
+            "",
+            Some(json!({"username":"Fixture", "password":"fixture", "remember":"false"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(!headers.contains_key(header::SET_COOKIE));
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL in DATABASE_URL; Emby is localhost"]
 async fn status_config_and_protected_routes_follow_current_admin_mirror() {
     let f = Fixture::new().await;
     let cookies = [f.cookie(true, false), f.cookie(false, false)];

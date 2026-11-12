@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
+import { mergeNavigationConfig } from '../src/utils/navigationConfig.js';
 
 const source = readFileSync(new URL('../src/MainLayout.vue', import.meta.url), 'utf8');
 function definition(name, declaration = 'const') {
@@ -55,9 +56,10 @@ function menuFixture(read) {
     ['UserCenter', { ...base[0].children[0], isGroup: false }],
   ]);
   const context = vm.createContext({
+    mergeNavigationConfig,
     baseMenuOptions: { value: base }, baseMenuMap: { value: map },
     isMenuReady: { value: false }, isMenuLoading: { value: false }, menuConfigLoaded: { value: false },
-    menuConfigError: { value: '' }, menuConfigTree: { value: [] }, isSavingMenu: { value: false },
+    menuConfigError: { value: '' }, menuConfigTree: { value: [] }, menuRevision: { value: 0 }, isSavingMenu: { value: false },
     isMenuEditorVisible: { value: true }, nextTick: callback => callback(), console: { error() {} },
     message: { success() {}, error() {} },
     axios: { get: read, post: async (path, body) => { requests.push({ path, body }); return { data: {} }; } },

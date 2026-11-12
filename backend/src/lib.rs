@@ -10,6 +10,8 @@ mod chapter_bif;
 pub mod concurrency;
 pub mod cover_render;
 pub mod covers;
+pub mod credits;
+mod credits_matching;
 pub mod dashboard;
 pub mod dashboard_layout;
 pub mod database_admin;

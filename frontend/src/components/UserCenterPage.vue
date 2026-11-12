@@ -55,7 +55,7 @@
           <template #prepend><VIcon icon="mdi-account" class="mr-2" /></template>
           <VCardTitle>{{ creatingUser ? '添加用户' : '编辑用户' }}</VCardTitle>
           <VCardSubtitle v-if="editingUser">{{ editingUser.name }}</VCardSubtitle>
-          <template #append><VBtn icon="mdi-close" variant="text" :disabled="userBusy" aria-label="关闭编辑用户" @click="closeUserDialog" /></template>
+          <template #append><VBtn icon="mdi-close" variant="text" color="default" :disabled="userBusy" aria-label="关闭编辑用户" @click="closeUserDialog" /></template>
         </VCardItem>
         <VDivider />
         <VCardText class="user-dialog-content">
@@ -114,7 +114,7 @@
           </div>
         </VCardText>
         <VDivider />
-        <VCardActions class="px-6 py-4"><VSpacer /><VBtn variant="text" :disabled="userBusy" @click="closeUserDialog">取消</VBtn><VBtn color="primary" variant="tonal" :loading="isSavingUser" :disabled="userBusy || loadingUserDetails || !editingUser" @click="saveUserDetails">{{ creatingUser ? '添加' : '保存' }}</VBtn></VCardActions>
+        <VCardActions class="px-6 py-4"><VSpacer /><VBtn color="default" variant="text" :disabled="userBusy" @click="closeUserDialog">取消</VBtn><VBtn :color="creatingUser ? 'primary' : 'default'" :variant="creatingUser ? 'flat' : 'text'" prepend-icon="mdi-content-save-outline" :loading="isSavingUser" :disabled="userBusy || loadingUserDetails || !editingUser" @click="saveUserDetails">{{ creatingUser ? '添加' : '保存' }}</VBtn></VCardActions>
       </VCard>
     </VDialog>
 
@@ -127,7 +127,7 @@
           <VTextField v-model="confirmPassword" label="确认新密码" type="password" :disabled="isSavingPassword" autocomplete="new-password" maxlength="1024" />
           <p class="text-body-2 text-medium-emphasis mb-0">保存后，该用户已登录的 Emby 客户端需要重新登录。</p>
         </VCardText>
-        <VCardActions class="px-6 pb-4"><VSpacer /><VBtn variant="text" :disabled="isSavingPassword" @click="closePasswordDialog">取消</VBtn><VBtn color="primary" variant="tonal" :loading="isSavingPassword" :disabled="isSavingPassword" @click="saveUserPassword">保存新密码</VBtn></VCardActions>
+        <VCardActions class="px-6 pb-4"><VSpacer /><VBtn color="default" variant="text" :disabled="isSavingPassword" @click="closePasswordDialog">取消</VBtn><VBtn color="default" variant="text" prepend-icon="mdi-content-save-outline" :loading="isSavingPassword" :disabled="isSavingPassword" @click="saveUserPassword">保存</VBtn></VCardActions>
       </VCard>
     </VDialog>
   </div>

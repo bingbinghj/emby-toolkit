@@ -1686,10 +1686,6 @@ html[data-theme-radius='extra'] {
   }
 }
 
-.apexcharts-title-text {
-  color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)) !important;
-}
-
 .v-tabs:not(.v-tabs-pill).v-tabs--horizontal {
   border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
 }
@@ -1862,4 +1858,11 @@ html[data-theme-radius='extra'] {
 
 .v-menu .v-overlay__content {
   box-shadow: none;
+}
+
+// Retain semantic button surfaces and make unfilled labels readable.
+.v-btn:not(.v-btn--disabled):is(.v-btn--variant-text, .v-btn--variant-tonal, .v-btn--variant-outlined) {
+  &:is(.text-primary, .text-secondary, .text-success, .text-info, .text-warning, .text-error) .v-btn__content {
+    color: color-mix(in srgb, rgb(var(--v-theme-on-surface)) 95%, currentColor 5%) !important;
+  }
 }

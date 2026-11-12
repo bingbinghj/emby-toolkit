@@ -222,6 +222,22 @@ async fn native_identity_preserves_observation_and_live_role_records() {
             Some(200)
         )
     );
+    let mut item = json!({"Id":"102","Path":"/media/episode-102.strm","Size":17});
+    assert_eq!(revalidation::observation(&state, &item).await.2, None);
+    item["MediaSources"] =
+        json!([{"ItemId":"102","Path":item["Path"],"Container":"mkv","Size":19}]);
+    assert_eq!(revalidation::observation(&state, &item).await.2, None);
+    item["MediaSources"][0]["Path"] = Value::Null;
+    assert_eq!(revalidation::observation(&state, &item).await.2, None);
+    item["MediaSources"][0]["Path"] = json!("/cd2/episode-102.mkv");
+    item["MediaSources"][0]["Container"] = json!("STRM");
+    assert_eq!(revalidation::observation(&state, &item).await.2, None);
+    item["MediaSources"][0]["Container"] = json!("mkv");
+    item["MediaSources"][0]["Size"] = Value::Null;
+    assert_eq!(revalidation::observation(&state, &item).await.2, None);
+    item["MediaSources"] = Value::Null;
+    item["Path"] = json!("/cd2/episode-102.mkv");
+    assert_eq!(revalidation::observation(&state, &item).await.2, Some(17));
     let host = Host::default();
     let mock = Router::new()
         .route(

@@ -8,6 +8,9 @@
     <VAlert v-if="mediaOperationFeedback" :type="mediaOperationFeedback.type" :title="mediaOperationFeedback.message" variant="tonal" class="mb-4">
       <div v-for="(detail, index) in mediaOperationFeedback.details" :key="index" class="text-wrap">{{ detail }}</div>
     </VAlert>
+    <VAlert v-if="creditsExtractionFeedback" :type="creditsExtractionFeedback.type" :title="creditsExtractionFeedback.message" variant="tonal" class="mb-4" data-testid="credits-extraction-feedback">
+      <div v-for="detail in creditsExtractionFeedback.details" :key="detail" class="text-wrap">{{ detail }}</div>
+    </VAlert>
 
     <VAlert v-if="mediaRecoveryState.pending || mediaRecoveryError" type="warning" :title="mediaRecoveryState.pending ? (mediaRecoveryCleanupOnly ? '恢复备份待清理' : '媒体信息需要恢复') : '恢复状态未确认'" variant="tonal" class="mb-4" data-testid="media-recovery-alert">
       <p>{{ mediaRecoveryCleanupOnly ? '媒体信息与原神医配置已通过验收，恢复备份尚未删除。' : '完成恢复验收与备份清理后才能继续保存媒体信息。' }}</p>
@@ -52,6 +55,7 @@
             <VBtn block color="info" variant="tonal" prepend-icon="mdi-file-document-outline" data-testid="media-info-open" @click="handleMediaInfoButtonClick">编辑媒体信息 (音轨/字幕)</VBtn>
             <VBtn block variant="tonal" prepend-icon="mdi-shield-check-outline" :loading="isRevalidatingFingerprints" @click="revalidateFingerprints(itemDetails.item_id || itemId)">重新校验指纹（{{ fingerprintScopeLabel }}）</VBtn>
             <VBtn v-if="['Series', 'Season', 'Episode'].includes(itemDetails.item_type)" block color="warning" variant="tonal" prepend-icon="mdi-image-refresh-outline" :loading="isReplacingEpisodeImages" @click="confirmEpisodeImageReplacement">替换剧集图</VBtn>
+            <VBtn v-if="itemDetails.item_type === 'Episode'" block color="default" variant="tonal" class="media-credits-action" prepend-icon="mdi-movie-open-outline" :loading="isExtractingCredits" :disabled="creditsExtractionBlocked" data-testid="episode-extract-credits" @click="extractEpisodeCredits(itemDetails.item_id || itemId)">提取片尾</VBtn>
             <VBtn block color="warning" variant="tonal" prepend-icon="mdi-file-edit-outline" @click="openRenameEditor">重命名媒体</VBtn>
             <VBtn block color="warning" variant="tonal" prepend-icon="mdi-cloud-search-outline" :loading="isRepairingP115Orphan" @click="confirmMediaAction('检查115孤儿文件', `确认只检查${p115OrphanScopeLabel}？`, repairCurrentP115Orphans)">检查115孤儿文件</VBtn>
           </VCardText>
@@ -103,7 +107,7 @@
           <VCardActions class="editor-actions">
             <VBtn variant="tonal" prepend-icon="mdi-plus" :disabled="isSaving" @click="showAddActorModal = true">添加演员</VBtn>
             <VSpacer /><VBtn variant="text" prepend-icon="mdi-arrow-left" @click="goBack">返回列表</VBtn>
-            <VBtn variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSaving" @click="handleSaveChanges">保存修改</VBtn>
+            <VBtn color="default" variant="text" prepend-icon="mdi-content-save-outline" :loading="isSaving" :disabled="isExtractingCredits" @click="handleSaveChanges">保存</VBtn>
           </VCardActions>
         </VCard>
       </VCol>
@@ -232,6 +236,10 @@
             <VBtn class="mt-3" variant="text" :loading="isCheckingMediaRecovery" :disabled="isRecoveringMediaInfo" @click="loadMediaRecovery">重新检查恢复状态</VBtn>
           </VAlert>
           <VBtn variant="tonal" prepend-icon="mdi-shield-check-outline" :loading="isRevalidatingFingerprints" class="mb-4" :disabled="isSavingMediaInfo || isDeletingMediaVersion || isRepairingTruehdCore" @click="revalidateFingerprints(currentEditMediaId)">重新校验当前视频指纹</VBtn>
+          <VBtn v-if="['Series', 'Season', 'Episode'].includes(itemDetails?.item_type)" color="default" variant="tonal" prepend-icon="mdi-movie-open-outline" class="mb-4 ms-2 media-credits-action" :loading="isExtractingCredits" :disabled="creditsExtractionBlocked" data-testid="media-info-extract-credits" @click="extractEpisodeCredits(currentEditMediaId)">提取当前集片尾</VBtn>
+          <VAlert v-if="creditsExtractionFeedback?.itemId === String(currentEditMediaId)" :type="creditsExtractionFeedback.type" :title="creditsExtractionFeedback.message" variant="tonal" class="mb-4" data-testid="media-info-credits-feedback">
+            <div v-for="detail in creditsExtractionFeedback.details" :key="detail" class="text-wrap">{{ detail }}</div>
+          </VAlert>
           <VAlert v-if="mediaInfoContext.fingerprint_pending" type="warning" variant="tonal" class="mb-4">文件身份待校验。请先重新校验指纹，完成后重新打开编辑器，再保存媒体信息。</VAlert>
           <VAlert v-if="mediaInfoSaveFeedback" :type="mediaInfoSaveFeedback.type" :title="mediaInfoSaveFeedback.message" variant="tonal" class="mb-4">
             <div class="media-info-feedback"><div v-for="(detail, index) in mediaInfoSaveFeedback.details" :key="index">{{ detail }}</div></div>
@@ -281,7 +289,7 @@
         </VCardText>
         <VCardActions class="editor-actions">
           <VBtn color="warning" variant="tonal" prepend-icon="mdi-wrench-outline" :loading="isRepairingTruehdCore" :disabled="isSavingMediaInfo" @click="confirmMediaAction('纠正多出音轨', '将丢弃当前未保存修改；存在歧义时会只读探测 CD2，并且只纠正证据唯一的高清音轨兼容核心。是否继续？', repairCurrentAudioTracks)">纠正多出音轨</VBtn>
-          <VSpacer /><VBtn variant="text" @click="closeMediaInfoEditor">取消</VBtn><VBtn variant="flat" prepend-icon="mdi-content-save-outline" :disabled="isRepairingTruehdCore || isFillingMediaInfoTitles || mediaRecoveryBlocked" :loading="isSavingMediaInfo" data-testid="media-info-save" @click="saveMediaInfo">保存并刷新</VBtn>
+          <VSpacer /><VBtn variant="text" @click="closeMediaInfoEditor">取消</VBtn><VBtn color="default" variant="text" prepend-icon="mdi-content-save-outline" :disabled="isRepairingTruehdCore || isFillingMediaInfoTitles || mediaRecoveryBlocked || isExtractingCredits" :loading="isSavingMediaInfo" data-testid="media-info-save" @click="saveMediaInfo">保存</VBtn>
         </VCardActions>
       </VCard>
     </VDialog>
@@ -304,7 +312,7 @@
             <div v-if="renamePreview.target_local_path" class="rename-result-row"><span class="rename-result-label">本地路径</span><code>{{ renamePreview.target_local_path }}</code></div>
           </div>
         </VCardText>
-        <VCardActions><VSpacer /><VBtn variant="tonal" prepend-icon="mdi-eye-outline" :loading="isPreviewingRename" @click="previewRename">预览</VBtn><VBtn variant="flat" prepend-icon="mdi-content-save-outline" :loading="isExecutingRename" :disabled="!renamePreview" @click="executeRename">保存重命名</VBtn></VCardActions>
+        <VCardActions><VSpacer /><VBtn variant="tonal" prepend-icon="mdi-eye-outline" :loading="isPreviewingRename" @click="previewRename">预览</VBtn><VBtn color="default" variant="text" prepend-icon="mdi-content-save-outline" :loading="isExecutingRename" :disabled="!renamePreview" @click="executeRename">保存</VBtn></VCardActions>
       </VCard>
     </VDialog>
 
@@ -322,6 +330,7 @@ import axios from 'axios';
 import { useMessage, useDialog } from '@/composables/useFeedback';
 import { debounce } from 'lodash-es';
 import { textColorForBackground } from '../theme.js';
+import { useTaskStatus } from '../composables/useTaskStatus.js';
 import {
   buildMediaInfoLanguageOptions,
   filterMediaInfoLanguageOption,
@@ -339,6 +348,7 @@ const route = useRoute();
 const router = useRouter();
 const message = useMessage();
 const dialog = useDialog();
+const { isBackgroundTaskRunning } = useTaskStatus();
 const imagePreview = ref(null);
 const previewMediaImage = (url, title) => {
   if (url) imagePreview.value = { url, title };
@@ -375,7 +385,6 @@ const showAddActorModal = ref(false);
 const actorSearchQuery = ref('');
 const actorSearchResults = ref([]);
 const isSearchingActors = ref(false);
-const fallbackAvatar = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 
 // ★★★ 图像编辑相关状态 ★★★
 const showImageEditor = ref(false);
@@ -583,6 +592,11 @@ const isCheckingMediaRecovery = ref(false);
 const isRecoveringMediaInfo = ref(false);
 const isConfirmingMediaRecovery = ref(false);
 const mediaRecoveryBlocked = computed(() => mediaRecoveryState.value.pending || Boolean(mediaRecoveryError.value) || isCheckingMediaRecovery.value || isRecoveringMediaInfo.value);
+const isExtractingCredits = ref(false);
+const creditsExtractionFeedback = ref(null);
+const creditsExtractionBlocked = computed(() => mediaRecoveryBlocked.value || isBackgroundTaskRunning.value
+  || isSaving.value || isSavingMediaInfo.value || isRepairingTruehdCore.value || isDeletingMediaVersion.value
+  || isReplacingEpisodeImages.value || isExtractingCredits.value);
 let mediaRecoveryLoadSequence = 0;
 let mediaRecoverySession = 0;
 let mediaRecoveryDialog = null;
@@ -601,6 +615,56 @@ const closeMediaInfoEditor = () => {
   ++mediaInfoLoadSequence;
   showMediaInfoEditor.value = false;
   mediaInfoLanguageSelectRefs.clear();
+};
+
+const mergeCreditsChapter = (info, chapter) => {
+  if (!chapter || chapter.MarkerType !== 'CreditsStart') return;
+  for (const entry of Array.isArray(info) ? info : [info]) {
+    if (!entry || typeof entry !== 'object') continue;
+    entry.Chapters = [...(Array.isArray(entry.Chapters) ? entry.Chapters : [])
+      .filter(item => item?.MarkerType !== 'CreditsStart'), { ...chapter }]
+      .sort((left, right) => Number(left.StartPositionTicks || 0) - Number(right.StartPositionTicks || 0));
+  }
+};
+
+const extractEpisodeCredits = async (id) => {
+  const targetId = String(id || '').trim();
+  if (!targetId || isExtractingCredits.value || creditsExtractionBlocked.value || !['Series', 'Season', 'Episode'].includes(itemDetails.value?.item_type)) return;
+  const pageSequence = mediaDetailsLoadSequence;
+  const editorSequence = mediaInfoLoadSequence;
+  isExtractingCredits.value = true;
+  creditsExtractionFeedback.value = null;
+  const loadingMsg = message.loading('正在提取片尾，可在任务中心查看进度...', { duration: 0 });
+  try {
+    const { data: result, status } = await axios.post(`/api/media/${encodeURIComponent(targetId)}/extract_credits`, {});
+    if (pageSequence !== mediaDetailsLoadSequence) return;
+    const details = mediaOperationDetails([
+      ...(Array.isArray(result.warning_details) ? result.warning_details : []),
+      ...(Array.isArray(result.failures) ? result.failures : []),
+      ...(Array.isArray(result.items) ? result.items.filter(item => item.status === 'skipped' && !item.chapter && item.error) : []),
+    ]);
+    const hasWarnings = status === 207 || Number(result.failed) > 0 || Number(result.warnings) > 0 || details.length > 0;
+    const summary = result.message || (hasWarnings ? '片尾提取有提醒' : '片尾提取已完成');
+    creditsExtractionFeedback.value = { itemId: targetId, type: hasWarnings ? 'warning' : 'success', message: summary, details };
+    if (editorSequence === mediaInfoLoadSequence && targetId === String(currentEditMediaId.value || '')) {
+      const chapter = result.chapter || result.items?.find(item => String(item.item_id) === targetId && item.chapter?.MarkerType === 'CreditsStart')?.chapter;
+      mergeCreditsChapter(mediaInfoData.value, chapter);
+    }
+    if (hasWarnings) message.warning(summary);
+    else message.success(summary);
+  } catch (error) {
+    if (pageSequence !== mediaDetailsLoadSequence) return;
+    const result = error.response?.data || {};
+    const summary = result.error || result.message || '片尾提取失败，请检查日志。';
+    creditsExtractionFeedback.value = { itemId: targetId, type: 'error', message: summary, details: mediaOperationDetails([
+      ...(Array.isArray(result.warning_details) ? result.warning_details : []),
+      ...(Array.isArray(result.failures) ? result.failures : []),
+    ]) };
+    message.error(summary);
+  } finally {
+    loadingMsg.destroy();
+    isExtractingCredits.value = false;
+  }
 };
 
 const loadMediaRecovery = async () => {
@@ -1798,14 +1862,6 @@ const selectTmdbImage = async (originalUrl) => {
 };
 
 // 格式化语言显示
-const formatLang = (langCode) => {
-  if (!langCode || langCode === 'null') return '未分级/无文字';
-  const langMap = {
-    'zh': 'Chinese', 'zh-CN': 'Chinese (Simplified)', 'zh-TW': 'Chinese (Traditional)',
-    'en': 'English', 'ja': 'Japanese', 'ko': 'Korean'
-  };
-  return langMap[langCode] || langCode.toUpperCase();
-};
 
 const searchDropdownOptions = computed(() => {
   const options = [];
@@ -2018,6 +2074,7 @@ watch(() => route.params.itemId, (value) => {
   imagePreview.value = null;
   tmdbImagesCache.value = null;
   mediaOperationFeedback.value = null;
+  creditsExtractionFeedback.value = null;
   debouncedSearchActors.cancel();
   itemId.value = targetId;
   fetchMediaDetails();
@@ -2676,6 +2733,10 @@ const handleSaveChanges = async () => {
 }
 
 .editor-actions { flex-wrap: wrap; gap: 8px; padding: 16px 24px; }
+html[data-theme='glass'][data-glass-color-scheme='dark'] .media-credits-action {
+  --glass-button-surface: rgba(var(--glass-material-rgb), 52%);
+  --glass-button-surface-hover: rgba(var(--glass-material-rgb), 60%);
+}
 .actor-edit-card { height: 100%; }
 .actor-edit-card :deep(.v-card-title) { padding: 12px 12px 0; font-size: 15px; }
 .actor-edit-card :deep(.v-card-text) { padding: 12px; }

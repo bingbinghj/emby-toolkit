@@ -17,9 +17,6 @@ export interface GlassAccentColor {
   rgb: string
 }
 
-const PLUGIN_ACCENT_MIN_LIGHTNESS = 0.48
-const PLUGIN_ACCENT_MAX_LIGHTNESS = 0.76
-const PLUGIN_ACCENT_MAX_CHROMA = 0.18
 const THEME_MATERIAL_MIN_LIGHTNESS = 0.56
 const THEME_MATERIAL_MAX_LIGHTNESS = 0.72
 const THEME_MATERIAL_MAX_CHROMA = 0.14
@@ -133,11 +130,6 @@ function normalizeAccentColor(color: string, minLightness: number, maxLightness:
   })
 
   return formatAccentColor(normalized)
-}
-
-/** 将插件 Logo 主色限制在可读范围内，同时保持品牌色相与中性色属性。 */
-export function normalizePluginAccentColor(color: string): GlassAccentColor | undefined {
-  return normalizeAccentColor(color, PLUGIN_ACCENT_MIN_LIGHTNESS, PLUGIN_ACCENT_MAX_LIGHTNESS, PLUGIN_ACCENT_MAX_CHROMA)
 }
 
 /** 派生大面积色调玻璃使用的材料色，不改变用户选择的真实主色。 */

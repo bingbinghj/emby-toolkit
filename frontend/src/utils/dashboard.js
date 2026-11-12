@@ -34,12 +34,6 @@ export function normalizeDashboardProfile(value, profile = 'desktop') {
   return { ...normalizeDashboardLayout(value), items, ...(Number.isSafeInteger(value?.updatedAt) && value.updatedAt >= 0 ? { updatedAt: value.updatedAt } : {}) };
 }
 
-export function reorderVisibleDashboard(order, visibleOrder) {
-  const visible = new Set(visibleOrder);
-  let index = 0;
-  return order.map(id => visible.has(id) ? visibleOrder[index++] : id);
-}
-
 const capacity = value => {
   const raw = value && typeof value === 'object' ? value.size : value;
   if (raw === null || raw === undefined || raw === '' || typeof raw === 'boolean') return null;
@@ -131,13 +125,34 @@ export function projectDashboardItems(items, library = false) {
 }
 
 export function projectDashboardStatistics(value) {
-  return Object.fromEntries(['movie_count', 'tv_count', 'episode_count', 'music_count'].map(key => {
+  const result = Object.fromEntries(['movie_count', 'tv_count', 'episode_count', 'music_count'].map(key => {
     const item = value?.[key];
     if (typeof item?.count !== 'number' || !Number.isFinite(item.count) || item.count < 0 || item.error) {
       throw new Error(item?.error || '媒体统计响应未确认');
     }
-    return [key, { count: item.count }];
+    const projected = { count: item.count };
+    if (Object.hasOwn(item, 'month_count')) {
+      if (item.month_count !== null && (!Number.isSafeInteger(item.month_count) || item.month_count < 0)) throw new Error('本月新增统计响应未确认');
+      projected.month_count = item.month_count;
+    }
+    return [key, projected];
   }));
+  if (value.month !== undefined) {
+    const month = value.month;
+    if (!month || !/^\d{4}-(0[1-9]|1[0-2])$/.test(month.period) || !['recording', 'unavailable'].includes(month.state) || month.source !== 'etk-history') throw new Error('本月新增统计来源未确认');
+    const fields = ['period', 'state', 'source', 'recording_since', 'partial', 'error'];
+    if (fields.some(field => Object.hasOwn(month, field) && month[field] !== null && typeof month[field] !== (field === 'partial' ? 'boolean' : 'string'))) throw new Error('本月新增统计来源未确认');
+    result.month = Object.fromEntries(fields.filter(field => Object.hasOwn(month, field)).map(field => [field, month[field]]));
+  }
+  return result;
+}
+
+// A legacy snapshot or a previous month's cached value must never appear as a
+// confirmed zero (or be relabelled as this month's admissions).
+export function dashboardMonthlyCount(statistics, key, now = new Date()) {
+  const period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const count = statistics?.[key]?.month_count;
+  return statistics?.month?.source === 'etk-history' && statistics.month.state === 'recording' && statistics.month.period === period && Number.isSafeInteger(count) && count >= 0 ? count : null;
 }
 
 export function embyDashboardImage(item, library = false) {

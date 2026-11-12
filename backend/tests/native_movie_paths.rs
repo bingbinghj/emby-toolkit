@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
     routing::get,
 };
-use emby_toolkit::{AppState, metadata, metadata_records, titles};
+use emby_toolkit::{AppState, media_edit, metadata, metadata_records, titles};
 use serde_json::{Value, json};
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
@@ -381,5 +381,129 @@ async fn movie_native_rebinding_replaces_legacy_path_and_preserves_pending_ident
     assert_eq!(row["asset_details_json"][0]["fingerprint_pending"], true);
     assert_eq!(row["file_sha1_json"], json!(["ORIGINAL-SHA"]));
     assert_eq!(row["file_pickcode_json"], json!(["ORIGINAL-PC"]));
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL in DATABASE_URL"]
+async fn media_version_labels_read_each_bound_sha_without_pickcode() {
+    let f = Fixture::new().await;
+    let mut first = f
+        .item(
+            "first",
+            "mediasource_first",
+            false,
+            "https://stream.invalid/download-first",
+        )
+        .await;
+    let second = f
+        .item(
+            "second",
+            "mediasource_second",
+            false,
+            "https://stream.invalid/download-second",
+        )
+        .await;
+    first["MediaSources"] = json!([first["MediaSources"][0], second["MediaSources"][0]]);
+    let mut records = f.bind(&first).await.unwrap();
+    let first_sha = "a".repeat(40);
+    let second_sha = "b".repeat(40);
+    records[0]["file_sha1_json"] = json!([first_sha, second_sha]);
+    records[0]["file_pickcode_json"] = json!([null, null]);
+    for asset in records[0]["asset_details_json"].as_array_mut().unwrap() {
+        asset["container"] = json!("strm");
+    }
+    for (id, sha, name) in [
+        ("1", &first_sha, "First.mkv"),
+        ("2", &second_sha, "Second.mp4"),
+    ] {
+        sqlx::query("INSERT INTO p115_filesystem_cache(id,parent_id,name,sha1,local_path,size) VALUES($1,'0',$2,$3,$2,1000)")
+            .bind(id).bind(name).bind(sha).execute(&f.state.db).await.unwrap();
+    }
+    metadata::upsert(&f.state, &mut records, false)
+        .await
+        .unwrap();
+    let reads = f.host.reads.lock().await.clone();
+    let target = media_edit::target(&f.state, "first").await.unwrap();
+    assert_eq!(target.versions.len(), 2);
+    for (id, name, format) in [
+        ("first", "First.mkv", "MKV"),
+        ("second", "Second.mp4", "MP4"),
+    ] {
+        let version = target
+            .versions
+            .iter()
+            .find(|version| version["emby_id"] == id)
+            .unwrap();
+        assert_eq!(version["file_name"], name, "{version}");
+        assert_eq!(version["format"], format, "{version}");
+    }
+    assert_eq!(
+        *f.host.reads.lock().await,
+        reads,
+        "source labels require no Emby request"
+    );
+    assert!(f.host.unexpected.lock().await.is_empty());
+    sqlx::query("UPDATE media_metadata SET emby_item_ids_json=$1 WHERE tmdb_id='634429' AND item_type='Movie'")
+        .bind(json!(["second", "first"])).execute(&f.state.db).await.unwrap();
+    let target = media_edit::target(&f.state, "first").await.unwrap();
+    assert!(
+        target
+            .versions
+            .iter()
+            .all(|version| version["format"] == ""),
+        "misaligned native IDs must not attach another slot's source: {:?}",
+        target.versions
+    );
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL in DATABASE_URL"]
+async fn media_version_label_rejects_conflicting_fingerprints_and_normalizes_container() {
+    let f = Fixture::new().await;
+    let item = f
+        .item(
+            "first",
+            "mediasource_first",
+            false,
+            "https://stream.invalid/download",
+        )
+        .await;
+    let mut records = f.bind(&item).await.unwrap();
+    let hash = "a".repeat(40);
+    records[0]["file_sha1_json"] = json!([hash]);
+    records[0]["file_pickcode_json"] = json!(["current-pc"]);
+    for (id, sha, pc, name) in [
+        ("1", "b".repeat(40), "current-pc", "Wrong.mp4"),
+        ("2", hash, "other-pc", "Other.mp4"),
+    ] {
+        sqlx::query("INSERT INTO p115_filesystem_cache(id,parent_id,name,sha1,pick_code,local_path,size) VALUES($1,'0',$2,$3,$4,$2,1000)")
+            .bind(id).bind(name).bind(sha).bind(pc).execute(&f.state.db).await.unwrap();
+    }
+    for (container, format, extension) in [
+        ("matroska", "MKV", ".mkv"),
+        ("mov,mp4,m4a,3gp,3g2,mj2", "MP4", ".mp4"),
+    ] {
+        records[0]["asset_details_json"][0]["container"] = json!(container);
+        metadata::upsert(&f.state, &mut records, false)
+            .await
+            .unwrap();
+        let target = media_edit::target(&f.state, "first").await.unwrap();
+        let version = &target.versions[0];
+        assert_eq!(version["format"], format, "{version}");
+        assert_eq!(
+            version["file_name"],
+            format!("first{extension}"),
+            "{version}"
+        );
+        assert!(!version["label"].as_str().unwrap().contains("Wrong"));
+        assert!(!version["label"].as_str().unwrap().contains("Other"));
+    }
+    assert!(
+        f.host.reads.lock().await.is_empty(),
+        "source labels require no Emby request"
+    );
+    assert!(f.host.unexpected.lock().await.is_empty());
     f.close().await;
 }

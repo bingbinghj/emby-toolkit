@@ -26,6 +26,7 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::logs::router())
         .merge(crate::media::router())
         .merge(crate::media_edit::router())
+        .merge(crate::credits::router())
         .merge(crate::media_extra::router())
         .merge(crate::media_manual::router())
         .merge(crate::media_search::router())
@@ -59,6 +60,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/mappings/config/{key}/defaults", get(mapping_default))
         .route("/api/ai/prompts", get(prompts_get).post(prompts_save))
         .route("/api/ai/prompts/reset", post(prompts_reset))
+        .route("/api/config/emby_check", post(emby_check))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_admin,
@@ -129,13 +131,19 @@ async fn auth_status(State(state): State<AppState>, headers: HeaderMap) -> Resul
     }
     if let Some(session) = auth::administrator_session(&state, &headers).await? {
         return Ok(Json(
-            json!({"status":"logged_in", "user":{"id":session.user_id,"name":session.name,"is_admin":true}}),
+            json!({"status":"logged_in", "remember":state.sessions.remember_claim(&headers).unwrap_or(true), "user":{"id":session.user_id,"name":session.name,"is_admin":true}}),
         ));
     }
     Ok(Json(json!({"status":"login_required"})))
 }
 
 async fn login(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Response> {
+    let remember = match body.get("remember") {
+        None => true,
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| ApiError::bad("保持登录必须为开关值"))?,
+    };
     if !state.configured().await {
         return Ok((StatusCode::PRECONDITION_REQUIRED, Json(json!({"status":"error", "code":"SETUP_REQUIRED","message":"系统尚未配置 Emby 连接"}))).into_response());
     }
@@ -203,13 +211,16 @@ async fn login(State(state): State<AppState>, Json(body): Json<Value>) -> Result
     let name = string(user, "Name");
     sqlx::query("INSERT INTO emby_users(id,name,is_administrator,policy_json,last_seen_at,last_updated_at) VALUES($1,$2,TRUE,$3,NOW(),NOW()) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,is_administrator=TRUE,policy_json=EXCLUDED.policy_json,last_seen_at=NOW(),last_updated_at=NOW()")
         .bind(&id).bind(&name).bind(&user["Policy"]).execute(&state.db).await?;
-    let token = state.sessions.sign_administrator(&Session {
+    let session = Session {
         user_id: id.clone(),
         name: name.clone(),
         setup_mode: false,
-        expires: chrono::Utc::now().timestamp() + 2678400,
-    });
-    Ok(([(header::SET_COOKIE, auth::cookie(&token))], Json(json!({"status":"ok", "user":{"id":id,"name":name,"is_admin":true,"user_type":"emby_user"}}))).into_response())
+        expires: chrono::Utc::now().timestamp() + auth::LOGIN_SESSION_SECONDS,
+    };
+    let token = state
+        .sessions
+        .sign_administrator_with_remember(&session, remember);
+    Ok(([(header::SET_COOKIE, auth::cookie(&token, session.expires, remember))], Json(json!({"status":"ok", "remember":remember, "user":{"id":id,"name":name,"is_admin":true,"user_type":"emby_user"}}))).into_response())
 }
 async fn logout() -> impl IntoResponse {
     (
@@ -356,6 +367,93 @@ async fn config_get(State(state): State<AppState>, headers: HeaderMap) -> Result
         return Ok(Json(json!({})));
     }
     Err(ApiError::forbidden())
+}
+async fn emby_check(State(state): State<AppState>, Json(body): Json<Value>) -> Result<Json<Value>> {
+    let base = string(&body, "emby_server_url");
+    let base = reqwest::Url::parse(base.trim()).map_err(|_| ApiError::bad("Emby URL 无效"))?;
+    if !matches!(base.scheme(), "http" | "https")
+        || base.host_str().is_none()
+        || !base.username().is_empty()
+        || base.password().is_some()
+        || base.query().is_some()
+        || base.fragment().is_some()
+    {
+        return Err(ApiError::bad(
+            "Emby URL 只支持 HTTP/HTTPS，且不能包含用户名、密码、查询参数或片段",
+        ));
+    }
+    let key = string(&body, "emby_api_key");
+    if key.trim().is_empty() {
+        return Err(ApiError::bad("API Key 不能为空"));
+    }
+    let mut key = reqwest::header::HeaderValue::from_str(&key)
+        .map_err(|_| ApiError::bad("API Key 格式无效"))?;
+    key.set_sensitive(true);
+    let timeout = match body.get("emby_api_timeout") {
+        None => 60,
+        Some(value) => value
+            .as_u64()
+            .filter(|seconds| (1..=600).contains(seconds))
+            .ok_or_else(|| ApiError::bad("Emby API 超时时间必须是 1 到 600 秒的整数"))?,
+    };
+    let _main = crate::strm::slot(&state, "main", None).await?;
+    let request_error = |error: reqwest::Error| {
+        if error.is_timeout() {
+            ApiError(StatusCode::GATEWAY_TIMEOUT, "连接测试失败：请求超时".into())
+        } else {
+            ApiError(
+                StatusCode::BAD_GATEWAY,
+                "连接测试失败：无法连接到服务器或读取响应".into(),
+            )
+        }
+    };
+    // A redirect must neither forward the API key nor bypass the authenticated endpoint.
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(request_error)?;
+    let response = crate::emby::send(
+        http.get(format!(
+            "{}/System/Info",
+            base.as_str().trim_end_matches('/')
+        ))
+        .header("X-Emby-Token", key)
+        .timeout(std::time::Duration::from_secs(timeout)),
+    )
+    .await
+    .map_err(request_error)?;
+    match response.status().as_u16() {
+        401 | 403 => return Err(ApiError::bad("连接测试失败：API Key 无效或无权限")),
+        status if !(200..300).contains(&status) => {
+            return Err(ApiError(
+                StatusCode::BAD_GATEWAY,
+                format!("连接测试失败：Emby 返回 HTTP {status}"),
+            ));
+        }
+        _ => (),
+    }
+    let info: Value = response.json().await.map_err(|error| {
+        if error.is_timeout() {
+            request_error(error)
+        } else {
+            ApiError(
+                StatusCode::BAD_GATEWAY,
+                "连接测试失败：Emby 系统信息响应无效".into(),
+            )
+        }
+    })?;
+    let name = string(&info, "ServerName");
+    let version = string(&info, "Version");
+    if string(&info, "Id").is_empty() || name.is_empty() || version.is_empty() {
+        return Err(ApiError(
+            StatusCode::BAD_GATEWAY,
+            "连接测试失败：Emby 系统信息响应不完整".into(),
+        ));
+    }
+    Ok(Json(
+        json!({"success":true,"message":"连接测试成功","data":{"name":name,"version":version}}),
+    ))
 }
 async fn config_save(
     State(state): State<AppState>,

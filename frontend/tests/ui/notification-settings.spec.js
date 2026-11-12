@@ -13,7 +13,7 @@ test('notification settings preserve Telegram fields and save only their configu
   await page.getByRole('button', { name: '保存通知设置', exact: true }).click();
   await expect.poll(() => api.requests.some(request => request.path === '/api/portal/telegram-chat-id')).toBe(true);
   const config = api.requests.find(request => request.method === 'POST' && request.path === '/api/config').body;
-  expect(config).toEqual({ telegram_bot_token: 'notification-fixture-token', telegram_channel_id: '@notification-fixture', telegram_notify_types: expect.any(Array), telegram_enabled: true, notification_scope: { library_new: 'admin', recognize_fail: 'admin' }, notification_time: { start: '00:00', end: '23:59' } });
+  expect(config).toEqual({ telegram_bot_token: 'notification-fixture-token', telegram_channel_id: '@notification-fixture', telegram_notify_types: expect.any(Array), telegram_enabled: true, telegram_channel_name: 'Telegram', telegram_topic_id: '', telegram_users: '', telegram_admins: '', telegram_api_url: '', notification_scope: { library_new: 'admin', recognize_fail: 'admin' }, notification_time: { start: '00:00', end: '23:59' } });
   expect(api.requests.find(request => request.path === '/api/portal/telegram-chat-id').body).toEqual({ chat_id: '123456' });
   await expect(page.getByText('通知设置已保存', { exact: true })).toBeVisible();
 });
@@ -108,7 +108,7 @@ test('notification channel test uses the unsaved dialog token and receiver witho
   await page.getByLabel('个人 Chat ID', { exact: true }).fill('');
   await page.getByRole('button', { name: '发送测试', exact: true }).click();
   await expect.poll(() => api.requests.some(request => request.path === '/api/telegram/test')).toBe(true);
-  expect(api.requests.find(request => request.path === '/api/telegram/test').body).toEqual({ token: 'unsaved-token', chat_id: '@unsaved-channel' });
+  expect(api.requests.find(request => request.path === '/api/telegram/test').body).toEqual({ token: 'unsaved-token', chat_id: '@unsaved-channel', api_url: '', topic_id: '' });
   expect(api.requests.filter(request => request.method === 'POST' && request.path !== '/api/telegram/test')).toEqual([]);
 });
 
@@ -125,6 +125,49 @@ test('opening the Telegram bot queries the new dialog token through a body inste
   const request = api.requests.find(request => request.path === '/api/portal/telegram-bot-info');
   expect(request.method).toBe('POST');
   expect(request.query).toEqual({});
-  expect(request.body).toEqual({ token: 'draft-bot-b-token' });
+  expect(request.body).toEqual({ token: 'draft-bot-b-token', api_url: '' });
   expect(api.requests.filter(request => request.method === 'POST' && request.path === '/api/config')).toEqual([]);
+});
+
+for (const width of [390, 1440]) {
+  test(`${width} MP Telegram channel uses its real configuration fields and saves the confirmed draft`, async ({ page, api }) => {
+    test.setTimeout(90_000);
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto('/settings/notifications');
+    const card = page.getByRole('button', { name: '编辑 Telegram 通知渠道', exact: true });
+    await expect(card.locator('.app-card-summary__image img')).toBeVisible();
+    await card.click();
+    const channel = page.locator('.v-overlay--active').filter({ has: page.getByRole('button', { name: '关闭通知渠道', exact: true }) });
+    await expect(channel.getByText('配置', { exact: true })).toBeVisible();
+    await channel.getByLabel('名称', { exact: true }).fill('媒体通知');
+    await channel.getByLabel('话题 ID', { exact: true }).fill('22');
+    await channel.getByLabel('用户白名单', { exact: true }).fill('123,456');
+    await channel.getByLabel('管理员白名单', { exact: true }).fill('123');
+    await channel.getByLabel('代理API地址', { exact: true }).fill('https://proxy.invalid/telegram');
+    await channel.getByRole('button', { name: '确定', exact: true }).click();
+    await expect(card.locator('.app-card-summary__title')).toHaveText('媒体通知');
+    expect(api.requests.filter(request => request.method === 'POST')).toEqual([]);
+    await page.getByRole('button', { name: '保存通知设置', exact: true }).click();
+    await expect.poll(() => api.requests.some(request => request.method === 'POST' && request.path === '/api/config')).toBe(true);
+    expect(api.requests.find(request => request.method === 'POST' && request.path === '/api/config').body).toMatchObject({
+      telegram_channel_name: '媒体通知', telegram_topic_id: '22', telegram_users: '123,456', telegram_admins: '123', telegram_api_url: 'https://proxy.invalid/telegram',
+    });
+  });
+}
+
+test('Telegram channel requires a name and cancelling message-type changes preserves the saved channel', async ({ page, api }) => {
+  await page.goto('/settings/notifications');
+  await page.getByRole('button', { name: '编辑 Telegram 通知渠道', exact: true }).click();
+  const types = page.locator('[data-field="telegram_notify_types"]');
+  const originalTypes = await types.locator('.v-chip__content').allTextContents();
+  await types.locator('.v-field__clearable').click();
+  await page.getByLabel('名称', { exact: true }).fill(' ');
+  await page.getByRole('button', { name: '确定', exact: true }).click();
+  await expect(page.getByText('通知渠道名称不能为空', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '关闭通知渠道', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '取消', exact: true }).click();
+  await page.getByRole('button', { name: '编辑 Telegram 通知渠道', exact: true }).click();
+  await expect(page.getByLabel('名称', { exact: true })).toHaveValue('Telegram');
+  await expect(types.locator('.v-chip__content')).toHaveText(originalTypes);
+  expect(api.requests.filter(request => request.method === 'POST')).toEqual([]);
 });

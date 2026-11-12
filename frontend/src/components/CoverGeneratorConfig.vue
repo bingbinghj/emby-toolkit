@@ -23,7 +23,7 @@
             <VAvatar color="primary" variant="tonal" rounded><VIcon icon="mdi-tune-variant" /></VAvatar>
           </template>
           <template #append>
-            <VBtn variant="tonal" prepend-icon="mdi-content-save-outline" :loading="isSaving" @click="saveConfig('basic')">保存基础设置</VBtn>
+            <VBtn color="default" variant="text" prepend-icon="mdi-content-save-outline" :loading="isSaving" @click="saveConfig('basic')">保存</VBtn>
           </template>
         </VCardItem>
         <VCardText>
@@ -68,7 +68,7 @@
             <VAvatar color="primary" variant="tonal" rounded><VIcon icon="mdi-image-edit-outline" /></VAvatar>
           </template>
           <template #append>
-            <VBtn variant="tonal" prepend-icon="mdi-content-save-outline" :loading="isSaving" @click="saveConfig(configData.tab || 'style-tab')">{{ sectionSaveLabel }}</VBtn>
+            <VBtn color="default" variant="text" prepend-icon="mdi-content-save-outline" :loading="isSaving" @click="saveConfig(configData.tab || 'style-tab')">保存</VBtn>
           </template>
         </VCardItem>
         <VTabs v-model="configData.tab" class="px-4" color="primary" show-arrows>
@@ -149,7 +149,7 @@
 </template>
 
 <script setup>
-import { computed, ref, onMounted, onBeforeUnmount, watch } from 'vue';
+import { ref, onMounted, onBeforeUnmount, watch } from 'vue';
 import axios from 'axios';
 import { useMessage } from '@/composables/useFeedback';
 import * as yaml from 'js-yaml'; // ★ 新增：导入 js-yaml
@@ -205,7 +205,6 @@ const sectionFields = {
   'multi-1-tab': ['zh_font_path_multi_1_local', 'en_font_path_multi_1_local', 'zh_font_url_multi_1', 'en_font_url_multi_1', 'zh_font_size_multi_1', 'en_font_size_multi_1', 'blur_size_multi_1', 'color_ratio_multi_1', 'multi_1_blur', 'multi_1_use_main_font', 'multi_1_use_primary'],
   'others-tab': ['covers_input', 'covers_output'],
 };
-const sectionSaveLabel = computed(() => ({ 'style-tab': '保存封面风格', 'title-tab': '保存封面标题', 'single-tab': '保存单图风格', 'multi-1-tab': '保存多图风格', 'others-tab': '保存其他设置' }[configData.value.tab || 'style-tab']));
 const ratingLimitOptions = ref([]);
 // ★ 新增：用于封面标题UI的结构化数据
 const titleConfigs = ref([]);

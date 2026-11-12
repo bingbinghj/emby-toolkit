@@ -1,0 +1,10 @@
+{% if type == "音乐" and artist %}
+🎤 艺术家：{{ artist }}{% endif %}{% if type == "音乐" and album %}
+💿 专辑：{{ album }}{% endif %}{% if type == "音乐" and audio_specs %}
+🔊 音质：{{ audio_specs }}{% endif %}{% if type != "音乐" and season_episode %}
+📺 集数：{{ season_episode }}{% endif %}{% if category %}
+🎭 类别：{{ category }}{% endif %}{% if releaseGroup %}
+👥 小组：{{ releaseGroup }}{% endif %}{% if resource_term %}
+🌟 质量：{{ webSource }} {{ resource_term }}{% if audioCodec %} {{ audioCodec }}{% endif %}{% endif %}
+💾 大小：{{ total_size }}{% if err_msg %}
+⚠️ 失败：{{ err_msg }}{% endif %}

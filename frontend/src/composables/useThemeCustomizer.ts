@@ -336,11 +336,6 @@ const activeSettings = computed(() => settingsState.value)
 export const themeCustomizerSettings = readonly(activeSettings)
 const glassEffectsEnabled = computed(() => activeSettings.value.glassEnabled)
 
-/** Shared glass switch; the setting applies to the browser interface. */
-export function useGlassEffectsEnabled() {
-  return readonly(glassEffectsEnabled)
-}
-
 type ThemeCustomizerGlassSettings = Pick<
   ThemeCustomizerSettings,
   | 'glassAppearance'

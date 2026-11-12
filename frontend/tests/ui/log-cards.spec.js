@@ -11,7 +11,7 @@ const task = { is_running: false, state: 'failed', last_action: '日志卡片验
 async function openLogs(page, api) {
   api.setTask(task);
   await page.goto('/dashboard');
-  await page.getByRole('button', { name: '通知中心', exact: true }).click();
+  await page.getByRole('button', { name: '实时日志', exact: true }).click();
   await expect(page.locator('.notification-log .log-record-body').first()).toHaveText(longBody);
 }
 
@@ -106,7 +106,7 @@ test('history cards paginate, filter errors and search complete contexts without
 
 test('paused live following freezes the visible records until returning to newest', async ({ page, api }) => {
   await openLogs(page, api);
-  await page.getByLabel('自动跟随日志', { exact: true }).uncheck();
+  await page.getByRole('button', { name: '暂停日志流', exact: true }).click();
   api.setTask({ ...task, logs: [...task.logs, '[12:31:00] [INFO] 后续日志完整结尾'] });
   await expect(page.getByRole('button', { name: '有新日志 · 回到最新', exact: true })).toBeVisible();
   await expect(page.getByText('后续日志完整结尾', { exact: true })).toHaveCount(0);

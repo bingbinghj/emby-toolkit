@@ -4,7 +4,7 @@
     <VCard class="fingerprint-report">
       <VCardTitle class="d-flex align-center justify-space-between ga-3">
         <span>最新指纹扫描报告</span>
-        <VBtn icon="mdi-close" variant="text" size="small" aria-label="关闭指纹扫描报告" @click="$emit('update:show', false)" />
+        <VBtn icon="mdi-close" variant="text" color="default" size="small" aria-label="关闭指纹扫描报告" @click="$emit('update:show', false)" />
       </VCardTitle>
       <VCardText class="report-content">
         <div class="report-actions">

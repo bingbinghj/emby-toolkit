@@ -1,4 +1,3 @@
-import { readonly, ref } from 'vue'
 import type { useTheme } from 'vuetify'
 
 const checkPrefersColorSchemeIsDark = () =>
@@ -47,10 +46,6 @@ export function readThemePreference(): ThemePreference {
     return 'auto'
   }
 }
-
-const appearancePreference = ref<ThemePreference>(readThemePreference())
-/** 向原生导航发布用户偏好，区分手动明暗与跟随系统。 */
-export const glassAppearancePreference = readonly(appearancePreference)
 
 /** 返回玻璃主题和浏览器原生控件当前应使用的明暗配色。 */
 export function getThemeColorScheme(preference: unknown = readThemePreference()): ThemeColorScheme {
@@ -167,7 +162,6 @@ export function applyGlassThemePalette(
   themeApi: ReturnType<typeof useTheme>,
   preference: ThemePreference = readThemePreference(),
 ) {
-  appearancePreference.value = preference
   const palette = getGlassThemePalette(getThemeColorScheme(preference))
   for (const name of ['glass', 'plain']) {
     const theme = themeApi.themes.value[name]
@@ -223,7 +217,6 @@ export function applyDocumentThemeChrome(
   options: ApplyDocumentThemeChromeOptions = {},
 ) {
   const preference = normalizeThemePreference(themePreference)
-  appearancePreference.value = preference
   const resolvedTheme = options.glassEnabled === false ? 'plain' : 'glass'
   const colorScheme = getThemeColorScheme(preference)
   const palette = getGlassThemePalette(colorScheme).colors

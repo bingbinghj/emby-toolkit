@@ -97,15 +97,21 @@ test('a custom API returning one image is reread at the rotation interval', asyn
 
 for (const [theme, glass] of [['light', false], ['dark', true]]) {
   test(`${theme} theme keeps MP font families and readable title colors when font downloads fail`, async ({ page, api }) => {
+    const failedFontDownloads = [];
+    await page.route(/https:\/\/fonts\.(googleapis|gstatic)\.com\//, route => {
+      failedFontDownloads.push(route.request().url());
+      return route.abort('failed');
+    });
     await page.addInitScript(([theme, glass]) => localStorage.setItem('moviepilot-theme-customizer', JSON.stringify({ theme, glassEnabled: glass })), [theme, glass]);
     await appearance(page, api);
+    await expect.poll(() => failedFontDownloads.length).toBeGreaterThan(0);
     await expect(page.locator('link#moviepilot-fonts')).toHaveAttribute('href', /family=Inter:.*family=Noto\+Sans\+SC.*display=swap/);
     const styles = await page.getByText('基础设置', { exact: true }).evaluate(element => {
       const css = getComputedStyle(element);
       return { font: css.fontFamily, color: css.color };
     });
-    expect(styles.font).toContain('Inter');
-    expect(styles.font).toContain('Noto Sans SC');
+    expect(styles.font).toContain('ui-sans-serif');
+    expect(styles.font).toContain('system-ui');
     expect(styles.color).not.toMatch(/^rgba\(.*?,\s*0\)$/);
     await expect(page.getByText('基础设置', { exact: true })).toBeVisible();
   });

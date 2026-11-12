@@ -39,14 +39,23 @@ async fn count(state: &AppState, user: &str, kind: &str) -> Result<u64> {
         .ok_or_else(|| ApiError::bad("Emby 未返回有效媒体统计"))
 }
 
+async fn music_count(state: &AppState, user: &str) -> Result<u64> {
+    // MoviePilot reports albums when Emby has album records, then falls back
+    // to songs for libraries without them.
+    match count(state, user, "MusicAlbum").await? {
+        0 => count(state, user, "Audio").await,
+        albums => Ok(albums),
+    }
+}
+
 async fn statistics(state: &AppState, user: &str) -> Value {
     let mut result = json!({});
-    let values = futures_util::future::join_all(
-        ["Movie", "Series", "Episode", "Audio"]
-            .iter()
-            .map(|kind| count(state, user, kind)),
-    )
-    .await;
+    let (movies, series, episodes, music) = tokio::join!(
+        count(state, user, "Movie"),
+        count(state, user, "Series"),
+        count(state, user, "Episode"),
+        music_count(state, user)
+    );
     for ((key, _), value) in [
         ("movie_count", "Movie"),
         ("tv_count", "Series"),
@@ -54,11 +63,34 @@ async fn statistics(state: &AppState, user: &str) -> Value {
         ("music_count", "Audio"),
     ]
     .into_iter()
-    .zip(values)
+    .zip([movies, series, episodes, music])
     {
         match value {
             Ok(count) => result[key] = json!({"count":count}),
             Err(error) => result[key] = json!({"count":null,"error":error.1}),
+        }
+    }
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        crate::media_organize_history::monthly_statistics(state, chrono::Local::now()),
+    )
+    .await
+    {
+        Ok(Ok(monthly)) => {
+            for key in ["movie_count", "tv_count", "episode_count", "music_count"] {
+                result[key]["month_count"] = monthly[key].clone();
+            }
+            result["month"] = monthly["month"].clone();
+        }
+        error => {
+            let reason = match error {
+                Ok(Err(error)) => error.1,
+                _ => "本月入库统计读取超时".into(),
+            };
+            for key in ["movie_count", "tv_count", "episode_count", "music_count"] {
+                result[key]["month_count"] = Value::Null;
+            }
+            result["month"] = json!({"period":chrono::Local::now().format("%Y-%m").to_string(),"state":"unavailable","source":"etk-history","error":reason});
         }
     }
     result

@@ -19,6 +19,10 @@ test('checked settings directory remains synchronized with actual field labels a
   assert.ok(byField.emby_metadata_path.keywords.some(word => word.includes('metadata')));
   assert.ok(byField.ai_model_name.keywords.some(word => word.includes('指定使用的LLM模型')));
   assert.ok(!byField.min_score_for_review);
+  assert.ok(!byField.emby_public_url);
+  assert.equal(byField.monitor_sha1_pc_search.card, '目录');
+  assert.equal(byField.tmdb_image_language_preference.card, '整理 & 刮削');
+  assert.equal(byField.auto_extract_credits_on_ingest.label, '入库完成后提取片尾');
   for (const field of ['ai_translate_actor_role', 'ai_translate_on_sync', 'ai_translate_title', 'ai_translate_overview', 'ai_translate_episode_overview', 'ai_joke_fallback', 'libraries_to_ignore']) assert.ok(byField[field]);
 });
 

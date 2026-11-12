@@ -24,7 +24,10 @@ async fn telegram(
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> Result<(StatusCode, Json<Value>)> {
-    let token = string(&body, "token");
+    let mut token = string(&body, "token");
+    if token == "********" {
+        token = string(&*state.config.read().await, "telegram_bot_token");
+    }
     let chat = match &body["chat_id"] {
         Value::String(value) => value.clone(),
         Value::Number(value) if value.as_i64() != Some(0) => value.to_string(),
@@ -36,7 +39,7 @@ async fn telegram(
             Json(json!({"success":false,"message":"缺少 Token 或 Chat ID"})),
         ));
     }
-    crate::notifications::test_message(&state, &token, &chat_id(&chat)).await?;
+    crate::notifications::test_message_draft(&state, token.trim(), &chat_id(&chat), &body).await?;
     Ok((
         StatusCode::OK,
         Json(json!({"success":true,"message":"测试消息发送成功！请检查您的 Telegram。"})),

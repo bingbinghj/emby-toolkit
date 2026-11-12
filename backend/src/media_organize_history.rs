@@ -11,6 +11,7 @@ use axum::{
     extract::{Query, State},
     routing::get,
 };
+use chrono::{Datelike, TimeZone};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -20,6 +21,92 @@ use std::{
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/api/media_organize/history", get(history))
+}
+
+/// MP counts successful transfer history in the server's current calendar month.
+/// ETK records one file per row and both sides of MP/Emby admission, so a source
+/// file is counted once rather than counting its preparation and finalization twice.
+pub async fn monthly_statistics(
+    state: &AppState,
+    now: chrono::DateTime<chrono::Local>,
+) -> Result<Value> {
+    let date = now.date_naive().with_day(1).unwrap();
+    let midnight = |date: chrono::NaiveDate| -> Result<chrono::DateTime<chrono::Utc>> {
+        chrono::Local
+            .from_local_datetime(&date.and_hms_opt(0, 0, 0).unwrap())
+            .earliest()
+            .map(|time| time.with_timezone(&chrono::Utc))
+            .ok_or_else(|| ApiError::bad("无法确定本月入库统计的时间边界"))
+    };
+    let start = midnight(date)?;
+    let end = midnight(
+        date.checked_add_months(chrono::Months::new(1))
+            .ok_or_else(|| ApiError::bad("本月入库统计日期无效"))?,
+    )?;
+    let records: Vec<Value> = sqlx::query_scalar("SELECT DISTINCT ON (source_identity) item_json || jsonb_build_object('item_id',item_id,'source_identity',source_identity) FROM media_organize_history WHERE status IN ('success','warning') AND created_at >= $1 AND created_at < $2 ORDER BY source_identity,created_at DESC,id DESC")
+        .bind(start).bind(end).fetch_all(&state.db).await?;
+    let mut movies = BTreeSet::new();
+    let mut shows = BTreeSet::new();
+    let mut music = BTreeSet::new();
+    let mut episodes = 0_u64;
+    for item in records {
+        let year = item["production_year"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| {
+                item["production_year"]
+                    .as_i64()
+                    .map(|year| year.to_string())
+            })
+            .unwrap_or_default();
+        let fallback = string(&item, "source_identity");
+        match item["item_type"].as_str() {
+            Some("Movie") => {
+                let name = string(&item, "name");
+                let source = string(&item, "media_source");
+                let media_id = string(&item, "media_id");
+                movies.insert((
+                    source,
+                    media_id.clone(),
+                    if name.is_empty() && media_id.is_empty() {
+                        fallback
+                    } else {
+                        name
+                    },
+                    year,
+                ));
+            }
+            Some("Episode") => {
+                let series_id = string(&item, "series_id");
+                let name = string(&item, "series_name");
+                shows.insert(if series_id.is_empty() {
+                    (
+                        series_id,
+                        if name.is_empty() { fallback } else { name },
+                        year,
+                    )
+                } else {
+                    (series_id, String::new(), String::new())
+                });
+                episodes += 1;
+            }
+            Some("Audio") => {
+                music.insert(fallback);
+            }
+            _ => {}
+        }
+    }
+    let since = crate::db::setting(&state.db, "media_organize_history_started_at")
+        .await?
+        .unwrap_or(Value::Null);
+    let partial = since
+        .as_str()
+        .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
+        .is_none_or(|time| time.with_timezone(&chrono::Utc) > start);
+    Ok(
+        json!({"movie_count":movies.len(),"tv_count":shows.len(),"episode_count":episodes,"music_count":music.len(),
+        "month":{"period":now.format("%Y-%m").to_string(),"state":"recording","source":"etk-history","recording_since":since,"partial":partial}}),
+    )
 }
 
 pub async fn interrupt_unfinished(pool: &sqlx::PgPool) -> Result<()> {
@@ -73,6 +160,13 @@ fn item_projection(item: &Value) -> Value {
     let kind = string(item, "Type");
     let mut result = json!({"item_id": if valid_id(&id) && matches!(kind.as_str(), "Movie" | "Episode") {Some(id)} else {None},
         "name":safe_text(&string(item,"Name")), "item_type":kind});
+    if result["item_type"] == "Movie" {
+        let tmdb = string(&item["ProviderIds"], "Tmdb");
+        if !tmdb.is_empty() && tmdb.bytes().all(|byte| byte.is_ascii_digit()) {
+            result["media_source"] = json!("tmdb");
+            result["media_id"] = json!(tmdb);
+        }
+    }
     if let Some(tag) = item["ImageTags"]["Primary"].as_str() {
         result["image_tag"] = json!(tag);
     }

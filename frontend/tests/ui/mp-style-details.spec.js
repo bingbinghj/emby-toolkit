@@ -2,7 +2,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { test, expect } from './fixtures.js';
 import { measureReadingContrast } from './reading-contrast.js';
 
-const artifactRoot = '/root/emby-toolkit-mp-followup-verification/style';
+const artifactRoot = '/root/emby-toolkit-nov11-verification/style';
 mkdirSync(artifactRoot, { recursive: true });
 const themes = [
   { name: 'plain-light', theme: 'light', glassEnabled: false },
@@ -118,7 +118,7 @@ for (const theme of themes) test(`${theme.name} confirmation text and settings h
   await page.getByRole('button', { name: '编辑 Telegram 通知渠道', exact: true }).click();
   const confirm = page.getByRole('button', { name: '确定', exact: true });
   await expect(confirm.locator('.v-btn__content')).toHaveCSS('font-size', '14px');
-  await expect(confirm.locator('.v-btn__content')).toHaveCSS('font-family', /Inter.*Noto Sans SC/);
+  await expect(confirm.locator('.v-btn__content')).toHaveCSS('font-family', /ui-sans-serif.*system-ui/);
   await readable(page, `${theme.name}-notification-confirm`, [{ role: 'channel confirmation', locator: confirm.locator('.v-btn__content') }]);
   await page.getByRole('button', { name: '关闭通知渠道', exact: true }).click();
   api.respond('GET', '/api/media_organize/history', { items: [{ id: '00000000-0000-4000-8000-000000000101',
@@ -128,7 +128,7 @@ for (const theme of themes) test(`${theme.name} confirmation text and settings h
   await page.getByTestId('organize-selected').click();
   const organize = page.getByTestId('organize-confirm');
   await expect(organize.locator('.v-btn__content')).toHaveCSS('font-size', '14px');
-  await expect(organize.locator('.v-btn__content')).toHaveCSS('font-family', /Inter.*Noto Sans SC/);
+  await expect(organize.locator('.v-btn__content')).toHaveCSS('font-family', /ui-sans-serif.*system-ui/);
   await readable(page, `${theme.name}-organize-confirm`, [{ role: 'organize confirmation', locator: organize.locator('.v-btn__content') }]);
   expect(api.requests.filter(request => request.method === 'POST' && request.path !== '/api/config/rename_preview' && !request.path.startsWith('/api/dashboard/layout/'))).toEqual([]);
 });

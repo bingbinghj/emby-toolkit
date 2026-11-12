@@ -52,7 +52,7 @@ function fixture(overrides = {}) {
     window: { innerWidth: 1200, location: { origin: 'https://etk.test' }, screen: { width: 1200, height: 800 }, open: overrides.open || (() => null), removeEventListener() {} },
     useDisplay: () => ({ smAndDown: { value: false } }),
     useRoute: () => ({ query: { tab: 'system' } }),
-    useSettingsSearch: () => ({ query: { value: '' }, results: { value: [] }, notice: { value: '' }, showCard: () => true }),
+    useSettingsSearch: () => ({ query: { value: '' }, results: { value: [] }, selected: { value: null }, notice: { value: '' }, showCard: () => true }),
     useMessage: () => toast, useDialog: () => ({ warning() {}, success() {}, error() {} }),
     useConfig: () => ({
       configModel: { value: model }, loadingConfig: { value: false }, savingConfig: { value: false }, configError: { value: '' },
@@ -60,7 +60,8 @@ function fixture(overrides = {}) {
     }), axios,
   });
   vm.runInContext(source + '\n' + `globalThis.page = {
-    saveCard, formRef, cardFields, configModel, handleImportFileSelection, fileToImport,
+    saveCard, formRef, cardFields, configModel, openMediaServerDialog, saveMediaServer, mediaServerFormRef,
+    mediaServerDraft, mediaServerDialogOpen, handleImportFileSelection, fileToImport,
     tablesToImport, handleImportSelectionChange, startImportProcess, openLocalFolderSelector,
     confirmLocalFolder, currentLocalPath, currentP115Cid, currentP115Path, confirmP115Folder,
     openQrcodeModal, closeQrcodeModal, qrcodeStatus, showQrcodeModal, componentIsMounted,
@@ -71,6 +72,7 @@ function fixture(overrides = {}) {
   };`, context);
   context.page.componentIsMounted.value = true;
   context.page.formRef.value = { validate: async () => ({ valid: overrides.valid ?? true }) };
+  context.page.mediaServerFormRef.value = context.page.formRef.value;
   return { page: context.page, requests, messages, intervals, timeouts, disposals };
 }
 
@@ -86,10 +88,42 @@ test('native settings card submits only its declared fields and leaves unrelated
 
 test('Vuetify invalid form result blocks only the Emby card', async () => {
   const f = fixture({ valid: false });
-  await f.page.saveCard('emby');
+  f.page.openMediaServerDialog();
+  await f.page.saveMediaServer();
   assert.equal(f.requests.length, 0);
   await f.page.saveCard('basic');
   assert.equal(f.requests.filter(item => item.method === 'SAVE').length, 1);
+});
+
+test('image language and SHA1 save independently while filesystem monitoring is disabled', async () => {
+  const f = fixture();
+  Object.assign(f.page.configModel.value, {
+    monitor_enabled: false, tmdb_image_language_preference: 'original', monitor_sha1_pc_search: false,
+    auto_extract_credits_on_ingest: true,
+  });
+  await f.page.saveCard('monitor');
+  const monitor = f.requests.find(item => item.method === 'SAVE').body;
+  assert.equal(monitor.monitor_enabled, false);
+  assert.equal(monitor.tmdb_image_language_preference, undefined);
+  assert.equal(monitor.monitor_sha1_pc_search, undefined);
+  await f.page.saveCard('rename');
+  const image = f.requests.filter(item => item.method === 'SAVE')[1].body;
+  assert.equal(image.tmdb_image_language_preference, 'original');
+  assert.equal(image.monitor_enabled, undefined);
+  await f.page.saveCard('fingerprints');
+  const fingerprint = f.requests.filter(item => item.method === 'SAVE')[2].body;
+  assert.equal(fingerprint.monitor_sha1_pc_search, false);
+  assert.equal(fingerprint.monitor_enabled, undefined);
+  await f.page.saveCard('ingest');
+  assert.equal(f.requests.filter(item => item.method === 'SAVE')[3].body.auto_extract_credits_on_ingest, true);
+});
+
+test('removed external playback URL cannot be submitted by media server settings', async () => {
+  const f = fixture();
+  f.page.configModel.value.emby_public_url = 'https://legacy.example.invalid';
+  f.page.openMediaServerDialog();
+  await f.page.saveMediaServer();
+  assert.equal(f.requests.find(item => item.method === 'SAVE').body.emby_public_url, undefined);
 });
 
 test('VFileInput File array reaches multipart preview and selected table import unchanged', async () => {

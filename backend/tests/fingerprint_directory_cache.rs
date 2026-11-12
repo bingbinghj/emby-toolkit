@@ -107,7 +107,7 @@ async fn batch_reuses_complete_parent_pages_but_reads_current_files_and_new_root
     let emby_root = directory.path().to_string_lossy().to_string();
     let emby = Router::new().route("/Users/admin/Items/{id}", get(move |Path(id): Path<String>| {
         let root = emby_root.clone();
-        async move { Json(json!({"Id":id,"Type":"Movie","Path":format!("{root}/Film/{id}.strm"),"Size":100})) }
+        async move { Json(json!({"Id":id,"Type":"Movie","Path":format!("{root}/Film/{id}.strm"),"Size":17,"MediaSources":[{"ItemId":id,"Path":format!("/cd2/Film/{id}.mkv"),"Container":"mkv","Size":100}]})) }
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let emby_address = listener.local_addr().unwrap();

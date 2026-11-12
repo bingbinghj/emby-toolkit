@@ -5,7 +5,7 @@ import { installFrameCaptureGate, stepCaptureFrame, resumeCaptureFrames } from '
 
 test.describe.configure({ timeout: 180_000 });
 test.use({ trace: { mode: 'retain-on-failure', screenshots: false, snapshots: false, sources: true } });
-const artifactRoot = '/root/emby-toolkit-mp-followup-verification/theme';
+const artifactRoot = '/root/emby-toolkit-nov11-verification/theme';
 mkdirSync(artifactRoot, { recursive: true });
 
 for (const [appearance, quality] of [['clear', 'css'], ['tinted', 'css'], ['frosted', 'css'], ['clear', 'balanced']]) {

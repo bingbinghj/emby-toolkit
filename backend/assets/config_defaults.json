@@ -90,6 +90,11 @@
   "log_rotation_backup_count": 10,
   "telegram_bot_token": "",
   "telegram_channel_id": "",
+  "telegram_channel_name": "Telegram",
+  "telegram_api_url": "",
+  "telegram_topic_id": "",
+  "telegram_users": "",
+  "telegram_admins": "",
   "tg_menu_tasks": [
     "populate-metadata",
     "enrich-aliases",
@@ -120,5 +125,6 @@
   "notification_time": {
     "start": "00:00",
     "end": "23:59"
-  }
+  },
+  "auto_extract_credits_on_ingest": false
 }

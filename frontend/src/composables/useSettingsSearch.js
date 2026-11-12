@@ -45,7 +45,7 @@ export function useSettingsSearch(scope, options = {}) {
     const entry = selected.value;
     if (!entry || entry.route !== scope || options.ready?.value === false) return;
     if (scope === 'general' && (route.query.tab || 'system') !== entry.category) return;
-    if (scope === 'notification' && ['notification_channel', 'telegram_enabled', 'telegram_bot_token', 'telegram_channel_id', 'telegram_chat_id'].includes(entry.field)) {
+    if (scope === 'notification' && (entry.field === 'notification_channel' || entry.field.startsWith('telegram_'))) {
       if (!await options.openChannel?.()) {
         notice.value = '通知渠道尚不可编辑，请先核对页面中的读取错误。';
         return;

@@ -44,6 +44,9 @@ export function useConfig() {
       configError.value = '配置数据为空，无法保存。';
       return false;
     }
+    const originalFields = JSON.parse(JSON.stringify(Object.fromEntries(
+      Object.keys(payload).map(field => [field, configModel.value?.[field]])
+    )));
 
     savingConfig.value = true;
     configError.value = null;
@@ -56,7 +59,7 @@ export function useConfig() {
       const savedFields = response.data?.saved_fields || payload;
       for (const [field, savedValue] of Object.entries(savedFields)) {
         // 保存期间继续编辑的草稿不应被旧请求结果覆盖。
-        if (JSON.stringify(configModel.value[field]) === JSON.stringify(payload[field])) {
+        if (Object.hasOwn(payload, field) && JSON.stringify(configModel.value[field]) === JSON.stringify(originalFields[field])) {
           configModel.value[field] = savedValue;
         }
       }

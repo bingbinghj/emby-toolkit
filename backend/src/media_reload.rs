@@ -604,6 +604,7 @@ pub(crate) async fn recover_record(
         .collect::<BTreeSet<_>>();
     let mut files = BTreeMap::new();
     let mut thumbnails = BTreeMap::new();
+    let mut native_bifs = BTreeMap::<String, Vec<BifEvidence>>::new();
     let mut image_times = BTreeMap::<String, BTreeSet<u64>>::new();
     let mut audio_complete = BTreeMap::new();
     for audio in media_edit::list(&record["audio_complete"]) {
@@ -645,13 +646,17 @@ pub(crate) async fn recover_record(
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("bif"))
         {
-            let times = recovery_bif_times(&tokio::fs::read(&backup).await?)?;
+            let bytes = tokio::fs::read(&backup).await?;
+            let frames = recovery_bif_times(&bytes)?.as_array().unwrap().len();
             for id in &ids {
-                if thumbnails.get(id).is_none_or(|old: &Value| {
-                    old.as_array().unwrap().len() < times.as_array().unwrap().len()
-                }) {
-                    thumbnails.insert(id.clone(), times.clone());
-                }
+                native_bifs
+                    .entry(id.clone())
+                    .or_default()
+                    .push(BifEvidence {
+                        path: path.clone(),
+                        bytes: bytes.clone(),
+                        frames,
+                    });
             }
         }
         if path.components().any(|part| part.as_os_str() == "chapters")
@@ -698,8 +703,16 @@ pub(crate) async fn recover_record(
         {
             return Err(conflict("BIF 桥接位置与当前媒体文件不一致"));
         }
-        let times = recovery_bif_times(&tokio::fs::read(&backup).await?)?;
-        thumbnails.entry(id.clone()).or_insert(times);
+        let bytes = tokio::fs::read(&backup).await?;
+        let frames = recovery_bif_times(&bytes)?.as_array().unwrap().len();
+        let evidence = native_bifs.entry(id.clone()).or_default();
+        if !evidence.iter().any(|original| original.path == path) {
+            evidence.push(BifEvidence {
+                path: path.clone(),
+                bytes,
+                frames,
+            });
+        }
         files.entry(path.clone()).or_insert(Snapshot {
             path,
             backup,
@@ -776,6 +789,7 @@ pub(crate) async fn recover_record(
             &finish,
             &before,
             &thumbnails,
+            &native_bifs,
         )
         .await?;
         for target in &targets {
@@ -1448,12 +1462,82 @@ fn thumbnail_times(response: &Value) -> Result<Value> {
     ))
 }
 
+struct BifEvidence {
+    path: PathBuf,
+    bytes: Vec<u8>,
+    frames: usize,
+}
+
+async fn local_bif_difference(evidence: &[BifEvidence]) -> Result<Option<String>> {
+    for original in evidence {
+        check_ancestors(&original.path).await?;
+        if !tokio::fs::symlink_metadata(&original.path)
+            .await
+            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+            || tokio::fs::read(&original.path).await? != original.bytes
+        {
+            return Ok(Some(format!(
+                "原有 BIF 资源未完整恢复：{}",
+                original.path.display()
+            )));
+        }
+    }
+    Ok(None)
+}
+
+async fn native_bif_difference(
+    state: &AppState,
+    id: &str,
+    evidence: &[BifEvidence],
+) -> Result<Option<String>> {
+    if let Some(difference) = local_bif_difference(evidence).await? {
+        return Ok(Some(difference));
+    }
+    // RokuMetadata.BifService builds ThumbnailSet from the filename interval
+    // and runtime; those synthetic positions are not the BIF frame index.
+    // The binary endpoint exposes the actual index and JPEG bytes. Width=0
+    // avoids its strict <= width filter returning an empty BIF for 1920px art.
+    let config = state.config.read().await.clone();
+    let response = crate::emby::send(
+        state
+            .http
+            .get(format!(
+                "{}/Videos/{id}/index.bif",
+                string(&config, "emby_server_url").trim_end_matches('/')
+            ))
+            .header("X-Emby-Token", string(&config, "emby_api_key"))
+            .query(&[("Width", "0")]),
+    )
+    .await?
+    .error_for_status()?;
+    let actual = response.bytes().await?;
+    if evidence.iter().any(|original| original.bytes == actual) {
+        // A second BIF may change while Emby sends a still-matching first one.
+        return local_bif_difference(evidence).await;
+    }
+    let expected = evidence
+        .iter()
+        .map(|original| original.frames)
+        .collect::<BTreeSet<_>>();
+    // The whole-byte comparison above is the acceptance check. Do not decode
+    // every original JPEG again merely to format a failed readback's count.
+    let actual_count = actual
+        .get(12..16)
+        .filter(|_| actual.get(..8) == Some(b"\x89BIF\r\n\x1a\n"))
+        .map(|count| u32::from_le_bytes(count.try_into().unwrap()).to_string())
+        .unwrap_or_else(|| "空或无效".into());
+    Ok(Some(format!(
+        "原有 BIF 缩略图集合未恢复：原生时间索引或图片内容与备份不一致（备份帧数 {expected:?}，回读帧数 {actual_count}）"
+    )))
+}
+
 async fn verify_reloaded(
     state: &AppState,
     targets: &[&SavedTarget],
     context: &JobContext,
     before: &BTreeMap<String, Value>,
     thumbnails: &BTreeMap<String, Value>,
+    native_bifs: &BTreeMap<String, Vec<BifEvidence>>,
 ) -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut pending = targets
@@ -1525,6 +1609,21 @@ async fn verify_reloaded(
                 .map_err(|_| conflict("BIF 缩略图回读超时，恢复备份已保留"))??;
                 if thumbnail_times(&readback)? != *expected {
                     reasons.push("原有 BIF 缩略图集合未恢复".into());
+                }
+            }
+            if let Some(evidence) = native_bifs.get(&target.id) {
+                let readback = tokio::time::timeout_at(
+                    deadline,
+                    native_bif_difference(state, &target.id, evidence),
+                )
+                .await;
+                let difference = match readback {
+                    Ok(result) => result?,
+                    Err(_) if !pending[&target.id].is_empty() => break,
+                    Err(_) => return Err(conflict("原生 BIF 回读超时，恢复备份已保留")),
+                };
+                if let Some(difference) = difference {
+                    reasons.push(difference);
                 }
             }
             if reasons.is_empty() {
@@ -1909,8 +2008,15 @@ pub(crate) async fn reload(
         if let Err(error) = restore_files(&resource_files, &synchronized).await {
             failures.push(error.1);
         }
-        let verified =
-            verify_reloaded(state, &ready, &recovery_context, &observations, &thumbnails).await;
+        let verified = verify_reloaded(
+            state,
+            &ready,
+            &recovery_context,
+            &observations,
+            &thumbnails,
+            &BTreeMap::new(),
+        )
+        .await;
         let verified_ok = verified.is_ok();
         if let Err(error) = verified {
             failures.push(error.1);

@@ -22,6 +22,7 @@ async fn fixture(failure: &str) -> (Value, Vec<HashMap<String, String>>) {
                     }
                     let kind = query.get("IncludeItemTypes").unwrap();
                     if failure == "count" && kind == "Episode" { return Json(json!({"TotalRecordCount":"bad"})); }
+                    if failure == "music-no-albums" && kind == "MusicAlbum" { return Json(json!({"TotalRecordCount":0})); }
                     return Json(json!({"Items":[],"TotalRecordCount":match kind.as_str(){"Movie"=>11,"Series"=>7,"Episode"=>42,_=>3}}));
                 }
                 Json(json!({"Items":[]}))
@@ -56,8 +57,10 @@ async fn fixture(failure: &str) -> (Value, Vec<HashMap<String, String>>) {
     let upstream = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let root = tempfile::tempdir().unwrap();
+    let db = sqlx::PgPool::connect_lazy("postgres://localhost/unused").unwrap();
+    db.close().await;
     let state = AppState {
-        db: sqlx::PgPool::connect_lazy("postgres://localhost/unused").unwrap(),
+        db,
         config: Arc::new(RwLock::new(
             json!({"emby_server_url":upstream,"emby_api_key":"fixture","emby_user_id":"admin"}),
         )),
@@ -104,6 +107,12 @@ async fn dashboard_reads_emby_counts_latest_and_library_primary_artwork() {
     assert_eq!(value["statistics"]["movie_count"]["count"], 11);
     assert_eq!(value["statistics"]["episode_count"]["count"], 42);
     assert_eq!(value["statistics"]["music_count"]["count"], 3);
+    assert!(value["statistics"]["movie_count"]["month_count"].is_null());
+    assert_eq!(value["statistics"]["month"]["state"], "unavailable");
+    assert!(
+        value["statistics"]["month"]["error"].is_string(),
+        "an unavailable admission database must not invent a monthly zero from Emby totals"
+    );
     assert_eq!(value["recent"][0]["id"], "101");
     assert_eq!(value["recent"][0]["image_tag"], "emby-poster");
     assert!(value["recent"][0].get("Path").is_none());
@@ -137,6 +146,30 @@ async fn failed_library_counts_remain_unknown_with_actionable_error() {
     assert!(value["libraries"][0]["count_error"].is_string());
     assert_eq!(value["libraries"][0]["image_tag"], "emby-library-composite");
     assert_eq!(value["statistics"]["movie_count"]["count"], 11);
+}
+
+#[tokio::test]
+async fn music_statistics_follow_moviepilots_album_then_song_fallback() {
+    let (value, requests) = fixture("").await;
+    assert_eq!(value["statistics"]["music_count"]["count"], 3);
+    assert!(requests.iter().any(|query| {
+        query
+            .get("IncludeItemTypes")
+            .is_some_and(|kind| kind == "MusicAlbum")
+    }));
+    assert!(!requests.iter().any(|query| {
+        query
+            .get("IncludeItemTypes")
+            .is_some_and(|kind| kind == "Audio")
+    }));
+
+    let (value, requests) = fixture("music-no-albums").await;
+    assert_eq!(value["statistics"]["music_count"]["count"], 3);
+    assert!(requests.iter().any(|query| {
+        query
+            .get("IncludeItemTypes")
+            .is_some_and(|kind| kind == "Audio")
+    }));
 }
 
 #[tokio::test]

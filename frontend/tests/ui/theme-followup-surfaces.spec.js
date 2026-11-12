@@ -6,7 +6,7 @@ import { navbarInteractionRegion } from './navbar-interaction.js';
 
 test.describe.configure({ timeout: 180_000 });
 test.use({ trace: { mode: 'retain-on-failure', screenshots: false, snapshots: false, sources: true } });
-const artifactRoot = '/root/emby-toolkit-mp-followup-verification/theme';
+const artifactRoot = '/root/emby-toolkit-nov11-verification/theme';
 mkdirSync(artifactRoot, { recursive: true });
 const liveBody = '用户同步失败，请检查服务器连接。';
 const historyBody = '用户权限同步失败，请检查 Emby 连接。';
@@ -136,7 +136,7 @@ for (const [index, options] of cases.entries()) {
           { role: 'disabled user status', locator: disabled.locator('.v-chip__content').nth(1) },
           { role: 'user activity hint', locator: current.locator('.user-activity .text-medium-emphasis').first() },
         ]);
-        await page.getByRole('button', { name: '通知中心', exact: true }).click();
+        await page.getByRole('button', { name: '实时日志', exact: true }).click();
         await settle(page, options);
         const live = page.locator('.notification-log .log-record').first();
         await expect(live.locator('.log-record-body')).toHaveText(liveBody);
@@ -156,7 +156,7 @@ for (const [index, options] of cases.entries()) {
           { role: 'history log source', locator: history.locator('.log-record-module') },
           { role: 'history log file', locator: history.locator('.log-record-file') },
         ]);
-        await page.getByRole('button', { name: '关闭通知中心', exact: true }).click();
+        await page.getByRole('button', { name: '关闭实时日志', exact: true }).click();
         const libraryRendering = await openPage(page, options, '/library/movies', scheme);
         await expect(page.locator('.media-card-title').first()).toHaveText('浏览器验证电影');
         await record(page, captureId, 'library', libraryRendering, [

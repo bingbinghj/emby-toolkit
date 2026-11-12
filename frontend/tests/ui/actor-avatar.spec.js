@@ -1,7 +1,7 @@
 import { test, expect, mediaDetails } from './fixtures.js';
 import { measureReadingContrast } from './reading-contrast.js';
 
-const evidence = '/root/emby-toolkit-mp-followup-verification/actor-avatar';
+const evidence = '/root/emby-toolkit-nov11-verification/actor-avatar';
 const portrait = '<svg xmlns="http://www.w3.org/2000/svg" width="120" height="180"><rect width="120" height="60" fill="#9c3b35"/><rect y="60" width="120" height="60" fill="#2e7967"/><rect y="120" width="120" height="60" fill="#385f9d"/></svg>';
 
 async function loadActors(page, api, mode, width) {

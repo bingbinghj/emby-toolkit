@@ -49,14 +49,18 @@ pub fn commands(config: &Value) -> Value {
 }
 
 async fn call(state: &AppState, token: &str, method: &str, payload: &Value) -> Result<Value> {
+    let config = state.config.read().await.clone();
+    let api_base = crate::notifications::telegram_api_base(&config, &state.notifications.api_base)?;
+    let payload = if matches!(method, "sendMessage" | "sendPhoto" | "sendDocument") {
+        crate::notifications::topic_payload(&config, payload)?
+    } else {
+        payload.clone()
+    };
     let response = state
         .http
-        .post(format!(
-            "{}/bot{token}/{method}",
-            state.notifications.api_base
-        ))
+        .post(format!("{}/bot{token}/{method}", api_base))
         .timeout(Duration::from_secs(15))
-        .json(payload)
+        .json(&payload)
         .send()
         .await?;
     let status = response.status();
@@ -117,8 +121,21 @@ async fn execute(state: &AppState, token: &str, chat: &str, key: &str) -> Result
 }
 
 pub async fn handle_update(state: &AppState, token: &str, update: &Value) -> Result<()> {
-    let admins: BTreeSet<String> = sqlx::query_scalar::<_,String>("SELECT e.telegram_chat_id FROM emby_users u JOIN emby_users_extended e ON u.id=e.emby_user_id WHERE u.is_administrator=true AND e.telegram_chat_id IS NOT NULL AND e.telegram_chat_id!=''")
+    let config = state.config.read().await.clone();
+    if !config["telegram_enabled"].as_bool().unwrap_or(true) {
+        return Ok(());
+    }
+    let emby_admins: BTreeSet<String> = sqlx::query_scalar::<_,String>("SELECT e.telegram_chat_id FROM emby_users u JOIN emby_users_extended e ON u.id=e.emby_user_id WHERE u.is_administrator=true AND e.telegram_chat_id IS NOT NULL AND e.telegram_chat_id!='' AND COALESCE(e.status,'active')='active' AND COALESCE(u.policy_json->>'IsDisabled','false')='false'")
         .fetch_all(&state.db).await?.into_iter().collect();
+    let configured_admins = crate::notifications::principal_ids(&config, "telegram_admins")?;
+    let admins: BTreeSet<String> = emby_admins
+        .iter()
+        .filter(|id| configured_admins.is_empty() || configured_admins.contains(*id))
+        .cloned()
+        .collect();
+    let mut allowed = crate::notifications::principal_ids(&config, "telegram_users")?;
+    allowed.extend(configured_admins);
+    allowed.extend(emby_admins.iter().cloned());
     if let Some(callback) = update.get("callback_query") {
         let requester = id(&callback["from"]["id"]);
         if !admins.contains(&requester) {
@@ -158,7 +175,7 @@ pub async fn handle_update(state: &AppState, token: &str, update: &Value) -> Res
         if chat.is_empty() || text.is_empty() {
             return Ok(());
         }
-        if !admins.contains(&chat) && !admins.contains(&requester) {
+        if !allowed.contains(&requester) {
             tracing::warn!("[TG交互] 未授权聊天消息已忽略");
             return Ok(());
         }
@@ -170,6 +187,14 @@ pub async fn handle_update(state: &AppState, token: &str, update: &Value) -> Res
             return Ok(());
         };
         if ["all_tasks", "tasks", "menu"].contains(&command.as_str()) {
+            if !admins.contains(&requester) {
+                let names = catalog()
+                    .iter()
+                    .map(|task| string(task, "name"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return send(state, token, &chat, &format!("📋 所有可用任务\n{names}\n维护任务仅限渠道允许的 Emby 管理员执行，请核对账号绑定及管理员配置。"), None).await;
+            }
             let buttons = catalog().into_iter().map(|task| json!({"text":task["name"],"callback_data":format!("run_task_{}",string(&task,"key"))})).collect::<Vec<_>>();
             let rows = buttons
                 .chunks(2)
@@ -188,16 +213,33 @@ pub async fn handle_update(state: &AppState, token: &str, update: &Value) -> Res
             .iter()
             .find(|task| string(task, "key").replace('-', "_").to_lowercase() == command)
         {
+            if !admins.contains(&requester) {
+                return send(
+                    state,
+                    token,
+                    &chat,
+                    "维护任务仅限渠道允许的 Emby 管理员执行，请核对账号绑定及管理员配置。",
+                    None,
+                )
+                .await;
+            }
             return execute(state, token, &chat, &string(task, "key")).await;
         }
     }
     Ok(())
 }
 
-async fn changed(state: &AppState, token: &str) {
+async fn changed(state: &AppState, token: &str, api_base: &str) {
     loop {
         tokio::time::sleep(Duration::from_secs(1)).await;
-        if string(&*state.config.read().await, "telegram_bot_token") != token {
+        let config = state.config.read().await.clone();
+        if string(&config, "telegram_bot_token") != token
+            || !config["telegram_enabled"].as_bool().unwrap_or(true)
+            || crate::notifications::telegram_api_base(&config, &state.notifications.api_base)
+                .ok()
+                .as_deref()
+                != Some(api_base)
+        {
             return;
         }
     }
@@ -316,6 +358,7 @@ fn retry_delay(failures: u32) -> u64 {
 
 pub async fn run(state: AppState, cancel: CancellationToken) {
     let mut active_token = String::new();
+    let mut active_base = String::new();
     let mut stopped_token = String::new();
     let mut menu = Value::Null;
     let mut offset: Option<i64> = None;
@@ -327,29 +370,47 @@ pub async fn run(state: AppState, cancel: CancellationToken) {
         }
         let config = state.config.read().await.clone();
         let token = string(&config, "telegram_bot_token");
-        if token != active_token {
+        let api_base = match crate::notifications::telegram_api_base(
+            &config,
+            &state.notifications.api_base,
+        ) {
+            Ok(base) => base,
+            Err(_) => {
+                tokio::select! {_ = cancel.cancelled()=>break,_ = tokio::time::sleep(Duration::from_secs(1))=>{}}
+                continue;
+            }
+        };
+        if token != active_token || api_base != active_base {
             if listening {
                 let reason = if token.is_empty() {
                     "Bot Token 配置已清空"
                 } else {
-                    "Bot Token 配置已切换"
+                    "连接配置已切换"
                 };
                 tracing::info!("[TG交互] Telegram 交互监听已停止：{reason}");
                 listening = false;
             }
             active_token = token.clone();
+            active_base = api_base.clone();
             stopped_token.clear();
             offset = None;
             menu = Value::Null;
             failures = 0;
         }
-        if token.is_empty() || token == stopped_token {
+        if token.is_empty()
+            || token == stopped_token
+            || !config["telegram_enabled"].as_bool().unwrap_or(true)
+        {
+            if listening {
+                tracing::info!("[TG交互] Telegram 交互监听已停止：渠道已关闭");
+                listening = false;
+            }
             tokio::select! {_ = cancel.cancelled()=>break,_ = tokio::time::sleep(Duration::from_secs(1))=>{}}
             continue;
         }
         let next_menu = commands(&config);
         if menu != next_menu {
-            let result = tokio::select! {_ = cancel.cancelled()=>break,_ = changed(&state,&token)=>continue,result = call(&state,&token,"setMyCommands",&next_menu)=>result};
+            let result = tokio::select! {_ = cancel.cancelled()=>break,_ = changed(&state,&token,&api_base)=>continue,result = call(&state,&token,"setMyCommands",&next_menu)=>result};
             if let Err(error) = result {
                 tracing::warn!("Telegram 菜单注册失败：{}", error.1);
             } else {
@@ -358,10 +419,7 @@ pub async fn run(state: AppState, cancel: CancellationToken) {
         }
         let mut request = state
             .http
-            .request(
-                Method::GET,
-                format!("{}/bot{token}/getUpdates", state.notifications.api_base),
-            )
+            .request(Method::GET, format!("{api_base}/bot{token}/getUpdates"))
             .timeout(Duration::from_secs(40))
             .query(&[
                 ("timeout", "30"),
@@ -370,14 +428,14 @@ pub async fn run(state: AppState, cancel: CancellationToken) {
         if let Some(offset) = offset {
             request = request.query(&[("offset", offset)]);
         }
-        let response = tokio::select! {_ = cancel.cancelled()=>break,_ = changed(&state,&token)=>continue,result = async {
+        let response = tokio::select! {_ = cancel.cancelled()=>break,_ = changed(&state,&token,&api_base)=>continue,result = async {
             if !listening {
                 tracing::info!("[TG交互] Telegram 交互监听已启用");
                 listening = true;
             }
             request.send().await
         }=>result};
-        let response = tokio::select! {_ = cancel.cancelled()=>break,_ = changed(&state,&token)=>continue,result = poll_response(response,&token)=>result};
+        let response = tokio::select! {_ = cancel.cancelled()=>break,_ = changed(&state,&token,&api_base)=>continue,result = poll_response(response,&token)=>result};
         let mut delay = 1;
         match response {
             Ok(body) => {
@@ -388,6 +446,13 @@ pub async fn run(state: AppState, cancel: CancellationToken) {
                 for update in list(&body["result"]) {
                     if cancel.is_cancelled()
                         || string(&*state.config.read().await, "telegram_bot_token") != token
+                        || crate::notifications::telegram_api_base(
+                            &*state.config.read().await,
+                            &state.notifications.api_base,
+                        )
+                        .ok()
+                        .as_deref()
+                            != Some(api_base.as_str())
                     {
                         break;
                     }
@@ -402,7 +467,7 @@ pub async fn run(state: AppState, cancel: CancellationToken) {
             Err(error) if error.stop => {
                 tracing::error!(
                     "[TG交互] Telegram Bot Token 无效，交互监听已停止：{}",
-                    error.message
+                    error.message.replace(&api_base, "Telegram API")
                 );
                 listening = false;
                 stopped_token = token;
@@ -412,13 +477,13 @@ pub async fn run(state: AppState, cancel: CancellationToken) {
                 delay = error.retry_after.unwrap_or_else(|| retry_delay(failures));
                 tracing::warn!(
                     "[TG交互] Telegram 轮询失败：{}；连续失败 {} 次，{} 秒后重试",
-                    error.message,
+                    error.message.replace(&api_base, "Telegram API"),
                     failures,
                     delay
                 );
             }
         }
-        tokio::select! {_ = cancel.cancelled()=>break,_ = changed(&state,&active_token)=>{},_ = tokio::time::sleep(Duration::from_secs(delay))=>{}}
+        tokio::select! {_ = cancel.cancelled()=>break,_ = changed(&state,&active_token,&active_base)=>{},_ = tokio::time::sleep(Duration::from_secs(delay))=>{}}
     }
     if listening {
         tracing::info!("[TG交互] Telegram 交互监听已停止：服务关闭");

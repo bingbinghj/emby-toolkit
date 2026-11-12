@@ -40,7 +40,6 @@ import {
   getGlassWallpaperTransitionProgress,
   normalizeGlassOpticalRect,
   reconcileGlassOpticalSurfaceSlots,
-  selectGlassOpticalRects,
   type GlassCornerRadii,
   type GlassOpticalQuality,
   type GlassOpticalRect,
@@ -64,7 +63,6 @@ import {
   type GlassFluidDynamics,
 } from '@/rendering/glass/glassFluidDynamics'
 import type { PagePresentationMotionReader } from '@/composables/usePagePresentationMotion'
-import { APP_ACTIVITY_SUSPEND_DELAY_MS } from '@/utils/appActivityLifecycle'
 import {
   analyzeGlassWallpaperTone,
   DEFAULT_GLASS_WALLPAPER_TONE_PROFILE,
@@ -76,6 +74,8 @@ import {
 export type GlassRendererState = 'fallback' | 'loading' | 'ready'
 export type GlassPresentationSpace = 'fixed' | 'scroll'
 type ThreeModule = typeof import('three')
+
+const APP_ACTIVITY_SUSPEND_DELAY_MS = 60_000
 
 export interface GlassOpticalInteractionSource {
   /** 按呈现空间订阅共享输入；同一事件只会交给一个空间。 */
@@ -1233,25 +1233,6 @@ function selectVisibleGlassOpticalSurfaceDescriptors(
 
     return visibleWidth >= 24 && visibleHeight >= 24
   })
-}
-
-/** 将活动界面中的高价值材质面集中转换为 renderer 矩形预算。 */
-export function collectGlassOpticalRects(
-  viewportWidth: number,
-  viewportHeight: number,
-  appearance: ThemeCustomizerGlassAppearance,
-  interactionPoint?: { x: number; y: number },
-  surfaceSpace: GlassPresentationSpace | 'all' = 'all',
-) {
-  const candidates = collectGlassOpticalSurfaceDescriptors(viewportWidth, viewportHeight, appearance, surfaceSpace)
-
-  return selectGlassOpticalRects(
-    candidates.map(candidate => candidate.rect),
-    viewportWidth,
-    viewportHeight,
-    viewportWidth <= 600,
-    interactionPoint,
-  )
 }
 
 /** 将材质语义映射为稳定 shader 协议，质量档不参与该映射。 */

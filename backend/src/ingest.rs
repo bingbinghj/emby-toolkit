@@ -551,14 +551,6 @@ async fn process(
     )
 }
 
-pub async fn patch_cached_series(
-    state: &AppState,
-    id: &str,
-    payload: &mut Value,
-    scope: &[(i64, i64)],
-) -> Result<bool> {
-    Ok(patch_cached_series_report(state, id, payload, scope).await?["patched"] == true)
-}
 pub async fn patch_cached_series_report(
     state: &AppState,
     id: &str,
@@ -710,19 +702,6 @@ pub async fn patch_cached_series_report(
         }
     );
     Ok(report)
-}
-pub async fn prepare_cached(
-    state: &AppState,
-    item: &Value,
-    episode_ids: &[String],
-    requested_group: Option<&str>,
-    context: &JobContext,
-) -> Result<bool> {
-    Ok(
-        prepare_cached_report(state, item, episode_ids, requested_group, context)
-            .await?
-            .is_some(),
-    )
 }
 pub async fn prepare_cached_report(
     state: &AppState,

@@ -343,10 +343,6 @@ pub async fn submit(
     ))
 }
 
-pub async fn recover(state: &AppState, id: &str, context: &JobContext) -> Result<(u16, Value)> {
-    recover_confirmed(state, id, context, &BTreeMap::new()).await
-}
-
 async fn recover_confirmed(
     state: &AppState,
     id: &str,

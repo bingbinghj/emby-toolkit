@@ -11,6 +11,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(test)]
+#[path = "independent_switch_tests.rs"]
+mod independent_switch_tests;
+
 pub fn strategies(original: &str, chinese: bool) -> Vec<String> {
     let mut result = vec![];
     if chinese {
@@ -149,28 +153,6 @@ pub async fn download_report(
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
     download_with_overwrite_report(state, kind, id, item, aggregate, context, &[]).await
-}
-pub async fn download_with_overwrite(
-    state: &AppState,
-    kind: &str,
-    id: &str,
-    item: &Value,
-    aggregate: &Value,
-    context: &crate::jobs::JobContext,
-    force_overwrite_episodes: &[String],
-) -> Result<usize> {
-    Ok(download_with_overwrite_report(
-        state,
-        kind,
-        id,
-        item,
-        aggregate,
-        context,
-        force_overwrite_episodes,
-    )
-    .await?["downloaded"]
-        .as_u64()
-        .unwrap_or(0) as usize)
 }
 pub async fn download_with_overwrite_report(
     state: &AppState,

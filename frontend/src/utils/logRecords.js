@@ -33,3 +33,22 @@ export function highlightLogText(value, keyword = '') {
   if (cursor < text.length) parts.push({ text: text.slice(cursor), matched: false });
   return parts;
 }
+
+// MP groups adjacent entries with the same second and level, separated by at most 100 ms.
+export function groupLogRecords(lines) {
+  const groups = [];
+  for (const [index, line] of lines.entries()) {
+    const record = parseLogRecord(line);
+    const second = record.timestamp.replace(/[,\.]\d+$/, '');
+    const timestamp = Date.parse(record.timestamp.replace(' ', 'T').replace(',', '.'));
+    const previous = groups.at(-1);
+    if (second && previous?.second === second && previous.level === record.level
+      && (!Number.isFinite(timestamp) || !Number.isFinite(previous.timestamp) || timestamp - previous.timestamp <= 100)) {
+      previous.lines.push(line);
+      previous.timestamp = timestamp;
+    } else {
+      groups.push({ key: `${second || 'log'}-${record.level}-${index}`, second, timestamp, level: record.level, lines: [line] });
+    }
+  }
+  return groups;
+}

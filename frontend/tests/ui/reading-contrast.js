@@ -30,11 +30,22 @@ export async function measureReadingContrast(page, probes, { gradientArtifactPre
       element.dataset.readingProbe = String(index);
       const box = element.getBoundingClientRect();
       const css = getComputedStyle(element);
+      let color = css.color;
+      if (!/^rgba?\(/.test(color)) {
+        if (!CSS.supports('color', color)) throw new Error(`Unexpected computed text color: ${color}`);
+        const canvas = document.createElement('canvas'); canvas.width = canvas.height = 1;
+        const context = canvas.getContext('2d');
+        if (!context) throw new Error('Native color conversion requires a 2D canvas');
+        context.fillStyle = color;
+        context.fillRect(0, 0, 1, 1);
+        const [red, green, blue, alpha] = context.getImageData(0, 0, 1, 1).data;
+        color = `rgba(${red}, ${green}, ${blue}, ${alpha / 255})`;
+      }
       const backgroundClip = css.backgroundClip;
       if (backgroundClip.includes('text') && css.backgroundImage !== 'none') element.dataset.readingGradientProbe = String(index);
       let opacity = 1;
       for (let node = element; node; node = node.parentElement) opacity *= Number(getComputedStyle(node).opacity);
-      return { color: css.color, opacity, backgroundClip, backgroundImage: css.backgroundImage,
+      return { color, nativeColor: css.color, opacity, backgroundClip, backgroundImage: css.backgroundImage,
         textFillColor: css.webkitTextFillColor, fragmentCount: element.getClientRects().length,
         box: { x: box.x, y: box.y, width: box.width, height: box.height },
         points: [.15, .5, .85].map(fraction => ({ x: box.x + box.width * fraction, y: box.y + box.height / 2 })) };
@@ -83,6 +94,7 @@ export async function measureReadingContrast(page, probes, { gradientArtifactPre
       return { background, ...(gradient ? { foreground } : {}), contrast: (Math.max(ink, fill) + .05) / (Math.min(ink, fill) + .05) };
     });
     return { role: probes[index].role, color: state.color, opacity: state.opacity,
+      ...(state.nativeColor !== state.color ? { nativeColor: state.nativeColor } : {}),
       ...(gradient ? { gradient: { ...gradient, box: state.box, nativeVerified: true,
         nativeForegroundPng: gradientArtifactPrefix ? `${gradientArtifactPrefix}-native-foreground.png` : undefined,
         backgroundPng: gradientArtifactPrefix ? `${gradientArtifactPrefix}-background.png` : undefined } } : {}), contrast: Math.min(...samples.map(sample => sample.contrast)), samples };

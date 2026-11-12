@@ -78,20 +78,6 @@ pub async fn missing_report(
 ) -> Result<Value> {
     missing_with_overwrite_report(state, files, aggregate, context, &[]).await
 }
-pub async fn missing_with_overwrite(
-    state: &AppState,
-    files: &[PathBuf],
-    aggregate: &Value,
-    context: Option<&JobContext>,
-    force_overwrite_episodes: &[String],
-) -> Result<usize> {
-    Ok(
-        missing_with_overwrite_report(state, files, aggregate, context, force_overwrite_episodes)
-            .await?["captured"]
-            .as_u64()
-            .unwrap_or(0) as usize,
-    )
-}
 pub async fn missing_with_overwrite_report(
     state: &AppState,
     files: &[PathBuf],

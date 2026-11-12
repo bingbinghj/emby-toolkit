@@ -181,61 +181,6 @@ export const findMediaInfoLanguageOption = (options, language) => {
     || null;
 };
 
-const normalizeMediaInfoTitleToken = value => String(value || '')
-  .trim()
-  .toLowerCase()
-  .replaceAll('繁體', '繁体')
-  .replaceAll('簡體', '简体')
-  .replaceAll('雙語', '双语');
-
-export const detectChineseSubtitleScript = (title) => {
-  const token = normalizeMediaInfoTitleToken(title);
-  if (!token) return null;
-  if (/繁|正体|正體|traditional\s+chinese|chinese\s+traditional|\bcht\b|zh[-_](?:tw|hk|mo|hant)/.test(token)) {
-    return 'traditional';
-  }
-  if (/简|簡|simplified\s+chinese|chinese\s+simplified|\bchs\b|zh[-_](?:cn|sg|hans)/.test(token)) {
-    return 'simplified';
-  }
-  return null;
-};
-
-export const inferChineseSubtitleLanguageFromTitle = (title) => {
-  const normalizedTitle = normalizeMediaInfoTitleToken(title);
-  if (/^(简繁|繁简)/.test(normalizedTitle)) return null;
-  const hasSimplifiedMarker = /简体|简中|中简/.test(normalizedTitle);
-  const hasTraditionalMarker = /繁体|繁中|中繁/.test(normalizedTitle);
-  if (hasSimplifiedMarker && hasTraditionalMarker) return null;
-  if (hasSimplifiedMarker !== hasTraditionalMarker) {
-    return hasSimplifiedMarker ? 'chs' : 'cht';
-  }
-
-  const hasCompactDualLanguage = /^(简|繁)(?!体|中).+?(双语|雙語)/.test(normalizedTitle)
-    || /^(简|繁)(?!体|中)[英日韩西德法葡俄泰越意]$/.test(normalizedTitle);
-  if (!hasCompactDualLanguage) {
-    return null;
-  }
-  const script = detectChineseSubtitleScript(normalizedTitle);
-  return script === 'simplified' ? 'chs' : script === 'traditional' ? 'cht' : null;
-};
-
-const CHINESE_SUBTITLE_LANGUAGE_TOKENS = new Set([
-  'chi', 'zho', 'zh', 'chs', 'cht', 'cmn', 'zh-cmn', 'yue', 'zh-yue', 'chinese',
-]);
-
-export const isChineseSubtitleStream = (stream, selectedLanguage, optionLabel) => {
-  if (stream?.Type !== 'Subtitle') return false;
-  if (detectChineseSubtitleScript(stream.Title)) return true;
-  if (['中文', '简体', '繁体', '国语', '粤语'].includes(String(optionLabel || '').trim())) {
-    return true;
-  }
-  return getMediaInfoLanguageTokens(selectedLanguage || stream.Language).some(token => (
-    CHINESE_SUBTITLE_LANGUAGE_TOKENS.has(token)
-    || token.startsWith('zh-')
-    || token.startsWith('yue-')
-  ));
-};
-
 export const resolveMediaInfoLanguageSelection = (
   options,
   stream,

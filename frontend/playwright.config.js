@@ -1,11 +1,16 @@
 import { defineConfig, devices } from '@playwright/test';
+import { mkdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+process.env.TMPDIR ||= fileURLToPath(new URL('./test-results/tmp', import.meta.url));
+mkdirSync(process.env.TMPDIR, { recursive: true });
 
 export default defineConfig({
   testDir: './tests/ui',
   timeout: 30_000,
   expect: { timeout: 8_000 },
   fullyParallel: true,
-  workers: 2,
+  workers: 1,
   reporter: [['list']],
   outputDir: './test-results/ui',
   use: {

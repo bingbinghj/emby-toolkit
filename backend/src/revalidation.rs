@@ -549,6 +549,18 @@ pub async fn observation(state: &AppState, item: &Value) -> (String, String, Opt
     let source =
         crate::media_info::item_source(item, &[&path, strm_target.as_deref().unwrap_or("")])
             .unwrap_or(&Value::Null);
+    let size = if media_paths::extension(&path) == ".strm" {
+        let source_path = string(source, "Path");
+        identity::size(&source["Size"]).filter(|_| {
+            !source_path.trim().is_empty()
+                && media_paths::extension(&source_path) != ".strm"
+                && !string(source, "Container")
+                    .trim()
+                    .eq_ignore_ascii_case("strm")
+        })
+    } else {
+        identity::size(&source["Size"]).or_else(|| identity::size(&item["Size"]))
+    };
     let target = strm_target.unwrap_or_else(|| {
         source["Path"]
             .as_str()
@@ -557,11 +569,7 @@ pub async fn observation(state: &AppState, item: &Value) -> (String, String, Opt
             .replace('\\', "/")
     });
     let _ = state;
-    (
-        path,
-        target,
-        identity::size(&source["Size"]).or_else(|| identity::size(&item["Size"])),
-    )
+    (path, target, size)
 }
 pub async fn mark_pending(
     state: &AppState,

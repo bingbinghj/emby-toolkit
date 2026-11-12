@@ -413,19 +413,6 @@ pub async fn translate_report(
 ) -> Result<(BTreeMap<String, String>, Vec<String>)> {
     translate_inner(state, inputs, purpose, context, actors, true).await
 }
-pub async fn translate_preview(
-    state: &AppState,
-    inputs: &BTreeMap<String, String>,
-    purpose: &str,
-    context: &Value,
-    actors: &Value,
-) -> Result<BTreeMap<String, String>> {
-    Ok(
-        translate_preview_report(state, inputs, purpose, context, actors)
-            .await?
-            .0,
-    )
-}
 pub async fn translate_preview_report(
     state: &AppState,
     inputs: &BTreeMap<String, String>,

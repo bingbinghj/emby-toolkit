@@ -19,6 +19,16 @@ test('header settings search crosses categories, highlights the target and retai
   await page.getByRole('tab', { name: '系统', exact: true }).click();
   await expect(page.locator('[data-field="delay_between_items_sec"] input')).toHaveValue('1.2');
   await expect(page.locator('.setting-card:visible')).toHaveCount(5);
+  await headerSearch(page).fill('API密钥');
+  await result(page, 'API密钥').click();
+  const server = page.locator('.v-dialog.v-overlay--active').filter({ has: page.getByRole('button', { name: '关闭媒体服务器配置', exact: true }) });
+  await expect(server).toBeVisible();
+  const apiKey = server.locator('[data-field="emby_api_key"]');
+  await expect(apiKey).toHaveClass(/settings-search-highlight/);
+  await expect(apiKey.locator('input')).toBeFocused();
+  await server.getByRole('button', { name: '取消媒体服务器配置', exact: true }).click();
+  await headerSearch(page).clear();
+  await expect(page.locator('[data-field="delay_between_items_sec"] input')).toHaveValue('1.2');
   expect(writes(api)).toEqual([]);
 });
 

@@ -62,14 +62,14 @@ test('current user cannot disable themselves or remove their administrator role'
 test('password change validates confirmation and uses an independent Emby operation', async ({ page, api }) => {
   await page.goto('/user-management');
   await page.getByRole('button', { name: '修改 Media Member 的密码', exact: true }).click();
-  const dialog = page.locator('.v-overlay--active').filter({ has: page.getByRole('button', { name: '保存新密码', exact: true }) });
+  const dialog = page.locator('.v-overlay--active').filter({ has: page.getByRole('button', { name: '保存', exact: true }) });
   await dialog.getByLabel('新密码', { exact: true }).fill('fixture-password');
   await dialog.getByLabel('确认新密码', { exact: true }).fill('different');
-  await dialog.getByRole('button', { name: '保存新密码', exact: true }).click();
+  await dialog.getByRole('button', { name: '保存', exact: true }).click();
   await expect(dialog.getByText('两次输入的密码不一致', { exact: true })).toBeVisible();
   expect(api.requests.filter(request => request.method === 'POST' && request.path.startsWith('/api/portal/users/'))).toHaveLength(0);
   await dialog.getByLabel('确认新密码', { exact: true }).fill('fixture-password');
-  await dialog.getByRole('button', { name: '保存新密码', exact: true }).click();
+  await dialog.getByRole('button', { name: '保存', exact: true }).click();
   await expect(dialog).toHaveCount(0);
   expect(api.requests.find(request => request.path === '/api/portal/users/member/password').body).toEqual({ new_password: 'fixture-password' });
   expect(api.requests.some(request => request.path === '/api/portal/users/member' && request.method === 'POST')).toBe(false);

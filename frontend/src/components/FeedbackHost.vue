@@ -1,7 +1,7 @@
 <template>
   <VDialog v-if="current" :model-value="true" :persistent="current.busy" max-width="560"
     :fullscreen="smAndDown" @update:model-value="value => !value && dismissDialog(current)">
-    <VCard>
+    <VCard @keydown.tab="keepDialogFocus">
       <VCardItem>
         <template #prepend><VIcon :icon="icons[current.type]" :color="current.type" /></template>
         <VCardTitle>{{ current.options.title || '请确认' }}</VCardTitle>
@@ -29,6 +29,15 @@ import { feedbackDialogs, answerDialog, dismissDialog } from '../composables/use
 const { smAndDown } = useDisplay()
 const current = computed(() => feedbackDialogs[0])
 const icons = { info: 'mdi-information-outline', success: 'mdi-check-circle-outline', warning: 'mdi-alert-outline', error: 'mdi-alert-circle-outline' }
+function keepDialogFocus(event) {
+  const controls = [...event.currentTarget.querySelectorAll('button, a[href], input, select, textarea, [tabindex]')]
+    .filter(element => element.tabIndex >= 0 && !element.matches(':disabled') && element.getClientRects().length)
+  const first = controls[0], last = controls.at(-1)
+  if (document.activeElement === (event.shiftKey ? first : last)) {
+    event.preventDefault()
+    ;(event.shiftKey ? last : first)?.focus()
+  }
+}
 const DialogContent = defineComponent({
   props: ['content'],
   setup(props) {

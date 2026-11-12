@@ -7,14 +7,27 @@ use axum::{
 };
 use emby_toolkit::{AppState, db, webhook};
 use serde_json::{Value, json};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 use tokio::sync::Mutex;
 
 #[derive(Clone, Default)]
 struct Host {
     items: Arc<Mutex<HashMap<String, Value>>>,
     title_failures: Arc<Mutex<Vec<String>>>,
+    refresh_failures: Arc<Mutex<Vec<String>>>,
+    refresh_attempts: Arc<Mutex<Vec<(String, String)>>>,
     native_starts: Arc<Mutex<Vec<String>>>,
+    chain_enabled: Arc<AtomicBool>,
+    stage_order: Arc<Mutex<Vec<String>>>,
+    intro_runs: Arc<Mutex<u64>>,
+    year_readbacks: Arc<AtomicUsize>,
     info_runs: Arc<Mutex<u64>>,
     logs: Arc<Mutex<Vec<String>>>,
     configuration: Arc<Mutex<Value>>,
@@ -24,6 +37,25 @@ async fn details(
     Path(id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
+    if host.chain_enabled.load(Ordering::SeqCst) {
+        if id == "101"
+            && query
+                .get("Fields")
+                .is_some_and(|fields| fields.split(',').any(|field| field == "SeasonId"))
+        {
+            let mut stages = host.stage_order.lock().await;
+            if !stages.iter().any(|stage| stage == "credits-read") {
+                stages.push("credits-read".into());
+            }
+        }
+        if id == "301"
+            && query
+                .get("Fields")
+                .is_some_and(|fields| fields.split(',').any(|field| field == "EndDate"))
+        {
+            host.year_readbacks.fetch_add(1, Ordering::SeqCst);
+        }
+    }
     if query.get("Fields").is_some_and(|fields| {
         [
             "Name",
@@ -57,12 +89,45 @@ async fn items(
                 || query
                     .get("Ids")
                     .is_some_and(|ids| ids.split(',').any(|id| item["Id"] == id))
+                || query.get("ParentId").is_some_and(|parent| {
+                    item["ParentId"] == *parent || item["SeriesId"] == *parent
+                })
+        })
+        .filter(|item| {
+            query
+                .get("IncludeItemTypes")
+                .is_none_or(|types| types.split(',').any(|kind| item["Type"] == kind))
         })
         .cloned()
         .collect::<Vec<_>>();
     Json(json!({"TotalRecordCount":items.len(),"Items":items}))
 }
-async fn refresh(State(host): State<Host>, Path(id): Path<String>) -> StatusCode {
+async fn refresh(
+    State(host): State<Host>,
+    Path(id): Path<String>,
+    Query(query): Query<HashMap<String, String>>,
+) -> StatusCode {
+    let mode = query
+        .get("MetadataRefreshMode")
+        .cloned()
+        .unwrap_or_default();
+    host.refresh_attempts
+        .lock()
+        .await
+        .push((id.clone(), mode.clone()));
+    if mode == "FullRefresh" && host.refresh_failures.lock().await.contains(&id) {
+        return StatusCode::BAD_REQUEST;
+    }
+    if host.chain_enabled.load(Ordering::SeqCst) && id == "301" {
+        host.stage_order.lock().await.push(
+            if mode == "FullRefresh" {
+                "metadata-refresh"
+            } else {
+                "nfo-refresh"
+            }
+            .into(),
+        );
+    }
     host.logs.lock().await.extend([
         format!("Info fixture: RefreshItem Start: {id} metadata"),
         format!("Info fixture: RefreshItem Complete: {id} metadata"),
@@ -91,17 +156,37 @@ async fn config_save(State(host): State<Host>, Json(body): Json<Value>) -> Json<
     Json(json!({}))
 }
 async fn tasks(State(host): State<Host>) -> Json<Value> {
-    Json(json!([
+    let mut tasks = json!([
         {"Id":"info","Name":"Extract MediaInfo","Key":"MediaInfoExtractTask","State":"Idle","LastExecutionResult":{"StartTimeUtc":host.info_runs.lock().await.to_string(),"Status":"Completed"}},
         {"Id":"thumb","Name":"Extract Video Thumbnail","Key":"VideoThumbnailExtractTask","State":"Idle","LastExecutionResult":{"StartTimeUtc":"previous","Status":"Completed"}}
-    ]))
+    ]);
+    if host.chain_enabled.load(Ordering::SeqCst) {
+        tasks.as_array_mut().unwrap().push(json!({"Id":"intro","Name":"Extract Intro Fingerprint","Key":"IntroFingerprintExtractTask","State":"Idle","LastExecutionResult":{"StartTimeUtc":host.intro_runs.lock().await.to_string(),"Status":"Completed"}}));
+    }
+    Json(tasks)
 }
 async fn start(State(host): State<Host>, Path(id): Path<String>) -> StatusCode {
     if id == "info" {
         *host.info_runs.lock().await += 1;
         return StatusCode::NO_CONTENT;
     }
-    host.native_starts.lock().await.push(id);
+    host.native_starts.lock().await.push(id.clone());
+    if host.chain_enabled.load(Ordering::SeqCst) && id == "intro" {
+        *host.intro_runs.lock().await += 1;
+        host.stage_order.lock().await.push("intro".into());
+        host.logs.lock().await.extend([
+            "Info fixture: IntroFingerprintExtract - Scheduled Task Execute".into(),
+            "Info fixture: IntroFingerprintExtract - Number of episodes: 1".into(),
+            "Info fixture: IntroFingerprintExtract - Number of seasons: 1".into(),
+            "Info fixture: IntroFingerprintExtract - Episode Progress 1/1 - Task 1: episode".into(),
+            "Info fixture: IntroFingerprintExtract - Season Progress 1/1 - Task 1: season".into(),
+            "Info fixture: IntroFingerprintExtract - Scheduled Task Complete".into(),
+        ]);
+        return StatusCode::NO_CONTENT;
+    }
+    if host.chain_enabled.load(Ordering::SeqCst) && id == "thumb" {
+        host.stage_order.lock().await.push("thumb".into());
+    }
     // Stop the fixture immediately after proving the real native entry was reached.
     StatusCode::BAD_REQUEST
 }
@@ -173,6 +258,9 @@ impl Fixture {
             if *mode == "failed" {
                 host.title_failures.lock().await.push(id.clone());
             }
+            if *mode == "refresh_failed" {
+                host.refresh_failures.lock().await.push(id.clone());
+            }
             let item = json!({"Id":id,"Type":"Movie","Name":format!("电影{id}"),"Path":path,"PartCount":1,"Size":1000,"Chapters":[],"ProviderIds":{"Tmdb":id},"People":[],"Genres":[],"MediaStreams":streams,"MediaSources":[{"Id":format!("mediasource_{id}"),"ItemId":id,"Path":playback,"Size":1000,"Container":"mkv","MediaStreams":streams}]});
             host.items.lock().await.insert(id.clone(), item);
             let info = json!([{"MediaSourceInfo":{"Path":playback,"Size":1000,"Container":"mkv","RunTimeTicks":600000000_u64,"MediaStreams":streams},"Chapters":[]}]);
@@ -224,6 +312,93 @@ impl Fixture {
             host,
             server,
         }
+    }
+    async fn configure_series_chain(&self) {
+        let path = self.files[0].as_str().unwrap();
+        let root = std::path::Path::new(path).parent().unwrap();
+        let season_root = root.join("Season 01");
+        std::fs::create_dir_all(&season_root).unwrap();
+        std::fs::write(root.join("tvshow.nfo"),"<tvshow><title>测试电视剧</title><year>2005</year><premiered>2005-01-01</premiered></tvshow>").unwrap();
+        let sha = "1".repeat(40);
+        let chapters = json!([
+            {"Name":"片头","MarkerType":"IntroStart","StartPositionTicks":0},
+            {"Name":"片头结束","MarkerType":"IntroEnd","StartPositionTicks":200_000_000_u64}
+        ]);
+        let mut native = self.host.items.lock().await;
+        let episode = native.get_mut("101").unwrap();
+        episode["Type"] = json!("Episode");
+        episode["Name"] = json!("测试分集");
+        episode["ProviderIds"] = json!({"Tmdb":"1011"});
+        episode["SeriesId"] = json!("301");
+        episode["SeasonId"] = json!("302");
+        episode["ParentId"] = json!("302");
+        episode["SeriesName"] = json!("测试电视剧");
+        episode["ParentIndexNumber"] = json!(1);
+        episode["IndexNumber"] = json!(1);
+        episode["RunTimeTicks"] = json!(1_200_000_000_u64);
+        episode["MediaSources"][0]["RunTimeTicks"] = json!(1_200_000_000_u64);
+        episode["Chapters"] = chapters.clone();
+        episode["Chapters"].as_array_mut().unwrap().push(
+            json!({"Name":"片尾","MarkerType":"CreditsStart","StartPositionTicks":750_000_000_u64}),
+        );
+        let streams = episode["MediaStreams"].clone();
+        let source = episode["MediaSources"][0]["Path"].clone();
+        native.insert("301".into(),json!({"Id":"301","Type":"Series","Name":"测试电视剧","Path":root,"ProviderIds":{"Tmdb":"101"},"ProductionYear":2005,"EndDate":null,"Status":"Continuing","People":[],"Genres":[]}));
+        native.insert("302".into(),json!({"Id":"302","Type":"Season","Name":"第 1 季","Path":season_root,"ParentId":"301","SeriesId":"301","IndexNumber":1,"ProviderIds":{"Tmdb":"1001"}}));
+        drop(native);
+        let info = json!([{"MediaSourceInfo":{"Path":source,"Size":1000,"Container":"mkv","RunTimeTicks":1_200_000_000_u64,"MediaStreams":streams},"Chapters":chapters}]);
+        let sidecar = std::path::Path::new(path).with_file_name("101-mediainfo.json");
+        std::fs::write(&sidecar, serde_json::to_vec(&info).unwrap()).unwrap();
+        sqlx::query("DELETE FROM media_metadata WHERE item_type='Movie'")
+            .execute(&self.state.db)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO media_metadata(tmdb_id,item_type,title,release_date,release_year,actors_json,in_library,emby_item_ids_json,asset_details_json) VALUES('101','Series','测试电视剧','2005-01-01',2005,$1,true,$2,$3)")
+            .bind(json!([{"tmdb_id":1,"character":"演员","order":0}])).bind(json!(["301"])).bind(json!([{"path":root}])).execute(&self.state.db).await.unwrap();
+        sqlx::query("INSERT INTO media_metadata(tmdb_id,item_type,title,parent_series_tmdb_id,season_number,in_library,emby_item_ids_json) VALUES('1001','Season','第1季','101',1,true,$1)")
+            .bind(json!(["302"])).execute(&self.state.db).await.unwrap();
+        sqlx::query("INSERT INTO media_metadata(tmdb_id,item_type,title,parent_series_tmdb_id,season_number,episode_number,in_library,emby_item_ids_json,asset_details_json,file_sha1_json,file_pickcode_json) VALUES('1011','Episode','测试分集','101',1,1,true,$1,$2,$3,$4)")
+            .bind(json!(["101"])).bind(json!([{"emby_item_id":"101","path":path,"size_bytes":1000}])).bind(json!([sha])).bind(json!(["pc101"])).execute(&self.state.db).await.unwrap();
+        sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2)")
+            .bind(&sha)
+            .bind(info)
+            .execute(&self.state.db)
+            .await
+            .unwrap();
+        self.state.save_config(&json!({"auto_fill_language_titles_on_ingest":false,"auto_extract_intro_fingerprint_on_ingest":true,"auto_extract_credits_on_ingest":true,"auto_extract_video_thumbnails_on_ingest":true,"emby_webhook_ingest_enabled":false})).await.unwrap();
+        self.host.chain_enabled.store(true, Ordering::SeqCst);
+    }
+
+    async fn run_series(&self, moviepilot: bool) -> Value {
+        let work = self.state.clone();
+        let event = if moviepilot {
+            json!({"files":self.files,"tmdb_id":"","batch_key":"ordered-series"})
+        } else {
+            json!({"id":"301","episode_ids":["101"],"event":"item.add","source":"fixture","original":{"Id":"101"}})
+        };
+        let task = self
+            .state
+            .jobs
+            .submit("真实入库片头片尾顺序验收", move |context| async move {
+                if moviepilot {
+                    webhook::process_moviepilot(&work, &event, &context).await
+                } else {
+                    webhook::process_emby(&work, &event, &context).await
+                }
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let job = self.state.jobs.result(&task).await.unwrap();
+                if job["is_running"] == false {
+                    return job;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
     }
     async fn run(&self, moviepilot: bool) -> Value {
         let work = self.state.clone();
@@ -370,6 +545,10 @@ async fn moviepilot_notifies_unmerged_same_year_movie_versions_once_with_both_pe
     let text = message_text(&messages[0]);
     assert!(text.contains("1998"));
     assert!(
+        text.contains("📂 已入库2个文件"),
+        "only this batch's two native movie files: {text}"
+    );
+    assert!(
         text.contains("电影101"),
         "first version pending must be retained: {text}"
     );
@@ -411,12 +590,14 @@ async fn moviepilot_keeps_different_year_movie_notices_separate_despite_same_tmd
     );
     for message in &messages {
         assert_eq!(message_text(message).matches("字幕10").count(), 1);
+        assert!(message_text(message).contains("📂 已入库1个文件"));
     }
 }
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
-async fn both_ingest_entries_skip_extraction_until_titles_are_enabled_and_complete() {
+async fn both_ingest_entries_allow_disabled_titles_after_actual_refresh_and_block_unfinished_enabled_titles()
+ {
     for moviepilot in [false, true] {
         for (mode, enabled) in [
             ("complete", false),
@@ -432,14 +613,37 @@ async fn both_ingest_entries_skip_extraction_until_titles_are_enabled_and_comple
             } else {
                 &result["finalization"]["title_fill"]
             };
+            let refresh = if moviepilot {
+                &result["finalizations"][0]["report"]["metadata_refresh"]
+            } else {
+                &result["finalization"]["metadata_refresh"]
+            };
             let starts = f.host.native_starts.lock().await.clone();
             assert_eq!(
                 result["updated"], 1,
                 "moviepilot={moviepilot} mode={mode} enabled={enabled}: {job}"
             );
-            if mode == "complete" && enabled {
-                assert_eq!(title["completed"], true, "{job}");
-                assert_eq!(title["skipped_chinese_streams"], 9, "{job}");
+            assert_eq!(
+                refresh["completed"], true,
+                "a real final refresh must be verified: {job}"
+            );
+            assert!(
+                f.host
+                    .refresh_attempts
+                    .lock()
+                    .await
+                    .iter()
+                    .any(|(_, mode)| mode == "FullRefresh"),
+                "the fixture must receive the actual full refresh request"
+            );
+            if mode == "complete" {
+                if enabled {
+                    assert_eq!(title["completed"], true, "{job}");
+                    assert_eq!(title["skipped_chinese_streams"], 9, "{job}");
+                } else {
+                    assert_eq!(title["completed"], false, "{job}");
+                    assert_eq!(title["skipped"], true, "{job}");
+                }
                 assert_eq!(starts, vec!["thumb"], "{job}");
             } else {
                 assert_eq!(title["completed"], false, "{job}");
@@ -449,6 +653,133 @@ async fn both_ingest_entries_skip_extraction_until_titles_are_enabled_and_comple
             }
             f.close().await;
         }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn both_ingest_entries_block_native_extraction_when_the_actual_final_refresh_request_fails() {
+    for moviepilot in [false, true] {
+        for titles_enabled in [false, true] {
+            let fixture = Fixture::new(&["refresh_failed"], titles_enabled, false).await;
+            let job = fixture.run(moviepilot).await;
+            assert!(
+                fixture
+                    .host
+                    .refresh_attempts
+                    .lock()
+                    .await
+                    .iter()
+                    .any(|(id, mode)| id == "101" && mode == "FullRefresh"),
+                "the actual final refresh rejection must be reached: {job}"
+            );
+            assert!(
+                fixture.host.native_starts.lock().await.is_empty(),
+                "a failed final refresh must not start intro, credits, or thumbnails: {job}"
+            );
+            if moviepilot {
+                assert_eq!(job["result"]["updated"], 1, "{job}");
+                assert!(
+                    !job["result"]["failures"].as_array().unwrap().is_empty(),
+                    "{job}"
+                );
+                assert!(job["result"]["automatic_extraction"].is_null(), "{job}");
+            } else {
+                assert_eq!(job["state"], "failed", "{job}");
+            }
+            fixture.close().await;
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby and all media requests stay localhost"]
+async fn disabled_titles_still_allow_actual_series_refresh_then_intro_credits_and_thumbnails_in_both_ingest_entries()
+ {
+    for moviepilot in [false, true] {
+        let fixture = Fixture::new(&["complete"], false, false).await;
+        fixture.configure_series_chain().await;
+        let original_cache: Value =
+            sqlx::query_scalar("SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1=$1")
+                .bind("1".repeat(40))
+                .fetch_one(&fixture.state.db)
+                .await
+                .unwrap();
+        assert!(
+            !original_cache[0]["Chapters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|chapter| chapter["MarkerType"] == "CreditsStart")
+        );
+        let job = fixture.run_series(moviepilot).await;
+        let result = &job["result"];
+        let finalization = if moviepilot {
+            &result["finalizations"][0]["report"]
+        } else {
+            &result["finalization"]
+        };
+        assert_eq!(
+            finalization["metadata_refresh"]["completed"], true,
+            "moviepilot={moviepilot}: {job}"
+        );
+        assert_eq!(finalization["title_fill"]["completed"], false, "{job}");
+        assert_eq!(finalization["title_fill"]["skipped"], true, "{job}");
+        assert!(
+            fixture.host.year_readbacks.load(Ordering::SeqCst) >= 3,
+            "actual Series NFO year readback must complete before extraction"
+        );
+        assert_eq!(
+            *fixture.host.stage_order.lock().await,
+            vec![
+                "metadata-refresh",
+                "nfo-refresh",
+                "intro",
+                "credits-read",
+                "thumb"
+            ],
+            "moviepilot={moviepilot}: {job}"
+        );
+        assert_eq!(
+            *fixture.host.native_starts.lock().await,
+            vec!["intro", "thumb"],
+            "{job}"
+        );
+        assert_eq!(
+            result["automatic_extraction"]["intro"]["failed"], 0,
+            "intro must pass native task and current execution log verification: {job}"
+        );
+        assert_eq!(
+            result["automatic_extraction"]["credits"]["failed"], 0,
+            "credits must pass actual Emby marker readback: {job}"
+        );
+        assert_eq!(
+            result["automatic_extraction"]["credits"]["skipped"], 1,
+            "an existing valid marker should be synced without re-extracting audio: {job}"
+        );
+        let cached: Value =
+            sqlx::query_scalar("SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1=$1")
+                .bind("1".repeat(40))
+                .fetch_one(&fixture.state.db)
+                .await
+                .unwrap();
+        assert!(
+            cached[0]["Chapters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|chapter| chapter["MarkerType"] == "CreditsStart"
+                    && chapter["StartPositionTicks"] == 750_000_000_u64),
+            "the real credits stage must update its cache"
+        );
+        // This fixture deliberately refuses the thumbnail start after recording
+        // the native entry. New audio extraction and writeback are tested with
+        // real ffmpeg in credits_extraction.rs.
+        assert!(
+            result["automatic_extraction"]["warnings"].as_u64().unwrap() > 0,
+            "the refused thumbnail start must remain visible: {job}"
+        );
+        fixture.close().await;
     }
 }
 

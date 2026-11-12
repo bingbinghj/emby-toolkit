@@ -6,7 +6,7 @@ import { navbarInteractionRegion } from './navbar-interaction.js';
 
 test.describe.configure({ timeout: 180_000 });
 test.use({ trace: { mode: 'retain-on-failure', screenshots: false, snapshots: false, sources: true } });
-const artifactRoot = '/root/emby-toolkit-mp-followup-verification/theme';
+const artifactRoot = '/root/emby-toolkit-nov11-verification/theme';
 mkdirSync(artifactRoot, { recursive: true });
 const appearances = ['clear', 'tinted', 'frosted'];
 const qualities = ['css', 'balanced', 'high'];
@@ -142,7 +142,7 @@ async function inspectSurfaces(page, options, rendering, id) {
   await menu.getByText('自定义导航', { exact: true }).click();
   await settleCaptureFrames(page, options);
   const dialog = page.locator('.v-dialog.v-overlay--active');
-  const primaryAction = dialog.getByRole('button', { name: '保存并应用', exact: true });
+  const primaryAction = dialog.getByRole('button', { name: '保存', exact: true });
   const primaryActionText = primaryAction.locator('.v-btn__content');
   await expect(primaryAction, 'dialog primary action button').toBeEnabled();
   await expect(primaryAction, 'dialog primary action button').toBeInViewport({ ratio: 1 });

@@ -1105,6 +1105,95 @@ fn sample_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
+fn sample_media_name(raw: &str) -> Option<String> {
+    let path = crate::media_paths::clean(raw);
+    let path = if path.to_lowercase().ends_with(".strm") {
+        std::path::Path::new(&path)
+            .with_extension("")
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        path
+    };
+    let ext = crate::media_paths::extension(&path);
+    if ext.is_empty() || ext == ".strm" {
+        return None;
+    }
+    std::path::Path::new(&path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
+async fn sample_source(state: &AppState, item: &Value) -> Result<String> {
+    let path = string(item, "Path");
+    let target = crate::media_paths::strm_target(&path)
+        .await
+        .unwrap_or_default();
+    let source = crate::media_info::item_source(item, &[&path, &target]).or_else(|| {
+        let sources = item["MediaSources"].as_array()?;
+        (sources.len() == 1
+            && (sources[0]["ItemId"].is_null() || sources[0]["ItemId"] == "")
+            && (sources[0]["Id"].is_null() || sources[0]["Id"] == ""))
+            .then(|| &sources[0])
+    });
+    if let Some(source) = source
+        && crate::media_paths::extension(&string(source, "Path")) != ".strm"
+        && !string(source, "Container")
+            .trim()
+            .eq_ignore_ascii_case("strm")
+        && let Some(name) = sample_media_name(&string(source, "Path"))
+    {
+        return Ok(name);
+    }
+    if crate::media_paths::extension(&path) != ".strm"
+        && let Some(name) = sample_media_name(&path)
+    {
+        return Ok(name);
+    }
+    if crate::media_paths::extension(&target) != ".strm"
+        && let Some(name) = sample_media_name(&target)
+    {
+        return Ok(name);
+    }
+    let config = state.config.read().await.clone();
+    let candidates = crate::media_paths::local_candidates(
+        &path,
+        &target,
+        &[
+            &string(&config, "local_strm_root"),
+            &string(&config, "cd2_media_root"),
+        ],
+    );
+    let pc = crate::fingerprints::pickcode(&target);
+    if let Some(cache) = crate::fingerprints::cached(state, pc.as_deref(), &candidates).await?
+        && crate::media_paths::extension(&string(&cache, "name")) != ".strm"
+        && let Some(name) = sample_media_name(&string(&cache, "name"))
+    {
+        return Ok(name);
+    }
+    if let Some(name) = sample_media_name(&path) {
+        return Ok(name);
+    }
+    Err(ApiError::bad("最近入库媒体无法确定真实源文件名及扩展名"))
+}
+
+fn sample_technical(source: &str) -> Value {
+    let mut fields = rename::pt(source);
+    // MP's filename parser retains source codec and SDR tags in naming examples.
+    let codec = regex::Regex::new(r"(?i)\b(AVC|HEVC|x26[45])\b").unwrap();
+    if let Some(token) = codec.find(source) {
+        fields["videoCodec"] = json!(if token.as_str().to_lowercase().starts_with('x') {
+            token.as_str().to_lowercase()
+        } else {
+            token.as_str().to_uppercase()
+        });
+    }
+    if fields["effect"].is_null() && regex::Regex::new(r"(?i)\bSDR\b").unwrap().is_match(source) {
+        fields["effect"] = json!("SDR");
+    }
+    fields
+}
+
 async fn latest_sample(state: &AppState, user: &str, kind: &str, template: &str) -> Result<Value> {
     if !sample_id(user) {
         return Err(ApiError::bad("未配置有效 Emby 用户 ID"));
@@ -1147,11 +1236,8 @@ async fn latest_sample(state: &AppState, user: &str, kind: &str, template: &str)
             item[field] = series[field].clone();
         }
     }
-    let source = string(&item, "Path");
-    if source.is_empty() {
-        return Err(ApiError::bad("最近入库媒体缺少源文件路径"));
-    }
-    let mut technical = rename::pt(&source);
+    let source = sample_source(state, &item).await?;
+    let mut technical = sample_technical(&source);
     for field in ["year", "season", "episode", "season_episode"] {
         technical.as_object_mut().unwrap().remove(field);
     }
@@ -1590,6 +1676,95 @@ mod sample_tests {
             assert_eq!(query["Limit"], "1");
         }
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn strm_previews_use_probed_real_movie_and_episode_file_names() {
+        let movie_name = "奈克瑟斯奥特曼EX：诗织 - 失落的记忆.Ultraman Nexus EX： Shiori - Lost Memories -.2005.720p.H264.AC3 2.0";
+        let episode_name =
+            "盖亚奥特曼.Ultraman Gaia.S01E44.1998.2160p.WEB-DL.SDR.AVC.AAC.2.0-QHstudIo";
+        let (_directory, state, _, server) = environment(
+            json!({"Items":[{"Id":"movie-new","Type":"Movie","Name":"奈克瑟斯奥特曼EX：诗织 - 失落的记忆","ProductionYear":2005,"ProviderIds":{"Tmdb":"1284316"},"Path":format!("/strm/{movie_name}.strm"),"MediaSources":[{"Path":format!("/media/{movie_name}.mkv"),"Container":"mkv"}]}]}),
+            json!({"Items":[{"Id":"episode-new","Type":"Episode","Name":"最新一集","SeriesId":"series-new","ParentIndexNumber":1,"IndexNumber":44,"Path":format!("/strm/{episode_name}.strm"),"MediaSources":[{"Path":format!("/media/{episode_name}.mp4"),"Container":"mp4"}]}]}),
+            json!({"Id":"series-new","Type":"Series","Name":"盖亚奥特曼","ProductionYear":1998,"ProviderIds":{"Tmdb":"4426"}}),
+        ).await;
+        let result = sample(State(state), Json(json!({
+            "movie_format":"{{title}} ({{year}}) {tmdbid={{tmdbid}}}/{{title}}.{{en_title}}.{{year}}.{{videoFormat}}.{{videoCodec}}.{{audioCodec}}{{fileExt}}",
+            "tv_format":"{{title}} ({{year}}) {tmdbid={{tmdbid}}}/Season {{'%02d'|format(season)}}/{{title}}.{{en_title}}.{{season_episode}}.{{year}}.{{videoFormat}}.{{resourceType}}.{{effect}}.{{videoCodec}}.{{audioCodec|replace(' ','.')}}-{{releaseGroup}}{{fileExt}}"
+        }))).await.unwrap().0;
+        assert_eq!(
+            result["movie"],
+            format!(
+                "奈克瑟斯奥特曼EX：诗织 - 失落的记忆 (2005) {{tmdbid=1284316}}/{movie_name}.mkv"
+            )
+        );
+        assert_eq!(
+            result["tv"],
+            format!("盖亚奥特曼 (1998) {{tmdbid=4426}}/Season 01/{episode_name}.mp4")
+        );
+        assert_eq!(
+            result["movie_sample"]["source_name"],
+            format!("{movie_name}.mkv")
+        );
+        assert_eq!(
+            result["tv_sample"]["source_name"],
+            format!("{episode_name}.mp4")
+        );
+        assert_eq!(result["tv_sample"]["season_episode"], "S01E44");
+        assert_eq!(result["errors"], json!({}));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn strm_previews_prefer_owned_actual_source_over_wrapper_tags() {
+        let (_directory, state, _, server) = environment(
+            json!({"Items":[{"Id":"movie-new","Type":"Movie","Name":"实际媒体","Path":"/strm/Old.1080p.H264.mkv.strm","MediaSources":[
+                {"ItemId":"other","Path":"/actual/Other.720p.H264.mkv","Container":"mkv"},
+                {"ItemId":"movie-new","Path":"/actual/New.2160p.H265.mp4","Container":"mp4"}
+            ]}]}),
+            json!({"Items":[]}),
+            Value::Null,
+        ).await;
+        let result = sample(
+            State(state),
+            Json(json!({"movie_format":"{{videoFormat}}.{{videoCodec}}{{fileExt}}"})),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(result["movie_sample"]["source_name"], "New.2160p.H265.mp4");
+        assert_eq!(result["movie"], "2160p.H265.mp4");
+        assert_eq!(result["errors"], json!({}));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn strm_previews_prefer_actual_link_target_over_wrapper_tags() {
+        let (directory, state, _, server) =
+            environment(json!({"Items":[]}), json!({"Items":[]}), Value::Null).await;
+        let path = directory.path().join("Old.1080p.H264.mkv.strm");
+        tokio::fs::write(&path, "/actual/New.2160p.H265.mp4")
+            .await
+            .unwrap();
+        let source = sample_source(&state, &json!({"Id":"movie-new","Path":path}))
+            .await
+            .unwrap();
+        assert_eq!(source, "New.2160p.H265.mp4");
+        server.abort();
+    }
+
+    #[test]
+    fn preview_source_names_decode_urls_without_guessing_an_unknown_extension() {
+        assert_eq!(
+            sample_media_name("https://media.test/Title%20Name.2026.mp4?token=redacted"),
+            Some("Title Name.2026.mp4".into())
+        );
+        assert_eq!(
+            sample_media_name("/media/Title.mkv.strm"),
+            Some("Title.mkv".into())
+        );
+        assert_eq!(sample_media_name("/media/Title.strm"), None);
+        assert_eq!(sample_media_name("https://media.test/d/abc123"), None);
     }
 
     #[tokio::test]

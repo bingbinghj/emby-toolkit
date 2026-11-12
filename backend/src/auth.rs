@@ -15,6 +15,9 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::{fs::OpenOptions, io::Write, path::Path};
 
+// MoviePilot v3 ACCESS_TOKEN_EXPIRE_MINUTES defaults to 60 * 24 * 8.
+pub const LOGIN_SESSION_SECONDS: i64 = 8 * 24 * 60 * 60;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub user_id: String,
@@ -51,8 +54,12 @@ impl SessionSigner {
         self.sign_value(&serde_json::to_value(session).expect("session serializable"))
     }
     pub fn sign_administrator(&self, session: &Session) -> String {
+        self.sign_administrator_with_remember(session, true)
+    }
+    pub fn sign_administrator_with_remember(&self, session: &Session, remember: bool) -> String {
         let mut value = serde_json::to_value(session).expect("session serializable");
         value["emby_is_admin"] = serde_json::json!(true);
+        value["remember"] = serde_json::json!(remember);
         self.sign_value(&value)
     }
     fn sign_value(&self, value: &serde_json::Value) -> String {
@@ -87,6 +94,17 @@ impl SessionSigner {
             })
     }
     pub fn administrator_claim(&self, headers: &HeaderMap) -> Option<bool> {
+        self.claims_from_headers(headers)?["emby_is_admin"].as_bool()
+    }
+    pub fn remember_claim(&self, headers: &HeaderMap) -> Option<bool> {
+        // Sessions issued before this preference existed were persistent.
+        Some(
+            self.claims_from_headers(headers)?["remember"]
+                .as_bool()
+                .unwrap_or(true),
+        )
+    }
+    fn claims_from_headers(&self, headers: &HeaderMap) -> Option<serde_json::Value> {
         headers
             .get(header::COOKIE)?
             .to_str()
@@ -99,9 +117,7 @@ impl SessionSigner {
                 }
                 self.verify(token)?;
                 let (payload, _) = token.split_once('.')?;
-                let value: serde_json::Value =
-                    serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).ok()?).ok()?;
-                value["emby_is_admin"].as_bool()
+                serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).ok()?).ok()
             })
     }
 }
@@ -130,6 +146,84 @@ pub async fn administrator_session(
     }
     Ok(Some(session))
 }
-pub fn cookie(token: &str) -> String {
-    format!("etk_session={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=2678400")
+pub fn cookie(token: &str, expires: i64, remember: bool) -> String {
+    let mut value = format!("etk_session={token}; HttpOnly; SameSite=Lax; Path=/");
+    if remember {
+        value.push_str(&format!(
+            "; Max-Age={}",
+            (expires - chrono::Utc::now().timestamp()).max(0)
+        ));
+    }
+    value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remember_preference_is_signed_and_legacy_sessions_remain_persistent() {
+        let signer = SessionSigner(vec![7; 32]);
+        let session = Session {
+            user_id: "test-admin".into(),
+            name: "Admin".into(),
+            setup_mode: false,
+            expires: chrono::Utc::now().timestamp() + LOGIN_SESSION_SECONDS,
+        };
+        for remember in [false, true] {
+            let token = signer.sign_administrator_with_remember(&session, remember);
+            let headers = HeaderMap::from_iter([(
+                header::COOKIE,
+                format!("etk_session={token}").parse().unwrap(),
+            )]);
+            assert_eq!(signer.remember_claim(&headers), Some(remember));
+            assert_eq!(signer.administrator_claim(&headers), Some(true));
+            assert_eq!(signer.from_headers(&headers).unwrap().user_id, "test-admin");
+
+            let (payload, signature) = token.split_once('.').unwrap();
+            let mut value: serde_json::Value =
+                serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
+            value["remember"] = serde_json::json!(!remember);
+            let forged = format!(
+                "{}.{}",
+                URL_SAFE_NO_PAD.encode(serde_json::to_vec(&value).unwrap()),
+                signature
+            );
+            let headers = HeaderMap::from_iter([(
+                header::COOKIE,
+                format!("etk_session={forged}").parse().unwrap(),
+            )]);
+            assert_eq!(signer.remember_claim(&headers), None);
+        }
+        let mut old_value = serde_json::to_value(session).unwrap();
+        old_value["emby_is_admin"] = serde_json::json!(true);
+        let old_token = signer.sign_value(&old_value);
+        let headers = HeaderMap::from_iter([(
+            header::COOKIE,
+            format!("etk_session={old_token}").parse().unwrap(),
+        )]);
+        assert_eq!(signer.remember_claim(&headers), Some(true));
+    }
+
+    #[test]
+    fn unchecked_login_cookie_is_session_only_and_remembered_cookie_matches_token_expiry() {
+        let now = chrono::Utc::now().timestamp();
+        let transient = cookie("fixture", now + LOGIN_SESSION_SECONDS, false);
+        assert_eq!(
+            transient,
+            "etk_session=fixture; HttpOnly; SameSite=Lax; Path=/"
+        );
+        let persistent = cookie("fixture", now + LOGIN_SESSION_SECONDS, true);
+        let age: i64 = persistent
+            .rsplit("Max-Age=")
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((LOGIN_SESSION_SECONDS - 1..=LOGIN_SESSION_SECONDS).contains(&age));
+        assert_eq!(
+            cookie("fixture", now - 1, true),
+            "etk_session=fixture; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"
+        );
+    }
 }

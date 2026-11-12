@@ -21,7 +21,7 @@ export function settingsCatalog(source, route) {
       card = attribute(node, 'title');
       subtitle = attribute(node, 'subtitle');
     } else if (!card && node.tag === 'VCard') {
-      card = text((node.children || []).find(child => child.tag === 'VCardTitle') || {});
+      card = attribute(node, 'data-settings-card') || text((node.children || []).find(child => child.tag === 'VCardTitle') || {});
     }
     const field = attribute(node, 'data-field');
     if (field) {

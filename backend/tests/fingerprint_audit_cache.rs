@@ -18,6 +18,7 @@ struct Mock {
     entered: Arc<Semaphore>,
     release: Arc<Semaphore>,
     sizes: Arc<Mutex<HashMap<String, u64>>>,
+    source_mode: Arc<AtomicUsize>,
     searches: Arc<Mutex<usize>>,
     request_times: Arc<Mutex<Vec<tokio::time::Instant>>>,
     missing_roots: Arc<AtomicUsize>,
@@ -86,6 +87,7 @@ impl Fixture {
             sizes: Arc::new(Mutex::new(
                 stems.iter().map(|stem| (stem.to_string(), 100)).collect(),
             )),
+            source_mode: Arc::new(AtomicUsize::new(0)),
             searches: Arc::new(Mutex::new(0)),
             request_times: Arc::new(Mutex::new(vec![])),
             missing_roots: Arc::new(AtomicUsize::new(0)),
@@ -135,7 +137,18 @@ impl Fixture {
                         mock.entered.add_permits(1);
                         mock.release.acquire().await.unwrap().forget();
                     }
-                    Json(json!({"Id":id,"Type":"Episode","Path":root.join(format!("Season/{id}.strm")),"Size":mock.sizes.lock().await[&id]}))
+                    let mut item = json!({"Id":id,"Type":"Episode","Path":root.join(format!("Season/{id}.strm")),"Size":17});
+                    let mode = mock.source_mode.load(Ordering::SeqCst);
+                    if mode != 1 {
+                        let mut source = json!({"ItemId":id,"Path":format!("/cd2/Season/{id}.mkv"),"Container":"mkv","Size":mock.sizes.lock().await[&id]});
+                        if mode == 2 {
+                            source["Path"] = item["Path"].clone();
+                            source["Container"] = json!("strm");
+                            source["Size"] = json!(19);
+                        }
+                        item["MediaSources"] = json!([source]);
+                    }
+                    Json(item)
                 }
             }))
             .with_state(mock.clone());
@@ -216,6 +229,43 @@ impl Fixture {
             .await
             .unwrap();
         self.root.close().await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL in DATABASE_URL"]
+async fn reports_unknown_emby_size_without_an_actual_media_source() {
+    for mode in [1, 2] {
+        let fixture = Fixture::new(&["First"], false).await;
+        fixture.mock.source_mode.store(mode, Ordering::SeqCst);
+        sqlx::query("UPDATE media_metadata SET file_sha1_json='[\"OLD-SHA\"]'")
+            .execute(&fixture.state.db)
+            .await
+            .unwrap();
+        let task = fixture.start().await;
+        let result = fixture.finish(&task).await;
+        let report: Value = serde_json::from_slice(
+            &tokio::fs::read(
+                fixture
+                    .directory
+                    .path()
+                    .join("fingerprint-scan-latest.json"),
+            )
+            .await
+            .unwrap(),
+        )
+        .unwrap();
+        fixture.cleanup().await;
+        assert_eq!(
+            result["result"]["counts"],
+            json!({"consistent":0,"repaired":1,"unknown":0}),
+            "mode={mode}: {result}"
+        );
+        assert!(
+            report["entries"][0]["emby_size"].is_null(),
+            "mode={mode}: {report}"
+        );
+        assert_eq!(report["entries"][0]["new"]["size"], 100);
     }
 }
 

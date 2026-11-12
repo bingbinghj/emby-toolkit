@@ -23,7 +23,7 @@
     <VAlert v-if="errorMessage" type="error" variant="tonal">{{ errorMessage }}</VAlert>
     <VProgressLinear v-if="isLoading" indeterminate color="primary" :aria-label="loadingText" />
     <div ref="scrollRef" class="history-log-list" role="region" aria-label="历史日志内容" tabindex="0">
-      <LogRecord v-for="(entry, index) in displayedRecords" :key="index" :line="entry.line" :file="entry.file" :keyword="isSearchMode ? appliedQuery : ''" />
+      <LogRecord v-for="(entry, index) in displayedRecords" :key="index" :line="entry.line" :file="entry.file" :keyword="isSearchMode ? appliedQuery : ''" :stripe="index % 2 ? 'odd' : 'even'" />
       <div v-if="!isLoading && !displayedRecords.length" class="history-empty"><VIcon icon="mdi-text-search" size="40" /><p>{{ isSearchMode ? '未找到匹配的日志记录' : levelFilter === 'all' ? '暂无日志内容' : '没有匹配的日志' }}</p></div>
     </div>
   </section>
@@ -143,15 +143,15 @@ onUnmounted(() => { pageActive = false; readSequence++; fileSequence++; });
 </script>
 
 <style scoped>
-.history-log-view { display:flex; flex:1; flex-direction:column; gap:12px; min-height:0; min-width:0; overflow:auto; }
+.history-log-view { display:flex; flex:1; flex-direction:column; gap:12px; min-height:0; min-width:0; overflow:hidden; }
 .history-search-toolbar, .history-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:10px; flex-shrink:0; }
 .history-search-toolbar > .v-input { flex:1; min-width:160px; }
 .history-file-select { flex:1 1 200px; min-width:0; }
 .history-level-select { flex:0 1 140px; min-width:110px; }
-.history-log-view > .v-input, .history-log-view > .v-alert, .history-log-view > .v-progress-linear { flex-shrink:0; }
+.history-log-view > .v-input, .history-log-view > .v-alert, .history-log-view > .v-progress-linear { flex:0 0 auto; }
 .history-pagination { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; flex-shrink:0; }
 .history-pagination span { color:var(--ui-text-muted); font-size:12px; }
-.history-log-list { display:flex; flex-direction:column; gap:12px; flex:1 0 160px; min-height:160px; min-width:0; overflow:auto; overscroll-behavior:contain; padding:8px 4px; }
+.history-log-list { display:flex; flex-direction:column; gap:6px; flex:1 1 0; min-height:0; min-width:0; overflow:auto; overscroll-behavior:contain; padding:14px; border:1px solid var(--logging-border,var(--ui-border)); background:var(--logging-shell-background,var(--ui-surface)); box-shadow:var(--logging-shadow); }
 .history-empty { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:32px 8px; color:var(--ui-text-muted); }
 @media (max-width:540px) { .history-search-toolbar > .v-input { flex-basis:100%; } .history-log-list { padding:4px; } }
 </style>

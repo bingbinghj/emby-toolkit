@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseLogRecord, matchesLogRecord, highlightLogText } from '../src/utils/logRecords.js';
+import { parseLogRecord, matchesLogRecord, highlightLogText, groupLogRecords } from '../src/utils/logRecords.js';
 
 const full = '2026-11-10 12:30:45,123 - emby_toolkit::media_reload - CRITICAL - 媒体 JSON 在失败后被修改，保留当前文件及备份\n原始路径 /config/backups/结尾';
 
@@ -44,4 +44,14 @@ test('safe keyword highlighting handles literal regex characters and never turns
   assert.equal(parts.filter(part => part.matched).length, 2);
   assert.equal(parts[0].text, '<script>');
   assert.deepEqual(highlightLogText('abc', ''), [{ text: 'abc', matched: false }]);
+});
+
+test('MP log groups merge only adjacent records of the same second and level within 100 ms', () => {
+  const line = (time, level, body) => `2026-11-11 12:30:45,${time} - source - ${level} - ${body}`;
+  const lines = [line('001', 'INFO', '第一条'), line('050', 'INFO', '第二条'), line('250', 'INFO', '间隔较大'), line('260', 'WARNING', '级别不同'), '续行原文'];
+  const groups = groupLogRecords(lines);
+  assert.deepEqual(groups.map(group => group.lines.length), [2, 1, 1, 1]);
+  assert.deepEqual(groups.flatMap(group => group.lines), lines);
+  assert.equal(groups[0].second, '2026-11-11 12:30:45');
+  assert.equal(groups[0].level, 'INFO');
 });

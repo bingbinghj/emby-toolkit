@@ -183,6 +183,9 @@ async fn database_target(state: &AppState, id: &str) -> Result<Option<Target>> {
             version_id
         };
         if !version_id.is_empty() && seen.insert(version_id.clone()) {
+            let slot_matches = ids.len() == assets.len()
+                && ids.get(i) == Some(&version_id)
+                && asset["emby_item_id"] == version_id;
             target.versions.push(
                 version(
                     state,
@@ -190,12 +193,12 @@ async fn database_target(state: &AppState, id: &str) -> Result<Option<Target>> {
                     &version_id,
                     i,
                     total,
-                    if sha.len() == assets.len() {
+                    if slot_matches && sha.len() == assets.len() {
                         sha.get(i)
                     } else {
                         None
                     },
-                    if pc.len() == assets.len() {
+                    if slot_matches && pc.len() == assets.len() {
                         pc.get(i)
                     } else {
                         None
@@ -374,9 +377,8 @@ async fn version(
     pc: Option<&Value>,
 ) -> Result<Value> {
     let path = string(asset, "path");
-    let _ = sha;
-    let cache=sqlx::query("SELECT name,local_path FROM p115_filesystem_cache WHERE $1::text IS NOT NULL AND pick_code=$1 LIMIT 1")
-        .bind(pc.map(text).filter(|s|!s.is_empty())).fetch_optional(&state.db).await?;
+    let cache=sqlx::query("SELECT name,local_path FROM p115_filesystem_cache WHERE (($1::text IS NOT NULL AND pick_code=$1) OR ($2::text IS NOT NULL AND UPPER(sha1)=UPPER($2))) AND ($1::text IS NULL OR pick_code IS NULL OR pick_code=$1) AND ($2::text IS NULL OR sha1 IS NULL OR UPPER(sha1)=UPPER($2)) ORDER BY CASE WHEN pick_code=$1 THEN 0 ELSE 1 END LIMIT 1")
+        .bind(pc.map(text).filter(|s|!s.is_empty())).bind(sha.map(text).filter(|s|!s.is_empty())).fetch_optional(&state.db).await?;
     let name = cache
         .as_ref()
         .and_then(|c| c.try_get::<String, _>("name").ok())
@@ -410,13 +412,18 @@ async fn version(
         .iter()
         .map(|s| media_paths::extension(s))
         .find(|s| !s.is_empty() && s != ".strm")
-        .unwrap_or_else(|| string(asset, "container"))
+        .unwrap_or_else(|| string(asset, "container"));
+    let format = match format
+        .trim()
         .trim_start_matches('.')
-        .to_uppercase();
-    let format = if format == "STRM" {
-        String::new()
-    } else {
-        format
+        .to_lowercase()
+        .as_str()
+    {
+        "strm" => String::new(),
+        "matroska" | "matroska,webm" => "MKV".into(),
+        "mov,mp4,m4a,3gp,3g2,mj2" => "MP4".into(),
+        "mpegts" | "mpeg-ts" => "TS".into(),
+        value => value.to_uppercase(),
     };
     if !filename.is_empty() && media_paths::extension(&filename).is_empty() && !format.is_empty() {
         filename.push_str(&format!(".{}", format.to_lowercase()));
@@ -542,7 +549,38 @@ async fn edit(State(state): State<AppState>, Path(id): Path<String>) -> Result<J
 }
 async fn edit_data(state: &AppState, id: &str) -> Result<Json<Value>> {
     let mut target = target(state, id).await?;
-    let info = load(state, &target).await?;
+    let mut info = load(state, &target).await?;
+    // The chapter-only writer updates Emby and its cache without clearing media
+    // streams. A local sidecar can therefore predate the new credits marker.
+    if target.kind == "Episode"
+        && let Ok(live) = details(state, id, "Id,Type,Path,Chapters").await
+        && live["Id"] == id
+        && live["Type"] == "Episode"
+        && live["Path"] == target.path
+        && let Some(ticks) = crate::credits::credits_start(&live["Chapters"])
+    {
+        let chapter = live["Chapters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|chapter| {
+                chapter["MarkerType"] == "CreditsStart" && chapter["StartPositionTicks"] == ticks
+            })
+            .unwrap()
+            .clone();
+        let entries = match &mut info {
+            Value::Array(entries) => entries.iter_mut().collect::<Vec<_>>(),
+            Value::Object(_) => vec![&mut info],
+            _ => vec![],
+        };
+        for entry in entries {
+            let mut chapters = list(&entry["Chapters"]);
+            chapters.retain(|chapter| chapter["MarkerType"] != "CreditsStart");
+            chapters.push(chapter.clone());
+            chapters.sort_by_key(|chapter| chapter["StartPositionTicks"].as_u64().unwrap_or(0));
+            entry["Chapters"] = json!(chapters);
+        }
+    }
     let mut options = vec![];
     let mut seen = HashSet::new();
     for stream in media_info::container(&info)

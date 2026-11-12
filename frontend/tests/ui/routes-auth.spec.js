@@ -44,7 +44,7 @@ test.describe('login required', () => {
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page).toHaveURL(/\/dashboard$/);
     await expect(page.locator('.dashboard-page')).toBeVisible();
-    expect(api.requests.find(request => request.path === '/api/auth/login').body).toEqual({ username: 'UI Test', password: 'fixture-password' });
+    expect(api.requests.find(request => request.path === '/api/auth/login').body).toEqual({ username: 'UI Test', password: 'fixture-password', remember: true });
   });
 });
 
@@ -70,7 +70,7 @@ test.describe('ordinary account', () => {
     await expect(page.locator('.user-management-page')).toBeVisible();
     await expect(page.getByText('用户管理需要管理员权限。', { exact: true })).toBeVisible();
     expect(api.requests.some(request => request.path === '/api/portal/users')).toBe(false);
-    await expect(page.getByRole('button', { name: '通知中心', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '实时日志', exact: true })).toHaveCount(0);
     await expect(page.locator('.v-navigation-drawer').getByText('设置', { exact: true })).toHaveCount(0);
     expect(api.requests.some(request => request.path === '/api/status')).toBe(false);
   });
@@ -80,13 +80,13 @@ test('menu order changes through accessible controls and is saved', async ({ pag
   await page.goto('/user-management');
   await page.getByRole('button', { name: 'UI Test 的用户菜单', exact: true }).click();
   await page.getByText('自定义导航', { exact: true }).click();
-  const dialog = page.locator('.v-overlay--active').filter({ has: page.getByRole('button', { name: '保存并应用', exact: true }) });
+  const dialog = page.locator('.v-overlay--active').filter({ has: page.getByRole('button', { name: '保存', exact: true }) });
   const firstGroup = dialog.locator('.menu-editor-group').nth(2);
   const items = firstGroup.locator('.menu-editor-item');
   await expect(items).toHaveCount(4);
   for (const index of [3, 2, 1]) await items.nth(index).getByRole('button', { name: '上移菜单', exact: true }).click();
   await expect(items.nth(0).getByLabel('菜单名称', { exact: true })).toHaveValue('用户管理');
-  await dialog.getByRole('button', { name: '保存并应用', exact: true }).click();
+  await dialog.getByRole('button', { name: '保存', exact: true }).click();
   await expect.poll(() => api.requests.some(request => request.method === 'POST' && request.path === '/api/system/menu_config')).toBe(true);
   const saved = api.requests.find(request => request.method === 'POST' && request.path === '/api/system/menu_config').body;
   expect(saved[2].children.map(item => item.key)).toEqual(['UserManagement', 'settings-general', 'settings-scheduler', 'CoverGeneratorConfig']);

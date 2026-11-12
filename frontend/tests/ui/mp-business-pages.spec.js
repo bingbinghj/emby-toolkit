@@ -30,11 +30,14 @@ for (const width of [390, 1440]) {
       expect(headingBounds.y).toBeGreaterThanOrEqual(navbarBounds.y + navbarBounds.height);
       await expect(content.locator('h1:not(.sr-only)')).toHaveCount(0);
       if (path === '/settings/scheduler') {
-        const copy = page.locator('.temp-task-description').first();
+        const copy = page.locator('.temp-task-description:visible').first();
         await expect(copy).toContainText('完整换行');
-        const button = page.locator('.task-card').first().getByRole('button', { name: '立即执行' });
+        const button = page.locator('.task-record:visible').first().getByRole('button', { name: '执行' });
         const [copyBounds, buttonBounds] = await Promise.all([copy.boundingBox(), button.boundingBox()]);
-        if (width < 600) expect(buttonBounds.y).toBeGreaterThanOrEqual(copyBounds.y + copyBounds.height);
+        const overlap = Math.max(0, Math.min(copyBounds.x + copyBounds.width, buttonBounds.x + buttonBounds.width) - Math.max(copyBounds.x, buttonBounds.x))
+          * Math.max(0, Math.min(copyBounds.y + copyBounds.height, buttonBounds.y + buttonBounds.height) - Math.max(copyBounds.y, buttonBounds.y));
+        expect(overlap).toBe(0);
+        await expect(page.getByTestId(width < 600 ? 'scheduler-mobile-tasks' : 'scheduler-desktop-tasks')).toBeVisible();
       }
       if (path === '/settings/cover-generator') {
         await page.getByRole('tab', { name: '单图风格设置', exact: true }).click();

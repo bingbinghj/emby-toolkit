@@ -131,6 +131,119 @@ mod native {
         f.close().await;
     }
 
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn legacy_recovery_verifies_sparse_bif_images_instead_of_synthetic_thumbnail_positions() {
+        let f = failed_json_recovery_fixture().await;
+        let recovery = reload_recovery(&f);
+        let marker = recovery.join("media-reload.json");
+        let mut legacy: Value =
+            serde_json::from_slice(&tokio::fs::read(&marker).await.unwrap()).unwrap();
+        for key in ["targets", "observations", "thumbnail_times"] {
+            legacy.as_object_mut().unwrap().remove(key);
+        }
+        tokio::fs::write(&marker, serde_json::to_vec(&legacy).unwrap())
+            .await
+            .unwrap();
+        *f.proxy.protocol_fault.lock().await = "thumbnail-set-synthetic".into();
+        let status = recovery_status(&f.native.state).await;
+        let result = recover_from_editor(
+            &f.native.state,
+            status["records"][0]["id"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(result["state"], "completed", "{result}");
+        assert!(!recovery.exists());
+        assert_eq!(recovery_status(&f.native.state).await["pending"], false);
+        assert_eq!(
+            *f.native.host.settings.lock().await,
+            f.proxy.original_settings
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn recovery_rejects_native_bif_with_original_positions_but_changed_images() {
+        let f = failed_json_recovery_fixture().await;
+        let recovery = reload_recovery(&f);
+        *f.proxy.protocol_fault.lock().await = "bif-readback-changed".into();
+        let status = recovery_status(&f.native.state).await;
+        let result = recover_from_editor(
+            &f.native.state,
+            status["records"][0]["id"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(result["state"], "failed", "{result}");
+        assert!(
+            result["message"]
+                .as_str()
+                .unwrap()
+                .contains("原生时间索引或图片内容"),
+            "{result}"
+        );
+        assert!(recovery.exists());
+        assert_eq!(recovery_status(&f.native.state).await["pending"], true);
+        assert_ne!(
+            *f.native.host.settings.lock().await,
+            f.proxy.original_settings
+        );
+        *f.proxy.protocol_fault.lock().await = String::new();
+        let retry = recover_from_editor(
+            &f.native.state,
+            status["records"][0]["id"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(retry["state"], "completed", "{retry}");
+        assert!(!recovery.exists());
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn recovery_keeps_bif_changed_while_native_readback_is_in_flight() {
+        let f = failed_json_recovery_fixture().await;
+        let recovery = reload_recovery(&f);
+        *f.proxy.protocol_fault.lock().await = "bif-resource-changed-during-readback".into();
+        let status = recovery_status(&f.native.state).await;
+        let result = recover_from_editor(
+            &f.native.state,
+            status["records"][0]["id"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(result["state"], "failed", "{result}");
+        assert!(
+            result["message"]
+                .as_str()
+                .unwrap()
+                .contains("原有 BIF 资源未完整恢复"),
+            "{result}"
+        );
+        assert!(recovery.exists());
+        assert_eq!(recovery_status(&f.native.state).await["pending"], true);
+        let record: Value = serde_json::from_slice(
+            &tokio::fs::read(recovery.join("media-reload.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let original = record["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["path"].as_str().unwrap().ends_with(".bif"))
+            .unwrap();
+        assert_ne!(
+            tokio::fs::read(original["path"].as_str().unwrap())
+                .await
+                .unwrap(),
+            tokio::fs::read(original["backup"].as_str().unwrap())
+                .await
+                .unwrap()
+        );
+        f.close().await;
+    }
+
     async fn failed_json_recovery_fixture() -> ThumbnailFixture {
         let f = ThumbnailFixture::with_flag(Some(false)).await;
         *f.proxy.protocol_fault.lock().await = "sync-failed".into();
@@ -1166,7 +1279,55 @@ mod native {
                     .find(|item| item["Id"] == id)
                     .unwrap();
                 let frames = native_bif_frames(&item).unwrap_or_default();
+                if proxy.protocol_fault.lock().await.as_str() == "thumbnail-set-synthetic" {
+                    // Emby 4.10.2 RokuMetadata.BifService returns a regular
+                    // filename interval timeline, not the sparse BIF index.
+                    return Json(json!({"Thumbnails":(0..5079_u64).map(|second|json!({"PositionTicks":second*10_000_000,"ImageTag":"synthetic-native-timeline"})).collect::<Vec<_>>()})).into_response();
+                }
                 return Json(json!({"Thumbnails":frames.iter().map(|(ms,_)|json!({"PositionTicks":ms.checked_mul(10_000).unwrap(),"ImageTag":"old-thumbnail"})).collect::<Vec<_>>()})).into_response();
+            }
+            if path.starts_with("/Videos/") && path.ends_with("/index.bif") {
+                assert_eq!(query.get("Width").map(String::as_str), Some("0"));
+                let id = path.split('/').nth(2).unwrap();
+                let item = proxy
+                    .items()
+                    .await
+                    .into_iter()
+                    .find(|item| item["Id"] == id)
+                    .unwrap();
+                let mut bytes = tokio::fs::read(local_bif(&item)).await.unwrap();
+                let fault = proxy.protocol_fault.lock().await.clone();
+                if matches!(
+                    fault.as_str(),
+                    "bif-readback-changed" | "bif-resource-changed-during-readback"
+                ) {
+                    let original = bytes.clone();
+                    let count = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize;
+                    let start = u32::from_le_bytes(bytes[68..72].try_into().unwrap()) as usize;
+                    let end = u32::from_le_bytes(bytes[76..80].try_into().unwrap()) as usize;
+                    let image = image::RgbImage::from_pixel(320, 180, image::Rgb([7, 8, 9]));
+                    let mut replacement = vec![];
+                    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut replacement, 90)
+                        .encode_image(&image)
+                        .unwrap();
+                    let delta = replacement.len() as i64 - (end - start) as i64;
+                    bytes.splice(start..end, replacement);
+                    for index in 1..=count {
+                        let offset = 68 + index * 8;
+                        let old = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+                        bytes[offset..offset + 4]
+                            .copy_from_slice(&((old as i64 + delta) as u32).to_le_bytes());
+                    }
+                    if fault == "bif-resource-changed-during-readback" {
+                        tokio::fs::write(local_bif(&item), &bytes).await.unwrap();
+                        bytes = original;
+                    }
+                }
+                return (
+                    [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+                    bytes,
+                )
+                    .into_response();
             }
             if path.contains("/stream") || path.ends_with("/Download") || path.starts_with("/cd2/")
             {
