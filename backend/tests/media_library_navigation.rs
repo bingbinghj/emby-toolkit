@@ -31,7 +31,7 @@ async fn request(
                 let start = query["StartIndex"].parse::<u64>().unwrap();
                 let limit = query["Limit"].parse::<u64>().unwrap();
                 let items: Vec<Value> = (start..(start + limit).min(240))
-                    .map(|index| json!({"Id":index.to_string(),"Name":format!("Movie {index}"),"Type":"Movie"})).collect();
+                    .map(|index| json!({"Id":index.to_string(),"Name":format!("Movie {index}"),"Type":"Movie","CommunityRating":8.2,"CriticRating":91,"OfficialRating":"PG-13","CustomRating":"青少年","UnrecognizedNativeField":{"retained":true}})).collect();
                 Json(json!({"Items":items,"TotalRecordCount":240})).into_response()
             }
         }))
@@ -97,6 +97,13 @@ async fn letter_navigation_keeps_the_full_library_and_anchors_inside_a_page() {
     assert_eq!(value["total"], 240);
     assert_eq!(value["anchor_found"], true);
     assert_eq!(value["items"][2]["Id"], "92");
+    for item in value["items"].as_array().unwrap() {
+        assert!(item.get("CommunityRating").is_none());
+        assert!(item.get("CriticRating").is_none());
+        assert_eq!(item["OfficialRating"], "PG-13");
+        assert_eq!(item["CustomRating"], "青少年");
+        assert_eq!(item["UnrecognizedNativeField"], json!({"retained":true}));
+    }
     assert_eq!(requests.len(), 3);
     assert_eq!(requests[1]["NameStartsWithOrGreater"], "D");
     assert!(!requests[2].contains_key("NameStartsWithOrGreater"));
@@ -104,6 +111,11 @@ async fn letter_navigation_keeps_the_full_library_and_anchors_inside_a_page() {
         assert_eq!(query["SearchTerm"], "Movie");
         assert_eq!(query["SortBy"], "SortName");
         assert_eq!(query["EnableTotalRecordCount"], "true");
+        assert!(
+            query
+                .get("Fields")
+                .is_none_or(|fields| !fields.split(',').any(|field| field == "CommunityRating"))
+        );
     }
 }
 

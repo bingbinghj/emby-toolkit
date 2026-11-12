@@ -79,10 +79,10 @@
         <VEmptyState v-if="!manualTaskGroups.length" :title="taskSearchQuery.trim() ? '未找到匹配任务' : '暂无可用任务'" icon="mdi-timer-off-outline" />
       </div>
       <VAlert v-if="configError" type="error" variant="tonal">{{ configError }}</VAlert>
-      <div v-if="availableTasksForManualRun.length" class="scheduler-order-actions d-flex align-center flex-wrap ga-3">
+      <div v-if="availableTasksForManualRun.length" class="scheduler-order-actions d-flex align-center flex-wrap justify-end ga-3">
+        <span v-if="manualOrderDirty" class="text-body-2 text-medium-emphasis">顺序已调整，保存后生效</span>
         <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" aria-label="保存任务顺序"
           :loading="manualOrderSaving" :disabled="manualOrderSaving" @click="saveManualTaskOrder">保存任务顺序</VBtn>
-        <span v-if="manualOrderDirty" class="text-body-2 text-medium-emphasis">顺序已调整，保存后生效</span>
       </div>
     </div>
     <VDialog v-model="showTgMenuConfigModal" max-width="600" persistent>
@@ -97,7 +97,7 @@
             </div>
           </div>
         </VCardText>
-        <VCardActions class="justify-start"><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" @click="saveTgMenuConfig">保存</VBtn><VBtn variant="text" @click="showTgMenuConfigModal = false">取消</VBtn></VCardActions>
+        <VCardActions><VSpacer /><VBtn variant="text" @click="showTgMenuConfigModal = false">取消</VBtn><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" @click="saveTgMenuConfig">保存</VBtn></VCardActions>
       </VCard>
     </VDialog>
     <VDialog v-model="showSyncModeModal" max-width="560" persistent>

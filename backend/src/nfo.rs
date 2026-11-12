@@ -182,7 +182,6 @@ pub fn build(kind: &str, data: &Value, cast: &[Value]) -> String {
         };
         element(&mut output, "year", &year);
         element(&mut output, "premiered", date);
-        element(&mut output, "rating", &data["vote_average"]);
         if kind == "Series" {
             element(&mut output, "status", &data["status"]);
         }
@@ -201,9 +200,6 @@ pub fn build(kind: &str, data: &Value, cast: &[Value]) -> String {
             element(&mut output, "episode", &data["episode_number"]);
         }
         element(&mut output, "premiered", &data["air_date"]);
-    }
-    if kind == "Episode" {
-        element(&mut output, "rating", &data["vote_average"]);
     }
     id(&mut output, "tmdb", &data["id"], true);
     if data["id"] != 0 {

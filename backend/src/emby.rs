@@ -527,6 +527,7 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
             ),
         )
         .await;
+    let mut start_error = None;
     if !running {
         checkpoint_deadline(context, &mut deadline).await?;
         if tokio::time::Instant::now() >= deadline {
@@ -535,13 +536,21 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
         let path = format!("ScheduledTasks/Running/{id}");
         let submission = tokio::select! {
             _ = context.cancelled() => return context.checkpoint().await,
-            result = tokio::time::timeout_at(deadline, state.emby(Method::POST, &path, &[], None)) => result,
+            result = tokio::time::timeout_at(deadline, state.emby_once(Method::POST, &path, &[], None)) => result,
         };
         checkpoint_deadline(context, &mut deadline).await?;
-        submission.map_err(|_| timeout())??;
-        tracing::info!(
-            "[Emby计划任务] {task_name}（任务ID：{id}）启动请求已接收，等待本次执行结果"
-        );
+        match submission.map_err(|_| timeout())? {
+            Ok(_) => tracing::info!(
+                "[Emby计划任务] {task_name}（任务ID：{id}）启动请求已接收，等待本次执行结果"
+            ),
+            Err(error) => {
+                tracing::warn!(
+                    "[Emby计划任务] {task_name}（任务ID：{id}）启动请求未正常返回，仅回读实际执行，不重复提交：{}",
+                    error.1
+                );
+                start_error = Some(error.1);
+            }
+        }
     }
     let mut next_notice = started;
     loop {
@@ -572,6 +581,14 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
             .as_array()
             .and_then(|tasks| tasks.iter().find(|t| t["Id"] == id))
             .ok_or_else(|| ApiError::bad("等待期间 Emby 任务消失"))?;
+        if task["State"] == "Idle"
+            && task["LastExecutionResult"]["StartTimeUtc"] == previous
+            && let Some(error) = &start_error
+        {
+            return Err(ApiError::bad(format!(
+                "Emby 任务启动未确认：{task_name}（任务ID：{id}），没有读取到本次执行，未重复提交：{error}"
+            )));
+        }
         if task["State"] == "Idle"
             && (running || task["LastExecutionResult"]["StartTimeUtc"] != previous)
         {

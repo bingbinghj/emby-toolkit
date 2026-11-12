@@ -144,8 +144,8 @@ test('Telegram task menu uses the primary filled save control', async ({ page, a
   await expect(save).toHaveClass(/v-btn--variant-flat/);
   await expect(save).toHaveClass(/bg-primary/);
   await expect(save.locator('.v-btn__prepend .v-icon')).toBeVisible();
-  const position = await save.evaluate(element => ({ left: element.getBoundingClientRect().left, parent: element.closest('.v-card-actions').getBoundingClientRect().left }));
-  expect(position.left - position.parent).toBeLessThanOrEqual(24);
+  const position = await save.evaluate(element => ({ right: element.getBoundingClientRect().right, parent: element.closest('.v-card-actions').getBoundingClientRect().right }));
+  expect(position.parent - position.right).toBeLessThanOrEqual(24);
 });
 
 const taskKeys = group => group.locator('.scheduler-task-grid > .task-record').evaluateAll(cards => cards.map(card => card.dataset.taskKey));
@@ -186,6 +186,9 @@ for (const width of [390, 1440]) {
     await moveCardBefore(page, group, tasks[1].key, tasks[0].key);
     await expect.poll(() => taskKeys(group)).toEqual([tasks[1].key, tasks[0].key]);
     await expect(page.getByText('顺序已调整，保存后生效', { exact: true })).toBeVisible();
+    const save = page.getByRole('button', { name: '保存任务顺序', exact: true });
+    const position = await save.evaluate(element => ({ right: element.getBoundingClientRect().right, parent: element.closest('.scheduler-order-actions').getBoundingClientRect().right }));
+    expect(position.parent - position.right).toBeLessThanOrEqual(2);
     expect(api.requests.filter(request => request.method === 'POST')).toEqual([]);
     await page.reload();
     await expect.poll(() => taskKeys(group)).toEqual(tasks.map(task => task.key));

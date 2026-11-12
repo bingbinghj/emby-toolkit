@@ -18,7 +18,7 @@ const props = defineProps({ taskStatus: Object });
 const router = useRouter(), route = useRoute(), authStore = useAuthStore();
 const message = useMessage(), dialog = useDialog();
 const appearance = useThemeCustomizer();
-const { mdAndDown } = useDisplay();
+const { mdAndDown, mdAndUp } = useDisplay();
 const isMobile = computed(() => mdAndDown.value);
 const notificationOpen = ref(false), themeCustomizerOpen = ref(false), avatarLoadFailed = ref(false);
 const searchOpen = ref(false), desktopSearchInput = ref(null), mobileSearchInput = ref(null);
@@ -518,9 +518,11 @@ onBeforeUnmount(clearDragState);
           </VCard>
         </VMenu>
       </template>
+    </template>
+    <template #navbar-center>
       <VMenu v-if="authStore.isAdmin && taskStatus?.is_running" location="bottom" :close-on-content-click="false">
         <template #activator="{ props: taskMenuProps }">
-          <VBtn v-bind="taskMenuProps" variant="text" class="running-task" aria-label="查看当前任务">
+          <VBtn v-bind="taskMenuProps" variant="tonal" color="default" class="running-task" aria-label="查看当前任务">
             <span class="running-task-content"><strong>{{ taskStatus.current_action }}</strong>
               <VProgressLinear :model-value="taskStatus.progress" :indeterminate="!taskStatus.progress_known" color="primary" rounded height="3" />
             </span>
@@ -593,7 +595,7 @@ onBeforeUnmount(clearDragState);
       </VCardText>
     </VCard>
   </VDialog>
-  <VDialog v-model="notificationOpen" max-width="1100">
+  <VDialog v-model="notificationOpen" :scrollable="mdAndUp" max-width="80rem" :fullscreen="!mdAndUp">
     <VCard class="notification-dialog-card"><NotificationCenter v-if="notificationOpen" :task="taskStatus" @close="notificationOpen = false" /></VCard>
   </VDialog>
   <ThemeCustomizer v-if="themeCustomizerOpen" @close="themeCustomizerOpen = false"><WallpaperSettings /></ThemeCustomizer>
@@ -652,8 +654,8 @@ onBeforeUnmount(clearDragState);
         </div>
         <VAlert type="info" variant="tonal" density="compact">拖到分区之间可设为独立导航，拖入分区可调整所属分区。菜单项始终直接显示；关闭分区显示时，其中开启的菜单仍会显示。</VAlert>
       </VCardText>
-      <VCardActions><VBtn class="menu-apply-button" color="primary" variant="flat" :loading="isSavingMenu" :disabled="!menuConfigLoaded" prepend-icon="mdi-content-save-outline" @click="saveMenuConfig">保存</VBtn>
-          <VBtn color="error" :loading="isSavingMenu" :disabled="isMenuLoading" prepend-icon="mdi-restore" @click="confirmResetMenu">恢复默认</VBtn>
+      <VCardActions><VBtn color="error" :loading="isSavingMenu" :disabled="isMenuLoading" prepend-icon="mdi-restore" @click="confirmResetMenu">恢复默认</VBtn>
+          <VSpacer /><VBtn class="menu-apply-button" color="primary" variant="flat" :loading="isSavingMenu" :disabled="!menuConfigLoaded" prepend-icon="mdi-content-save-outline" @click="saveMenuConfig">保存</VBtn>
       </VCardActions>
     </VCard>
   </VDialog>
@@ -665,7 +667,7 @@ onBeforeUnmount(clearDragState);
 .app-brand-name { font-size: 17px; font-weight: 700; white-space: nowrap; }
 .navbar-search { color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)) !important; }
 .navbar-search-desktop, .navbar-search-mobile { display: flex; align-items: center; gap: 10px; min-inline-size: 0; padding: 8px 12px; border-radius: var(--app-field-radius); }
-.navbar-search-desktop { inline-size: clamp(240px, 30vw, 440px); }
+.navbar-search-desktop { inline-size: clamp(240px, 30vw, 440px); max-inline-size: 100%; min-inline-size: 0; }
 .navbar-context-search { flex: 1; min-inline-size: 0; inline-size: 100%; color: inherit; font: inherit; font-size: 15px; line-height: 1.5; background: transparent; border: 0; outline: none; }
 .navbar-context-search::placeholder { color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); opacity: 1; }
 .navbar-context-search::-webkit-search-cancel-button { display: none; }
@@ -675,8 +677,8 @@ onBeforeUnmount(clearDragState);
 .user-profile-summary { background: rgba(var(--v-theme-primary), .05); }
 .user-profile-role { display: block; font-size: 14px; font-weight: 500; color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); }
 .user-profile-name { display: block; font-size: 18px; font-weight: 700; color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); overflow-wrap: anywhere; }
-.running-task { max-inline-size: min(280px, 30vw); min-inline-size: 0; }
-.running-task-content { display: grid; gap: 5px; min-inline-size: 0; inline-size: 100%; }
+.running-task { inline-size: min(240px, 100%); min-inline-size: 0; block-size: 46px; padding: 8px 12px; border: 1px solid rgba(var(--v-theme-on-surface), .16); border-radius: 12px; background-color: rgb(var(--v-theme-surface)); }
+.running-task-content { display: grid; gap: 5px; min-inline-size: 0; inline-size: 100%; text-align: center; }
 .running-task-content strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
 .task-message { margin-block-start: 12px; overflow-wrap: anywhere; }
 .menu-editor-content { max-block-size: 70dvh; }
@@ -700,7 +702,7 @@ onBeforeUnmount(clearDragState);
 .is-dragging { opacity: .45; }
 .empty-group-dropzone { text-align: center; color: rgba(var(--v-theme-on-surface), .55); padding: 16px; border: 1px dashed rgba(var(--v-theme-on-surface), .2); }
 @media (width <= 600px) {
-  .running-task { max-inline-size: 25vw; }
+  .running-task { padding-inline: 6px; }
   .app-brand-name { font-size: 15px; }
   .menu-editor-item { display: grid; grid-template-columns: 24px 40px minmax(0, 1fr); gap: 8px; }
   .menu-editor-item :deep(.v-text-field) { min-inline-size: 0; }

@@ -6,7 +6,11 @@ test('MP settings use one navigation entry and working header categories', async
   await expect(navigation.getByText('设置', { exact: true })).toHaveCount(1);
   await expect(navigation.getByText('通知设置', { exact: true })).toHaveCount(0);
   await expect(page.getByRole('tab', { name: '系统', exact: true })).toHaveAttribute('aria-selected', 'true');
-  await expect(page.getByLabel('地址', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '编辑 Emby 媒体服务器', exact: true }).click();
+  const serverDialog = page.locator('.v-dialog.v-overlay--active').filter({ has: page.getByRole('button', { name: '关闭媒体服务器配置', exact: true }) });
+  await expect(serverDialog.getByLabel('地址', { exact: true })).toBeVisible();
+  await serverDialog.getByRole('button', { name: '取消媒体服务器配置', exact: true }).click();
+  await expect(serverDialog).toBeHidden();
   await page.getByRole('tab', { name: '存储 & 目录', exact: true }).click();
   await expect(page).toHaveURL(/tab=directory/);
   await expect(page.getByLabel('媒体元数据目录', { exact: true })).toBeVisible();

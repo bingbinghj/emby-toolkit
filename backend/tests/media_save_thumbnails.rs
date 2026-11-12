@@ -1028,6 +1028,399 @@ mod native {
         }
     }
 
+    async fn file_marker_fixture() -> (ThumbnailFixture, Value) {
+        let mut f = ThumbnailFixture::with_flag(Some(false)).await;
+        f.proxy.file_import_enabled.store(true, Ordering::SeqCst);
+        f.native.host.settings.lock().await["ExclusiveExtract"] = json!(true);
+        f.native.original_settings["ExclusiveExtract"] = json!(true);
+        f.proxy.original_settings["ExclusiveExtract"] = json!(true);
+        f.native.original[0]["Chapters"] = json!([
+            {"Name":"片头","MarkerType":"IntroStart","StartPositionTicks":870646766_u64},
+            {"Name":"片尾","MarkerType":"IntroEnd","StartPositionTicks":1854477611_u64},
+            {"Name":"结束","MarkerType":"CreditsStart","StartPositionTicks":5_900_123_456_u64}
+        ]);
+        {
+            let mut item = f.native.host.item.lock().await;
+            item["MediaStreams"] = f.native.original[0]["MediaSourceInfo"]["MediaStreams"].clone();
+            item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
+            item["Chapters"] = f.native.original[0]["Chapters"].clone();
+            seed_chapter_images(&f.native.host, &item).await;
+            seed_standard_bif(&f.native.host, &item).await;
+            for chapter in item["Chapters"].as_array_mut().unwrap() {
+                chapter["ImageTag"] = json!("old-thumbnail");
+            }
+        }
+        tokio::fs::write(
+            info_path(&*f.native.host.item.lock().await),
+            serde_json::to_vec(&f.native.original).unwrap(),
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE p115_mediainfo_cache SET mediainfo_json=$1 WHERE sha1=$2")
+            .bind(&f.native.original)
+            .bind(format!("{:040X}", 42))
+            .execute(&f.native.state.db)
+            .await
+            .unwrap();
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("文件恢复后的新音轨标题");
+        (f, edited)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn file_marker_save_preserves_exact_markers_images_bif_and_uses_only_the_formal_file() {
+        for (existing_bif, clear_error) in [(true, false), (true, true), (false, false)] {
+            let (f, edited) = file_marker_fixture().await;
+            let before = f.native.host.item.lock().await.clone();
+            let bif = if existing_bif {
+                Some(tokio::fs::read(local_bif(&before)).await.unwrap())
+            } else {
+                tokio::fs::remove_file(local_bif(&before)).await.unwrap();
+                assert!(native_bif_frames(&before).is_none());
+                None
+            };
+            let images = before["Chapters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|chapter| {
+                    let path = chapter_image(&f.native.host, &before, chapter);
+                    let bytes = std::fs::read(&path).unwrap();
+                    (path, bytes)
+                })
+                .collect::<Vec<_>>();
+            if clear_error {
+                *f.proxy.protocol_fault.lock().await = "sync-native-hmi-noop-clear-error".into();
+            }
+            let result = f.save(json!({"mediainfo":edited.clone()}), false).await;
+            assert_eq!(
+                result["result"]["metadata_refresh"]["state"], "verified",
+                "{result}"
+            );
+            let live = f.native.host.item.lock().await.clone();
+            assert_eq!(live["MediaStreams"][1]["Title"], "文件恢复后的新音轨标题");
+            let chapters = live["Chapters"].as_array().unwrap();
+            let requested = edited[0]["Chapters"].as_array().unwrap();
+            assert_eq!(chapters.len(), requested.len());
+            for (actual, expected) in chapters.iter().zip(requested) {
+                for field in ["Name", "MarkerType", "StartPositionTicks"] {
+                    assert_eq!(actual[field], expected[field], "{field}: {result}");
+                }
+            }
+            assert!(
+                native_chapter_images(&f.native.host, &live)
+                    .iter()
+                    .all(|present| *present)
+            );
+            assert!(
+                live["Chapters"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|chapter| !string(chapter, "ImageTag").is_empty())
+            );
+            for (path, bytes) in &images {
+                assert_eq!(tokio::fs::read(path).await.unwrap(), *bytes);
+            }
+            let config = f.native.state.config.read().await.clone();
+            for (index, (_, expected)) in images.iter().enumerate() {
+                let image = f
+                    .native
+                    .state
+                    .http
+                    .get(format!(
+                        "{}/Items/61616/Images/Chapter/{index}",
+                        string(&config, "emby_server_url")
+                    ))
+                    .header("X-Emby-Token", string(&config, "emby_api_key"))
+                    .query(&[("Format", "jpg")])
+                    .send()
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap()
+                    .bytes()
+                    .await
+                    .unwrap();
+                assert_eq!(image.as_ref(), expected.as_slice());
+            }
+            if let Some(bif) = bif {
+                assert_eq!(tokio::fs::read(local_bif(&live)).await.unwrap(), bif);
+            } else {
+                // With no native BIF, the bridge must contain exactly the
+                // original chapter JPEGs, without reading the video source.
+                let frames = native_bif_frames(&live).unwrap();
+                assert_eq!(frames.len(), images.len());
+                for ((millis, jpeg), (chapter, (_, original))) in frames
+                    .iter()
+                    .zip(before["Chapters"].as_array().unwrap().iter().zip(&images))
+                {
+                    assert_eq!(
+                        *millis,
+                        chapter["StartPositionTicks"]
+                            .as_u64()
+                            .unwrap()
+                            .div_ceil(10_000)
+                    );
+                    assert_eq!(jpeg, original);
+                }
+                assert!(f.proxy.cached_image_reads.load(Ordering::SeqCst) >= images.len());
+            }
+            for field in [
+                "Name",
+                "Overview",
+                "Genres",
+                "People",
+                "ProviderIds",
+                "ImageTags",
+            ] {
+                assert_eq!(live[field], before[field], "{field}: {result}");
+            }
+            let formal: Value =
+                serde_json::from_slice(&tokio::fs::read(info_path(&live)).await.unwrap()).unwrap();
+            assert_eq!(formal, edited);
+            assert_eq!(
+                *f.proxy.file_imports.lock().await,
+                vec![("61616".into(), formal)]
+            );
+            assert!(f.proxy.sync_bodies.lock().await.is_empty());
+            assert_eq!(*f.proxy.refresh_ids.lock().await, vec!["61616"]);
+            assert_eq!(*f.native.host.clear_ids.lock().await, vec!["61616"]);
+            assert_eq!(f.native.host.starts.load(Ordering::SeqCst), 0);
+            assert_eq!(f.proxy.video_reads.load(Ordering::SeqCst), 0);
+            assert_eq!(recovery_status(&f.native.state).await["pending"], false);
+            assert_eq!(
+                *f.native.host.settings.lock().await,
+                f.proxy.original_settings
+            );
+            f.close_with_legacy(true).await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn file_marker_save_rejects_unprotected_alternate_scope_before_any_native_write() {
+        let (f, edited) = file_marker_fixture().await;
+        f.add_episode().await;
+        let before = f.native.host.item.lock().await.clone();
+        f.proxy.extra.lock().await.get_mut("61617").unwrap()["PresentationUniqueKey"] =
+            before["PresentationUniqueKey"].clone();
+        let sibling = f.proxy.extra.lock().await["61617"].clone();
+        let sibling_json = tokio::fs::read(info_path(&sibling)).await.unwrap();
+        let original = tokio::fs::read(info_path(&before)).await.unwrap();
+        let result = f.save(json!({"mediainfo":edited}), false).await;
+        assert_ne!(result["state"], "completed", "{result}");
+        assert!(f.native.host.clear_ids.lock().await.is_empty());
+        assert!(f.proxy.refresh_ids.lock().await.is_empty());
+        assert!(f.proxy.sync_bodies.lock().await.is_empty());
+        assert_eq!(*f.native.host.item.lock().await, before);
+        assert_eq!(f.proxy.extra.lock().await["61617"], sibling);
+        assert_eq!(tokio::fs::read(info_path(&before)).await.unwrap(), original);
+        assert_eq!(
+            tokio::fs::read(info_path(&sibling)).await.unwrap(),
+            sibling_json
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn file_marker_save_keeps_recovery_material_when_import_is_unverified_and_can_retry() {
+        let (f, edited) = file_marker_fixture().await;
+        let before = f.native.host.item.lock().await.clone();
+        let bif = tokio::fs::read(local_bif(&before)).await.unwrap();
+        let image = chapter_image(&f.native.host, &before, &before["Chapters"][0]);
+        let image_bytes = tokio::fs::read(&image).await.unwrap();
+        *f.proxy.protocol_fault.lock().await = "file-refresh-no-import".into();
+        let result = f.save(json!({"mediainfo":edited.clone()}), false).await;
+        assert_eq!(
+            result["result"]["metadata_refresh"]["state"], "failed",
+            "{result}"
+        );
+        let recovery = reload_recovery(&f);
+        assert!(recovery.join("media-reload.json").is_file());
+        assert_eq!(tokio::fs::read(local_bif(&before)).await.unwrap(), bif);
+        assert_eq!(tokio::fs::read(&image).await.unwrap(), image_bytes);
+        let status = recovery_status(&f.native.state).await;
+        assert_eq!(status["pending"], true);
+        assert_eq!(status["records"][0]["can_recover"], true);
+        *f.proxy.protocol_fault.lock().await = String::new();
+        let retried = recover_from_editor(
+            &f.native.state,
+            status["records"][0]["id"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(retried["state"], "completed", "{retried}");
+        let live = f.native.host.item.lock().await.clone();
+        assert_eq!(live["MediaStreams"][1]["Title"], "文件恢复后的新音轨标题");
+        let chapters = live["Chapters"].as_array().unwrap();
+        let requested = edited[0]["Chapters"].as_array().unwrap();
+        assert_eq!(chapters.len(), requested.len());
+        for (actual, expected) in chapters.iter().zip(requested) {
+            for field in ["Name", "MarkerType", "StartPositionTicks"] {
+                assert_eq!(actual[field], expected[field], "{field}: {retried}");
+            }
+        }
+        assert_eq!(recovery_status(&f.native.state).await["pending"], false);
+        assert!(!recovery.exists());
+        f.close_with_legacy(true).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn file_marker_save_rejects_native_bif_with_original_positions_but_changed_images() {
+        for existing_bif in [true, false] {
+            let (f, edited) = file_marker_fixture().await;
+            let before = f.native.host.item.lock().await.clone();
+            if !existing_bif {
+                tokio::fs::remove_file(local_bif(&before)).await.unwrap();
+            }
+            *f.proxy.protocol_fault.lock().await = "bif-readback-changed".into();
+            let result = f.save(json!({"mediainfo":edited.clone()}), false).await;
+            assert_eq!(
+                result["result"]["metadata_refresh"]["state"], "failed",
+                "existing_bif={existing_bif}: {result}"
+            );
+            assert!(
+                result.to_string().contains("原生时间索引或图片内容"),
+                "{result}"
+            );
+            let recovery = reload_recovery(&f);
+            assert!(recovery.join("media-reload.json").is_file());
+            let status = recovery_status(&f.native.state).await;
+            assert_eq!(status["pending"], true);
+            assert_eq!(status["records"][0]["can_recover"], true);
+            let live = f.native.host.item.lock().await.clone();
+            let bif = tokio::fs::read(local_bif(&live)).await.unwrap();
+            assert!(
+                native_chapter_images(&f.native.host, &live)
+                    .iter()
+                    .all(|present| *present)
+            );
+            *f.proxy.protocol_fault.lock().await = String::new();
+            let retried = recover_from_editor(
+                &f.native.state,
+                status["records"][0]["id"].as_str().unwrap(),
+            )
+            .await;
+            assert_eq!(retried["state"], "completed", "{retried}");
+            assert_eq!(tokio::fs::read(local_bif(&live)).await.unwrap(), bif);
+            assert_eq!(recovery_status(&f.native.state).await["pending"], false);
+            assert!(!recovery.exists());
+            f.close_with_legacy(true).await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn file_marker_save_recovers_with_proven_unused_empty_metadata_bif() {
+        let (f, edited) = file_marker_fixture().await;
+        let before = f.native.host.item.lock().await.clone();
+        tokio::fs::remove_file(local_bif(&before)).await.unwrap();
+        let unused = item_metadata_directory(&f.native.host, &before).join("empty.bif");
+        let mut empty = vec![0; 72];
+        empty[..8].copy_from_slice(b"\x89BIF\r\n\x1a\n");
+        empty[16..20].copy_from_slice(&1000_u32.to_le_bytes());
+        empty[64..68].copy_from_slice(&u32::MAX.to_le_bytes());
+        empty[68..72].copy_from_slice(&72_u32.to_le_bytes());
+        tokio::fs::write(&unused, &empty).await.unwrap();
+        let image = chapter_image(&f.native.host, &before, &before["Chapters"][0]);
+        let image_bytes = tokio::fs::read(&image).await.unwrap();
+        *f.proxy.protocol_fault.lock().await = "file-refresh-no-import".into();
+        let result = f.save(json!({"mediainfo":edited}), false).await;
+        assert_eq!(
+            result["result"]["metadata_refresh"]["state"], "failed",
+            "{result}"
+        );
+        let recovery = reload_recovery(&f);
+        let marker = recovery.join("media-reload.json");
+        let record: Value =
+            serde_json::from_slice(&tokio::fs::read(&marker).await.unwrap()).unwrap();
+        let index = record["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|file| file["path"] == json!(unused))
+            .unwrap();
+        let backup = PathBuf::from(record["files"][index]["backup"].as_str().unwrap());
+        let status = recovery_status(&f.native.state).await;
+        assert_eq!(status["pending"], true);
+        let id = status["records"][0]["id"].as_str().unwrap();
+        *f.proxy.protocol_fault.lock().await = String::new();
+        let mut tampered = empty.clone();
+        tampered[24] = 1;
+        tokio::fs::write(&backup, tampered).await.unwrap();
+        let rejected = recover_from_editor(&f.native.state, id).await;
+        assert_eq!(rejected["state"], "failed", "{rejected}");
+        assert!(rejected.to_string().contains("BIF"), "{rejected}");
+        assert_eq!(tokio::fs::read(&unused).await.unwrap(), empty);
+        tokio::fs::write(&backup, &empty).await.unwrap();
+        let mut legacy = record.clone();
+        legacy["files"][index]
+            .as_object_mut()
+            .unwrap()
+            .remove("unused_bif_sha256");
+        tokio::fs::write(&marker, serde_json::to_vec(&legacy).unwrap())
+            .await
+            .unwrap();
+        let rejected = recover_from_editor(&f.native.state, id).await;
+        assert_eq!(rejected["state"], "failed", "{rejected}");
+        assert!(rejected.to_string().contains("BIF"), "{rejected}");
+        assert_eq!(recovery_status(&f.native.state).await["pending"], true);
+        tokio::fs::write(&marker, serde_json::to_vec(&record).unwrap())
+            .await
+            .unwrap();
+        let retried = recover_from_editor(&f.native.state, id).await;
+        assert_eq!(retried["state"], "completed", "{retried}");
+        assert_eq!(tokio::fs::read(&unused).await.unwrap(), empty);
+        assert_eq!(tokio::fs::read(&image).await.unwrap(), image_bytes);
+        let live = f.native.host.item.lock().await.clone();
+        assert_eq!(live["MediaStreams"][1]["Title"], "文件恢复后的新音轨标题");
+        assert!(!native_bif_frames(&live).unwrap().is_empty());
+        assert_eq!(recovery_status(&f.native.state).await["pending"], false);
+        assert!(!recovery.exists());
+        f.close_with_legacy(true).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn manual_save_rejects_native_bif_with_original_positions_but_changed_images() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        let before = f.native.host.item.lock().await.clone();
+        let bif = tokio::fs::read(local_bif(&before)).await.unwrap();
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("普通保存的新音轨标题");
+        *f.proxy.protocol_fault.lock().await = "bif-readback-changed".into();
+        let result = f.save(json!({"mediainfo":edited}), false).await;
+        assert_eq!(
+            result["result"]["metadata_refresh"]["state"], "failed",
+            "{result}"
+        );
+        assert!(
+            result.to_string().contains("原生时间索引或图片内容"),
+            "{result}"
+        );
+        assert!(f.proxy.file_imports.lock().await.is_empty());
+        assert!(!f.proxy.sync_bodies.lock().await.is_empty());
+        assert_eq!(tokio::fs::read(local_bif(&before)).await.unwrap(), bif);
+        let recovery = reload_recovery(&f);
+        assert!(recovery.join("media-reload.json").is_file());
+        let status = recovery_status(&f.native.state).await;
+        assert_eq!(status["pending"], true);
+        *f.proxy.protocol_fault.lock().await = String::new();
+        let retried = recover_from_editor(
+            &f.native.state,
+            status["records"][0]["id"].as_str().unwrap(),
+        )
+        .await;
+        assert_eq!(retried["state"], "completed", "{retried}");
+        assert_eq!(tokio::fs::read(local_bif(&before)).await.unwrap(), bif);
+        assert_eq!(recovery_status(&f.native.state).await["pending"], false);
+        assert!(!recovery.exists());
+        f.close_with_legacy(true).await;
+    }
+
     type IdentityJsonMutation = (usize, PathBuf, Vec<u8>);
 
     #[derive(Clone)]
@@ -1041,6 +1434,8 @@ mod native {
         refresh_ids: Arc<Mutex<Vec<String>>>,
         sync_bodies: Arc<Mutex<Vec<Value>>>,
         sync_inputs: Arc<Mutex<Vec<(String, Value)>>>,
+        file_import_enabled: Arc<AtomicBool>,
+        file_imports: Arc<Mutex<Vec<(String, Value)>>>,
         protocol_fault: Arc<Mutex<String>>,
         readbacks: Arc<AtomicUsize>,
         required_recovery_reads: Arc<AtomicUsize>,
@@ -1076,6 +1471,62 @@ mod native {
     }
 
     impl Proxy {
+        async fn import_formal_file(&self, id: &str) {
+            let settings = self.host.settings.lock().await;
+            assert_eq!(settings["ExclusiveExtract"], true);
+            assert_eq!(settings["PersistMediaInfoMode"], "Restore");
+            assert!(
+                settings["ExclusiveControlFeatures"]
+                    .as_str()
+                    .unwrap()
+                    .split(',')
+                    .any(|flag| flag == "IgnoreFileChange")
+            );
+            drop(settings);
+            let target = self
+                .items()
+                .await
+                .into_iter()
+                .find(|item| item["Id"] == id)
+                .unwrap();
+            let bundles: Value =
+                serde_json::from_slice(&tokio::fs::read(info_path(&target)).await.unwrap())
+                    .unwrap();
+            assert_eq!(bundles.as_array().unwrap().len(), 1);
+            self.file_imports
+                .lock()
+                .await
+                .push((id.into(), bundles.clone()));
+            let source = &bundles[0]["MediaSourceInfo"];
+            for item in std::iter::once(&mut *self.host.item.lock().await)
+                .chain(self.extra.lock().await.values_mut())
+            {
+                if item["Id"] != id {
+                    continue;
+                }
+                // The PRO file importer applies the complete Bundle, without
+                // the filtering performed by the SyncMediaInfo HTTP handler.
+                item["MediaStreams"] = source["MediaStreams"].clone();
+                item["MediaSources"][0]["MediaStreams"] = source["MediaStreams"].clone();
+                for field in ["Size", "RunTimeTicks"] {
+                    item[field] = source[field].clone();
+                    item["MediaSources"][0][field] = source[field].clone();
+                }
+                item["Chapters"] = bundles[0]["Chapters"].clone();
+                let images = native_chapter_images(&self.host, item);
+                for (chapter, exists) in item["Chapters"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .zip(images)
+                {
+                    if exists {
+                        chapter["ImageTag"] = json!("old-thumbnail");
+                    }
+                }
+            }
+        }
+
         async fn finish_sync(&self, id: &str, info: Value) -> Value {
             let settings = self.host.settings.lock().await;
             let flags = settings["ExclusiveControlFeatures"]
@@ -1249,6 +1700,17 @@ mod native {
             }
             if path == "/swagger.json" {
                 let mut contract = pro_swagger();
+                if proxy.file_import_enabled.load(Ordering::SeqCst) {
+                    contract["paths"]["/Items/{Id}/Refresh"] = json!({"post":{"parameters":[
+                        {"in":"query","name":"Recursive","type":"boolean"},
+                        {"in":"path","name":"Id","type":"string","required":true},
+                        {"in":"query","name":"MetadataRefreshMode"},
+                        {"in":"query","name":"ImageRefreshMode"},
+                        {"in":"query","name":"ReplaceAllMetadata","type":"boolean"},
+                        {"in":"query","name":"ReplaceAllImages","type":"boolean"},
+                        {"in":"body","name":"body","required":true,"schema":{"$ref":"#/definitions/BaseRefreshRequest"}}
+                    ],"responses":{"200":{"description":"Operation successful. Empty response."}}}});
+                }
                 match proxy.protocol_fault.lock().await.as_str() {
                     "missing-api" => {
                         contract["paths"]
@@ -1357,7 +1819,33 @@ mod native {
                 else {
                     return StatusCode::NOT_FOUND.into_response();
                 };
+                if proxy.file_import_enabled.load(Ordering::SeqCst)
+                    && string(chapter, "ImageTag").is_empty()
+                {
+                    return StatusCode::NOT_FOUND.into_response();
+                }
                 proxy.cached_image_reads.fetch_add(1, Ordering::SeqCst);
+                if proxy.file_import_enabled.load(Ordering::SeqCst)
+                    && proxy
+                        .file_imports
+                        .lock()
+                        .await
+                        .iter()
+                        .any(|(imported, _)| imported == id)
+                {
+                    let ticks = chapter["StartPositionTicks"].as_u64().unwrap();
+                    return match native_bif_frames(&item).and_then(|frames| {
+                        frames.into_iter().find(|(millis, _)| {
+                            millis.checked_mul(10_000).is_some_and(|at| at >= ticks)
+                        })
+                    }) {
+                        Some((_, jpeg)) => {
+                            ([(axum::http::header::CONTENT_TYPE, "image/jpeg")], jpeg)
+                                .into_response()
+                        }
+                        None => StatusCode::NOT_FOUND.into_response(),
+                    };
+                }
                 return match tokio::fs::read(chapter_image(&proxy.host, &item, chapter)).await {
                     Ok(bytes) => {
                         ([(axum::http::header::CONTENT_TYPE, "image/jpeg")], bytes).into_response()
@@ -1541,6 +2029,19 @@ mod native {
                 {
                     proxy.guid_lookups.fetch_add(1, Ordering::SeqCst);
                     match proxy.guid_lookup_fault.lock().await.as_str() {
+                        "unknown-root-folders" if found.is_empty() => {
+                            // Emby 4.10.2 returns the visible root libraries for
+                            // an unresolved GUID rather than an empty item list.
+                            found = (3..24)
+                                .step_by(2)
+                                .map(|id| {
+                                    json!({
+                                        "Id":id.to_string(),"Type":"CollectionFolder",
+                                        "Path":proxy.host.directory.join(format!("root-{id}"))
+                                    })
+                                })
+                                .collect();
+                        }
                         "missing" => found.clear(),
                         "wrong-id" => {
                             for item in &mut found {
@@ -1580,13 +2081,28 @@ mod native {
             }
             if path == "/UI/Command"
                 && (proxy.reject_settings_restore.load(Ordering::SeqCst)
-                    || proxy.required_recovery_reads.load(Ordering::SeqCst) > 0)
+                    || proxy.required_recovery_reads.load(Ordering::SeqCst) > 0
+                    || proxy.protocol_fault.lock().await.as_str() == "formal-json-after-staging")
             {
                 let (parts, body) = request.into_parts();
                 let bytes = axum::body::to_bytes(body, 1024 * 1024).await.unwrap();
                 let command: Value = serde_json::from_slice(&bytes).unwrap();
                 let desired: Value =
                     serde_json::from_str(command["Data"].as_str().unwrap()).unwrap();
+                if proxy.protocol_fault.lock().await.as_str() == "formal-json-after-staging"
+                    && desired["ExclusiveControlFeatures"]
+                        != proxy.original_settings["ExclusiveControlFeatures"]
+                {
+                    let file = info_path(&*proxy.host.item.lock().await);
+                    let mut changed: Value =
+                        serde_json::from_slice(&tokio::fs::read(&file).await.unwrap()).unwrap();
+                    changed[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] =
+                        json!("外部编辑的新标题");
+                    tokio::fs::write(file, serde_json::to_vec(&changed).unwrap())
+                        .await
+                        .unwrap();
+                    proxy.identity_json_mutated.store(true, Ordering::SeqCst);
+                }
                 if desired["ExclusiveControlFeatures"]
                     == proxy.original_settings["ExclusiveControlFeatures"]
                 {
@@ -1721,7 +2237,19 @@ mod native {
                 proxy.metadata_logs.lock().await.push(format!(
                     "2026-11-09 00:00:01.000 RefreshItem Start: {id} fixture"
                 ));
-                // Native Refresh accepts the request but never imports PRO JSON.
+                if full && proxy.file_import_enabled.load(Ordering::SeqCst) {
+                    let fault = proxy.protocol_fault.lock().await.clone();
+                    if fault == "file-refresh-failed" {
+                        return StatusCode::BAD_REQUEST.into_response();
+                    }
+                    if fault != "file-refresh-no-import" {
+                        proxy.import_formal_file(&id).await;
+                        proxy.metadata_logs.lock().await.push(format!(
+                            "2026-11-09 00:00:01.500 MediaInfoPersist - Deserialization Success (fixture file): {id}"
+                        ));
+                    }
+                }
+                // With no enabled file hook, native Refresh remains a no-op.
                 proxy.metadata_logs.lock().await.push(format!(
                     "2026-11-09 00:00:02.000 RefreshItem Complete: {id} fixture"
                 ));
@@ -1895,6 +2423,8 @@ mod native {
                 refresh_ids: Arc::default(),
                 sync_bodies: Arc::default(),
                 sync_inputs: Arc::default(),
+                file_import_enabled: Arc::default(),
+                file_imports: Arc::default(),
                 protocol_fault: Arc::default(),
                 readbacks: Arc::default(),
                 required_recovery_reads: Arc::default(),
@@ -2674,6 +3204,36 @@ mod native {
 
     #[tokio::test]
     #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn manual_save_keeps_formal_json_changed_after_staging_before_commit() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        let before = f.native.host.item.lock().await.clone();
+        let file = info_path(&before);
+        let mut changed = f.native.original.clone();
+        changed[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("外部编辑的新标题");
+        let changed_bytes = serde_json::to_vec(&changed).unwrap();
+        *f.proxy.protocol_fault.lock().await = "formal-json-after-staging".into();
+        let mut requested = f.native.original.clone();
+        requested[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("本次保存的标题");
+        let result = f.save(json!({"mediainfo":requested}), false).await;
+        let after_bytes = tokio::fs::read(&file).await.unwrap();
+        let after = f.native.host.item.lock().await.clone();
+        let sync_calls = f.proxy.sync_bodies.lock().await.len();
+        let clear_calls = f.native.host.clear_ids.lock().await.len();
+        let outside_mutation = f.proxy.identity_json_mutated.load(Ordering::SeqCst);
+        f.close().await;
+        assert!(
+            outside_mutation,
+            "the outside JSON update must be exercised"
+        );
+        assert_eq!(after_bytes, changed_bytes);
+        assert_eq!(result["state"], "failed", "{result}");
+        assert_eq!(after, before);
+        assert_eq!(sync_calls, 0);
+        assert_eq!(clear_calls, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
     async fn manual_save_holds_ignore_through_delayed_target_refresh() {
         let f = ThumbnailFixture::with_flag(Some(false)).await;
         f.proxy.delayed_metadata.store(true, Ordering::SeqCst);
@@ -3190,6 +3750,7 @@ mod native {
     #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
     async fn missing_guid_uses_the_verified_case_insensitive_native_directory() {
         let f = ThumbnailFixture::with_flag(Some(false)).await;
+        *f.proxy.guid_lookup_fault.lock().await = "unknown-root-folders".into();
         let mut item = f.native.host.item.lock().await;
         let original = item.clone();
         let mixed_path = f.native.directory.path().join("MiXeD.strm");
@@ -4218,6 +4779,87 @@ mod native {
         assert!(f.proxy.sync_bodies.lock().await.is_empty());
         assert!(f.native.host.clear_ids.lock().await.is_empty());
         assert_eq!(recovery_status(&f.native.state).await["pending"], false);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn manual_save_refuses_nonempty_chapter_edits_instead_of_discarding_them() {
+        for field in [
+            "bundle-marker",
+            "bundle-name",
+            "bundle-ticks",
+            "source-chapters",
+        ] {
+            let f = ThumbnailFixture::with_flag(Some(false)).await;
+            let before = f.native.host.item.lock().await.clone();
+            let original = tokio::fs::read(info_path(&before)).await.unwrap();
+            let bif = tokio::fs::read(local_bif(&before)).await.unwrap();
+            let mut edited = f.native.original.clone();
+            edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] =
+                json!("不能掩盖章节请求的新标题");
+            match field {
+                "bundle-marker" => edited[0]["Chapters"][0]["MarkerType"] = json!("IntroStart"),
+                "bundle-name" => edited[0]["Chapters"][0]["Name"] = json!("请求的新章节名称"),
+                "bundle-ticks" => {
+                    edited[0]["Chapters"][0]["StartPositionTicks"] = json!(123456789_u64)
+                }
+                _ => {
+                    edited[0]["MediaSourceInfo"]["Chapters"] = edited[0]["Chapters"].clone();
+                    edited[0]["MediaSourceInfo"]["Chapters"][0]["Name"] =
+                        json!("请求的新嵌套章节名称");
+                }
+            }
+            let result = f.save(json!({"mediainfo":edited}), false).await;
+            assert_eq!(result["state"], "failed", "{field}: {result}");
+            assert!(
+                result["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("不支持编辑章节"),
+                "{field}: {result}"
+            );
+            assert_eq!(*f.native.host.item.lock().await, before, "{field}");
+            assert_eq!(
+                tokio::fs::read(info_path(&before)).await.unwrap(),
+                original,
+                "{field}"
+            );
+            assert_eq!(
+                tokio::fs::read(local_bif(&before)).await.unwrap(),
+                bif,
+                "{field}"
+            );
+            assert!(f.proxy.sync_bodies.lock().await.is_empty(), "{field}");
+            assert!(f.proxy.refresh_ids.lock().await.is_empty(), "{field}");
+            assert!(f.native.host.clear_ids.lock().await.is_empty(), "{field}");
+            f.close().await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn manual_save_preserves_original_chapters_for_an_empty_stale_request() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        let before = f.native.host.item.lock().await.clone();
+        let bif = tokio::fs::read(local_bif(&before)).await.unwrap();
+        let mut edited = f.native.original.clone();
+        edited[0]["Chapters"] = json!([]);
+        edited[0]["MediaSourceInfo"]["Chapters"] = json!([]);
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("空章节请求仍保留原记录");
+        let result = f.save(json!({"mediainfo":edited}), false).await;
+        assert_eq!(
+            result["result"]["metadata_refresh"]["state"], "verified",
+            "{result}"
+        );
+        let live = f.native.host.item.lock().await.clone();
+        assert_eq!(live["MediaStreams"][1]["Title"], "空章节请求仍保留原记录");
+        assert_eq!(
+            emby_toolkit::media_info::signature(&live["Chapters"]).unwrap(),
+            emby_toolkit::media_info::signature(&before["Chapters"]).unwrap()
+        );
+        assert_eq!(tokio::fs::read(local_bif(&live)).await.unwrap(), bif);
+        assert!(f.native.host.clear_ids.lock().await.is_empty());
         f.close().await;
     }
 

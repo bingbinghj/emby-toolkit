@@ -6,7 +6,7 @@ use reqwest::Method;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-const FIELDS: &str = "ProviderIds,Type,DateCreated,Name,OriginalTitle,PremiereDate,CommunityRating,Genres,Studios,Tags,TagItems,DateModified,OfficialRating,CustomRating,ProductionYear,Path,PrimaryImageAspectRatio,Overview,MediaStreams,Container,Size,SeriesId,ParentIndexNumber,IndexNumber,ParentId,RunTimeTicks,_SourceLibraryId";
+const FIELDS: &str = "ProviderIds,Type,DateCreated,Name,OriginalTitle,PremiereDate,Genres,Studios,Tags,TagItems,DateModified,OfficialRating,CustomRating,ProductionYear,Path,PrimaryImageAspectRatio,Overview,MediaStreams,Container,Size,SeriesId,ParentIndexNumber,IndexNumber,ParentId,RunTimeTicks,_SourceLibraryId";
 fn key(item: &Value) -> Option<(String, String)> {
     let id = item["ProviderIds"]["Tmdb"].as_str()?;
     (!id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) && id.bytes().any(|b| b != b'0'))
@@ -659,7 +659,7 @@ pub async fn records(
     let mut top = json!({"tmdb_id":work.0,"item_type":work.1,"release_year":item["ProductionYear"],"in_library":true,
         "emby_item_ids_json":tops.iter().map(|i|i["Id"].clone()).collect::<Vec<_>>(),"asset_details_json":assets,
         "imdb_id":item["ProviderIds"].get("Imdb").filter(|v|v.as_str().is_some_and(|s|!s.is_empty())).unwrap_or(&details["imdb_id"]),"original_language":details["original_language"],
-        "rating":details.get("vote_average").filter(|v|!v.is_null()).unwrap_or(&item["CommunityRating"]),"date_added":item["DateCreated"],
+        "date_added":item["DateCreated"],
         "release_date":date,"last_air_date":details["last_air_date"],"genres_json":genres,"tags_json":tags(item),"official_rating_json":ratings,
         "custom_rating":item["CustomRating"],"runtime_minutes":if movie{details["runtime"].clone()}else{Value::Null},"tagline":details["tagline"],
         "poster_path":details["poster_path"],"backdrop_path":details["backdrop_path"],"homepage":details["homepage"],"overview":details["overview"]});
@@ -792,10 +792,8 @@ pub async fn records(
             "item_type":"Season","parent_series_tmdb_id":work.0,"season_number":number,"in_library":true,"release_date":date,
             "emby_item_ids_json":versions.iter().map(|v|v["Id"].clone()).collect::<Vec<_>>(),"tags_json":tags(&versions[0]),
             "imdb_id":versions[0]["ProviderIds"]["Imdb"],"title":season.get("name").unwrap_or(&versions[0]["Name"]),
-            "overview":season["overview"],"poster_path":season.get("poster_path").filter(|v|v.as_str().is_some_and(|s|!s.is_empty())).unwrap_or(&details["poster_path"]),
-            "rating":season["vote_average"]});
+            "overview":season["overview"],"poster_path":season.get("poster_path").filter(|v|v.as_str().is_some_and(|s|!s.is_empty())).unwrap_or(&details["poster_path"])});
         if info.is_none() {
-            record.as_object_mut().unwrap().remove("rating");
             record["title"] = versions[0]["Name"]
                 .as_str()
                 .filter(|s| !s.is_empty())
@@ -821,7 +819,6 @@ pub async fn records(
         let mut record = json!({"tmdb_id":info["id"].as_u64().filter(|n|*n>0).map(|n|n.to_string()).unwrap_or(format!("{}-S{season}E{number}",work.0)),
             "item_type":"Episode","parent_series_tmdb_id":work.0,"season_number":season,"episode_number":number,"in_library":true,
             "imdb_id":first["ProviderIds"]["Imdb"],"release_date":first.get("PremiereDate").filter(|v|v.as_str().is_some_and(|s|!s.is_empty())).unwrap_or(&info["air_date"]),
-            "rating":info.get("vote_average").filter(|v|!v.is_null()).unwrap_or(&first["CommunityRating"]),
             "title":info.get("name").unwrap_or(&first["Name"]),"overview":info.get("overview").unwrap_or(&first["Overview"]),
             "runtime_minutes":info["runtime"],"poster_path":info["still_path"],"backdrop_path":info["still_path"],
             "emby_item_ids_json":versions.iter().map(|v|v["Id"].clone()).collect::<Vec<_>>(),"asset_details_json":assets,"tags_json":tags(first)});

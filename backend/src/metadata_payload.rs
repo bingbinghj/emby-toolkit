@@ -124,6 +124,8 @@ pub fn build(
         "trailers",
         "content_ratings",
         "videos",
+        "vote_average",
+        "vote_count",
         "credits",
         "genres",
         "episodes_details",
@@ -179,6 +181,14 @@ pub fn build(
                 .get("seasons_details")
                 .cloned()
                 .unwrap_or(json!([]));
+            if let Some(seasons) = output["seasons_details"].as_array_mut() {
+                for season in seasons {
+                    if let Some(fields) = season.as_object_mut() {
+                        fields.remove("vote_average");
+                        fields.remove("vote_count");
+                    }
+                }
+            }
             let mut episodes = serde_json::Map::new();
             for (key, episode) in aggregate["episodes_details"]
                 .as_object()
@@ -193,7 +203,6 @@ pub fn build(
                     "name",
                     "overview",
                     "air_date",
-                    "vote_average",
                     "still_path",
                 ] {
                     episode_out[field] = episode[field].clone();

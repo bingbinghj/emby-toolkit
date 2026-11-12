@@ -1,9 +1,7 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { test, expect } from './fixtures.js';
 import { measureReadingContrast } from './reading-contrast.js';
 
-const artifactRoot = '/root/emby-toolkit-nov11-verification/style';
-mkdirSync(artifactRoot, { recursive: true });
 const themes = [
   { name: 'plain-light', theme: 'light', glassEnabled: false },
   { name: 'plain-dark', theme: 'dark', glassEnabled: false },
@@ -24,10 +22,11 @@ async function prepare(page, theme, width = 1440) {
 }
 
 async function readable(page, id, probes) {
+  const testInfo = test.info();
   for (const probe of probes) await expect(probe.locator, probe.role).toBeInViewport({ ratio: 1 });
   const readings = await measureReadingContrast(page, probes);
-  writeFileSync(`${artifactRoot}/${id}.json`, JSON.stringify(readings, null, 2));
-  await page.screenshot({ path: `${artifactRoot}/${id}.png`, animations: 'disabled' });
+  writeFileSync(testInfo.outputPath(`${id}.json`), JSON.stringify(readings, null, 2));
+  await page.screenshot({ path: testInfo.outputPath(`${id}.png`), animations: 'disabled' });
   for (const reading of readings) expect(reading.contrast, `${id}: ${reading.role}`).toBeGreaterThanOrEqual(4.5);
 }
 
@@ -61,12 +60,16 @@ for (const width of [390, 1440]) for (const theme of themes) for (const color of
     await page.goto('/library/movies');
     const card = page.locator('[data-media-index="0"] .media-card');
     await expect.poll(() => card.locator('img.v-img__img').evaluate(image => image.complete && image.naturalWidth > 0)).toBe(true);
+    await expect(card.getByLabel(/Emby 社区评分/)).toHaveCount(0);
+    await expect(card).not.toContainText('8.2');
     await page.locator('[data-media-index="0"]').hover();
     const detail = card.locator('.media-card-detail');
     await expect(detail).toBeVisible();
     await expect(detail.locator('.media-detail-title')).toHaveCSS('font-size', '18px');
     await expect(detail.locator('.media-detail-title')).toHaveCSS('font-weight', '700');
-    await expect(detail.locator('.media-detail-title')).toHaveCSS('color', 'rgb(255, 255, 255)');
+    const foreground = await detail.evaluate(element => `rgb(${getComputedStyle(element).getPropertyValue('--v-theme-on-surface').trim().split(/[\s,]+/).join(', ')})`);
+    await expect(detail).toHaveCSS('color', foreground);
+    await expect(detail.locator('.media-detail-title')).toHaveCSS('color', foreground);
     await expect(detail.locator('.media-detail-title')).toHaveCSS('-webkit-line-clamp', '2');
     await expect(detail.locator('.media-detail-year')).toHaveCSS('font-size', '14px');
     await expect(detail.locator('.media-detail-year')).toHaveCSS('font-weight', '600');
@@ -80,12 +83,10 @@ for (const width of [390, 1440]) for (const theme of themes) for (const color of
       expect(lines.height, `${selector} must clip at a complete line`).toBeCloseTo(lines.completeLinesHeight, 0);
     }
     await insideArtwork('.media-poster-wrap', detail.locator(':scope > *'));
-    await insideArtwork('.media-poster-wrap', card.locator('.media-rating'));
     await readable(page, `${id}-library`, [
       { role: 'hover year', locator: detail.locator('.media-detail-year') },
       { role: 'hover title', locator: detail.locator('.media-detail-title') },
       { role: 'hover overview', locator: detail.locator('.media-overview') },
-      { role: 'Emby rating', locator: card.locator('.media-rating .v-chip__content') },
     ]);
     await page.goto('/dashboard');
     await expect(page.locator('.dashboard-media-card')).toHaveCount(2);

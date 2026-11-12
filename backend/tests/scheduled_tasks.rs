@@ -181,3 +181,77 @@ async fn cancelled_local_job_does_not_start_emby_extraction() {
     assert_eq!(observed.await.unwrap(), "任务已取消");
     assert_eq!(finish(&state, &id).await["state"], "cancelled");
 }
+
+async fn uncertain_start(executes: bool) -> (Value, usize) {
+    let starts = Arc::new(AtomicUsize::new(0));
+    let native = Arc::new(std::sync::Mutex::new(task(
+        "Idle",
+        "old",
+        json!("Completed"),
+    )));
+    let reads = native.clone();
+    let writes = native.clone();
+    let submitted = starts.clone();
+    let app = Router::new()
+        .route(
+            "/ScheduledTasks",
+            get(move || {
+                let task = reads.lock().unwrap().clone();
+                async move { Json(json!([task])) }
+            }),
+        )
+        .route(
+            "/ScheduledTasks/Running/extract",
+            post(move || {
+                let attempt = submitted.fetch_add(1, Ordering::SeqCst) + 1;
+                if executes {
+                    *writes.lock().unwrap() =
+                        task("Idle", &format!("run-{attempt}"), json!("Completed"));
+                }
+                async move {
+                    if attempt == 1 {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    } else {
+                        StatusCode::NO_CONTENT
+                    }
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let directory = tempfile::tempdir().unwrap();
+    let state = state(directory.path(), &format!("http://{address}"));
+    let work = state.clone();
+    let id = state
+        .jobs
+        .submit("单次启动验收", move |context| async move {
+            emby::scheduled(&work, "MediaInfoExtractTask", &context).await?;
+            Ok(json!({"message":"已确认实际执行"}))
+        })
+        .await
+        .unwrap();
+    let result = finish(&state, &id).await;
+    server.abort();
+    (result, starts.load(Ordering::SeqCst))
+}
+
+#[tokio::test]
+async fn an_executed_start_with_a_lost_response_is_not_submitted_again() {
+    let (result, starts) = uncertain_start(true).await;
+    assert_eq!(starts, 1, "an accepted start must not be replayed");
+    assert_eq!(result["state"], "completed", "{result}");
+}
+
+#[tokio::test]
+async fn an_unconfirmed_start_cannot_reuse_old_success_or_submit_again() {
+    let (result, starts) = uncertain_start(false).await;
+    assert_eq!(starts, 1, "a failed start must not be replayed");
+    assert_eq!(result["state"], "failed", "{result}");
+    assert!(
+        result["message"].as_str().unwrap().contains("启动未确认"),
+        "{result}"
+    );
+}

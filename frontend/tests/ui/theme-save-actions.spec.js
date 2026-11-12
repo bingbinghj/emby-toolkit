@@ -34,9 +34,9 @@ async function expectFilledPrimary(button) {
   expect(values.icon).toBe(values.onPrimary);
   const position = await button.evaluate(element => {
     const footer = element.closest('.v-card-actions');
-    return { left: element.getBoundingClientRect().left, expected: footer.getBoundingClientRect().left + parseFloat(getComputedStyle(footer).paddingLeft) };
+    return { right: element.getBoundingClientRect().right, expected: footer.getBoundingClientRect().right - parseFloat(getComputedStyle(footer).paddingRight) };
   });
-  expect(Math.abs(position.left - position.expected)).toBeLessThanOrEqual(2);
+  expect(Math.abs(position.right - position.expected)).toBeLessThanOrEqual(2);
   const luminance = color => color.match(/[\d.]+/g).slice(0, 3).map(channel => Number(channel) / 255)
     .reduce((sum, value, index) => sum + (value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4)
       * [.2126, .7152, .0722][index], 0);
@@ -71,17 +71,16 @@ test('changing the custom primary color updates the existing save button without
   await expectFilledPrimary(save);
 });
 
-test('media rating and hover details follow the current primary and surface palettes', async ({ page, api }) => {
+test('media hover details follow the surface palette without displaying numeric ratings', async ({ page, api }) => {
   await prepare(page, cases[4]);
   api.respond('GET', '/api/media_center/libraries/movies/items', { library: { id: 'movies', name: '电影', collection_type: 'movies' },
-    total: 1, start_index: 0, items: [{ Id: '101', Name: '主题评分验证', Type: 'Movie', CommunityRating: 8.8,
+    total: 1, start_index: 0, items: [{ Id: '101', Name: '主题详情验证', Type: 'Movie', CommunityRating: 8.8,
       Overview: '主题控制媒体详情前景与背景', ProductionYear: 2026, ImageTags: { Primary: 'fixture' } }] });
   await page.goto('/library/movies');
-  const rating = page.getByLabel('Emby 社区评分 8.8', { exact: true });
-  await expect(rating).toBeVisible();
-  expect(await rating.evaluate(element => getComputedStyle(element).backgroundColor)).toBe('rgb(255, 255, 255)');
-  expect(await rating.locator('.v-chip__content').evaluate(element => getComputedStyle(element).color)).toBe('rgb(0, 0, 0)');
-  await page.getByRole('button', { name: '编辑 主题评分验证', exact: true }).hover();
+  await expect(page.getByLabel(/Emby 社区评分/)).toHaveCount(0);
+  const card = page.getByRole('button', { name: '编辑 主题详情验证', exact: true });
+  await expect(card).not.toContainText('8.8');
+  await card.hover();
   const detail = page.locator('.media-card-detail');
   await expect(detail).toBeVisible();
   const colors = await detail.evaluate(element => {

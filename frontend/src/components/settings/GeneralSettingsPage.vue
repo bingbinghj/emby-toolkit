@@ -11,7 +11,7 @@
             <VWindowItem value="system" eager>
               <VRow class="mp-aligned-grid settings-card-grid settings-grid">
                 <VCol cols="12" v-show="settingsSearch.showCard('基础设置')">
-                  <SettingCard class="dashboard-card" title="基础设置" subtitle="媒体处理与语言显示" actions-start>
+                  <SettingCard class="dashboard-card" title="基础设置" subtitle="媒体处理与语言显示">
 
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="delay_between_items_sec">
@@ -119,7 +119,7 @@
                       </div>
                     </VCardText>
                     <template #actions>
-                      <div class="d-flex ga-3 flex-wrap align-center justify-start">
+                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
                           color="primary"
                           variant="flat"
@@ -304,19 +304,19 @@
                         </VCardText>
                         <VDivider />
                         <VCardActions class="app-dialog-actions">
-                          <VBtn color="primary" variant="flat" aria-label="保存媒体服务器" prepend-icon="mdi-content-save-outline"
-                            :loading="savingCard === 'emby'" :disabled="mediaServerBusy || !mediaServerDraft" @click="saveMediaServer">保存</VBtn>
                           <VBtn variant="tonal" prepend-icon="mdi-lan-connect" aria-label="测试媒体服务器连接"
                             :loading="isTestingMediaServer" :disabled="mediaServerSaving" @click="testMediaServerConnection">测试连接</VBtn>
                           <VSpacer />
                           <VBtn color="default" variant="text" aria-label="取消媒体服务器配置" :disabled="mediaServerBusy" @click="closeMediaServerDialog">取消</VBtn>
+                          <VBtn color="primary" variant="flat" aria-label="保存媒体服务器" prepend-icon="mdi-content-save-outline"
+                            :loading="savingCard === 'emby'" :disabled="mediaServerBusy || !mediaServerDraft" @click="saveMediaServer">保存</VBtn>
                         </VCardActions>
                       </VCard>
                     </VDialog>
                   </SettingCard>
                 </VCol>
                 <VCol cols="12" v-show="settingsSearch.showCard('AI 增强')">
-                  <SettingCard class="dashboard-card" title="AI 增强" subtitle="翻译服务与处理策略" actions-start>
+                  <SettingCard class="dashboard-card" title="AI 增强" subtitle="翻译服务与处理策略">
 
                     <template #append>
                       <div class="d-flex ga-3 flex-wrap align-center">
@@ -484,7 +484,7 @@
                       </div>
                     </VCardText>
                     <template #actions>
-                      <div class="d-flex ga-3 flex-wrap align-center justify-start">
+                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
                           color="primary"
                           variant="flat"
@@ -501,7 +501,7 @@
                   </SettingCard>
                 </VCol>
                 <VCol cols="12" v-show="settingsSearch.showCard('日志配置')">
-                  <SettingCard class="dashboard-card" title="日志配置" subtitle="日志保留与文件大小" actions-start>
+                  <SettingCard class="dashboard-card" title="日志配置" subtitle="日志保留与文件大小">
 
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="log_rotation_size_mb">
@@ -534,7 +534,7 @@
                       </div>
                     </VCardText>
                     <template #actions>
-                      <div class="d-flex ga-3 flex-wrap align-center justify-start">
+                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
                           color="primary"
                           variant="flat"
@@ -854,17 +854,17 @@
                         </VCardText>
                         <VDivider />
                         <VCardActions class="app-dialog-actions">
-                          <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" aria-label="保存存储"
-                            :loading="savingCard === 'p115Account'" :disabled="storageBusy" @click="saveStorageSettings">保存</VBtn>
                           <VSpacer />
                           <VBtn color="default" variant="text" aria-label="取消存储配置" :disabled="storageBusy" @click="closeStorageDialog">取消</VBtn>
+                          <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" aria-label="保存存储"
+                            :loading="savingCard === 'p115Account'" :disabled="storageBusy" @click="saveStorageSettings">保存</VBtn>
                         </VCardActions>
                       </VCard>
                     </VDialog>
                   </SettingCard>
                 </VCol>
                 <VCol cols="12" v-show="settingsSearch.showCard('目录')">
-                  <SettingCard class="dashboard-card" title="目录" subtitle="媒体目录与文件身份" actions-start>
+                  <SettingCard class="dashboard-card" title="目录" subtitle="媒体目录与文件身份">
 
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="emby_metadata_path">
@@ -960,7 +960,7 @@
                       </div>
                     </VCardText>
                     <template #actions>
-                      <div class="d-flex ga-3 flex-wrap align-center justify-start">
+                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
                           color="primary"
                           variant="flat"
@@ -981,7 +981,7 @@
             <VWindowItem value="rule" eager>
               <VRow class="mp-aligned-grid settings-card-grid settings-grid">
                 <VCol cols="12" v-show="settingsSearch.showCard('实时监控')">
-                  <SettingCard class="dashboard-card" title="实时监控" subtitle="自动发现本地媒体变化" actions-start>
+                  <SettingCard class="dashboard-card" title="实时监控" subtitle="自动发现本地媒体变化">
 
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="monitor_enabled">
@@ -1093,7 +1093,7 @@
                       </div>
                     </VCardText>
                     <template #actions>
-                      <div class="d-flex ga-3 flex-wrap align-center justify-start">
+                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
                           color="primary"
                           variant="flat"
@@ -1110,7 +1110,7 @@
                   </SettingCard>
                 </VCol>
                 <VCol cols="12" v-show="settingsSearch.showCard('入库自动处理')">
-                  <SettingCard class="dashboard-card" title="入库自动处理" subtitle="新媒体入库后的增强任务" actions-start>
+                  <SettingCard class="dashboard-card" title="入库自动处理" subtitle="新媒体入库后的增强任务">
 
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="auto_repair_truehd_core_on_ingest">
@@ -1181,7 +1181,7 @@
                       </div>
                     </VCardText>
                     <template #actions>
-                      <div class="d-flex ga-3 flex-wrap align-center justify-start">
+                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
                           color="primary"
                           variant="flat"
@@ -1198,7 +1198,7 @@
                   </SettingCard>
                 </VCol>
                 <VCol cols="12" v-show="settingsSearch.showCard('整理 & 刮削')">
-                  <SettingCard class="dashboard-card" title="整理 & 刮削" subtitle="电影与电视剧的目录和文件名" actions-start>
+                  <SettingCard class="dashboard-card" title="整理 & 刮削" subtitle="电影与电视剧的目录和文件名">
 
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="tmdb_image_language_preference">
@@ -1313,7 +1313,7 @@
                       </div>
                     </VCardText>
                     <template #actions>
-                      <div class="d-flex ga-3 flex-wrap align-center justify-start">
+                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
                           color="primary"
                           variant="flat"
@@ -1334,7 +1334,7 @@
             <VWindowItem value="search" eager>
               <VRow class="mp-aligned-grid settings-card-grid settings-grid">
                 <VCol cols="12" v-show="settingsSearch.showCard('数据源与API')">
-                  <SettingCard class="dashboard-card" title="数据源与API" subtitle="元数据服务与访问凭据" actions-start>
+                  <SettingCard class="dashboard-card" title="数据源与API" subtitle="元数据服务与访问凭据">
 
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="tmdb_api_key">
@@ -1401,7 +1401,7 @@
                       </div>
                     </VCardText>
                     <template #actions>
-                      <div class="d-flex ga-3 flex-wrap align-center justify-start">
+                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
                           color="primary"
                           variant="flat"
@@ -1510,10 +1510,12 @@
               <VExpansionPanel title="手动粘贴 Cookie (备用方案)" value="manual">
                 <VExpansionPanelText>
                   <VTextarea v-model="tempCookieInput" placeholder="UID=...; CID=...; SEID=..." :rows="3"></VTextarea>
-                  <VBtn color="primary" size="small" style="margin-top: 8px" @click="saveManualCookie">
-                    <template #prepend><UiIcon name="save" /></template>
-                    保存手动输入的 Cookie
-                  </VBtn>
+                  <div class="d-flex justify-end mt-2">
+                    <VBtn color="primary" size="small" @click="saveManualCookie">
+                      <template #prepend><UiIcon name="save" /></template>
+                      保存手动输入的 Cookie
+                    </VBtn>
+                  </div>
                 </VExpansionPanelText>
               </VExpansionPanel>
             </VExpansionPanels>
@@ -2071,25 +2073,22 @@
           </VWindow>
         </div>
       </VCardText>
-      <VCardActions class="justify-start flex-wrap ga-2">
-        <div style="width: 100%" class="d-flex ga-3 flex-wrap align-center justify-space-between">
-          <div class="d-flex ga-3 flex-wrap align-center">
-            <VBtn variant="flat" color="primary" @click="savePrompts" :loading="savingPrompts">
-              <template #prepend><UiIcon name="save" /></template>
-              保存配置
-            </VBtn>
-            <VBtn
-              color="warning"
-              :loading="savingPrompts"
-              @click="confirmSettingAction('确定要丢弃所有自定义修改，恢复到系统默认提示词吗？', resetPrompts, '确认')"
-              variant="outlined"
-            >
-              <template #prepend><UiIcon name="refresh" /></template>
-              恢复默认
-            </VBtn>
-          </div>
-          <VBtn @click="promptModalVisible = false" color="secondary">取消</VBtn>
-        </div>
+      <VCardActions class="justify-end flex-wrap ga-2">
+        <VBtn
+          color="warning"
+          :loading="savingPrompts"
+          @click="confirmSettingAction('确定要丢弃所有自定义修改，恢复到系统默认提示词吗？', resetPrompts, '确认')"
+          variant="outlined"
+        >
+          <template #prepend><UiIcon name="refresh" /></template>
+          恢复默认
+        </VBtn>
+        <VSpacer />
+        <VBtn @click="promptModalVisible = false" color="secondary">取消</VBtn>
+        <VBtn variant="flat" color="primary" @click="savePrompts" :loading="savingPrompts">
+          <template #prepend><UiIcon name="save" /></template>
+          保存配置
+        </VBtn>
       </VCardActions>
     </VCard>
   </VDialog>

@@ -60,7 +60,7 @@ async fn sync_counts_committed_rows_reports_sql_failures_and_preserves_failed_tm
         .route("/Library/VirtualFolders", get(|| async { Json(json!([])) }))
         .route("/movie/{id}", get(|Path(id):Path<String>|async move {
             if id=="789" { return StatusCode::FORBIDDEN.into_response(); }
-            Json(json!({"id":id.parse::<i32>().unwrap(),"title":"Movie","original_title":"Movie","original_language":"en","runtime":if id=="123" {json!(90)} else {json!("not-an-integer")}})).into_response()
+            Json(json!({"id":id.parse::<i32>().unwrap(),"title":"Movie","original_title":"Movie","original_language":"en","vote_average":9.4,"vote_count":500,"runtime":if id=="123" {json!(90)} else {json!("not-an-integer")}})).into_response()
         }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -142,6 +142,10 @@ async fn sync_counts_committed_rows_reports_sql_failures_and_preserves_failed_tm
     assert_eq!(good["runtime_minutes"], 90);
     assert_eq!(good["custom_rating"], "限制分级");
     assert_eq!(good["title"], "手工标题");
+    assert!(
+        good["rating"].is_null(),
+        "TMDb rating must not enter the ETK cache"
+    );
     assert_eq!(
         bad, before,
         "a failed write must preserve the original record"
@@ -165,7 +169,10 @@ async fn sync_counts_committed_rows_reports_sql_failures_and_preserves_failed_tm
     assert_eq!(fallback["custom_rating"], "新自定义分级");
     assert_eq!(fallback["genres_json"], json!([{"id":0,"name":"剧情"}]));
     assert_eq!(fallback["tags_json"], json!(["Emby新标签"]));
-    assert_eq!(fallback["rating"], 8.5);
+    assert!(
+        fallback["rating"].is_null(),
+        "native rating must not enter the ETK cache"
+    );
     assert_eq!(fallback["emby_item_ids_json"], json!(["fallback"]));
     let warnings = result["result"]["warning_details"].as_array().unwrap();
     assert_eq!(warnings.len(), 1, "{result}");
@@ -177,5 +184,12 @@ async fn sync_counts_committed_rows_reports_sql_failures_and_preserves_failed_tm
             .iter()
             .filter(|fields| fields.contains("MediaStreams"))
             .all(|fields| fields.split(',').any(|field| field == "CustomRating"))
+    );
+    assert!(
+        requested_fields
+            .lock()
+            .await
+            .iter()
+            .all(|fields| !fields.split(',').any(|field| field == "CommunityRating"))
     );
 }

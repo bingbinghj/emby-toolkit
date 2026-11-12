@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { test, expect } from './fixtures.js';
 import { measureReadingContrast } from './reading-contrast.js';
 
@@ -53,6 +54,7 @@ test('MP realtime logs group adjacent bursts and keep original groups when filte
 
 test('native live dates, rectangular accents and title actions match the requested log layout', async ({ page, api }) => {
   test.setTimeout(90_000);
+  await page.setViewportSize({ width: 1440, height: 1000 });
   api.setTask({ logs: [
     '2026-11-11 09:56:24,010 - media::source - INFO - 昨日记录',
     '2026-11-12 09:56:24,020 - media::source - INFO - 今日记录',
@@ -63,11 +65,32 @@ test('native live dates, rectangular accents and title actions match the request
   await launcher.click();
   await expect(page.locator('.notification-log .log-record-time')).toHaveText(['2026/11/11 09:56:24', '2026/11/12 09:56:24']);
   const heading = page.locator('.notification-heading');
-  await expect(heading.getByRole('button', { name: '导出实时日志', exact: true })).toBeVisible();
-  await expect(heading.getByRole('link', { name: '在新窗口中打开实时日志', exact: true })).toHaveAttribute('href', '/logs');
+  const fileUrl = '/api/logs/view?filename=app.log';
+  const wholeFile = '2026-11-10 08:00:00,000 - source - INFO - 文件中的较早记录\n完整当前日志\n';
+  let failDownload = true;
+  await page.route('**/api/logs/view?filename=app.log', route => failDownload
+    ? route.fulfill({ status: 503, contentType: 'text/plain; charset=utf-8', body: '日志读取暂不可用' })
+    : route.fulfill({ contentType: 'text/plain; charset=utf-8', body: wholeFile }));
+  const exportLogs = heading.getByRole('button', { name: '下载实时日志', exact: true });
+  await expect(exportLogs).toBeVisible();
+  await expect(exportLogs).toHaveText('下载');
+  await expect(heading.getByRole('link', { name: '在新窗口中打开实时日志', exact: true })).toHaveText('在新窗口中打开');
+  await expect(heading.getByRole('link', { name: '在新窗口中打开实时日志', exact: true })).toHaveAttribute('href', fileUrl);
   await expect(heading.getByRole('link', { name: '在新窗口中打开实时日志', exact: true })).toHaveAttribute('target', '_blank');
   await expect(page.locator('.logging-toolbar').getByRole('button', { name: '暂停日志流', exact: true })).toBeVisible();
-  await expect(page.locator('.logging-toolbar').getByRole('button', { name: '导出实时日志', exact: true })).toHaveCount(0);
+  await expect(page.locator('.logging-toolbar').getByRole('button', { name: '下载实时日志', exact: true })).toHaveCount(0);
+  const colorOf = button => button.evaluate(element => {
+    const style = getComputedStyle(element);
+    return { background: style.backgroundColor, primary: `rgb(${style.getPropertyValue('--v-theme-primary').trim().split(/\s*,\s*/).join(', ')})` };
+  });
+  const pause = page.getByRole('button', { name: '暂停日志流', exact: true });
+  const runningColor = await colorOf(pause);
+  expect(runningColor.background).toBe(runningColor.primary);
+  await pause.click();
+  const resume = page.getByRole('button', { name: '继续日志流', exact: true });
+  const pausedColor = await colorOf(resume);
+  expect(pausedColor.background).toBe(pausedColor.primary);
+  await resume.click();
   for (const accent of await page.locator('.notification-log .log-record-accent').all()) {
     const size = await accent.evaluate(element => {
       const box = element.getBoundingClientRect();
@@ -76,22 +99,31 @@ test('native live dates, rectangular accents and title actions match the request
     expect(size.height).toBeGreaterThan(size.width);
     expect(size.radius).toBe('2px');
   }
+  await exportLogs.click();
+  await expect(page.getByText('下载日志失败，请重试。', { exact: true })).toBeVisible();
+  await expect(exportLogs).toBeEnabled();
+  failDownload = false;
   const download = page.waitForEvent('download');
-  await heading.getByRole('button', { name: '导出实时日志', exact: true }).click();
-  expect((await download).suggestedFilename()).toMatch(/^etk-.*\.log$/);
+  await exportLogs.click();
+  const downloaded = await download;
+  expect(downloaded.suggestedFilename()).toBe('app.log');
+  expect(await readFile(await downloaded.path(), 'utf8')).toBe(wholeFile);
 });
 
-test('the new log window authenticates and continues receiving native live logs', async ({ page, api }) => {
+test('the new window opens the complete log file with the existing administrator session', async ({ page, api, baseURL }) => {
   test.setTimeout(60_000);
-  let records = ['2026-11-12 09:56:24,010 - media::source - INFO - 窗口初始记录'];
+  const records = ['2026-11-12 09:56:24,010 - media::source - INFO - 窗口初始记录'];
+  const fileContents = `2026-11-10 08:00:00,000 - source - INFO - 文件中的较早记录\n${records[0]}`;
   const popupErrors = [], popupRequests = [];
+  await page.context().addCookies([{ name: 'etk_session', value: 'log-test-session', url: baseURL }]);
   await page.context().route('**/api/**', async route => {
-    const path = new URL(route.request().url()).pathname;
+    const request = route.request(), url = new URL(request.url()), path = url.pathname;
     popupRequests.push(path);
-    if (path === '/api/auth/check_status') return route.fulfill({ json: { status: 'logged_in', user: { id: 'log-user', name: 'Log User', username: 'Log User', is_admin: true } } });
-    if (path === '/api/status') return route.fulfill({ json: { is_running: false, state: 'idle', logs: records } });
-    if (path === '/api/portal/account-info') return route.fulfill({ json: { name: 'Log User', status: 'active', profile_image_tag: null } });
-    if (path === '/api/system/menu_config') return route.fulfill({ json: [] });
+    if (path === '/api/logs/view') {
+      expect(url.searchParams.get('filename')).toBe('app.log');
+      expect((await request.allHeaders()).cookie).toContain('etk_session=log-test-session');
+      return route.fulfill({ contentType: 'text/plain; charset=utf-8', body: fileContents });
+    }
     throw new Error(`日志窗口请求了未定义接口 ${path}`);
   });
   api.setTask({ logs: records });
@@ -101,14 +133,10 @@ test('the new log window authenticates and continues receiving native live logs'
   await page.getByRole('link', { name: '在新窗口中打开实时日志', exact: true }).click();
   const popup = await popupEvent;
   popup.on('pageerror', error => popupErrors.push(error.message));
-  await expect(popup).toHaveURL(/\/logs$/);
-  await expect(popup.locator('.notification-center.is-standalone')).toBeVisible();
-  await expect(popup.getByText('窗口初始记录', { exact: true })).toBeVisible();
-  await expect(popup.getByRole('button', { name: '关闭实时日志', exact: true })).toHaveCount(0);
-  records = [...records, '2026-11-12 09:56:25,010 - media::source - INFO - 窗口后续记录'];
-  await expect(popup.getByText('窗口后续记录', { exact: true })).toBeVisible();
-  expect(popupRequests).toContain('/api/auth/check_status');
-  expect(popupRequests.filter(path => path === '/api/status').length).toBeGreaterThanOrEqual(2);
+  await expect(popup).toHaveURL(/\/api\/logs\/view\?filename=app\.log$/);
+  await expect(popup.locator('body')).toHaveText(fileContents);
+  await expect(popup.locator('.notification-center')).toHaveCount(0);
+  expect(popupRequests).toEqual(['/api/logs/view']);
   expect(popupErrors).toEqual([]);
   await popup.close();
 });
@@ -158,7 +186,7 @@ for (const preference of [{ theme: 'light', primaryColor: '#FFFFFF' }, { theme: 
       { role: 'active log tab', locator: center.getByRole('tab', { name: '实时日志', exact: true }).locator('.v-btn__content') },
     );
     const iconProbes = [
-      { role: 'download icon', locator: center.getByRole('button', { name: '导出实时日志', exact: true }).locator('svg') },
+      { role: 'download icon', locator: center.getByRole('button', { name: '下载实时日志', exact: true }).locator('svg') },
       { role: 'new window icon', locator: center.getByRole('link', { name: '在新窗口中打开实时日志', exact: true }).locator('svg') },
       { role: 'pause icon', locator: center.getByRole('button', { name: '暂停日志流', exact: true }).locator('svg') },
     ];
@@ -186,6 +214,15 @@ for (const preference of [
       await page.goto('/dashboard');
       await page.getByRole('button', { name: '实时日志', exact: true }).click();
       await expect(page.locator('.notification-log .log-record')).toHaveCount(30);
+      const dialogSize = await page.locator('.notification-dialog-card').evaluate(element => {
+        const box = element.getBoundingClientRect();
+        return { width: box.width, height: box.height, rem: parseFloat(getComputedStyle(document.documentElement).fontSize) };
+      });
+      expect(dialogSize.width).toBeCloseTo(width < 960 ? width : Math.min(80 * dialogSize.rem, width - 48), 0);
+      expect(dialogSize.height).toBeCloseTo(width < 960 ? 844 : 844 - 48, 0);
+      const titleActions = page.locator('.notification-heading');
+      await expect(titleActions.getByRole('button', { name: '下载实时日志', exact: true })).toHaveText('下载');
+      await expect(titleActions.getByRole('link', { name: '在新窗口中打开实时日志', exact: true })).toHaveText('在新窗口中打开');
       const heading = page.locator('.notification-heading h2');
       const count = page.locator('.notification-footer > span');
       await expect(count).toContainText('30 条日志');

@@ -49,7 +49,8 @@
                           <template #placeholder><VSkeletonLoader type="image" class="h-100" /></template>
                           <template #error><div class="dashboard-art-fallback"><VIcon :icon="mediaIcon(item.item_type)" size="40" /></div></template>
                         </VImg>
-                        <VChip class="dashboard-media-type" size="small" variant="elevated" :color="item.item_type === 'Movie' ? 'info' : 'primary'">{{ mediaType(item.item_type) }}</VChip>
+                        <VChip class="dashboard-media-type" size="small" variant="elevated" :color="item.item_type === 'Movie' ? 'info' : 'primary'"
+                          :style="{ '--dashboard-type-color': item.item_type === 'Movie' ? 'var(--v-theme-info)' : 'var(--v-theme-primary)', '--dashboard-type-foreground': item.item_type === 'Movie' ? movieTypeForeground : 'rgb(var(--v-theme-on-primary))' }">{{ mediaType(item.item_type) }}</VChip>
                         <div class="dashboard-poster-overlay" :class="{ 'is-visible': hover.isHovering }">
                           <span class="dashboard-poster-subtitle" :title="String(item.production_year || 'Emby 新入库')">{{ String(item.production_year || 'Emby 新入库') }}</span>
                           <h3 class="dashboard-poster-title" :title="item.name">{{ item.name }}</h3>
@@ -94,7 +95,7 @@
             </button>
           </div>
         </VCardText>
-        <VCardActions class="app-dialog-actions"><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save" @click="saveModules">保存</VBtn></VCardActions>
+        <VCardActions class="app-dialog-actions"><VSpacer /><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save" @click="saveModules">保存</VBtn></VCardActions>
       </VCard>
     </VDialog>
     <Teleport to="body">
@@ -109,17 +110,20 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { useDisplay } from 'vuetify';
+import { useDisplay, useTheme } from 'vuetify';
 import { GridStack } from 'gridstack';
 import 'gridstack/dist/gridstack.min.css';
 import axios from 'axios';
 import storageImage from '@/assets/mp-storage.png';
 import { useAuthStore } from '@/stores/auth';
+import { textColorForBackground } from '@/utils/colorContrast';
 import { dashboardModules, normalizeDashboardProfile, dashboardLayoutProfile, dashboardColumns, storageFrom115, embyDashboardImage, formatDashboardCount, dashboardSnapshot, projectDashboardItems, projectDashboardStatistics, dashboardMonthlyCount } from '@/utils/dashboard';
 
 const authStore = useAuthStore();
 const snapshotUserId = String(authStore.user?.id || '');
 const { width } = useDisplay();
+const { current: currentTheme } = useTheme();
+const movieTypeForeground = computed(() => textColorForBackground(currentTheme.value.colors.info));
 const layoutProfile = computed(() => dashboardLayoutProfile(width.value));
 const layoutKey = profile => `etk-dashboard-layout-v2:${snapshotUserId}:${profile}`;
 const layoutError = ref('');
@@ -421,7 +425,7 @@ onBeforeUnmount(() => { active = false; ++mediaSequence; ++storageSequence; ++gr
 .dashboard-stat-item + .dashboard-stat-item { border-left: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
 .dashboard-stat-copy { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
 .dashboard-stat-label { color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: .72rem; }
-.dashboard-stat-addition { color: var(--ui-success-text, rgb(var(--v-theme-success))); font-size: .72rem; line-height: 1.5; overflow-wrap: anywhere; }
+.dashboard-stat-addition { color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); font-size: .72rem; line-height: 1.5; overflow-wrap: anywhere; }
 .dashboard-number { color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); font-size: 1.15rem; font-weight: 700; line-height: 1.4; font-variant-numeric: tabular-nums; }
 .dashboard-poster-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(144px, 1fr)); gap: 16px; padding: 4px 0; }
 .dashboard-library-row { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 20px; padding: 4px 0 8px; }
@@ -431,7 +435,9 @@ onBeforeUnmount(() => { active = false; ++mediaSequence; ++storageSequence; ++gr
 .dashboard-poster-hover-area { width: 100%; height: 100%; }
 .dashboard-poster-image { height: 100%; width: 100%; }
 .dashboard-library-card :deep(.v-img) { border-radius: 9px; overflow: hidden; }
-.dashboard-media-type { position: absolute; z-index: 1; top: 8px; left: 8px; font-weight: 700; }
+.dashboard-media-type { position: absolute; z-index: 1; top: 8px; left: 8px; background: rgb(var(--dashboard-type-color)) !important; color: var(--dashboard-type-foreground) !important; font-weight: 700; }
+.dashboard-media-type :deep(.v-chip__content) { color: var(--dashboard-type-foreground) !important; }
+:global(html[data-theme='glass'] body[data-theme='glass'] .dashboard-media-type) { background: rgb(var(--dashboard-type-color)) !important; color: var(--dashboard-type-foreground) !important; }
 .dashboard-poster-overlay { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: flex-end; padding: 8px max(12px, var(--app-theme-surface-radius)) max(20px, var(--app-theme-surface-radius)); background: linear-gradient(rgba(var(--v-theme-surface), .94) 0%, rgba(var(--v-theme-surface), .98) 100%); opacity: 0; transition: opacity .18s ease; pointer-events: none; }
 .dashboard-poster-overlay.is-visible, .dashboard-media-card:focus-visible .dashboard-poster-overlay, .dashboard-poster-fallback .dashboard-poster-overlay { opacity: 1; }
 @media (hover: none) { .dashboard-poster-overlay { opacity: 1; } }

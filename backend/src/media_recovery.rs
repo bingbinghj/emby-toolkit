@@ -319,6 +319,13 @@ async fn records(state: &AppState) -> Result<Vec<Record>> {
                 can_recover = false;
                 reason = "原配置恢复说明无效，未修改神医配置".into();
             }
+            if let Ok(original) = &original
+                && let Err(error) =
+                    crate::strm::recovery_applied_settings(&directory, original).await
+            {
+                can_recover = false;
+                reason = error.1;
+            }
             let target_ids = material
                 .as_ref()
                 .ok()
@@ -455,13 +462,15 @@ async fn recover_confirmed(
         cleanup_marker(&record.directory)?
     } else {
         let original = read_json(&record.directory.join("original-settings.json")).await?;
-        let result = crate::strm::finish_media_recovery(state, &original, || async {
-            retained =
-                crate::media_reload::recover_record(state, &record.directory, context, hashes)
-                    .await?;
-            Ok(())
-        })
-        .await;
+        let applied = crate::strm::recovery_applied_settings(&record.directory, &original).await?;
+        let result =
+            crate::strm::finish_media_recovery(state, &original, applied.as_ref(), || async {
+                retained =
+                    crate::media_reload::recover_record(state, &record.directory, context, hashes)
+                        .await?;
+                Ok(())
+            })
+            .await;
         if let Err(mut error) = result {
             if !retained.is_empty() && !error.1.contains(&retained[0].display().to_string()) {
                 error.1.push_str(&format!(

@@ -129,11 +129,13 @@ onBeforeUnmount(() => { window.removeEventListener('scroll', updateScroll); canc
       :height="(horizontal ? 104 : 64) + (hasHeaderTabs ? 44 : 0)" :style="horizontal ? { '--shell-navbar-scroll-progress': scrollProgress } : undefined">
       <div class="navbar-content-container">
         <div class="theme-navbar-row">
-          <slot v-if="horizontal" name="brand" :rail="false" />
-          <VBtn v-if="mdAndDown" icon="mdi-menu" variant="text" color="default" aria-label="切换导航"
-            :aria-expanded="overlayOpen" @click="toggleNavigation" />
-          <slot name="navbar-leading" />
-          <VSpacer />
+          <div class="theme-navbar-leading">
+            <slot v-if="horizontal" name="brand" :rail="false" />
+            <VBtn v-if="mdAndDown" icon="mdi-menu" variant="text" color="default" aria-label="切换导航"
+              :aria-expanded="overlayOpen" @click="toggleNavigation" />
+            <slot name="navbar-leading" />
+          </div>
+          <div class="theme-navbar-center"><slot name="navbar-center" /></div>
           <div class="theme-navbar-actions"><slot name="navbar-actions" /></div>
         </div>
         <nav v-if="horizontal" class="theme-horizontal-nav" aria-label="主导航">
@@ -212,9 +214,11 @@ html[data-theme='glass'][data-glass-color-scheme='dark'] .theme-horizontal-nav__
   background-color: rgb(var(--v-theme-primary));
 }
 .navbar-content-container { inline-size: 100%; padding-inline: 8px; padding-block-start: env(safe-area-inset-top); }
-.theme-navbar-row, .theme-navbar-actions { display: flex; align-items: center; gap: 8px; min-inline-size: 0; }
-.theme-navbar-row { min-block-size: 64px; }
-.theme-navbar-actions { flex: 0 0 auto; }
+.theme-navbar-row { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 8px; min-inline-size: 0; min-block-size: 64px; }
+.theme-navbar-leading, .theme-navbar-center, .theme-navbar-actions { display: flex; align-items: center; gap: 8px; min-inline-size: 0; }
+.theme-navbar-center { justify-content: center; }
+.theme-navbar-actions { justify-content: flex-end; }
+@media (width <= 1279px) { .theme-navbar-row { grid-template-columns: auto minmax(0, 1fr) auto; } }
 .layout-navbar { border-block-end: 1px solid rgba(var(--v-theme-on-surface), .08); }
 .layout-navbar--horizontal { border-radius: calc(var(--shell-navbar-scroll-progress, 0) * 24px); transform: translateY(calc(var(--shell-navbar-scroll-progress, 0) * 12px)); margin-inline: calc(var(--shell-navbar-scroll-progress, 0) * 16px); max-inline-size: calc(100% - var(--shell-navbar-scroll-progress, 0) * 32px); }
 .theme-horizontal-nav { display: flex; align-items: center; gap: 4px; padding-block-end: 8px; }

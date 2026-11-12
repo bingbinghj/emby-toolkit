@@ -464,7 +464,7 @@ pub fn reconstruct(row: &Value) -> Value {
     let kind = string(row, "item_type");
     let mut output = json!({"id":string(row,"tmdb_id").parse::<i64>().unwrap_or(0),
         "overview":row["overview"],"original_language":row["original_language"],
-        "backdrop_path":row["backdrop_path"],"homepage":row["homepage"],"vote_average":row["rating"],
+        "backdrop_path":row["backdrop_path"],"homepage":row["homepage"],
         "poster_path":row["poster_path"],"imdb_id":row["imdb_id"],"tagline":row["tagline"]});
     if let Some(date) = row["date_added"].as_str().filter(|s| !s.is_empty()) {
         output["date_added"] = json!(date);
@@ -632,7 +632,7 @@ pub async fn reconstruct_full(
             if child["item_type"] == "Season" {
                 seasons.push(json!({"id":id,"name":child["title"],"overview":child["overview"],"season_number":child["season_number"],"air_date":child["release_date"],"poster_path":child["poster_path"]}));
             } else {
-                episodes[format!("S{}E{}", child["season_number"], child["episode_number"])] = json!({"id":id,"name":child["title"],"overview":child["overview"],"season_number":child["season_number"],"episode_number":child["episode_number"],"air_date":child["release_date"],"vote_average":child["rating"],"still_path":child["poster_path"],"credits":{"cast":expand(&child),"crew":list(&child["directors_json"]).iter().map(|d|json!({"id":d["id"],"name":d["name"],"job":"Director"})).collect::<Vec<_>>()}});
+                episodes[format!("S{}E{}", child["season_number"], child["episode_number"])] = json!({"id":id,"name":child["title"],"overview":child["overview"],"season_number":child["season_number"],"episode_number":child["episode_number"],"air_date":child["release_date"],"still_path":child["poster_path"],"credits":{"cast":expand(&child),"crew":list(&child["directors_json"]).iter().map(|d|json!({"id":d["id"],"name":d["name"],"job":"Director"})).collect::<Vec<_>>()}});
             }
         }
         if !seasons.is_empty() {

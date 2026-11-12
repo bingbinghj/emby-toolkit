@@ -6,9 +6,11 @@ export async function navbarInteractionRegion(page) {
       const { x, y, width, height } = element.getBoundingClientRect();
       return width && height ? { x, y, width, height } : null;
     };
+    const interactive = 'input, button, a, select, textarea, [role="button"], [contenteditable="true"]';
     const navbarBox = visibleBox(navbar);
     const search = visibleBox(navbar.querySelector('.navbar-search-desktop'));
-    const actions = visibleBox(navbar.querySelector('.theme-navbar-actions'));
+    const actionControls = navbar.querySelector('.theme-navbar-actions')?.querySelectorAll(interactive) || [];
+    const actions = [...actionControls].map(visibleBox).filter(Boolean).sort((a, b) => a.x - b.x)[0] || null;
     if (!navbarBox) throw new Error('Navbar must be visible before interaction capture');
     let left = navbarBox.x + Math.min(160, navbarBox.width / 4);
     let width = Math.min(400, navbarBox.width / 2);
@@ -22,7 +24,6 @@ export async function navbarInteractionRegion(page) {
     }
     const clip = { x: Math.ceil(left), y: Math.ceil(navbarBox.y + 2),
       width: Math.floor(width), height: Math.floor(Math.min(50, navbarBox.height - 4)) };
-    const interactive = 'input, button, a, select, textarea, [role="button"], [contenteditable="true"]';
     for (const element of navbar.querySelectorAll(interactive)) {
       const box = visibleBox(element);
       if (box && box.x < clip.x + clip.width && box.x + box.width > clip.x

@@ -181,12 +181,18 @@ async fn library_items(
     } else {
         anchor_index / size * size
     };
-    query.extend([("StartIndex",start.to_string()),("Limit",size.to_string()),("EnableTotalRecordCount","true".into()),("Fields","PrimaryImageAspectRatio,ImageTags,BackdropImageTags,Name,Type,ProductionYear,ProviderIds,ChildCount,CommunityRating,OfficialRating".into())]);
+    query.extend([("StartIndex",start.to_string()),("Limit",size.to_string()),("EnableTotalRecordCount","true".into()),("Fields","PrimaryImageAspectRatio,ImageTags,BackdropImageTags,Name,Type,ProductionYear,ProviderIds,ChildCount,OfficialRating".into())]);
     let response = items(&state, &query).await?;
-    let list = response["Items"]
+    let mut list = response["Items"]
         .as_array()
         .cloned()
         .ok_or_else(|| ApiError(StatusCode::BAD_GATEWAY, "Emby 媒体项响应无效".into()))?;
+    for item in &mut list {
+        if let Some(item) = item.as_object_mut() {
+            item.remove("CommunityRating");
+            item.remove("CriticRating");
+        }
+    }
     Ok(Json(
         json!({"library":{"id":library["Id"],"name":library["Name"],"collection_type":library["CollectionType"],"media_type_filter":filter(&library)},
         "next_start_index":start+list.len() as u64,"items":list,"total":item_total(&response)?,"start_index":start,

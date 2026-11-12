@@ -2,10 +2,10 @@
   <section class="notification-center" :class="{ 'is-dark-theme': isDarkTheme, 'is-standalone': standalone }" aria-label="实时日志">
     <header class="notification-heading">
       <VCardTitle tag="h2" class="pa-0">实时日志</VCardTitle>
-      <VBtn variant="text" icon="mdi-download" color="default" class="logging-heading-action" size="small" aria-label="导出实时日志" title="下载日志" @click="downloadLogs" :disabled="!filteredLogs.length" />
-      <VBtn v-if="!standalone" variant="text" icon="mdi-open-in-new" color="default" class="logging-heading-action" size="small" aria-label="在新窗口中打开实时日志" title="在新窗口中打开" :href="router.resolve({ name: 'Logs' }).href" target="_blank" rel="noopener noreferrer" />
-      <VSpacer />
-      <VBtn v-if="!standalone" variant="text" icon="mdi-close" color="default" size="small" aria-label="关闭实时日志" title="关闭" @click="$emit('close')" />
+      <VBtn variant="tonal" prepend-icon="mdi-download" color="default" class="logging-heading-action" size="small" aria-label="下载实时日志" title="下载日志" :loading="isDownloading" :disabled="isDownloading" @click="downloadLogs">下载</VBtn>
+      <VBtn v-if="!standalone" variant="tonal" prepend-icon="mdi-open-in-new" color="default" class="logging-heading-action" size="small" aria-label="在新窗口中打开实时日志" title="在新窗口中打开" :href="logFileUrl" target="_blank" rel="noopener noreferrer">在新窗口中打开</VBtn>
+      <VSpacer class="logging-heading-spacer" />
+      <VBtn v-if="!standalone" variant="text" icon="mdi-close" color="default" class="logging-close-action" size="small" aria-label="关闭实时日志" title="关闭" @click="$emit('close')" />
     </header>
     <VTabs v-model="activeTab" color="primary" density="compact" class="notification-tabs">
       <VTab value="logs" prepend-icon="mdi-console-line">实时日志</VTab>
@@ -21,7 +21,7 @@
           <template #selection="{ item }"><span class="font-weight-medium">{{ item.title }}</span></template>
         </VSelect>
         <VTextField v-model="keyword" clearable hide-details variant="plain" density="compact" prepend-inner-icon="mdi-magnify" placeholder="搜索日志" aria-label="搜索实时日志" class="notification-search logging-search" />
-        <VBtn variant="text" color="default" icon :class="{ 'is-live': following }" class="logging-stream-action" :aria-label="following ? '暂停日志流' : '继续日志流'" :title="following ? '暂停日志流' : '继续日志流'" @click="following = !following"><VIcon :icon="following ? 'mdi-pause' : 'mdi-play'" /></VBtn>
+        <VBtn variant="flat" color="primary" icon class="logging-stream-action" :aria-label="following ? '暂停日志流' : '继续日志流'" :title="following ? '暂停日志流' : '继续日志流'" @click="following = !following"><VIcon :icon="following ? 'mdi-pause' : 'mdi-play'" /></VBtn>
       </div>
       <div ref="logRef" class="notification-log logging-shell" role="region" aria-label="实时日志内容" tabindex="0" @scroll="handleScroll">
         <LogRecord v-for="(group, index) in logGroups" :key="group.key" :lines="group.lines" :keyword="keyword" :stripe="index % 2 ? 'odd' : 'even'" />
@@ -39,7 +39,8 @@
 <script setup>
 import { computed, ref, watch, nextTick } from 'vue';
 import { useDisplay, useTheme } from 'vuetify';
-import { useRouter } from 'vue-router';
+import axios from 'axios';
+import { useMessage } from '@/composables/useFeedback';
 import LogViewer from './LogViewer.vue';
 import LogRecord from './LogRecord.vue';
 import { groupLogRecords, matchesLogRecord } from '@/utils/logRecords';
@@ -48,20 +49,28 @@ const props = defineProps({ task: { type: Object, default: () => ({}) }, standal
 defineEmits(['close']);
 const display = useDisplay();
 const theme = useTheme();
-const router = useRouter();
+const message = useMessage();
+const logFileUrl = '/api/logs/view?filename=app.log';
 const isDarkTheme = computed(() => theme.global.current.value.dark);
 const activeTab = ref('logs'), logRef = ref(null);
-const keyword = ref(''), logFilter = ref('all'), following = ref(true), displayedLogs = ref([]);
+const keyword = ref(''), logFilter = ref('all'), following = ref(true), displayedLogs = ref([]), isDownloading = ref(false);
 const filterOptions = [{ label: '全部级别', value: 'all' }, { label: 'DEBUG', value: 'debug' }, { label: 'INFO', value: 'info' }, { label: 'WARNING', value: 'warning' }, { label: 'ERROR', value: 'error' }];
 const latestLogs = computed(() => props.task.logs || []);
 const hasNewLogs = computed(() => latestLogs.value.join('\n') !== displayedLogs.value.join('\n'));
-function downloadLogs() {
-  const url = URL.createObjectURL(new Blob([filteredLogs.value.join('\n')], { type: 'text/plain;charset=utf-8' }));
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = `etk-${new Date().toISOString().replace(/[:.]/g, '-')}.log`;
-  link.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+async function downloadLogs() {
+  isDownloading.value = true;
+  try {
+    const { data } = await axios.get(logFileUrl, { responseType: 'blob' });
+    const url = URL.createObjectURL(data), link = document.createElement('a');
+    link.href = url;
+    link.download = 'app.log';
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  } catch (error) {
+    message.error(error.response?.data?.error || '下载日志失败，请重试。');
+  } finally {
+    isDownloading.value = false;
+  }
 }
 const filteredLogs = computed(() => displayedLogs.value.filter(line => matchesLogRecord(line, keyword.value, logFilter.value)));
 const logGroups = computed(() => groupLogRecords(displayedLogs.value)
@@ -81,7 +90,7 @@ function handleScroll() {
 </script>
 
 <style scoped>
-.notification-center { --logging-shell-background:linear-gradient(180deg,var(--logging-shell-bg),rgba(var(--v-theme-surface),0.9)); --logging-shell-bg:rgba(var(--v-theme-surface),0.96); --logging-record-bg-even:rgba(var(--v-theme-surface-variant),0.01); --logging-record-bg-odd:rgba(var(--v-theme-surface-variant),0.005); --logging-border:rgba(var(--v-theme-on-surface),0.12); --logging-text:rgba(var(--v-theme-on-surface),0.88); display:flex; flex-direction:column; box-sizing:border-box; height:min(850px, calc(100dvh - 48px)); min-height:0; min-width:0; gap:16px; padding:24px; overflow:hidden; }
+.notification-center { --logging-shell-background:linear-gradient(180deg,var(--logging-shell-bg),rgba(var(--v-theme-surface),0.9)); --logging-shell-bg:rgba(var(--v-theme-surface),0.96); --logging-record-bg-even:rgba(var(--v-theme-surface-variant),0.01); --logging-record-bg-odd:rgba(var(--v-theme-surface-variant),0.005); --logging-border:rgba(var(--v-theme-on-surface),0.12); --logging-text:rgba(var(--v-theme-on-surface),0.88); display:flex; flex-direction:column; box-sizing:border-box; height:calc(100dvh - 48px); min-height:0; min-width:0; gap:16px; padding:24px; overflow:hidden; }
 .notification-center.is-dark-theme { --logging-shell-bg:rgba(var(--v-theme-surface),0.72); --logging-record-bg-even:rgba(var(--v-theme-on-surface),0.02); --logging-record-bg-odd:rgba(var(--v-theme-on-surface),0.008); --logging-shadow:inset 0 1px 0 rgba(255,255,255,0.04); }
 .notification-center.is-standalone { height:100dvh; }
 .notification-heading { display:flex; align-items:center; gap:8px; flex-shrink:0; }
@@ -93,8 +102,6 @@ function handleScroll() {
 .logging-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; flex-shrink:0; }
 .logging-search { flex:1 1 9rem; min-inline-size:5rem; }
 .logging-level-select { flex:0 0 7rem; min-inline-size:7rem; }
-.logging-stream-action { color:var(--ui-text-muted); }
-.logging-stream-action.is-live { color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,rgb(var(--v-theme-success))); }
 .logging-search :deep(.v-field), .logging-level-select :deep(.v-field) { border-radius:var(--app-field-radius); background:transparent !important; box-shadow:none !important; }
 .logging-search :deep(.v-field__outline), .logging-search :deep(.v-field__overlay), .logging-level-select :deep(.v-field__outline), .logging-level-select :deep(.v-field__overlay) { display:none; }
 .logging-search :deep(.v-field__input) { padding-inline-start:0; }
@@ -116,9 +123,14 @@ function handleScroll() {
   .logging-search :deep(.v-field__field), .logging-search :deep(.v-field__input), .logging-search :deep(.v-field__prepend-inner), .logging-search :deep(.v-field__clearable) { align-items:center; min-block-size:2rem; padding-block:0; }
   .logging-stream-action { block-size:2rem; inline-size:2rem; }
 }
-@media (max-width:600px) {
-  .notification-center { height:calc(100dvh - 32px); padding:16px; }
+@media (max-width:959px) {
+  .notification-center { height:100dvh; padding:16px; }
   .notification-center, .notification-live { gap:12px; }
+  .notification-heading { display:grid; grid-template-columns:auto 1fr auto; }
+  .notification-heading :deep(.v-card-title) { grid-column:1 / 3; }
+  .logging-close-action { grid-column:3; grid-row:1; }
+  .logging-heading-action { grid-row:2; justify-self:start; }
+  .logging-heading-spacer { display:none; }
   .notification-log { padding:8px; }
 }
 </style>

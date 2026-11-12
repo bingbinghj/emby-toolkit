@@ -19,6 +19,7 @@ async function operate(name, data, status = 200, reject = false) {
     showMediaInfoEditor: { value: true }, mediaOperationFeedback: { value: null },
     isReplacingEpisodeImages: { value: false }, isDeletingMediaVersion: { value: false },
     imageRefreshTokens: { value: { poster: 1 } },
+    mediaDetailsLoadSequence: 1, mediaRecoverySession: 1, mediaInfoLoadSequence: 1,
     axios: { post: async () => {
       if (reject) throw { response: { data, status } };
       return { data, status };

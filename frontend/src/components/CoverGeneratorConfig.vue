@@ -57,7 +57,7 @@
             </VRow>
           </template>
         </VCardText>
-        <VCardActions class="px-6 pb-4">
+        <VCardActions class="px-6 pb-4 justify-end">
           <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSaving" @click="saveConfig('basic')">保存</VBtn>
         </VCardActions>
       </VCard>
@@ -140,7 +140,7 @@
             </VWindowItem>
           </VWindow>
         </VCardText>
-        <VCardActions class="px-6 pb-4">
+        <VCardActions class="px-6 pb-4 justify-end">
           <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSaving" @click="saveConfig(configData.tab || 'style-tab')">保存</VBtn>
         </VCardActions>
       </VCard>

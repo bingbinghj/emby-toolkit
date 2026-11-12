@@ -17,7 +17,7 @@ export const languageMapping = [
 
 export const mediaDetails = {
   item_id: '101', item_type: 'Movie', item_name: '浏览器验证电影', production_year: 2026,
-  original_score: 8.2, review_reason: '', search_links: { baidu: 'https://example.invalid/search' },
+  review_reason: '', search_links: { baidu: 'https://example.invalid/search' },
   current_emby_cast: [
     { name: 'Actor One', role: 'Captain', tmdbId: '10', embyPersonId: 'person-10', originalName: 'Actor One', imageUrl: '' },
     { name: 'Actor Two', role: 'Doctor', tmdbId: '20', embyPersonId: 'person-20', originalName: 'Actor Two', imageUrl: '' },
@@ -111,7 +111,7 @@ export const test = base.extend({
       libraries: [library], errors: {},
     });
     respond('GET', '/api/media_center/libraries/movies/items', { library, items: [{ Id: '101', Name: mediaDetails.item_name, Type: 'Movie', ProductionYear: 2026, ImageTags: { Primary: 'fixture' } }], total: 1, start_index: 0, anchor_index: 0 });
-    respond('GET', '/api/review_items', { items: [{ item_id: '101', item_name: mediaDetails.item_name, item_type: 'Movie', failed_at: '2026-11-09T12:00:00Z', reason: '人工复核', original_score: 8.2 }], total_items: 1 });
+    respond('GET', '/api/review_items', { items: [{ item_id: '101', item_name: mediaDetails.item_name, item_type: 'Movie', failed_at: '2026-11-09T12:00:00Z', reason: '人工复核' }], total_items: 1 });
     respond('GET', '/api/search_emby_library', { items: [{ item_id: '101', item_name: mediaDetails.item_name, item_type: 'Movie' }], total_items: 1 });
     respond('GET', '/api/media_for_editing/101', mediaDetails);
     respond('GET', '/api/media_info/edit/101', mediaInfo);

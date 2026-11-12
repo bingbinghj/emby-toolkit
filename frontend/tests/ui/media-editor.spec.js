@@ -1,5 +1,15 @@
 import { test, expect, mediaDetails, mediaInfo } from './fixtures.js';
 
+async function expectSaveAtRight(button) {
+  await expect(button).toBeVisible();
+  const position = await button.evaluate(element => {
+    const footer = element.closest('.v-card-actions');
+    return { right: element.getBoundingClientRect().right,
+      expected: footer.getBoundingClientRect().right - parseFloat(getComputedStyle(footer).paddingRight) };
+  });
+  expect(Math.abs(position.right - position.expected)).toBeLessThanOrEqual(2);
+}
+
 test('subtitle editor shows actual languages and original titles without modifying an untouched save', async ({ page, api }) => {
   const stored = structuredClone(mediaInfo);
   stored.mediainfo[0].MediaSourceInfo.MediaStreams = [
@@ -86,7 +96,9 @@ test('late actor translation preserves edits made while its request is running',
 
 test('confirmed media save closes the editor after receiving its result', async ({ page }) => {
   await page.goto('/edit-media/101');
+  await expectSaveAtRight(page.getByRole('button', { name: '保存', exact: true }));
   await page.getByTestId('media-info-open').click();
+  await expectSaveAtRight(page.getByTestId('media-info-save'));
   await page.getByTestId('media-info-save').click();
   await expect(page.getByRole('button', { name: '关闭媒体信息编辑器', exact: true })).toHaveCount(0);
   await expect(page.getByText('媒体信息已更新', { exact: true })).toBeVisible();

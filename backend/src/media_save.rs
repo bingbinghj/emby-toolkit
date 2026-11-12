@@ -61,6 +61,7 @@ struct Prepared {
     source: Option<String>,
     final_path: PathBuf,
     stage: Option<PathBuf>,
+    expected_json: Option<Vec<u8>>,
     chapters: Value,
     multipart: bool,
     has_streams: bool,
@@ -79,6 +80,37 @@ fn protected(state_config: &Value, path: &str) -> bool {
         || normalized.starts_with("/cd2/")
         || normalized.contains("/115open/")
         || normalized.contains("/115/")
+}
+
+fn validate_requested_chapters(info: &Value, original: &Value) -> Result<()> {
+    let requested = media_info::restore_json(info)?;
+    let original = media_info::restore_json(original)?;
+    let original_root = media_info::object(&original).unwrap();
+    let original_source = media_info::container(&original).unwrap();
+    let empty = json!([]);
+    let expected = if original_root["Chapters"].is_null() {
+        &original_source["Chapters"]
+    } else {
+        &original_root["Chapters"]
+    };
+    let expected = media_info::signature(if expected.is_null() { &empty } else { expected })?;
+    let requested_root = media_info::object(&requested).unwrap();
+    let requested_source = media_info::container(&requested).unwrap();
+    for chapters in [&requested_root["Chapters"], &requested_source["Chapters"]] {
+        if chapters.is_null() {
+            continue;
+        }
+        let actual = media_info::signature(chapters)?;
+        // Empty chapters from an old editing page remain recoverable. A
+        // nonempty change must never be silently overwritten as a success.
+        if !actual.is_empty() && actual != expected {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "媒体信息编辑不支持编辑章节，章节内容与原记录不一致，已停止保存".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 async fn prepare(
     state: &AppState,
@@ -117,6 +149,11 @@ async fn prepare(
             .with_extension("")
             .to_string_lossy()
     ));
+    let expected_json = match tokio::fs::read(&final_path).await {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
     let source = crate::media_paths::strm_target(&path).await;
     let paths = [&path[..], source.as_deref().unwrap_or("")];
     let has_streams = media_info::has_media_streams(&item, &paths);
@@ -139,6 +176,7 @@ async fn prepare(
         path,
         final_path,
         stage: None,
+        expected_json,
         chapters,
         multipart: item["PartCount"].as_u64().unwrap_or(0) > 1,
     })
@@ -925,7 +963,8 @@ async fn save_inner(
                     info
                 };
             crate::language::normalize_subtitles_for_save(&mut info, &original);
-            if file_refresh { crate::media_reload::ensure_json_unfiltered(&info,target_id)?; }
+            validate_requested_chapters(&info, &original)?;
+            if file_refresh { crate::media_reload::ensure_json_streams_unfiltered(&info,target_id)?; }
             // A stale editing page may still contain empty chapters after a failed restore.
             if let Some(chapters) = media_info::object(&original).and_then(|root| root["Chapters"].as_array()) {
                 media_info::preserve_chapters(&mut info, &json!(chapters))?;
@@ -1029,8 +1068,23 @@ async fn save_inner(
         context.update(35, "暂存", "暂存媒体信息和当前章节").await;
     }
     if file_refresh {
-        for item in restore.values() {
+        let context = context.ok_or_else(|| ApiError::bad("保存任务上下文缺失"))?;
+        for (id, item) in &restore {
             crate::media_reload::ensure_single_bundle(&item.info)?;
+            crate::media_reload::preflight_file_import(
+                state,
+                &SavedTarget {
+                    id: id.clone(),
+                    path: item.path.clone(),
+                    source: item.source.clone(),
+                    sha: item.target.sha.clone(),
+                    asset: (!item.target.kind.is_empty()).then(|| item.target.asset.clone()),
+                    info: item.info.clone(),
+                    refresh_required: true,
+                },
+                context,
+            )
+            .await?;
             if let Ok(bytes) = tokio::fs::read(&item.final_path).await
                 && let Ok(original) = serde_json::from_slice::<Value>(&bytes)
             {
@@ -1044,7 +1098,6 @@ async fn save_inner(
         }
         let mut warning_details = vec![];
         let mut written_ids = vec![];
-        let context = context.ok_or_else(|| ApiError::bad("保存任务上下文缺失"))?;
         let refresh_outcome = refresh_saved(state, context, || async {
             let mut items = restore.iter().collect::<Vec<_>>();
             items.sort_by_cached_key(|(id, _)| order.get(*id).cloned());
@@ -1060,7 +1113,13 @@ async fn save_inner(
                         refresh_required: true,
                     };
                     saved_details(state, &saved).await?;
-                    if let Err(error) = commit_json_stage(stage, &item.final_path).await {
+                    if let Err(error) = commit_json_stage_guarded(
+                        stage,
+                        &item.final_path,
+                        item.expected_json.as_deref(),
+                    )
+                    .await
+                    {
                         failures.push(format!("{id}：媒体信息 JSON 保存失败：{}", error.1));
                         continue;
                     }

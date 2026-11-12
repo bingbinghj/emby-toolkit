@@ -7,7 +7,7 @@ use crate::{
 use serde_json::{Value, json};
 
 fn empty_record() -> Value {
-    let columns = "tmdb_id item_type title original_title overview release_date release_year last_air_date backdrop_path homepage original_language poster_path rating actors_json parent_series_tmdb_id season_number episode_number in_library episode_group_id emby_item_ids_json file_sha1_json file_pickcode_json date_added official_rating_json genres_json directors_json production_companies_json networks_json countries_json keywords_json asset_details_json runtime_minutes total_episodes imdb_id tagline";
+    let columns = "tmdb_id item_type title original_title overview release_date release_year last_air_date backdrop_path homepage original_language poster_path actors_json parent_series_tmdb_id season_number episode_number in_library episode_group_id emby_item_ids_json file_sha1_json file_pickcode_json date_added official_rating_json genres_json directors_json production_companies_json networks_json countries_json keywords_json asset_details_json runtime_minutes total_episodes imdb_id tagline";
     let mut record = Value::Object(
         columns
             .split_whitespace()
@@ -92,7 +92,6 @@ pub fn pending(kind: &str, package: &Value, cast: &[Value], item: &Value) -> Res
         "original_name"
     }]
     .clone();
-    record["rating"] = details["vote_average"].clone();
     record["release_date"] = details[if kind == "Movie" {
         "release_date"
     } else {

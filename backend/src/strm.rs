@@ -199,7 +199,17 @@ where
             return Err(ApiError::bad(message));
         }
     }
-    if changed && !restore_settings(state, &id, &restore, mode, outcome.as_ref().err()).await {
+    if changed
+        && !restore_settings(
+            state,
+            &id,
+            &restore,
+            Some(&desired),
+            mode,
+            outcome.as_ref().err(),
+        )
+        .await
+    {
         return Err(ApiError(
             axum::http::StatusCode::CONFLICT,
             "神医临时配置恢复失败，请核对神医设置".into(),
@@ -294,6 +304,36 @@ fn features(value: &Value) -> HashSet<String> {
         .map(str::to_string)
         .collect()
 }
+fn temporary_features(original: &Value, mode: &str) -> Result<Value> {
+    let removed: &[&str] = match mode {
+        "preserve" | "restore_media_info" => {
+            &["CatchAllAllow", "ExtractOnFileChange", "IgnoreFileChange"]
+        }
+        "ignore_file_change" => &["ExtractOnFileChange", "IgnoreFileChange"],
+        "capture" => &[
+            "CatchAllBlock",
+            "ExtractOnFileChange",
+            "IgnoreFileChange",
+            "CatchAllAllow",
+        ],
+        _ => return Err(ApiError::bad("未知神医临时设置模式")),
+    };
+    let mut values = string(original, "ExclusiveControlFeatures")
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !removed.contains(value))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    values.push(
+        if mode == "capture" {
+            "CatchAllAllow"
+        } else {
+            "IgnoreFileChange"
+        }
+        .into(),
+    );
+    Ok(json!(values.join(",")))
+}
 fn matches(actual: &Value, expected: &Value) -> bool {
     expected.as_object().is_some_and(|fields| {
         fields.iter().all(|(key, value)| {
@@ -317,6 +357,7 @@ async fn restore_settings(
     state: &AppState,
     id: &str,
     restore: &Value,
+    applied: Option<&Value>,
     mode: &str,
     failure: Option<&ApiError>,
 ) -> bool {
@@ -324,13 +365,51 @@ async fn restore_settings(
     tracing::info!("[神医临时设置] {mode_name} 开始恢复原配置");
     for attempt in 1..=3 {
         let result = async {
-            let mut current = read(state, id).await?;
-            current
-                .as_object_mut()
-                .unwrap()
-                .extend(restore.as_object().unwrap().clone());
-            write(state, id, &current).await?;
-            if !matches(&read(state, id).await?, restore) {
+            let current = read(state, id).await?;
+            let mut restored = current.clone();
+            for (key, original) in restore.as_object().unwrap() {
+                let Some(expected) = applied.and_then(|applied| applied.get(key)) else {
+                    // Older recovery records did not retain the applied values.
+                    // Keep their explicit restore-original contract unchanged.
+                    if applied.is_none() {
+                        restored[key] = original.clone();
+                    }
+                    continue;
+                };
+                if key == "ExclusiveControlFeatures" {
+                    let original_features = features(original);
+                    let applied_features = features(expected);
+                    let current_features = features(&current[key]);
+                    let mut merged = current_features.clone();
+                    for added in applied_features.difference(&original_features) {
+                        merged.remove(added);
+                    }
+                    for removed in original_features.difference(&applied_features) {
+                        merged.insert(removed.clone());
+                    }
+                    if merged != current_features {
+                        restored[key] = if merged == original_features {
+                            original.clone()
+                        } else {
+                            let mut values = merged.into_iter().collect::<Vec<_>>();
+                            values.sort();
+                            json!(values.join(","))
+                        };
+                    }
+                } else if current[key] == *expected {
+                    restored[key] = original.clone();
+                } else if current[key] != *original {
+                    tracing::warn!(
+                        field = key,
+                        "[神医临时设置] 配置已由其他操作修改，保留当前值"
+                    );
+                }
+            }
+            if matches(&current, &restored) {
+                return Ok(());
+            }
+            write(state, id, &restored).await?;
+            if !matches(&read(state, id).await?, &restored) {
                 return Err(ApiError::bad("恢复配置回读不一致"));
             }
             Ok::<_, ApiError>(())
@@ -377,9 +456,73 @@ pub(crate) fn valid_recovery_settings(original: &Value) -> bool {
     })
 }
 
+pub(crate) async fn recovery_applied_settings(
+    recovery: &std::path::Path,
+    original: &Value,
+) -> Result<Option<Value>> {
+    let path = recovery.join("applied-settings.json");
+    if !tokio::fs::try_exists(&path).await? {
+        return Ok(None);
+    }
+    let applied = crate::media_recovery::read_json(&path).await?;
+    if !applied.as_object().is_some_and(|fields| {
+        fields.iter().all(|(key, value)| {
+            original.get(key).is_some()
+                && match key.as_str() {
+                    "ExclusiveControlFeatures" | "PersistMediaInfoMode" => {
+                        value.is_string() || (key == "ExclusiveControlFeatures" && value.is_null())
+                    }
+                    "EnableImageCapture" => value.is_boolean(),
+                    _ => false,
+                }
+        })
+    }) {
+        return Err(ApiError::bad("本任务临时配置恢复说明无效，未修改神医配置"));
+    }
+    let modes: &[&str] = if original.get("EnableImageCapture").is_some() {
+        &["capture"]
+    } else if original.get("PersistMediaInfoMode").is_some() {
+        &["restore_media_info"]
+    } else {
+        &["preserve", "ignore_file_change"]
+    };
+    let candidates = modes
+        .iter()
+        .map(|mode| temporary_features(original, mode))
+        .collect::<Result<Vec<_>>>()?;
+    let invalid_features = if let Some(value) = applied.get("ExclusiveControlFeatures") {
+        !candidates
+            .iter()
+            .any(|expected| features(expected) == features(value))
+    } else {
+        !candidates
+            .iter()
+            .any(|expected| features(expected) == features(&original["ExclusiveControlFeatures"]))
+    };
+    let invalid_scalar = [
+        ("PersistMediaInfoMode", json!("Restore")),
+        ("EnableImageCapture", json!(true)),
+    ]
+    .iter()
+    .any(|(key, expected)| {
+        original.get(key).is_some_and(|original| {
+            applied
+                .get(key)
+                .map_or(original != expected, |value| value != expected)
+        })
+    });
+    if invalid_features || invalid_scalar {
+        return Err(ApiError::bad(
+            "本任务临时配置与原恢复说明不一致，未修改神医配置",
+        ));
+    }
+    Ok(Some(applied))
+}
+
 pub(crate) async fn finish_media_recovery<F, Fut>(
     state: &AppState,
     original: &Value,
+    applied: Option<&Value>,
     function: F,
 ) -> Result<()>
 where
@@ -396,7 +539,7 @@ where
         return Err(ApiError::bad("神医媒体任务尚未结束，请结束后重试恢复"));
     }
     function().await?;
-    if !restore_settings(state, &id, original, "preserve", None).await {
+    if !restore_settings(state, &id, original, applied, "preserve", None).await {
         return Err(ApiError::bad(
             "媒体已通过验收，但神医原配置恢复尚未确认，恢复记录已保留",
         ));
@@ -540,7 +683,10 @@ async fn check_rename_scan_guard(state: &AppState, id: &str) -> Result<()> {
     }) {
         return Err(blocked("原配置恢复说明缺少有效独占模式".into()));
     }
-    if !restore_settings(state, id, &original, "preserve", None).await {
+    let applied = recovery_applied_settings(recovery, &original)
+        .await
+        .map_err(|error| blocked(error.1))?;
+    if !restore_settings(state, id, &original, applied.as_ref(), "preserve", None).await {
         return Err(blocked("本次扫描已结束，但神医原配置恢复尚未确认".into()));
     }
     tokio::fs::remove_file(path).await.map_err(|error| {
@@ -611,38 +757,8 @@ where
             "神医媒体信息、指纹或缩略图任务尚未结束，未清理媒体信息",
         ));
     }
-    let removed: &[&str] = match mode {
-        "preserve" | "restore_media_info" => {
-            &["CatchAllAllow", "ExtractOnFileChange", "IgnoreFileChange"]
-        }
-        "ignore_file_change" => &["ExtractOnFileChange", "IgnoreFileChange"],
-        "capture" => &[
-            "CatchAllBlock",
-            "ExtractOnFileChange",
-            "IgnoreFileChange",
-            "CatchAllAllow",
-        ],
-        _ => return Err(ApiError::bad("未知神医临时设置模式")),
-    };
     let mut desired = original.clone();
-    let mut values = string(&original, "ExclusiveControlFeatures")
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && !removed.contains(s))
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    values.push(
-        if matches!(
-            mode,
-            "preserve" | "ignore_file_change" | "restore_media_info"
-        ) {
-            "IgnoreFileChange"
-        } else {
-            "CatchAllAllow"
-        }
-        .into(),
-    );
-    desired["ExclusiveControlFeatures"] = json!(values.join(","));
+    desired["ExclusiveControlFeatures"] = temporary_features(&original, mode)?;
     if mode == "capture" {
         if !original["EnableImageCapture"].is_boolean() {
             return Err(ApiError::bad("神医截图开关配置无效，未开始截图"));
@@ -695,6 +811,25 @@ where
         file.write_all(&serde_json::to_vec_pretty(&backup).unwrap())
             .await?;
         file.sync_all().await?;
+        let applied = restore
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|key| (key.clone(), desired[key].clone()))
+            .collect::<serde_json::Map<_, _>>();
+        let applied_path = recovery.join("applied-settings.json");
+        tokio::fs::write(&applied_path, serde_json::to_vec(&applied).unwrap()).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&applied_path, std::fs::Permissions::from_mode(0o600))
+                .await?;
+        }
+        tokio::fs::File::open(&applied_path)
+            .await?
+            .sync_all()
+            .await?;
+        tokio::fs::File::open(recovery).await?.sync_all().await?;
     }
     let mode_name = settings_mode_label(mode);
     tracing::info!("[神医临时设置] {mode_name} 开始");
@@ -733,7 +868,17 @@ where
             ),
         ));
     }
-    if changed && !restore_settings(state, &id, &restore, mode, outcome.as_ref().err()).await {
+    if changed
+        && !restore_settings(
+            state,
+            &id,
+            &restore,
+            Some(&desired),
+            mode,
+            outcome.as_ref().err(),
+        )
+        .await
+    {
         return Err(ApiError(
             axum::http::StatusCode::CONFLICT,
             "神医临时设置恢复失败，请核对独占模式".into(),

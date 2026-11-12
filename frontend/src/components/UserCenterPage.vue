@@ -114,7 +114,7 @@
           </div>
         </VCardText>
         <VDivider />
-        <VCardActions class="px-6 py-4"><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSavingUser" :disabled="userBusy || loadingUserDetails || !editingUser" @click="saveUserDetails">{{ creatingUser ? '添加' : '保存' }}</VBtn><VSpacer /><VBtn color="default" variant="text" :disabled="userBusy" @click="closeUserDialog">取消</VBtn></VCardActions>
+        <VCardActions class="px-6 py-4"><VSpacer /><VBtn color="default" variant="text" :disabled="userBusy" @click="closeUserDialog">取消</VBtn><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSavingUser" :disabled="userBusy || loadingUserDetails || !editingUser" @click="saveUserDetails">{{ creatingUser ? '添加' : '保存' }}</VBtn></VCardActions>
       </VCard>
     </VDialog>
 
@@ -127,7 +127,7 @@
           <VTextField v-model="confirmPassword" label="确认新密码" type="password" :disabled="isSavingPassword" autocomplete="new-password" maxlength="1024" />
           <p class="text-body-2 text-medium-emphasis mb-0">保存后，该用户已登录的 Emby 客户端需要重新登录。</p>
         </VCardText>
-        <VCardActions class="px-6 pb-4"><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSavingPassword" :disabled="isSavingPassword" @click="saveUserPassword">保存</VBtn><VSpacer /><VBtn color="default" variant="text" :disabled="isSavingPassword" @click="closePasswordDialog">取消</VBtn></VCardActions>
+        <VCardActions class="px-6 pb-4"><VSpacer /><VBtn color="default" variant="text" :disabled="isSavingPassword" @click="closePasswordDialog">取消</VBtn><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSavingPassword" :disabled="isSavingPassword" @click="saveUserPassword">保存</VBtn></VCardActions>
       </VCard>
     </VDialog>
   </div>

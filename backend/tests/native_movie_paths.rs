@@ -114,7 +114,7 @@ impl Fixture {
         metadata_records::online(
             &self.state,
             "Movie",
-            &json!({"id":634429,"title":"原生路径验证"}),
+            &json!({"id":634429,"title":"原生路径验证","vote_average":8.8,"vote_count":123,"_official_rating_map":{"US":"PG-13"}}),
             &[],
             item,
             &metadata_records::OnlineContext {
@@ -154,6 +154,7 @@ async fn movie_local_playback_path_keeps_native_strm_and_titles_pass_readback() 
         .await;
     let mut records = f.bind(&item).await.unwrap();
     assert_eq!(records[0]["asset_details_json"][0]["path"], item["Path"]);
+    assert!(records[0].get("rating").is_none());
     metadata::upsert(&f.state, &mut records, false)
         .await
         .unwrap();
@@ -165,7 +166,84 @@ async fn movie_local_playback_path_keeps_native_strm_and_titles_pass_readback() 
         f.host.unexpected.lock().await.is_empty(),
         "matching titles require no plugin requests"
     );
+    let mut cached = metadata::row(&f.state, "634429", "Movie")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(cached["rating"].is_null());
+    cached["rating"] = json!(9.9);
+    let mut payload = metadata::reconstruct(&cached);
+    assert!(
+        payload.get("vote_average").is_none(),
+        "legacy numeric cache is not restored"
+    );
+    assert_eq!(payload["mpaa"], "PG-13");
+    payload["vote_average"] = json!(9.9);
+    let config = f.state.config.read().await.clone();
+    let empty = json!([]);
+    let options = emby_toolkit::nfo_files::Options {
+        force: true,
+        config: &config,
+        studio_mapping: &empty,
+        keyword_mapping: &empty,
+        ..Default::default()
+    };
+    let written = emby_toolkit::nfo_files::sync("Movie", &item, &payload, &[], &options)
+        .await
+        .unwrap();
+    assert_eq!(written, 1);
+    let xml = tokio::fs::read_to_string(
+        std::path::Path::new(item["Path"].as_str().unwrap()).with_extension("nfo"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !xml.contains("<rating"),
+        "provider scores are not written to NFO: {xml}"
+    );
+    assert!(
+        xml.contains("<mpaa>PG-13</mpaa>"),
+        "age classification stays in NFO: {xml}"
+    );
     f.close().await;
+}
+
+#[test]
+fn formatted_series_and_episode_nfo_omit_numeric_ratings_and_keep_age_classification() {
+    let raw = json!({"id":123,"name":"Series","vote_average":8.5,"vote_count":123,"content_ratings":{"results":[{"iso_3166_1":"US","rating":"TV-PG"}]}});
+    let aggregate = json!({"seasons_details":[{"id":124,"name":"Season 1","season_number":1,"vote_average":8.3,"vote_count":100}],"episodes_details":{"S1E1":{"id":125,"name":"Episode 1","season_number":1,"episode_number":1,"vote_average":8.1,"vote_count":90}}});
+    let mut payload = emby_toolkit::metadata_payload::build(
+        "Series",
+        &raw,
+        Some(&aggregate),
+        None,
+        &json!({}),
+        &json!([]),
+    );
+    assert_eq!(payload["id"], 123);
+    assert_eq!(payload["name"], "Series");
+    assert_eq!(payload["seasons_details"][0]["id"], 124);
+    assert_eq!(payload["seasons_details"][0]["season_number"], 1);
+    assert_eq!(payload["episodes_details"]["S1E1"]["id"], 125);
+    assert_eq!(payload["episodes_details"]["S1E1"]["episode_number"], 1);
+    for value in [
+        &payload,
+        &payload["seasons_details"][0],
+        &payload["episodes_details"]["S1E1"],
+    ] {
+        assert!(value.get("vote_average").is_none());
+        assert!(value.get("vote_count").is_none());
+    }
+    assert_eq!(payload["mpaa"], "TV-PG");
+    payload["vote_average"] = json!(8.5);
+    let series = emby_toolkit::nfo::build("Series", &payload, &[]);
+    assert!(!series.contains("<rating"), "{series}");
+    assert!(series.contains("<mpaa>TV-PG</mpaa>"), "{series}");
+    let mut episode = payload["episodes_details"]["S1E1"].clone();
+    episode["vote_average"] = json!(8.1);
+    let episode = emby_toolkit::nfo::build("Episode", &episode, &[]);
+    assert!(!episode.contains("<rating"), "{episode}");
+    assert!(episode.contains("<episode>1</episode>"), "{episode}");
 }
 
 #[tokio::test]

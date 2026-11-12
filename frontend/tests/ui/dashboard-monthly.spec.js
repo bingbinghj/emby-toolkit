@@ -1,13 +1,12 @@
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { test, expect } from './fixtures.js';
 import { measureReadingContrast } from './reading-contrast.js';
 
-const artifactRoot = '/root/emby-toolkit-nov11-verification/dashboard-monthly';
-mkdirSync(artifactRoot, { recursive: true });
 const period = (date = new Date()) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
-const counts = { movie_count: 7, tv_count: 5, episode_count: 122, music_count: 0 };
+const counts = { movie_count: 7, tv_count: 5, episode_count: 122 };
 const statistics = () => ({
   ...Object.fromEntries(Object.entries(counts).map(([key, month_count]) => [key, { count: 800, month_count }])),
+  music_count: { count: 800, month_count: 0 },
   month: { period: period(), state: 'recording', source: 'etk-history', recording_since: '2026-11-10T18:30:57Z', partial: true },
 });
 const payload = statistics => ({ statistics, recent: [], libraries: [], errors: {} });
@@ -16,6 +15,8 @@ test('MP monthly additions show real history numbers and a history failure leave
   api.respond('GET', '/api/dashboard/media', payload(statistics()));
   await page.goto('/dashboard');
   for (const [key, count] of Object.entries(counts)) await expect(page.getByTestId(`dashboard-${key}-month`)).toHaveText(`本月新增 ${count}`);
+  await expect(page.getByTestId('dashboard-music_count')).toHaveCount(0);
+  await expect(page.getByTestId('dashboard-music_count-month')).toHaveCount(0);
   await expect(page.getByTestId('dashboard-movie_count-month')).toHaveAttribute('title', /按 ETK 成功入库记录统计.*记录始于/);
   const next = { ...statistics(), movie_count: { count: 801, month_count: null }, month: { period: period(), state: 'unavailable', source: 'etk-history', error: '入库记录数据库暂不可用' } };
   api.respond('GET', '/api/dashboard/media', payload(next));
@@ -37,6 +38,8 @@ for (const cache of ['legacy', 'previous-month']) test(`${cache} snapshot cannot
   await page.goto('/dashboard');
   await expect(page.getByTestId('dashboard-movie_count')).toHaveText('800');
   for (const key of Object.keys(counts)) await expect(page.getByTestId(`dashboard-${key}-month`)).toHaveText('本月新增 —');
+  await expect(page.getByTestId('dashboard-music_count')).toHaveCount(0);
+  await expect(page.getByTestId('dashboard-music_count-month')).toHaveCount(0);
 });
 
 const themes = [
@@ -47,7 +50,7 @@ const themes = [
   })))),
 ];
 
-for (const width of [390, 1440]) for (const theme of themes) test(`${width}-${theme.name} monthly captions and enabled module labels are readable and clear of rounded clipping`, async ({ page, api }) => {
+for (const width of [390, 1440]) for (const theme of themes) test(`${width}-${theme.name} monthly captions and enabled module labels are readable and clear of rounded clipping`, async ({ page, api }, testInfo) => {
   const id = `${width}-${theme.name}`;
   await page.setViewportSize({ width, height: 1000 });
   await page.emulateMedia({ colorScheme: theme.theme, reducedMotion: 'reduce' });
@@ -65,7 +68,7 @@ for (const width of [390, 1440]) for (const theme of themes) test(`${width}-${th
   api.respond('GET', '/api/dashboard/media', payload(values));
   await page.goto('/dashboard');
   const captions = page.locator('.dashboard-stat-addition');
-  await expect(captions).toHaveCount(4);
+  await expect(captions).toHaveCount(3);
   const geometry = await captions.evaluateAll(elements => elements.map(element => {
     const box = element.getBoundingClientRect(), card = element.closest('.dashboard-card').getBoundingClientRect();
     const css = getComputedStyle(element);
@@ -79,13 +82,13 @@ for (const width of [390, 1440]) for (const theme of themes) test(`${width}-${th
     expect(item.fontSize).toBe('11.52px');
   }
   const captionReadings = await measureReadingContrast(page, Object.keys(counts).map(key => ({ role: `${key} monthly addition`, locator: page.getByTestId(`dashboard-${key}-month`) })));
-  await page.screenshot({ path: `${artifactRoot}/${id}-captions.png`, animations: 'disabled' });
+  await page.screenshot({ path: testInfo.outputPath(`${id}-captions.png`), animations: 'disabled' });
   await page.getByRole('button', { name: '调整布局', exact: true }).hover();
   await page.getByRole('button', { name: '仪表盘设置', exact: true }).click();
   const enabled = page.getByRole('dialog').locator('.dashboard-setting-item.enabled .dashboard-setting-label');
   await expect(enabled).toHaveCount(4);
   const labelReadings = await measureReadingContrast(page, ['存储空间', '媒体统计', '最新入库 - Emby', '我的媒体库'].map(title => ({ role: `enabled ${title}`, locator: enabled.filter({ hasText: title }) })));
-  writeFileSync(`${artifactRoot}/${id}.json`, JSON.stringify({ geometry, readings: [...captionReadings, ...labelReadings] }, null, 2));
-  await page.screenshot({ path: `${artifactRoot}/${id}-settings.png`, animations: 'disabled' });
+  writeFileSync(testInfo.outputPath(`${id}.json`), JSON.stringify({ geometry, readings: [...captionReadings, ...labelReadings] }, null, 2));
+  await page.screenshot({ path: testInfo.outputPath(`${id}-settings.png`), animations: 'disabled' });
   for (const reading of [...captionReadings, ...labelReadings]) expect(reading.contrast, `${id}: ${reading.role}`).toBeGreaterThanOrEqual(4.5);
 });

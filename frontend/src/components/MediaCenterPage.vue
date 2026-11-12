@@ -47,9 +47,6 @@
                     <template #placeholder><div class="poster-fallback"><VProgressCircular v-if="itemImage(itemsByIndex[index - 1])" indeterminate size="24" width="2" /></div></template>
                     <template #error><div class="poster-fallback"><VIcon :icon="libraryIcon(itemsByIndex[index - 1].Type)" size="36" /></div></template>
                     <div v-if="!itemImage(itemsByIndex[index - 1])" class="poster-fallback"><VIcon :icon="libraryIcon(itemsByIndex[index - 1].Type)" size="36" /></div>
-                    <VChip v-if="itemsByIndex[index - 1].CommunityRating" class="media-rating" color="primary" variant="elevated" size="small" prepend-icon="mdi-star" :aria-label="`Emby 社区评分 ${Number(itemsByIndex[index - 1].CommunityRating).toFixed(1)}`">
-                      {{ Number(itemsByIndex[index - 1].CommunityRating).toFixed(1) }}
-                    </VChip>
                     <div v-if="isHovering" class="media-card-detail">
                       <span class="media-detail-year">{{ itemsByIndex[index - 1].ProductionYear }}</span>
                       <h2 class="media-detail-title my-2" :title="itemsByIndex[index - 1].Name">{{ itemsByIndex[index - 1].Name }}</h2>
@@ -411,9 +408,6 @@ onBeforeUnmount(() => {
 .media-detail-year { font-size:14px; font-weight:600; line-height:20px; }
 .media-detail-title { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; overflow-wrap:anywhere; flex-shrink:0; color:rgb(var(--v-theme-on-surface)); font-size:18px; font-weight:700; line-height:20px; }
 .media-overview { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; font-size:14px; line-height:16px; }
-.media-rating { position:absolute; z-index:1; top:8px; right:8px; background-color:rgb(var(--v-theme-primary)) !important; color:rgb(var(--v-theme-on-primary)) !important; font-weight:700; }
-.media-rating :deep(.v-chip__content), .media-rating :deep(.v-chip__prepend) { color:rgb(var(--v-theme-on-primary)) !important; }
-:global(html[data-theme='glass'] body[data-theme='glass'] .media-rating) { background-color:rgb(var(--v-theme-primary)) !important; color:rgb(var(--v-theme-on-primary)) !important; }
 .media-card-title { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; min-height:40px; overflow:hidden; overflow-wrap:anywhere; font-size:14px; font-weight:600; line-height:20px; text-align:center; }
 .media-card-meta { display:flex; min-height:18px; justify-content:center; gap:8px; margin-top:6px; color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity)); font-size:12px; line-height:18px; }
 .media-empty { margin:50px 0; }

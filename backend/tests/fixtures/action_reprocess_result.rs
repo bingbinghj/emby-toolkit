@@ -148,15 +148,24 @@ async fn reorganize_proxy(
             return Json(api_item(proxy.related.lock().await.clone())).into_response();
         }
         if path == "/Items"
-            && query
-                .get("Ids")
-                .is_some_and(|ids| ids.split(',').any(|id| id == "61617"))
+            && let Some(ids) = query.get("Ids")
         {
-            let mut values = vec![api_item(proxy.related.lock().await.clone())];
-            if query["Ids"].split(',').any(|id| id == "61616") {
-                values.push(api_item(proxy.original.item.lock().await.clone()));
+            let related = proxy.related.lock().await.clone();
+            if ids
+                .split(',')
+                .any(|id| native_item_id_matches(&related, id))
+            {
+                let original = proxy.original.item.lock().await.clone();
+                let mut values = vec![api_item(related)];
+                if ids
+                    .split(',')
+                    .any(|id| native_item_id_matches(&original, id))
+                {
+                    values.push(api_item(original));
+                }
+                return Json(json!({"Items":values,"TotalRecordCount":values.len()}))
+                    .into_response();
             }
-            return Json(json!({"Items":values,"TotalRecordCount":values.len()})).into_response();
         }
         if path == "/Items/61617/ThumbnailSet" || path == "/Videos/61617/AdditionalParts" {
             return Json(json!({"Thumbnails":[],"Items":[]})).into_response();

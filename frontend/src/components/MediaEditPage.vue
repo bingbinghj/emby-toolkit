@@ -105,9 +105,9 @@
             </VForm>
           </VCardText>
           <VCardActions class="editor-actions">
-            <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSaving" :disabled="isExtractingCredits" @click="handleSaveChanges">保存</VBtn>
             <VBtn variant="tonal" prepend-icon="mdi-plus" :disabled="isSaving" @click="showAddActorModal = true">添加演员</VBtn>
             <VSpacer /><VBtn variant="text" prepend-icon="mdi-arrow-left" @click="goBack">返回列表</VBtn>
+            <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSaving" :disabled="isExtractingCredits" @click="handleSaveChanges">保存</VBtn>
           </VCardActions>
         </VCard>
       </VCol>
@@ -288,9 +288,8 @@
           </div>
         </VCardText>
         <VCardActions class="editor-actions">
-          <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :disabled="isRepairingTruehdCore || isFillingMediaInfoTitles || mediaRecoveryBlocked || isExtractingCredits" :loading="isSavingMediaInfo" data-testid="media-info-save" @click="saveMediaInfo">保存</VBtn>
           <VBtn color="warning" variant="tonal" prepend-icon="mdi-wrench-outline" :loading="isRepairingTruehdCore" :disabled="isSavingMediaInfo" @click="confirmMediaAction('纠正多出音轨', '将丢弃当前未保存修改；存在歧义时会只读探测 CD2，并且只纠正证据唯一的高清音轨兼容核心。是否继续？', repairCurrentAudioTracks)">纠正多出音轨</VBtn>
-          <VSpacer /><VBtn variant="text" @click="closeMediaInfoEditor">取消</VBtn>
+          <VSpacer /><VBtn variant="text" @click="closeMediaInfoEditor">取消</VBtn><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :disabled="isRepairingTruehdCore || isFillingMediaInfoTitles || mediaRecoveryBlocked || isExtractingCredits" :loading="isSavingMediaInfo" data-testid="media-info-save" @click="saveMediaInfo">保存</VBtn>
         </VCardActions>
       </VCard>
     </VDialog>
@@ -313,7 +312,7 @@
             <div v-if="renamePreview.target_local_path" class="rename-result-row"><span class="rename-result-label">本地路径</span><code>{{ renamePreview.target_local_path }}</code></div>
           </div>
         </VCardText>
-        <VCardActions><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isExecutingRename" :disabled="!renamePreview" @click="executeRename">保存</VBtn><VSpacer /><VBtn variant="tonal" prepend-icon="mdi-eye-outline" :loading="isPreviewingRename" @click="previewRename">预览</VBtn></VCardActions>
+        <VCardActions><VSpacer /><VBtn variant="tonal" prepend-icon="mdi-eye-outline" :loading="isPreviewingRename" @click="previewRename">预览</VBtn><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isExecutingRename" :disabled="!renamePreview" @click="executeRename">保存</VBtn></VCardActions>
       </VCard>
     </VDialog>
 
@@ -392,6 +391,7 @@ const isSearchingActors = ref(false);
 // ★★★ 图像编辑相关状态 ★★★
 const showImageEditor = ref(false);
 const showUrlPrompt = ref(false);
+let imageUrlPromptSession = 0;
 const imageUrlInput = ref('');
 const currentEditImageType = ref('');
 const fileInputRef = ref(null);
@@ -445,6 +445,7 @@ const handleFileUpload = async (event) => {
 };
 
 const openUrlPrompt = (type) => {
+  ++imageUrlPromptSession;
   currentEditImageType.value = type;
   imageUrlInput.value = '';
   showUrlPrompt.value = true;
@@ -460,12 +461,23 @@ const submitUrlImage = async () => {
     image_type: currentEditImageType.value,
     image_url: imageUrlInput.value
   };
-
-  await uploadImagePayload(payload);
-  showUrlPrompt.value = false;
+  const promptSession = imageUrlPromptSession;
+  const pageSession = mediaRecoverySession;
+  const targetId = String(itemId.value || '');
+  const uploaded = await uploadImagePayload(payload);
+  if (uploaded && promptSession === imageUrlPromptSession && pageSession === mediaRecoverySession
+    && targetId === String(itemId.value || '') && payload.image_type === currentEditImageType.value
+    && payload.image_url === imageUrlInput.value) showUrlPrompt.value = false;
 };
 
 const uploadImagePayload = async (payload) => {
+  const targetId = String(itemId.value || '').trim();
+  if (!targetId || isUploadingImage.value) return false;
+  const imageType = payload instanceof FormData ? payload.get('image_type') : payload.image_type;
+  const sequence = mediaDetailsLoadSequence;
+  const session = mediaRecoverySession;
+  const isCurrentItem = () => sequence === mediaDetailsLoadSequence
+    && session === mediaRecoverySession && targetId === String(itemId.value || '');
   isUploadingImage.value = true;
   const loadingMsg = message.loading("正在替换并通知 Emby 刷新...", { duration: 0 });
 
@@ -474,15 +486,19 @@ const uploadImagePayload = async (payload) => {
       ? { headers: { 'Content-Type': 'multipart/form-data' } }
       : {};
 
-    const res = await axios.post(`/api/update_media_image/${itemId.value}`, payload, config);
+    const res = await axios.post(`/api/update_media_image/${targetId}`, payload, config);
+    if (!isCurrentItem()) return false;
     message.success(res.data.message || "图片替换成功！");
 
     // 刷新对应图片的时间戳，强制前端重新加载图片
-    imageRefreshTokens.value[currentEditImageType.value] = Date.now();
+    imageRefreshTokens.value[imageType] = Date.now();
+    return true;
 
   } catch (error) {
+    if (!isCurrentItem()) return false;
     console.error("图片替换失败:", error);
     message.error(error.response?.data?.error || "图片替换失败，请检查后端日志。");
+    return false;
   } finally {
     loadingMsg.destroy();
     isUploadingImage.value = false;
@@ -499,11 +515,18 @@ const mediaOperationDetails = (values) => {
 };
 
 const replaceEpisodeImages = async () => {
+  const targetId = String(itemId.value || '').trim();
+  if (!targetId || isReplacingEpisodeImages.value) return;
+  const sequence = mediaDetailsLoadSequence;
+  const session = mediaRecoverySession;
+  const isCurrentItem = () => sequence === mediaDetailsLoadSequence
+    && session === mediaRecoverySession && targetId === String(itemId.value || '');
   isReplacingEpisodeImages.value = true;
   mediaOperationFeedback.value = null;
   const loadingMsg = message.loading('剧集图正在后台处理，可在通知中心中查看生成数量...', { duration: 0 });
   try {
-    const response = await axios.post(`/api/media_info/replace_episode_images/${itemId.value}`);
+    const response = await axios.post(`/api/media_info/replace_episode_images/${targetId}`);
+    if (!isCurrentItem()) return;
     const result = response.data || {};
     const details = mediaOperationDetails([
       ...(Array.isArray(result.warning_details) ? result.warning_details : []),
@@ -519,6 +542,7 @@ const replaceEpisodeImages = async () => {
       imageRefreshTokens.value.poster = Date.now();
     }
   } catch (error) {
+    if (!isCurrentItem()) return;
     const result = error.response?.data || {};
     const summary = result.message || result.error || '替换剧集图失败，请检查日志。';
     mediaOperationFeedback.value = { type: 'error', message: summary, details: mediaOperationDetails([
@@ -1567,13 +1591,20 @@ const handleMediaInfoSegmentChange = (targetId) => {
 
 const deleteCurrentMediaVersion = async () => {
   const targetId = String(currentMediaInfoVersion.value?.emby_id || '').trim();
-  if (!targetId || mediaInfoVersionOptions.value.length <= 1) return;
+  if (!targetId || mediaInfoVersionOptions.value.length <= 1 || isDeletingMediaVersion.value) return;
+  const sequence = mediaDetailsLoadSequence;
+  const session = mediaRecoverySession;
+  const editorSequence = mediaInfoLoadSequence;
+  const isCurrentEditor = () => sequence === mediaDetailsLoadSequence && session === mediaRecoverySession
+    && editorSequence === mediaInfoLoadSequence
+    && targetId === String(currentMediaInfoVersion.value?.emby_id || '');
 
   isDeletingMediaVersion.value = true;
   mediaOperationFeedback.value = null;
   const loadingMsg = message.loading('正在删除 115、STRM 和 Emby 当前版本...', { duration: 0 });
   try {
     const response = await axios.post(`/api/media_info/delete_version/${targetId}`);
+    if (!isCurrentEditor()) return;
     const result = response.data || {};
     const remainingItemId = String(result.remaining_item_id || '').trim();
     const deletedItemId = String(result.deleted_item_id || '').trim();
@@ -1604,6 +1635,7 @@ const deleteCurrentMediaVersion = async () => {
       await fetchMediaDetails();
     }
   } catch (error) {
+    if (!isCurrentEditor()) return;
     const result = error.response?.data || {};
     const summary = result.message || result.error || '删除当前版本失败，请检查日志';
     mediaOperationFeedback.value = { type: 'error', message: summary, details: mediaOperationDetails([
@@ -2060,6 +2092,7 @@ watch(() => route.params.itemId, (value) => {
   showEpisodeSelector.value = false;
   showRenameEditor.value = false;
   showImageEditor.value = false;
+  showUrlPrompt.value = false;
   showAddActorModal.value = false;
   showTmdbSelector.value = false;
   imagePreview.value = null;
