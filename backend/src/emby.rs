@@ -89,11 +89,24 @@ impl Response {
 pub async fn send(
     request: reqwest::RequestBuilder,
 ) -> std::result::Result<Response, reqwest::Error> {
+    send_with_retries(request, 5).await
+}
+
+pub(crate) async fn send_once(
+    request: reqwest::RequestBuilder,
+) -> std::result::Result<Response, reqwest::Error> {
+    send_with_retries(request, 0).await
+}
+
+async fn send_with_retries(
+    request: reqwest::RequestBuilder,
+    retries: u32,
+) -> std::result::Result<Response, reqwest::Error> {
     static REQUESTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(10);
     let permit = REQUESTS.acquire().await.expect("Emby 请求槽位不会关闭");
     let retryable = request.try_clone();
     let mut next = request;
-    for attempt in 0..=5 {
+    for attempt in 0..=retries {
         let response = next.send().await;
         let retry = match &response {
             Ok(response) => {
@@ -103,8 +116,8 @@ pub async fn send(
             }
             Err(error) => error.is_connect() || error.is_timeout(),
         };
-        if attempt == 5 || !retry || retryable.is_none() {
-            let response = if retry && attempt == 5 {
+        if attempt == retries || !retry || retryable.is_none() {
+            let response = if retry && attempt == retries {
                 response.and_then(reqwest::Response::error_for_status)
             } else {
                 response
@@ -121,7 +134,7 @@ pub async fn send(
             .unwrap_or_else(|| {
                 Duration::from_secs(if attempt == 0 { 0 } else { 2_u64.pow(attempt) })
             });
-        tracing::warn!("Emby 请求暂时失败，准备重试 {}/5。", attempt + 1);
+        tracing::warn!("Emby 请求暂时失败，准备重试 {}/{}。", attempt + 1, retries);
         drop(response);
         tokio::time::sleep(delay).await;
         next = retryable
@@ -1136,4 +1149,47 @@ pub async fn persons(state: &AppState, context: &JobContext) -> Result<Vec<Value
         );
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[tokio::test]
+    async fn single_submission_reports_failure_without_replay_and_standard_requests_retry() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::any(move || {
+                let calls = observed.clone();
+                async move {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        reqwest::StatusCode::BAD_GATEWAY
+                    } else {
+                        reqwest::StatusCode::OK
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let url = format!("http://{address}/");
+        let error = send_once(client.post(&url)).await.err().unwrap();
+        assert_eq!(error.status(), Some(reqwest::StatusCode::BAD_GATEWAY));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        calls.store(0, Ordering::SeqCst);
+        assert_eq!(
+            send(client.get(&url)).await.unwrap().status(),
+            reqwest::StatusCode::OK
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        server.abort();
+    }
 }

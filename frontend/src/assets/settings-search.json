@@ -522,9 +522,7 @@
       "115接口",
       "存储",
       "115 授权方式与连接状态",
-      "默认优先 Cookie，失败后再尝试 OpenAPI。",
-      "优先 Cookie（默认）",
-      "优先 OpenAPI（备用）"
+      "默认优先 Cookie，失败后再尝试 OpenAPI。"
     ],
     "route": "general"
   },

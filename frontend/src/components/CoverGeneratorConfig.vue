@@ -23,7 +23,7 @@
             <VAvatar color="primary" variant="tonal" rounded><VIcon icon="mdi-tune-variant" /></VAvatar>
           </template>
           <template #append>
-            <VBtn color="default" variant="text" prepend-icon="mdi-content-save-outline" :loading="isSaving" @click="saveConfig('basic')">保存</VBtn>
+            <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSaving" @click="saveConfig('basic')">保存</VBtn>
           </template>
         </VCardItem>
         <VCardText>
@@ -68,7 +68,7 @@
             <VAvatar color="primary" variant="tonal" rounded><VIcon icon="mdi-image-edit-outline" /></VAvatar>
           </template>
           <template #append>
-            <VBtn color="default" variant="text" prepend-icon="mdi-content-save-outline" :loading="isSaving" @click="saveConfig(configData.tab || 'style-tab')">保存</VBtn>
+            <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSaving" @click="saveConfig(configData.tab || 'style-tab')">保存</VBtn>
           </template>
         </VCardItem>
         <VTabs v-model="configData.tab" class="px-4" color="primary" show-arrows>

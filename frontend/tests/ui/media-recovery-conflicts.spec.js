@@ -81,6 +81,25 @@ test('explicit confirmation submits the exact current hash and successful recove
   expect(api.requests.filter(request => request.method === 'POST' && request.path === '/api/media_info/edit/101')).toEqual([]);
 });
 
+test('verified cleanup removes the old conflict backup notice while preserving the unsaved draft', async ({ page, api }) => {
+  const withBackup = { pending: true, records: [{ ...record, conflict_backup_directories: [preservedDirectory] }] };
+  await openEditor(page, api, withBackup);
+  const title = editor(page).getByRole('textbox', { name: /音轨.*1.*标题/ });
+  await title.fill('清理后保留草稿');
+  await expect(editor(page)).toContainText(preservedDirectory);
+  api.respond('POST', recoveryPath, () => {
+    api.respond('GET', recoveryPath, { pending: false, records: [] });
+    return { ...success, conflict_backup_directories: [], deleted_conflict_backup_directories: [preservedDirectory] };
+  });
+  await action(page).click();
+  await expect(confirmation(page)).toContainText('完整验收后删除原恢复备份及关联的冲突 JSON 备份');
+  await confirmation(page).getByRole('button', { name: '备份并恢复', exact: true }).click();
+  await expect(editor(page).getByTestId('media-info-save')).toBeEnabled();
+  await expect(editor(page)).not.toContainText(preservedDirectory);
+  await expect(page.getByText('当前 JSON 备份已保留', { exact: true })).toHaveCount(0);
+  await expect(title).toHaveValue('清理后保留草稿');
+});
+
 test('a current JSON change after confirmation retains the draft and requires the newly read hash for retry', async ({ page, api }) => {
   const changedState = {
     pending: true,

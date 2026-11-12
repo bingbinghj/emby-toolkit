@@ -293,7 +293,10 @@ async fn monthly_admissions_follow_mp_success_identity_and_calendar_rules_withou
         monthly["episode_count"], 3,
         "MP preparation and Emby finalization of the same file count once"
     );
-    assert_eq!(monthly["music_count"], 2);
+    assert!(
+        monthly.get("music_count").is_none(),
+        "music admissions are outside ETK dashboard statistics"
+    );
     assert_eq!(monthly["month"]["period"], "2026-11");
     assert_eq!(monthly["month"]["partial"], true);
     sqlx::query("UPDATE app_settings SET value_json=$1 WHERE setting_key='media_organize_history_started_at'")

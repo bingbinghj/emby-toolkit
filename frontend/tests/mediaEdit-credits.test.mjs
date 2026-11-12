@@ -38,6 +38,20 @@ test('credits extraction replaces only CreditsStart and preserves audio drafts a
   assert.equal(f.state.isExtractingCredits.value, false);
 });
 
+for (const kind of ['Series', 'Season']) {
+  test(`${kind} extraction submits its own id and leaves the current episode draft intact`, async () => {
+    const f = fixture(async () => ({ status: 200, data: {
+      message: '所选范围片尾已提取', items: [{ item_id: '101', chapter: credits }], chapter: credits,
+    } }));
+    f.state.itemDetails.value.item_type = kind;
+    const before = json(f.state.mediaInfoData.value);
+    await f.state.run('201');
+    assert.equal(f.calls[0].url, '/api/media/201/extract_credits');
+    assert.equal(f.state.creditsExtractionFeedback.value.itemId, '201');
+    assert.deepEqual(json(f.state.mediaInfoData.value), before);
+  });
+}
+
 test('object media info preserves its streams when credits are merged', () => {
   const f = fixture();
   const info = { Chapters: [intro], MediaStreams: [{ Type: 'Subtitle', Title: '字幕草稿' }] };

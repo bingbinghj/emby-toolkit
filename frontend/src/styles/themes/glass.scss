@@ -2113,3 +2113,19 @@ html[data-theme='glass'][data-glass-color-scheme='dark'][data-glass-quality='hig
   --glass-popup-surface: rgba(var(--glass-popup-rgb), 0.52);
   --glass-navbar-scrim: linear-gradient(rgba(var(--glass-shell-rgb), 0.52), rgba(var(--glass-shell-rgb), 0.52));
 }
+
+// Filled actions retain their semantic theme color in every glass material.
+// Their matching on-color also follows custom primary colors and light/dark palettes.
+html[data-theme='glass'] body[data-theme='glass'] {
+  @each $color in primary, secondary, success, info, warning, error {
+    .v-btn:is(.v-btn--variant-flat, .v-btn--variant-elevated).bg-#{$color} {
+      border-color: rgb(var(--v-theme-#{$color}));
+      background-color: rgb(var(--v-theme-#{$color})) !important;
+      color: rgb(var(--v-theme-on-#{$color})) !important;
+
+      :is(.v-btn__content, .v-btn__prepend, .v-btn__append) {
+        color: inherit !important;
+      }
+    }
+  }
+}

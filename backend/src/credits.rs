@@ -35,18 +35,75 @@ async fn submit(
     Path(id): Path<String>,
 ) -> Result<(StatusCode, Json<Value>)> {
     let item = details(&state, &id, FIELDS).await?;
-    ensure_episode(&item, &id)?;
+    let action = scope_action(&item, &id)?;
     let task = state
         .jobs
         .clone()
-        .submit("提取当前集片尾", move |context| async move {
-            extract_ids(&state, &[id], &context).await
+        .submit(action, move |context| async move {
+            let live = details(&state, &id, FIELDS).await?;
+            if scope_action(&live, &id)? != action {
+                return Err(ApiError::bad("媒体类型在任务开始前变化，未提取片尾"));
+            }
+            if live["Type"] == "Episode" {
+                return extract_items(&state, vec![live], &context).await;
+            }
+            context
+                .activity("提取片尾", "正在读取所选范围的电视剧分集")
+                .await;
+            let mut items = crate::emby::query_items(
+                &state,
+                &[
+                    ("ParentId", id.clone()),
+                    ("Recursive", "true".into()),
+                    ("IncludeItemTypes", "Episode".into()),
+                    ("Fields", FIELDS.into()),
+                ],
+                &context,
+            )
+            .await?;
+            if items
+                .iter()
+                .any(|candidate| !in_scope(candidate, &live, &id))
+            {
+                return Err(ApiError::bad("Emby 返回了所选剧或季以外的媒体，未提取片尾"));
+            }
+            if items.is_empty() {
+                return Err(ApiError::bad("所选剧或季没有可提取片尾的分集"));
+            }
+            crate::media_order::sort(&mut items);
+            extract_items(&state, items, &context).await
         })
         .await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({"task_id":task,"message":"片尾提取任务已提交"})),
     ))
+}
+
+fn scope_action(item: &Value, id: &str) -> Result<&'static str> {
+    if item["Id"] == id {
+        match item["Type"].as_str() {
+            Some("Series") => return Ok("提取当前剧片尾"),
+            Some("Season") => return Ok("提取当前季片尾"),
+            Some("Episode") => return Ok("提取当前集片尾"),
+            _ => {}
+        }
+    }
+    Err(ApiError::bad(
+        "片尾提取仅支持已确认的电视剧、季或分集，电影不提取",
+    ))
+}
+
+fn in_scope(item: &Value, root: &Value, id: &str) -> bool {
+    item["Type"] == "Episode"
+        && match root["Type"].as_str() {
+            Some("Series") => item["SeriesId"] == id,
+            Some("Season") => {
+                item["SeasonId"] == id
+                    || (string(item, "SeasonId").is_empty() && item["ParentId"] == id)
+            }
+            _ => false,
+        }
 }
 
 fn ensure_episode(item: &Value, id: &str) -> Result<()> {
@@ -856,6 +913,37 @@ async fn cache_chapters(state: &AppState, reference: &Episode, chapters: &Value)
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn television_scope_requires_matching_identity_and_parent() {
+        for kind in ["Series", "Season", "Episode"] {
+            assert!(scope_action(&json!({"Id":"1","Type":kind}), "1").is_ok());
+            assert!(scope_action(&json!({"Id":"2","Type":kind}), "1").is_err());
+        }
+        assert!(scope_action(&json!({"Id":"1","Type":"Movie"}), "1").is_err());
+        let series = json!({"Type":"Series"});
+        let season = json!({"Type":"Season"});
+        let episode =
+            json!({"Type":"Episode","SeriesId":"series","SeasonId":"season","ParentId":"season"});
+        assert!(in_scope(&episode, &series, "series"));
+        assert!(in_scope(&episode, &season, "season"));
+        assert!(!in_scope(&episode, &series, "other"));
+        assert!(!in_scope(&episode, &season, "other"));
+        assert!(!in_scope(
+            &json!({"Type":"Movie","SeriesId":"series"}),
+            &series,
+            "series"
+        ));
+        assert!(in_scope(
+            &json!({"Type":"Episode","ParentId":"season"}),
+            &season,
+            "season"
+        ));
+        assert!(!in_scope(
+            &json!({"Type":"Episode","SeasonId":"other","ParentId":"season"}),
+            &season,
+            "season"
+        ));
+    }
     #[test]
     fn movies_and_unconfirmed_ids_never_enter_episode_extraction() {
         assert!(ensure_episode(&json!({"Id":"1","Type":"Movie"}), "1").is_err());

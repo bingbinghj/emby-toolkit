@@ -47,7 +47,7 @@
                     <template #placeholder><div class="poster-fallback"><VProgressCircular v-if="itemImage(itemsByIndex[index - 1])" indeterminate size="24" width="2" /></div></template>
                     <template #error><div class="poster-fallback"><VIcon :icon="libraryIcon(itemsByIndex[index - 1].Type)" size="36" /></div></template>
                     <div v-if="!itemImage(itemsByIndex[index - 1])" class="poster-fallback"><VIcon :icon="libraryIcon(itemsByIndex[index - 1].Type)" size="36" /></div>
-                    <VChip v-if="itemsByIndex[index - 1].CommunityRating" class="media-rating" color="#9333ea" variant="elevated" size="small" prepend-icon="mdi-star" :aria-label="`Emby 社区评分 ${Number(itemsByIndex[index - 1].CommunityRating).toFixed(1)}`">
+                    <VChip v-if="itemsByIndex[index - 1].CommunityRating" class="media-rating" color="primary" variant="elevated" size="small" prepend-icon="mdi-star" :aria-label="`Emby 社区评分 ${Number(itemsByIndex[index - 1].CommunityRating).toFixed(1)}`">
                       {{ Number(itemsByIndex[index - 1].CommunityRating).toFixed(1) }}
                     </VChip>
                     <div v-if="isHovering" class="media-card-detail">
@@ -407,12 +407,13 @@ onBeforeUnmount(() => {
 .media-card-placeholder::before { content:''; display:block; aspect-ratio:2/3; }
 .media-card-placeholder::after { content:''; display:block; height:calc(76px + max(12px, var(--app-theme-surface-radius))); }
 .poster-fallback { display:flex; align-items:center; justify-content:center; height:100%; width:100%; color:rgba(var(--v-theme-on-surface),.45); }
-.media-card-detail { position:absolute; inset:0; display:flex; flex-direction:column; justify-content:flex-end; padding:12px max(12px, var(--app-theme-surface-radius)); color:#fff; text-align:left; background:linear-gradient(rgba(45,55,72,.7),rgba(45,55,72,.9)); }
+.media-card-detail { position:absolute; inset:0; display:flex; flex-direction:column; justify-content:flex-end; padding:12px max(12px, var(--app-theme-surface-radius)); color:rgb(var(--v-theme-on-surface)); text-align:left; background:linear-gradient(rgba(var(--v-theme-surface),.96),rgba(var(--v-theme-surface),.98)); }
 .media-detail-year { font-size:14px; font-weight:600; line-height:20px; }
-.media-detail-title { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; overflow-wrap:anywhere; flex-shrink:0; color:#fff; font-size:18px; font-weight:700; line-height:20px; }
+.media-detail-title { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; overflow-wrap:anywhere; flex-shrink:0; color:rgb(var(--v-theme-on-surface)); font-size:18px; font-weight:700; line-height:20px; }
 .media-overview { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; font-size:14px; line-height:16px; }
-.media-rating { position:absolute; z-index:1; top:8px; right:8px; background-color:rgba(147,51,234,.8) !important; background-image:linear-gradient(rgba(0,0,0,.2),rgba(0,0,0,.2)) !important; color:#fff !important; font-weight:700; }
-.media-rating :deep(.v-chip__content), .media-rating :deep(.v-chip__prepend) { color:#fff !important; }
+.media-rating { position:absolute; z-index:1; top:8px; right:8px; background-color:rgb(var(--v-theme-primary)) !important; color:rgb(var(--v-theme-on-primary)) !important; font-weight:700; }
+.media-rating :deep(.v-chip__content), .media-rating :deep(.v-chip__prepend) { color:rgb(var(--v-theme-on-primary)) !important; }
+:global(html[data-theme='glass'] body[data-theme='glass'] .media-rating) { background-color:rgb(var(--v-theme-primary)) !important; color:rgb(var(--v-theme-on-primary)) !important; }
 .media-card-title { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; min-height:40px; overflow:hidden; overflow-wrap:anywhere; font-size:14px; font-weight:600; line-height:20px; text-align:center; }
 .media-card-meta { display:flex; min-height:18px; justify-content:center; gap:8px; margin-top:6px; color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity)); font-size:12px; line-height:18px; }
 .media-empty { margin:50px 0; }

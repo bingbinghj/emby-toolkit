@@ -22,7 +22,6 @@ async fn fixture(failure: &str) -> (Value, Vec<HashMap<String, String>>) {
                     }
                     let kind = query.get("IncludeItemTypes").unwrap();
                     if failure == "count" && kind == "Episode" { return Json(json!({"TotalRecordCount":"bad"})); }
-                    if failure == "music-no-albums" && kind == "MusicAlbum" { return Json(json!({"TotalRecordCount":0})); }
                     return Json(json!({"Items":[],"TotalRecordCount":match kind.as_str(){"Movie"=>11,"Series"=>7,"Episode"=>42,_=>3}}));
                 }
                 Json(json!({"Items":[]}))
@@ -50,7 +49,7 @@ async fn fixture(failure: &str) -> (Value, Vec<HashMap<String, String>>) {
         .route("/Users/admin/Views", get(move || {
             let mode=mode.clone(); async move {
                 if mode == "libraries" { return Json(json!({"Items":null})); }
-                Json(json!({"Items":[{"Id":"movies","Name":"我的电影","CollectionType":"movies","ImageTags":{"Primary":"emby-library-composite"}},{"Id":"ignored-boxset","Name":"Collections","CollectionType":"boxsets"}]}))
+                Json(json!({"Items":[{"Id":"movies","Name":"我的电影","CollectionType":"movies","ImageTags":{"Primary":"emby-library-composite"}},{"Id":"ignored-boxset","Name":"Collections","CollectionType":"boxsets"},{"Id":"music","Name":"音乐库","CollectionType":"music"}]}))
             }
         }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -106,7 +105,7 @@ async fn dashboard_reads_emby_counts_latest_and_library_primary_artwork() {
     let (value, requests) = fixture("").await;
     assert_eq!(value["statistics"]["movie_count"]["count"], 11);
     assert_eq!(value["statistics"]["episode_count"]["count"], 42);
-    assert_eq!(value["statistics"]["music_count"]["count"], 3);
+    assert!(value["statistics"].get("music_count").is_none());
     assert!(value["statistics"]["movie_count"]["month_count"].is_null());
     assert_eq!(value["statistics"]["month"]["state"], "unavailable");
     assert!(
@@ -134,7 +133,7 @@ async fn dashboard_reads_emby_counts_latest_and_library_primary_artwork() {
             .iter()
             .filter(|q| q.get("Limit").is_some_and(|v| v == "0"))
             .count(),
-        5
+        4
     );
     assert_eq!(value["errors"], json!({}));
 }
@@ -149,26 +148,16 @@ async fn failed_library_counts_remain_unknown_with_actionable_error() {
 }
 
 #[tokio::test]
-async fn music_statistics_follow_moviepilots_album_then_song_fallback() {
+async fn dashboard_ignores_music_libraries_and_does_not_request_audio_or_albums() {
     let (value, requests) = fixture("").await;
-    assert_eq!(value["statistics"]["music_count"]["count"], 3);
-    assert!(requests.iter().any(|query| {
-        query
-            .get("IncludeItemTypes")
-            .is_some_and(|kind| kind == "MusicAlbum")
-    }));
+    assert!(value["statistics"].get("music_count").is_none());
+    assert_eq!(value["libraries"].as_array().unwrap().len(), 1);
+    assert_eq!(value["libraries"][0]["id"], "movies");
     assert!(!requests.iter().any(|query| {
-        query
-            .get("IncludeItemTypes")
-            .is_some_and(|kind| kind == "Audio")
-    }));
-
-    let (value, requests) = fixture("music-no-albums").await;
-    assert_eq!(value["statistics"]["music_count"]["count"], 3);
-    assert!(requests.iter().any(|query| {
-        query
-            .get("IncludeItemTypes")
-            .is_some_and(|kind| kind == "Audio")
+        query.get("ParentId").is_some_and(|id| id == "music")
+            || query
+                .get("IncludeItemTypes")
+                .is_some_and(|kind| matches!(kind.as_str(), "MusicAlbum" | "Audio"))
     }));
 }
 

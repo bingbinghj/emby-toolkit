@@ -49,7 +49,7 @@
                           <template #placeholder><VSkeletonLoader type="image" class="h-100" /></template>
                           <template #error><div class="dashboard-art-fallback"><VIcon :icon="mediaIcon(item.item_type)" size="40" /></div></template>
                         </VImg>
-                        <VChip class="dashboard-media-type bg-opacity-80" size="small" variant="elevated" :color="item.item_type === 'Movie' ? 'rgba(37,99,235,.8)' : 'rgba(99,102,241,.8)'">{{ mediaType(item.item_type) }}</VChip>
+                        <VChip class="dashboard-media-type" size="small" variant="elevated" :color="item.item_type === 'Movie' ? 'info' : 'primary'">{{ mediaType(item.item_type) }}</VChip>
                         <div class="dashboard-poster-overlay" :class="{ 'is-visible': hover.isHovering }">
                           <span class="dashboard-poster-subtitle" :title="String(item.production_year || 'Emby 新入库')">{{ String(item.production_year || 'Emby 新入库') }}</span>
                           <h3 class="dashboard-poster-title" :title="item.name">{{ item.name }}</h3>
@@ -94,7 +94,7 @@
             </button>
           </div>
         </VCardText>
-        <VCardActions class="app-dialog-actions"><VSpacer /><VBtn color="default" variant="text" prepend-icon="mdi-content-save" @click="saveModules">保存</VBtn></VCardActions>
+        <VCardActions class="app-dialog-actions"><VSpacer /><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save" @click="saveModules">保存</VBtn></VCardActions>
       </VCard>
     </VDialog>
     <Teleport to="body">
@@ -316,7 +316,6 @@ const statisticTypes = [
   { key: 'movie_count', label: '电影', icon: 'mdi-movie-roll', color: 'primary' },
   { key: 'tv_count', label: '电视剧', icon: 'mdi-television-box', color: 'success' },
   { key: 'episode_count', label: '剧集', icon: 'mdi-television-classic', color: 'warning' },
-  { key: 'music_count', label: '音乐', icon: 'mdi-music-box-multiple', color: 'info' },
 ];
 const projections = { statistics: projectDashboardStatistics, recent: value => projectDashboardItems(value), libraries: value => projectDashboardItems(value, true) };
 const snapshots = Object.fromEntries(Object.keys(projections).map(key => [key, dashboardSnapshot(snapshotUserId, key)]));
@@ -416,15 +415,13 @@ onBeforeUnmount(() => { active = false; ++mediaSequence; ++storageSequence; ++gr
 .storage-number { color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); font-size: clamp(1.5rem, 1.8vw, 1.75rem); font-weight: 700; line-height: 1.2; font-variant-numeric: tabular-nums; padding-right: 70px; }
 .storage-icon { position: absolute; right: 1.35rem; top: 2.7rem; width: clamp(3.6rem, 18%, 4.5rem); filter: hue-rotate(225deg) saturate(.72); }
 .storage-caption { padding-right: 4.75rem; font-size: .68rem; margin-top: .35rem; line-height: 1.5; overflow-wrap: anywhere; }
-.dashboard-stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); min-height: 98px; align-items: center; }
+.dashboard-stat-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); min-height: 98px; align-items: center; }
 .dashboard-stat-item { display: flex; gap: 12px; align-items: center; padding: 0 18px; min-width: 0; }
 .dashboard-stat-item:first-child { padding-left: 0; }
 .dashboard-stat-item + .dashboard-stat-item { border-left: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
 .dashboard-stat-copy { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
 .dashboard-stat-label { color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: .72rem; }
 .dashboard-stat-addition { color: var(--ui-success-text, rgb(var(--v-theme-success))); font-size: .72rem; line-height: 1.5; overflow-wrap: anywhere; }
-:global(html.light .dashboard-stat-addition) { color: #187142; }
-:global(html.dark .dashboard-stat-addition) { color: #d5f5e3; }
 .dashboard-number { color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); font-size: 1.15rem; font-weight: 700; line-height: 1.4; font-variant-numeric: tabular-nums; }
 .dashboard-poster-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(144px, 1fr)); gap: 16px; padding: 4px 0; }
 .dashboard-library-row { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 20px; padding: 4px 0 8px; }
@@ -434,15 +431,14 @@ onBeforeUnmount(() => { active = false; ++mediaSequence; ++storageSequence; ++gr
 .dashboard-poster-hover-area { width: 100%; height: 100%; }
 .dashboard-poster-image { height: 100%; width: 100%; }
 .dashboard-library-card :deep(.v-img) { border-radius: 9px; overflow: hidden; }
-.dashboard-media-type { position: absolute; z-index: 1; top: 8px; left: 8px; background-image: linear-gradient(rgba(0,0,0,.2), rgba(0,0,0,.2)) !important; color: #fff !important; font-weight: 700; }
-.dashboard-media-type :deep(.v-chip__content) { color: #fff !important; }
-.dashboard-poster-overlay { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: flex-end; padding: 8px max(12px, var(--app-theme-surface-radius)) max(20px, var(--app-theme-surface-radius)); background: linear-gradient(rgba(45, 55, 72, .7) 0%, rgba(45, 55, 72, .9) 100%); opacity: 0; transition: opacity .18s ease; pointer-events: none; }
+.dashboard-media-type { position: absolute; z-index: 1; top: 8px; left: 8px; font-weight: 700; }
+.dashboard-poster-overlay { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: flex-end; padding: 8px max(12px, var(--app-theme-surface-radius)) max(20px, var(--app-theme-surface-radius)); background: linear-gradient(rgba(var(--v-theme-surface), .94) 0%, rgba(var(--v-theme-surface), .98) 100%); opacity: 0; transition: opacity .18s ease; pointer-events: none; }
 .dashboard-poster-overlay.is-visible, .dashboard-media-card:focus-visible .dashboard-poster-overlay, .dashboard-poster-fallback .dashboard-poster-overlay { opacity: 1; }
 @media (hover: none) { .dashboard-poster-overlay { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { .dashboard-poster-overlay { transition: none; } }
-.dashboard-library-count { position: absolute; top: 6px; right: 6px; min-width: 24px; height: 24px; padding: 0 5px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: #52b54b; color: #fff; font-size: .75rem; font-weight: 600; font-variant-numeric: tabular-nums; }
-.dashboard-poster-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; margin: 0 0 4px; color: #fff !important; font-size: 18px; font-weight: 700; line-height: 1.5; }
-.dashboard-poster-subtitle { color: #fff !important; font-size: 14px; font-weight: 600; line-height: 1.5; }
+.dashboard-library-count { position: absolute; top: 6px; right: 6px; min-width: 24px; height: 24px; padding: 0 5px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: rgb(var(--v-theme-success)); color: rgb(var(--v-theme-on-success)); font-size: .75rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.dashboard-poster-title { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; margin: 0 0 4px; color: rgb(var(--v-theme-on-surface)) !important; font-size: 18px; font-weight: 700; line-height: 1.5; }
+.dashboard-poster-subtitle { color: rgb(var(--v-theme-on-surface)) !important; font-size: 14px; font-weight: 600; line-height: 1.5; }
 .dashboard-library-title { padding: 8px 4px 4px; color: rgb(var(--v-theme-on-surface)); text-align: center; font-size: .75rem; font-weight: 700; line-height: 1.5; }
 .dashboard-settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .dashboard-setting-item { appearance: none; position: relative; overflow: hidden; display: flex; align-items: center; gap: 8px; min-height: 48px; border: 1px solid rgba(var(--v-theme-on-surface), .1); border-radius: 10px; background: rgba(var(--v-theme-on-surface), .04); padding: 10px 12px; font: inherit; cursor: pointer; transition: border-color .2s ease, background-color .2s ease, transform .2s ease; }

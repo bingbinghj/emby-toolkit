@@ -10,24 +10,26 @@ test('notification settings preserve Telegram fields and save only their configu
   await page.getByLabel('Chat ID', { exact: true }).fill('@notification-fixture');
   await page.getByLabel('个人 Chat ID', { exact: true }).fill('123456');
   await page.getByRole('button', { name: '确定', exact: true }).click();
-  await page.getByRole('button', { name: '保存通知设置', exact: true }).click();
+  await page.getByRole('button', { name: '保存通知渠道', exact: true }).click();
   await expect.poll(() => api.requests.some(request => request.path === '/api/portal/telegram-chat-id')).toBe(true);
   const config = api.requests.find(request => request.method === 'POST' && request.path === '/api/config').body;
-  expect(config).toEqual({ telegram_bot_token: 'notification-fixture-token', telegram_channel_id: '@notification-fixture', telegram_notify_types: expect.any(Array), telegram_enabled: true, telegram_channel_name: 'Telegram', telegram_topic_id: '', telegram_users: '', telegram_admins: '', telegram_api_url: '', notification_scope: { library_new: 'admin', recognize_fail: 'admin' }, notification_time: { start: '00:00', end: '23:59' } });
+  expect(config).toEqual({ telegram_bot_token: 'notification-fixture-token', telegram_channel_id: '@notification-fixture', telegram_notify_types: expect.any(Array), telegram_enabled: true, telegram_channel_name: 'Telegram', telegram_topic_id: '', telegram_users: '', telegram_admins: '', telegram_api_url: '' });
   expect(api.requests.find(request => request.path === '/api/portal/telegram-chat-id').body).toEqual({ chat_id: '123456' });
-  await expect(page.getByText('通知设置已保存', { exact: true })).toBeVisible();
+  await expect(page.getByText('通知渠道已保存', { exact: true })).toBeVisible();
 });
 
 test('unread notification configuration blocks writes and offers a retry', async ({ page, api }) => {
   api.respond('GET', '/api/config', { error: '通知配置暂不可读取' }, 503);
   await page.goto('/settings/notifications');
   await expect(page.getByText('通知配置暂不可读取', { exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: '保存通知设置', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '保存通知渠道', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '保存通知发送范围', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '保存通知发送时间', exact: true })).toBeDisabled();
   expect(api.requests.filter(request => request.method === 'POST')).toEqual([]);
   api.respond('GET', '/api/config', { telegram_bot_token: '', telegram_channel_id: '', telegram_notify_types: [] });
   await page.getByRole('button', { name: '重新读取通知设置', exact: true }).click();
   await expect(page.getByRole('button', { name: '编辑 Telegram 通知渠道', exact: true })).toBeVisible();
-  await expect(page.getByRole('button', { name: '保存通知设置', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '保存通知渠道', exact: true })).toBeEnabled();
 });
 
 test('a failed notification save keeps the editor available for retry', async ({ page, api }) => {
@@ -37,12 +39,12 @@ test('a failed notification save keeps the editor available for retry', async ({
   const channel = page.getByLabel('Chat ID', { exact: true });
   await channel.fill('@notification-draft');
   await page.getByRole('button', { name: '确定', exact: true }).click();
-  await page.getByRole('button', { name: '保存通知设置', exact: true }).click();
+  await page.getByRole('button', { name: '保存通知渠道', exact: true }).click();
   await expect(page.getByText('模拟通知配置写入失败', { exact: true }).first()).toBeVisible();
   await page.getByRole('button', { name: '编辑 Telegram 通知渠道', exact: true }).click();
   await expect(channel).toHaveValue('@notification-draft');
   await page.getByRole('button', { name: '取消', exact: true }).click();
-  await expect(page.getByRole('button', { name: '保存通知设置', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '保存通知渠道', exact: true })).toBeEnabled();
   expect(api.requests.filter(request => request.path === '/api/portal/telegram-chat-id')).toEqual([]);
 });
 
@@ -52,14 +54,14 @@ test('leaving notification settings during the configuration save prevents a lat
   await page.getByRole('button', { name: '编辑 Telegram 通知渠道', exact: true }).click();
   await page.getByLabel('个人 Chat ID', { exact: true }).fill('123456');
   await page.getByRole('button', { name: '确定', exact: true }).click();
-  await page.getByRole('button', { name: '保存通知设置', exact: true }).click();
+  await page.getByRole('button', { name: '保存通知渠道', exact: true }).click();
   await saving.started;
   await page.locator('.v-navigation-drawer').getByText('任务中心', { exact: true }).click();
   await expect(page).toHaveURL(/\/settings\/scheduler$/);
   saving.release({ message: '配置已保存', saved_fields: {} });
   await page.waitForTimeout(200);
   expect(api.requests.filter(request => request.path === '/api/portal/telegram-chat-id')).toEqual([]);
-  await expect(page.getByText('通知设置已保存', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('通知渠道已保存', { exact: true })).toHaveCount(0);
 });
 
 
@@ -79,24 +81,65 @@ test('MP notification channel cancel discards edits, while confirming keeps only
   await token.fill('confirmed-token');
   await page.getByRole('button', { name: '确定', exact: true }).click();
   expect(api.requests.filter(request => request.method === 'POST')).toEqual([]);
-  await page.getByRole('button', { name: '保存通知设置', exact: true }).click();
+  await page.getByRole('button', { name: '保存通知渠道', exact: true }).click();
   await expect.poll(() => api.requests.some(request => request.method === 'POST' && request.path === '/api/config')).toBe(true);
   expect(api.requests.find(request => request.method === 'POST' && request.path === '/api/config').body.telegram_bot_token).toBe('confirmed-token');
 });
 
-test('MP notification scope and sending window persist, and the unused intercept option is absent', async ({ page, api }) => {
+test('each notification card saves only its fields and preserves the other unsaved drafts', async ({ page, api }) => {
   await page.goto('/settings/notifications');
   await expect(page.getByLabel('拦截通知', { exact: true })).toHaveCount(0);
   const row = page.locator('.scope-row').filter({ hasText: '整理入库' });
   await row.getByRole('radio', { name: '所有用户', exact: true }).check();
   await page.getByLabel('开始时间', { exact: true }).fill('23:00');
   await page.getByLabel('结束时间', { exact: true }).fill('06:00');
-  await page.getByRole('button', { name: '保存通知设置', exact: true }).click();
-  await expect.poll(() => api.requests.some(request => request.method === 'POST' && request.path === '/api/config')).toBe(true);
-  const saved = api.requests.find(request => request.method === 'POST' && request.path === '/api/config').body;
-  expect(saved.notification_scope.library_new).toBe('all');
-  expect(saved.notification_time).toEqual({ start: '23:00', end: '06:00' });
-  expect(saved.telegram_notify_types).not.toContain('intercept_notify');
+  await page.getByRole('button', { name: '保存通知发送范围', exact: true }).click();
+  await expect(page.getByText('通知发送范围已保存', { exact: true })).toBeVisible();
+  const writes = () => api.requests.filter(request => request.method === 'POST' && request.path === '/api/config');
+  expect(writes()[0].body).toEqual({ notification_scope: { library_new: 'all', recognize_fail: 'admin' } });
+  await expect(page.getByLabel('开始时间', { exact: true })).toHaveValue('23:00');
+  await page.getByRole('button', { name: '保存通知发送时间', exact: true }).click();
+  await expect(page.getByText('通知发送时间已保存', { exact: true })).toBeVisible();
+  expect(writes()[1].body).toEqual({ notification_time: { start: '23:00', end: '06:00' } });
+  await expect(row.getByRole('radio', { name: '所有用户', exact: true })).toBeChecked();
+  expect(api.requests.filter(request => request.path === '/api/portal/telegram-chat-id')).toEqual([]);
+});
+
+test('a pending notification card save blocks additional writes, and failure retains the other drafts', async ({ page, api }) => {
+  const saving = api.defer('POST', '/api/config');
+  await page.goto('/settings/notifications');
+  await page.getByLabel('开始时间', { exact: true }).fill('21:30');
+  const row = page.locator('.scope-row').filter({ hasText: '整理入库' });
+  await row.getByRole('radio', { name: '所有用户', exact: true }).check();
+  await page.getByRole('button', { name: '保存通知发送时间', exact: true }).click();
+  await saving.started;
+  await expect(page.getByRole('button', { name: '保存通知发送范围', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '保存通知渠道', exact: true })).toBeDisabled();
+  const writes = () => api.requests.filter(request => request.method === 'POST' && request.path === '/api/config');
+  expect(writes()).toHaveLength(1);
+  saving.release({ saved_fields: { notification_time: { start: '21:30', end: '23:59' } } });
+  await expect(page.getByRole('button', { name: '保存通知发送范围', exact: true })).toBeEnabled();
+  await expect(row.getByRole('radio', { name: '所有用户', exact: true })).toBeChecked();
+
+  api.respond('POST', '/api/config', { error: '模拟范围卡片写入失败' }, 500);
+  await page.getByRole('button', { name: '保存通知发送范围', exact: true }).click();
+  await expect(page.getByText('模拟范围卡片写入失败', { exact: true }).first()).toBeVisible();
+  await expect(row.getByRole('radio', { name: '所有用户', exact: true })).toBeChecked();
+  await expect(page.getByLabel('开始时间', { exact: true })).toHaveValue('21:30');
+  await expect(page.getByRole('button', { name: '保存通知发送范围', exact: true })).toBeEnabled();
+  expect(writes()[1].body).toEqual({ notification_scope: { library_new: 'all', recognize_fail: 'admin' } });
+});
+
+test('notification scope and time can save when only the personal account read failed', async ({ page, api }) => {
+  api.respond('GET', '/api/portal/account-info', { error: '模拟个人账号读取失败' }, 503);
+  await page.goto('/settings/notifications');
+  await expect(page.getByText('模拟个人账号读取失败', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '保存通知渠道', exact: true })).toBeDisabled();
+  await expect(page.getByRole('button', { name: '保存通知发送范围', exact: true })).toBeEnabled();
+  await expect(page.getByRole('button', { name: '保存通知发送时间', exact: true })).toBeEnabled();
+  await page.getByRole('button', { name: '保存通知发送时间', exact: true }).click();
+  await expect(page.getByText('通知发送时间已保存', { exact: true })).toBeVisible();
+  expect(api.requests.filter(request => request.path === '/api/portal/telegram-chat-id')).toEqual([]);
 });
 
 test('notification channel test uses the unsaved dialog token and receiver without saving configuration', async ({ page, api }) => {
@@ -147,7 +190,7 @@ for (const width of [390, 1440]) {
     await channel.getByRole('button', { name: '确定', exact: true }).click();
     await expect(card.locator('.app-card-summary__title')).toHaveText('媒体通知');
     expect(api.requests.filter(request => request.method === 'POST')).toEqual([]);
-    await page.getByRole('button', { name: '保存通知设置', exact: true }).click();
+    await page.getByRole('button', { name: '保存通知渠道', exact: true }).click();
     await expect.poll(() => api.requests.some(request => request.method === 'POST' && request.path === '/api/config')).toBe(true);
     expect(api.requests.find(request => request.method === 'POST' && request.path === '/api/config').body).toMatchObject({
       telegram_channel_name: '媒体通知', telegram_topic_id: '22', telegram_users: '123,456', telegram_admins: '123', telegram_api_url: 'https://proxy.invalid/telegram',

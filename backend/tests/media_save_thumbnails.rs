@@ -347,10 +347,10 @@ mod native {
 
     #[tokio::test]
     #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
-    async fn editor_json_recovery_preserves_confirmed_current_json_then_restores_original_request()
-    {
+    async fn editor_json_recovery_cleans_confirmed_current_json_after_original_request_verification()
+     {
         let f = failed_json_recovery_fixture().await;
-        let current = change_current_recovery_json(&f, "先独立备份的新标题").await;
+        change_current_recovery_json(&f, "先独立备份的新标题").await;
         let recovery = reload_recovery(&f);
         let status = recovery_status(&f.native.state).await;
         let record = &status["records"][0];
@@ -364,20 +364,15 @@ mod native {
         assert_eq!(result["state"], "completed", "{result}");
         assert_eq!(result["result"]["backup_deleted"], true);
         assert!(!recovery.exists());
-        let retained = PathBuf::from(
-            result["result"]["conflict_backup_directories"][0]
+        assert_eq!(result["result"]["conflict_backup_directories"], json!([]));
+        let removed = PathBuf::from(
+            result["result"]["deleted_conflict_backup_directories"][0]
                 .as_str()
                 .unwrap(),
         );
-        assert!(retained.starts_with(f.native.state.data_dir.join("backups/media-info-conflicts")));
-        assert!(!retained.starts_with(&recovery));
-        assert_eq!(
-            tokio::fs::read(retained.join("current-61616.json"))
-                .await
-                .unwrap(),
-            current
-        );
-        assert!(retained.join("manifest.json").is_file());
+        assert!(removed.starts_with(f.native.state.data_dir.join("backups/media-info-conflicts")));
+        assert!(!removed.starts_with(&recovery));
+        assert!(!removed.exists());
         assert_eq!(
             f.native.host.item.lock().await["MediaStreams"][1]["Title"],
             "原请求恢复标题"
@@ -386,28 +381,6 @@ mod native {
             *f.native.host.settings.lock().await,
             f.proxy.original_settings
         );
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                tokio::fs::metadata(&retained)
-                    .await
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o700
-            );
-            assert_eq!(
-                tokio::fs::metadata(retained.join("current-61616.json"))
-                    .await
-                    .unwrap()
-                    .permissions()
-                    .mode()
-                    & 0o777,
-                0o600
-            );
-        }
         f.close().await;
     }
 
@@ -449,7 +422,7 @@ mod native {
 
     #[tokio::test]
     #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
-    async fn editor_json_recovery_preserves_both_backups_on_sync_failure_and_reports_them_after_retry()
+    async fn editor_json_recovery_preserves_both_backups_on_sync_failure_and_cleans_them_after_retry()
      {
         let f = failed_json_recovery_fixture().await;
         let current = change_current_recovery_json(&f, "同步失败仍要保留的新标题").await;
@@ -483,21 +456,39 @@ mod native {
             current
         );
         assert!(recovery.join("media-reload.json").is_file());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                tokio::fs::metadata(&retained)
+                    .await
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+            assert_eq!(
+                tokio::fs::metadata(retained.join("current-61616.json"))
+                    .await
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
         *f.proxy.protocol_fault.lock().await = String::new();
         let result =
             recover_from_editor(&f.native.state, next["records"][0]["id"].as_str().unwrap()).await;
         assert_eq!(result["state"], "completed", "{result}");
         assert!(!recovery.exists());
         assert_eq!(
-            result["result"]["conflict_backup_directories"][0],
+            result["result"]["deleted_conflict_backup_directories"][0],
             json!(retained)
         );
-        assert_eq!(
-            tokio::fs::read(retained.join("current-61616.json"))
-                .await
-                .unwrap(),
-            current
-        );
+        assert_eq!(result["result"]["conflict_backup_directories"], json!([]));
+        assert!(!retained.exists());
         f.close().await;
     }
 
@@ -1081,6 +1072,7 @@ mod native {
         guid_lookups: Arc<AtomicUsize>,
         identity_json_mutation: Arc<Mutex<Option<IdentityJsonMutation>>>,
         identity_json_mutated: Arc<AtomicBool>,
+        post_noop_identity_reads: Arc<AtomicUsize>,
     }
 
     impl Proxy {
@@ -1199,8 +1191,24 @@ mod native {
                 .into_owned()
                 .collect();
         if request.method() == axum::http::Method::GET {
+            if path == "/Users/user" {
+                let mut policy = json!({"IsAdministrator":true,"MaxParentalRating":null,"BlockUnratedItems":[],"BlockedTags":[],"IsTagBlockingModeInclusive":false,"AllowTagOrRating":false});
+                if proxy.protocol_fault.lock().await.as_str()
+                    == "sync-native-hmi-noop-restricted-user"
+                {
+                    policy["MaxParentalRating"] = json!(13);
+                }
+                return Json(json!({"Id":"user","Policy":policy})).into_response();
+            }
             if path == "/Users/user/Items/61616" && query.get("Fields").is_some_and(|fields| fields ==
                 "Id,Name,Overview,Genres,People,ProviderIds,Album,Artists,AlbumArtists,Composers,IndexNumber,ParentIndexNumber,Path,Type,Guid,PresentationUniqueKey,ExtraType,PartCount,Size,RunTimeTicks,Chapters,MediaSources,MediaStreams,ImageTags") {
+                if proxy.protocol_fault.lock().await.as_str() == "sync-native-hmi-noop-scope-expanded"
+                    && !proxy.metadata_ids.lock().await.is_empty()
+                    && proxy.post_noop_identity_reads.fetch_add(1, Ordering::SeqCst) == 1
+                {
+                    let key = proxy.host.item.lock().await["PresentationUniqueKey"].clone();
+                    proxy.extra.lock().await.get_mut("61617").unwrap()["PresentationUniqueKey"] = key;
+                }
                 let mutation = {
                     let mut pending = proxy.identity_json_mutation.lock().await;
                     match pending.take() {
@@ -1364,6 +1372,24 @@ mod native {
                 return Json(json!([])).into_response();
             }
             if path.starts_with("/Videos/") && path.ends_with("/AdditionalParts") {
+                match proxy.protocol_fault.lock().await.as_str() {
+                    "sync-native-hmi-noop-parts-incomplete" => {
+                        return Json(json!({"Items":[],"TotalRecordCount":1})).into_response();
+                    }
+                    "sync-native-hmi-noop-parts-filtered" if !query.contains_key("UserId") => {
+                        return Json(json!({"Items":[{"Id":"hidden-extra","ParentId":"61616"}],"TotalRecordCount":1})).into_response();
+                    }
+                    "sync-native-hmi-noop-parts-malformed" => {
+                        return Json(
+                            json!({"Items":[{"Name":"missing identity"}],"TotalRecordCount":1}),
+                        )
+                        .into_response();
+                    }
+                    "sync-native-hmi-noop-parts-missing-total" => {
+                        return Json(json!({"Items":[]})).into_response();
+                    }
+                    _ => (),
+                }
                 let id = path.split('/').nth(2).unwrap();
                 let parts = proxy
                     .parts
@@ -1372,7 +1398,7 @@ mod native {
                     .get(id)
                     .cloned()
                     .unwrap_or_default();
-                return Json(json!({"Items":parts})).into_response();
+                return Json(json!({"TotalRecordCount":parts.len(),"Items":parts})).into_response();
             }
             if path == "/UI/View" && proxy.reject_config_once.swap(false, Ordering::SeqCst) {
                 return StatusCode::BAD_REQUEST.into_response();
@@ -1611,6 +1637,47 @@ mod native {
                     body, prepared,
                     "Sync receives the complete prepared JSON body"
                 );
+                let fault = proxy.protocol_fault.lock().await.clone();
+                if fault.starts_with("sync-native-hmi-noop") {
+                    // PRO 3.0.0.57's importer reports success before reading the
+                    // request Bundle when the native item already has complete
+                    // media information (0x06001a66 -> 0x060019fc).
+                    let complete = target["Size"].as_u64().unwrap_or(0) >= 1_048_576
+                        && !target["RunTimeTicks"].is_null()
+                        && target["MediaStreams"].as_array().is_some_and(|streams| {
+                            streams.iter().any(|stream| {
+                                stream["IsExternal"] != true
+                                    && matches!(stream["Type"].as_str(), Some("Video" | "Audio"))
+                            })
+                        });
+                    if complete {
+                        let mut exported = body.clone();
+                        exported[0]["MediaSourceInfo"]["MediaStreams"] =
+                            target["MediaStreams"].clone();
+                        exported[0]["Chapters"] = target["Chapters"].clone();
+                        tokio::fs::write(
+                            info_path(&target),
+                            serde_json::to_vec(&exported).unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                        if fault == "sync-native-hmi-noop-json-change" {
+                            let mut user_file = exported.clone();
+                            user_file[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] =
+                                json!("同步后用户写入的新标题");
+                            tokio::fs::write(
+                                info_path(&target),
+                                serde_json::to_vec(&user_file).unwrap(),
+                            )
+                            .await
+                            .unwrap();
+                        }
+                        return Json(exported).into_response();
+                    }
+                    if fault == "sync-native-hmi-noop-then-failed" {
+                        return StatusCode::BAD_REQUEST.into_response();
+                    }
+                }
                 if proxy.protocol_fault.lock().await.as_str() == "sync-failed" {
                     return (
                         StatusCode::BAD_REQUEST,
@@ -1711,6 +1778,20 @@ mod native {
                     if file.is_file() {
                         tokio::fs::remove_file(file).await.unwrap();
                     }
+                }
+                #[cfg(unix)]
+                if proxy.protocol_fault.lock().await.as_str() == "sync-native-hmi-noop-json-symlink"
+                {
+                    let user_file = info_path(&current).with_file_name("user-new-json.json");
+                    tokio::fs::write(&user_file, b"user-owned contents")
+                        .await
+                        .unwrap();
+                    std::os::unix::fs::symlink(&user_file, info_path(&current)).unwrap();
+                }
+                if proxy.protocol_fault.lock().await.as_str() == "sync-native-hmi-noop-clear-error"
+                {
+                    // The operation ran before its HTTP result failed.
+                    return StatusCode::BAD_GATEWAY.into_response();
                 }
                 return StatusCode::NO_CONTENT.into_response();
             } else if path == "/ScheduledTasks/Running/media" {
@@ -1849,6 +1930,7 @@ mod native {
                 guid_lookups: Arc::default(),
                 identity_json_mutation: Arc::default(),
                 identity_json_mutated: Arc::default(),
+                post_noop_identity_reads: Arc::default(),
             };
             let app = Router::new()
                 .fallback(self::proxy)
@@ -3186,6 +3268,315 @@ mod native {
             );
             f.close().await;
         }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn manual_save_reimports_a_complete_native_item_without_losing_protected_resources() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        f.native.host.item.lock().await["RunTimeTicks"] =
+            f.native.original[0]["MediaSourceInfo"]["RunTimeTicks"].clone();
+        *f.proxy.protocol_fault.lock().await = "sync-native-hmi-noop".into();
+        let before = f.native.host.item.lock().await.clone();
+        let bif = local_bif(&before);
+        let bif_bytes = tokio::fs::read(&bif).await.unwrap();
+        let images = before["Chapters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|chapter| {
+                let path = chapter_image(&f.native.host, &before, chapter);
+                let bytes = std::fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect::<Vec<_>>();
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("台配国语");
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Language"] = json!("yue");
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["IsDefault"] = json!(true);
+        let outcome = f.save(json!({"mediainfo":edited}), false).await;
+        let live = f.native.host.item.lock().await.clone();
+        let saved: Value =
+            serde_json::from_slice(&tokio::fs::read(info_path(&live)).await.unwrap()).unwrap();
+        assert_eq!(
+            outcome["result"]["metadata_refresh"]["state"], "verified",
+            "{outcome}"
+        );
+        for streams in [
+            &live["MediaStreams"],
+            &saved[0]["MediaSourceInfo"]["MediaStreams"],
+        ] {
+            assert_eq!(streams[1]["Title"], "台配国语");
+            assert_eq!(streams[1]["Language"], "yue");
+            assert_eq!(streams[1]["IsDefault"], true);
+        }
+        assert_eq!(live["Chapters"], before["Chapters"]);
+        assert_eq!(tokio::fs::read(&bif).await.unwrap(), bif_bytes);
+        assert!(
+            images
+                .iter()
+                .all(|(path, bytes)| std::fs::read(path).unwrap() == *bytes)
+        );
+        assert_eq!(*f.native.host.clear_ids.lock().await, vec!["61616"]);
+        assert_eq!(*f.proxy.metadata_ids.lock().await, vec!["61616", "61616"]);
+        assert_eq!(
+            *f.native.host.settings.lock().await,
+            f.proxy.original_settings
+        );
+        assert_eq!(recovery_status(&f.native.state).await["pending"], false);
+        assert_eq!(f.proxy.video_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(f.native.host.starts.load(Ordering::SeqCst), 0);
+        f.close_with_legacy(true).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn native_noop_reimport_refuses_an_unrequested_presentation_sibling() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        f.add_episode().await;
+        f.native.host.item.lock().await["RunTimeTicks"] =
+            f.native.original[0]["MediaSourceInfo"]["RunTimeTicks"].clone();
+        let key = f.native.host.item.lock().await["PresentationUniqueKey"].clone();
+        f.proxy.extra.lock().await.get_mut("61617").unwrap()["PresentationUniqueKey"] = key;
+        let sibling = f.proxy.extra.lock().await["61617"].clone();
+        let sibling_json = tokio::fs::read(info_path(&sibling)).await.unwrap();
+        *f.proxy.protocol_fault.lock().await = "sync-native-hmi-noop".into();
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("仅请求当前媒体");
+        let outcome = f.save(json!({"mediainfo":edited}), false).await;
+        assert_ne!(
+            outcome["result"]["metadata_refresh"]["state"], "verified",
+            "{outcome}"
+        );
+        assert!(outcome.to_string().contains("关联"), "{outcome}");
+        assert!(f.native.host.clear_ids.lock().await.is_empty());
+        assert_eq!(f.proxy.extra.lock().await["61617"], sibling);
+        assert_eq!(
+            tokio::fs::read(info_path(&sibling)).await.unwrap(),
+            sibling_json
+        );
+        assert!(reload_recovery(&f).is_dir());
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn native_noop_reimport_refuses_unproven_additional_parts() {
+        for fault in [
+            "sync-native-hmi-noop-parts-incomplete",
+            "sync-native-hmi-noop-parts-filtered",
+            "sync-native-hmi-noop-parts-malformed",
+            "sync-native-hmi-noop-parts-missing-total",
+        ] {
+            let f = ThumbnailFixture::with_flag(Some(false)).await;
+            f.native.host.item.lock().await["RunTimeTicks"] =
+                f.native.original[0]["MediaSourceInfo"]["RunTimeTicks"].clone();
+            *f.proxy.protocol_fault.lock().await = fault.into();
+            let before = f.native.host.item.lock().await.clone();
+            let bif = local_bif(&before);
+            let bif_bytes = tokio::fs::read(&bif).await.unwrap();
+            let mut edited = f.native.original.clone();
+            edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("仅修改当前媒体");
+            let outcome = f.save(json!({"mediainfo":edited}), false).await;
+            assert_ne!(
+                outcome["result"]["metadata_refresh"]["state"], "verified",
+                "{fault}: {outcome}"
+            );
+            assert!(f.native.host.clear_ids.lock().await.is_empty(), "{fault}");
+            assert_eq!(*f.native.host.item.lock().await, before, "{fault}");
+            assert_eq!(tokio::fs::read(bif).await.unwrap(), bif_bytes, "{fault}");
+            assert!(reload_recovery(&f).is_dir(), "{fault}");
+            f.close().await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn native_noop_reimport_rechecks_scope_after_preparation() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        f.add_episode().await;
+        f.native.host.item.lock().await["RunTimeTicks"] =
+            f.native.original[0]["MediaSourceInfo"]["RunTimeTicks"].clone();
+        let sibling = f.proxy.extra.lock().await["61617"].clone();
+        let sibling_json = tokio::fs::read(info_path(&sibling)).await.unwrap();
+        *f.proxy.protocol_fault.lock().await = "sync-native-hmi-noop-scope-expanded".into();
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("准备期间范围变化");
+        let outcome = f.save(json!({"mediainfo":edited}), false).await;
+        assert_eq!(
+            f.proxy.extra.lock().await["61617"]["PresentationUniqueKey"],
+            f.native.host.item.lock().await["PresentationUniqueKey"]
+        );
+        assert_ne!(
+            outcome["result"]["metadata_refresh"]["state"], "verified",
+            "{outcome}"
+        );
+        assert!(f.native.host.clear_ids.lock().await.is_empty());
+        assert_eq!(
+            tokio::fs::read(info_path(&sibling)).await.unwrap(),
+            sibling_json
+        );
+        assert!(reload_recovery(&f).is_dir());
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn native_noop_reimport_keeps_user_json_changed_after_the_sync_response() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        f.native.host.item.lock().await["RunTimeTicks"] =
+            f.native.original[0]["MediaSourceInfo"]["RunTimeTicks"].clone();
+        *f.proxy.protocol_fault.lock().await = "sync-native-hmi-noop-json-change".into();
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("本次编辑的标题");
+        let outcome = f.save(json!({"mediainfo":edited}), false).await;
+        assert_ne!(
+            outcome["result"]["metadata_refresh"]["state"], "verified",
+            "{outcome}"
+        );
+        assert!(f.native.host.clear_ids.lock().await.is_empty());
+        let live = f.native.host.item.lock().await.clone();
+        let current: Value =
+            serde_json::from_slice(&tokio::fs::read(info_path(&live)).await.unwrap()).unwrap();
+        assert_eq!(
+            current[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"],
+            "同步后用户写入的新标题"
+        );
+        assert!(reload_recovery(&f).is_dir());
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn native_noop_reimport_recovers_after_clear_runs_but_its_http_result_fails() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        f.native.host.item.lock().await["RunTimeTicks"] =
+            f.native.original[0]["MediaSourceInfo"]["RunTimeTicks"].clone();
+        *f.proxy.protocol_fault.lock().await = "sync-native-hmi-noop-clear-error".into();
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] =
+            json!("清理HTTP异常后的补救标题");
+        let outcome = f.save(json!({"mediainfo":edited}), false).await;
+        assert_eq!(
+            outcome["result"]["metadata_refresh"]["state"], "verified",
+            "{outcome}"
+        );
+        assert_eq!(
+            f.native.host.item.lock().await["MediaStreams"][1]["Title"],
+            "清理HTTP异常后的补救标题"
+        );
+        assert!(
+            outcome.to_string().contains("原生清理请求未正常返回"),
+            "{outcome}"
+        );
+        assert_eq!(*f.native.host.clear_ids.lock().await, vec!["61616"]);
+        assert_eq!(*f.proxy.metadata_ids.lock().await, vec!["61616", "61616"]);
+        assert_eq!(recovery_status(&f.native.state).await["pending"], false);
+        assert_eq!(
+            *f.native.host.settings.lock().await,
+            f.proxy.original_settings
+        );
+        f.close_with_legacy(true).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn native_noop_reimport_refuses_rating_filtered_admin_extra_visibility() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        f.native.host.item.lock().await["RunTimeTicks"] =
+            f.native.original[0]["MediaSourceInfo"]["RunTimeTicks"].clone();
+        *f.proxy.protocol_fault.lock().await = "sync-native-hmi-noop-restricted-user".into();
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("不能证明全部花絮可见");
+        let outcome = f.save(json!({"mediainfo":edited}), false).await;
+        assert_ne!(
+            outcome["result"]["metadata_refresh"]["state"], "verified",
+            "{outcome}"
+        );
+        assert!(f.native.host.clear_ids.lock().await.is_empty());
+        assert!(reload_recovery(&f).is_dir());
+        f.close().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn native_noop_reimport_restores_images_even_when_json_becomes_a_symlink_after_clear() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        f.native.host.item.lock().await["RunTimeTicks"] =
+            f.native.original[0]["MediaSourceInfo"]["RunTimeTicks"].clone();
+        *f.proxy.protocol_fault.lock().await = "sync-native-hmi-noop-json-symlink".into();
+        let before = f.native.host.item.lock().await.clone();
+        let bif = local_bif(&before);
+        let bif_bytes = tokio::fs::read(&bif).await.unwrap();
+        let images = before["Chapters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|chapter| {
+                let path = chapter_image(&f.native.host, &before, chapter);
+                let bytes = std::fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect::<Vec<_>>();
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] =
+            json!("符号链接异常时保留恢复材料");
+        let outcome = f.save(json!({"mediainfo":edited}), false).await;
+        assert_ne!(
+            outcome["result"]["metadata_refresh"]["state"], "verified",
+            "{outcome}"
+        );
+        assert_eq!(*f.native.host.clear_ids.lock().await, vec!["61616"]);
+        assert_eq!(tokio::fs::read(&bif).await.unwrap(), bif_bytes);
+        assert!(
+            images
+                .iter()
+                .all(|(path, bytes)| std::fs::read(path).unwrap() == *bytes)
+        );
+        let file = info_path(&before);
+        assert!(
+            std::fs::symlink_metadata(&file)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            tokio::fs::read(&file).await.unwrap(),
+            b"user-owned contents"
+        );
+        assert!(reload_recovery(&f).join("media-reload.json").is_file());
+        f.close_with_legacy(true).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn native_noop_reimport_failure_keeps_json_resources_and_retry_material() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        f.native.host.item.lock().await["RunTimeTicks"] =
+            f.native.original[0]["MediaSourceInfo"]["RunTimeTicks"].clone();
+        *f.proxy.protocol_fault.lock().await = "sync-native-hmi-noop-then-failed".into();
+        let before = f.native.host.item.lock().await.clone();
+        let bif = local_bif(&before);
+        let bif_bytes = tokio::fs::read(&bif).await.unwrap();
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("失败后保留的请求标题");
+        let outcome = f.save(json!({"mediainfo":edited}), false).await;
+        assert_ne!(
+            outcome["result"]["metadata_refresh"]["state"], "verified",
+            "{outcome}"
+        );
+        assert_eq!(*f.native.host.clear_ids.lock().await, vec!["61616"]);
+        assert_eq!(tokio::fs::read(&bif).await.unwrap(), bif_bytes);
+        let current: Value =
+            serde_json::from_slice(&tokio::fs::read(info_path(&before)).await.unwrap()).unwrap();
+        assert_eq!(
+            current[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"],
+            "失败后保留的请求标题"
+        );
+        assert!(reload_recovery(&f).join("media-reload.json").is_file());
+        assert_eq!(recovery_status(&f.native.state).await["pending"], true);
+        f.close_with_legacy(true).await;
     }
 
     #[tokio::test]

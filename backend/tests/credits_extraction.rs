@@ -36,6 +36,9 @@ struct Host {
     plugins_seen: Arc<Notify>,
     plugins_release: Arc<Notify>,
     failed_season: Arc<Mutex<Option<String>>>,
+    item_queries: Arc<Mutex<Vec<HashMap<String, String>>>>,
+    items_seen: Arc<Notify>,
+    page_limit: Arc<Mutex<Option<usize>>>,
 }
 
 async fn details(State(host): State<Host>, Path(id): Path<String>) -> Response {
@@ -46,6 +49,8 @@ async fn details(State(host): State<Host>, Path(id): Path<String>) -> Response {
 }
 
 async fn items(State(host): State<Host>, Query(query): Query<HashMap<String, String>>) -> Response {
+    host.items_seen.notify_one();
+    host.item_queries.lock().await.push(query.clone());
     let failed_season = host.failed_season.lock().await.clone();
     if failed_season.is_some() && query.get("ParentId") == failed_season.as_ref() {
         return StatusCode::BAD_REQUEST.into_response();
@@ -75,6 +80,7 @@ async fn items(State(host): State<Host>, Query(query): Query<HashMap<String, Str
         .get("Limit")
         .and_then(|limit| limit.parse().ok())
         .unwrap_or(total);
+    let limit = host.page_limit.lock().await.unwrap_or(limit).min(limit);
     let page = items
         .into_iter()
         .skip(start)
@@ -357,9 +363,13 @@ impl Fixture {
             })
             .await
             .unwrap();
+        self.wait(&task).await
+    }
+
+    async fn wait(&self, task: &str) -> Value {
         tokio::time::timeout(Duration::from_secs(90), async {
             loop {
-                let job = self.state.jobs.result(&task).await.unwrap();
+                let job = self.state.jobs.result(task).await.unwrap();
                 if job["is_running"] == false {
                     return job;
                 }
@@ -397,6 +407,142 @@ fn start(chapters: &Value) -> Option<u64> {
         .iter()
         .find(|chapter| chapter["MarkerType"] == "CreditsStart")
         .and_then(|chapter| chapter["StartPositionTicks"].as_u64())
+}
+
+async fn begin_endpoint(fixture: &Fixture, id: &str) -> String {
+    use tower::ServiceExt;
+    let response = credits::router()
+        .with_state(fixture.state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/media/{id}/extract_credits"))
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    body["task_id"].as_str().unwrap().to_string()
+}
+
+async fn submit_endpoint(fixture: &Fixture, id: &str) -> Value {
+    fixture.wait(&begin_endpoint(fixture, id).await).await
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all HTTP stays local"]
+async fn series_and_season_endpoints_page_only_the_selected_scope() {
+    for (id, kind, expected, action) in [
+        ("series", "Series", vec!["101", "102"], "提取当前剧片尾"),
+        ("season", "Season", vec!["101"], "提取当前季片尾"),
+    ] {
+        let fixture = Fixture::new(false).await;
+        *fixture.host.page_limit.lock().await = Some(1);
+        {
+            let mut items = fixture.host.items.lock().await;
+            items.insert(id.into(), json!({"Id":id,"Type":kind}));
+            items.get_mut("102").unwrap()["SeasonId"] = json!("season2");
+            items.get_mut("102").unwrap()["ParentId"] = json!("season2");
+            items.get_mut("102").unwrap()["ParentIndexNumber"] = json!(2);
+            for episode in ["101", "102"] {
+                items.get_mut(episode).unwrap()["Chapters"].as_array_mut().unwrap()
+                    .push(json!({"Name":"片尾","MarkerType":"CreditsStart","StartPositionTicks":750_000_000}));
+            }
+            items.insert("301".into(), json!({"Id":"301","Type":"Episode","SeriesId":"unrelated","SeasonId":"unrelated-season"}));
+        }
+        let job = submit_endpoint(&fixture, id).await;
+        assert_eq!(job["last_action"], action, "{job}");
+        assert_eq!(job["result"]["failed"], 0, "{job}");
+        let selected = job["result"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["item_id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(selected, expected, "{job}");
+        assert_eq!(
+            start(&fixture.cache("101").await[0]["Chapters"]),
+            Some(750_000_000)
+        );
+        assert_eq!(
+            start(&fixture.cache("102").await[0]["Chapters"]),
+            (kind == "Series").then_some(750_000_000)
+        );
+        let queries = fixture.host.item_queries.lock().await;
+        assert!(
+            queries
+                .iter()
+                .all(|query| query["IncludeItemTypes"] == "Episode")
+        );
+        if kind == "Series" {
+            assert!(
+                queries
+                    .iter()
+                    .any(|query| query["ParentId"] == id && query["StartIndex"] == "1")
+            );
+        }
+        drop(queries);
+        assert!(fixture.host.writes.lock().await.is_empty());
+        assert!(fixture.host.downloads.lock().await.is_empty());
+        fixture.close().await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all HTTP stays local"]
+async fn selected_series_list_failure_is_terminal_before_extraction() {
+    let fixture = Fixture::new(false).await;
+    fixture
+        .host
+        .items
+        .lock()
+        .await
+        .insert("series".into(), json!({"Id":"series","Type":"Series"}));
+    *fixture.host.failed_season.lock().await = Some("series".into());
+    let job = submit_endpoint(&fixture, "series").await;
+    assert_eq!(job["state"], "failed", "{job}");
+    assert!(fixture.host.writes.lock().await.is_empty());
+    assert!(fixture.host.downloads.lock().await.is_empty());
+    fixture.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all HTTP stays local"]
+async fn stopping_series_scope_read_never_extracts_or_updates_episode_cache() {
+    let fixture = Fixture::new(false).await;
+    fixture
+        .host
+        .items
+        .lock()
+        .await
+        .insert("series".into(), json!({"Id":"series","Type":"Series"}));
+    let reads = fixture.host.item_queries.lock().await;
+    let task = begin_endpoint(&fixture, "series").await;
+    tokio::time::timeout(Duration::from_secs(10), fixture.host.items_seen.notified())
+        .await
+        .unwrap();
+    fixture
+        .state
+        .jobs
+        .control(Some(&task), "stop")
+        .await
+        .unwrap();
+    drop(reads);
+    let job = fixture.wait(&task).await;
+    assert_eq!(job["state"], "cancelled", "{job}");
+    assert!(fixture.host.writes.lock().await.is_empty());
+    assert!(fixture.host.downloads.lock().await.is_empty());
+    for id in ["101", "102"] {
+        assert_eq!(start(&fixture.cache(id).await[0]["Chapters"]), None);
+    }
+    fixture.close().await;
 }
 
 #[tokio::test]

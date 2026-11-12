@@ -55,3 +55,15 @@ test('MP log groups merge only adjacent records of the same second and level wit
   assert.equal(groups[0].second, '2026-11-11 12:30:45');
   assert.equal(groups[0].level, 'INFO');
 });
+
+test('native live dates remain distinct across days and retain precise grouping times', () => {
+  const lines = [
+    '2026-11-11 09:56:24,990 - source - INFO - 昨日记录',
+    '2026-11-12 09:56:24,010 - source - INFO - 今日记录',
+    '2026-11-12 09:56:24,090 - source - INFO - 同秒记录',
+  ];
+  const groups = groupLogRecords(lines);
+  assert.deepEqual(groups.map(group => group.lines.length), [1, 2]);
+  assert.equal(parseLogRecord(lines[1]).timestamp, '2026-11-12 09:56:24,010');
+  assert.deepEqual(groups.flatMap(group => group.lines), lines);
+});

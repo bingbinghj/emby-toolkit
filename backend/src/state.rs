@@ -187,6 +187,25 @@ impl AppState {
         query: &[(&str, String)],
         body: Option<Value>,
     ) -> Result<Value> {
+        self.emby_request(method, path, query, body, true).await
+    }
+    pub(crate) async fn emby_once(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<Value>,
+    ) -> Result<Value> {
+        self.emby_request(method, path, query, body, false).await
+    }
+    async fn emby_request(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<Value>,
+        retry: bool,
+    ) -> Result<Value> {
         let endpoint = format!(
             "Emby {} /{}",
             method.as_str(),
@@ -227,11 +246,14 @@ impl AppState {
         if let Some(body) = body {
             request = request.json(&body);
         }
-        let response = crate::emby::send(request)
-            .await
-            .map_err(request_error)?
-            .error_for_status()
-            .map_err(request_error)?;
+        let response = if retry {
+            crate::emby::send(request).await
+        } else {
+            crate::emby::send_once(request).await
+        }
+        .map_err(request_error)?
+        .error_for_status()
+        .map_err(request_error)?;
         if response.status() == reqwest::StatusCode::NO_CONTENT {
             return Ok(json!({"success":true}));
         }

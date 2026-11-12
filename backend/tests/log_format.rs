@@ -32,12 +32,37 @@ fn python_style_logs_preserve_fields_levels_and_redaction_in_file_and_live_view(
     assert_eq!(live.len(), 4);
     assert!(
         live.iter()
-            .any(|line| line.contains("[WARNING] 媒体同步失败"))
+            .any(|line| line.contains(" - WARNING - 媒体同步失败"))
     );
-    assert!(live.iter().all(|line| !line.contains("[DEBUG]")));
+    assert!(live.iter().all(|line| !line.contains(" - DEBUG - ")));
     assert!(
         live.iter()
             .all(|line| !line.contains("fixture-private-cookie"))
     );
     print!("{file}");
+}
+
+#[test]
+fn live_logs_preserve_native_dates_sources_and_milliseconds_across_midnight() {
+    use std::io::Write;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    let directory = tempfile::tempdir().unwrap();
+    let store = LogStore::open(directory.path()).unwrap();
+    let writer = LogWriter(store.clone());
+    let lines = [
+        "2026-11-11 23:59:59,990 - emby_toolkit::sync - INFO - 昨日记录\n",
+        "2026-11-12 00:00:00,010 - emby_toolkit::sync - INFO - 今日记录\n",
+    ];
+    for line in &lines {
+        writer.make_writer().write_all(line.as_bytes()).unwrap();
+    }
+    assert_eq!(
+        store.recent(),
+        lines.map(|line| line.trim_end().to_string()).to_vec()
+    );
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("app.log")).unwrap(),
+        lines.join("")
+    );
 }

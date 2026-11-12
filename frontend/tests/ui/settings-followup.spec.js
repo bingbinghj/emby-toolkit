@@ -4,7 +4,7 @@ const card = (page, title) => page.locator('.setting-card').filter({ has: page.g
 const writes = api => api.requests.filter(request => request.method === 'POST' && request.path === '/api/config');
 const mediaServerDialog = page => page.locator('.v-dialog.v-overlay--active').filter({ has: page.getByRole('button', { name: '关闭媒体服务器配置', exact: true }) });
 
-test('media server omits external playback URL and uses an icon plus plain save action', async ({ page, api }) => {
+test('media server omits external playback URL and uses an icon plus filled primary save action', async ({ page, api }) => {
   await page.goto('/setting?tab=system');
   await expect(page.locator('[data-field="emby_public_url"]')).toHaveCount(0);
   await page.locator('[data-field="delay_between_items_sec"] input').fill('1.7');
@@ -18,7 +18,7 @@ test('media server omits external playback URL and uses an icon plus plain save 
   server = mediaServerDialog(page);
   await expect(server.locator('[data-field="emby_server_url"] input')).toHaveValue(originalAddress);
   const save = server.getByRole('button', { name: '保存媒体服务器', exact: true });
-  await expect(save).toHaveClass(/v-btn--variant-text/);
+  await expect(save).toHaveClass(/v-btn--variant-flat/);
   await expect(save).toHaveText('保存');
   await expect(save.locator('.v-icon')).toBeVisible();
   await server.locator('[data-field="emby_server_url"] input').fill('http://updated-emby.invalid:8096');

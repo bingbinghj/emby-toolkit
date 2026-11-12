@@ -117,7 +117,7 @@ export function projectDashboardItems(items, library = false) {
     'id', 'name', 'item_type', 'production_year', 'image_tag', 'series_id', 'series_image_tag',
     'series_name', 'season_number', 'episode_number', 'date_created',
   ];
-  return items.map(item => {
+  return items.filter(item => !library || item.collection_type !== 'music').map(item => {
     const values = fields.filter(field => Object.hasOwn(item, field)).map(field => [field, item[field]]);
     if (values.some(([, value]) => value !== null && !['string', 'number'].includes(typeof value))) throw new Error('媒体卡片响应未确认');
     return Object.fromEntries(values);
@@ -125,7 +125,7 @@ export function projectDashboardItems(items, library = false) {
 }
 
 export function projectDashboardStatistics(value) {
-  const result = Object.fromEntries(['movie_count', 'tv_count', 'episode_count', 'music_count'].map(key => {
+  const result = Object.fromEntries(['movie_count', 'tv_count', 'episode_count'].map(key => {
     const item = value?.[key];
     if (typeof item?.count !== 'number' || !Number.isFinite(item.count) || item.count < 0 || item.error) {
       throw new Error(item?.error || '媒体统计响应未确认');

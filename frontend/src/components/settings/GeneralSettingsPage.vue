@@ -137,8 +137,8 @@
                     <template #actions>
                       <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
-                          color="default"
-                          variant="text"
+                          color="primary"
+                          variant="flat"
                           :loading="savingCard === 'basic'"
                           :disabled="savingConfig"
                           aria-label="保存基础设置"
@@ -324,7 +324,7 @@
                             :loading="isTestingMediaServer" :disabled="mediaServerSaving" @click="testMediaServerConnection">测试连接</VBtn>
                           <VSpacer />
                           <VBtn color="default" variant="text" aria-label="取消媒体服务器配置" :disabled="mediaServerBusy" @click="closeMediaServerDialog">取消</VBtn>
-                          <VBtn color="default" variant="text" aria-label="保存媒体服务器" prepend-icon="mdi-content-save-outline"
+                          <VBtn color="primary" variant="flat" aria-label="保存媒体服务器" prepend-icon="mdi-content-save-outline"
                             :loading="savingCard === 'emby'" :disabled="mediaServerBusy || !mediaServerDraft" @click="saveMediaServer">保存</VBtn>
                         </VCardActions>
                       </VCard>
@@ -502,8 +502,8 @@
                     <template #actions>
                       <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
-                          color="default"
-                          variant="text"
+                          color="primary"
+                          variant="flat"
                           :loading="savingCard === 'ai'"
                           :disabled="savingConfig"
                           aria-label="保存AI 增强"
@@ -552,8 +552,8 @@
                     <template #actions>
                       <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
-                          color="default"
-                          variant="text"
+                          color="primary"
+                          variant="flat"
                           :loading="savingCard === 'logs'"
                           :disabled="savingConfig"
                           aria-label="保存日志配置"
@@ -836,24 +836,19 @@
                                 </div>
                               </div>
                             </div>
-                            <div class="settings-field" data-field="p115_api_priority">
+                            <div class="settings-field mb-4" data-field="p115_api_priority">
                               <VRadioGroup
                                 :disabled="storageSaving"
                                 v-model="storageDraft.p115_api_priority"
                                 name="api_priority_group"
                                 label="115接口"
+                                hint="默认优先 Cookie，失败后再尝试 OpenAPI。"
+                                persistent-hint
                                 inline
                               >
-                                <div class="d-flex ga-3 flex-wrap align-center">
-                                  <VRadio value="cookie"><template #label>优先 Cookie（默认）</template></VRadio>
-                                  <VRadio value="openapi"><template #label>优先 OpenAPI（备用）</template></VRadio>
-                                </div>
+                                <VRadio value="cookie" label="优先 Cookie（默认）" />
+                                <VRadio value="openapi" label="优先 OpenAPI（备用）" />
                               </VRadioGroup>
-                              <div class="settings-hint">
-                                <span class="text-medium-emphasis">
-                                  默认优先 Cookie，失败后再尝试 OpenAPI。
-                                </span>
-                              </div>
                             </div>
                             <div class="settings-field" data-field="p115_request_interval">
                               <VTextField :disabled="storageSaving" type="number"
@@ -862,12 +857,9 @@
                                 :step="0.1"
                                 placeholder="0.5"
                                 label="API 请求间隔 (秒)"
+                                hint="115 官方对 API 调用频率有严格限制，建议保持 0.5 秒以上。"
+                                persistent-hint
                               ></VTextField>
-                              <div class="settings-hint">
-                                <span class="text-medium-emphasis">
-                                  115 官方对 API 调用频率有严格限制，建议保持 0.5 秒以上。
-                                </span>
-                              </div>
                             </div>
                           </VForm>
                           <VAlert v-if="storageSaveError" type="error" variant="tonal" density="compact" class="mt-4">{{ storageSaveError }}</VAlert>
@@ -876,7 +868,7 @@
                         <VCardActions class="app-dialog-actions">
                           <VSpacer />
                           <VBtn color="default" variant="text" aria-label="取消存储配置" :disabled="storageBusy" @click="closeStorageDialog">取消</VBtn>
-                          <VBtn color="default" variant="text" prepend-icon="mdi-content-save-outline" aria-label="保存存储"
+                          <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" aria-label="保存存储"
                             :loading="savingCard === 'p115Account'" :disabled="storageBusy" @click="saveStorageSettings">保存</VBtn>
                         </VCardActions>
                       </VCard>
@@ -982,8 +974,8 @@
                     <template #actions>
                       <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
-                          color="default"
-                          variant="text"
+                          color="primary"
+                          variant="flat"
                           :loading="savingCard === 'fingerprints'"
                           :disabled="savingConfig"
                           aria-label="保存目录"
@@ -1115,8 +1107,8 @@
                     <template #actions>
                       <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
-                          color="default"
-                          variant="text"
+                          color="primary"
+                          variant="flat"
                           :loading="savingCard === 'monitor'"
                           :disabled="savingConfig"
                           aria-label="保存实时监控"
@@ -1203,8 +1195,8 @@
                     <template #actions>
                       <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
-                          color="default"
-                          variant="text"
+                          color="primary"
+                          variant="flat"
                           :loading="savingCard === 'ingest'"
                           :disabled="savingConfig"
                           aria-label="保存入库自动处理"
@@ -1335,8 +1327,8 @@
                     <template #actions>
                       <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
-                          color="default"
-                          variant="text"
+                          color="primary"
+                          variant="flat"
                           :loading="savingCard === 'rename'"
                           :disabled="savingConfig"
                           aria-label="保存整理与刮削"
@@ -1423,8 +1415,8 @@
                     <template #actions>
                       <div class="d-flex ga-3 flex-wrap align-center justify-end">
                         <VBtn
-                          color="default"
-                          variant="text"
+                          color="primary"
+                          variant="flat"
                           :loading="savingCard === 'sources'"
                           :disabled="savingConfig"
                           aria-label="保存数据源与API"
@@ -2104,7 +2096,7 @@
           </VBtn>
           <div class="d-flex ga-3 flex-wrap align-center">
             <VBtn @click="promptModalVisible = false" color="secondary">取消</VBtn>
-            <VBtn color="default" @click="savePrompts" :loading="savingPrompts">
+            <VBtn variant="flat" color="primary" @click="savePrompts" :loading="savingPrompts">
               <template #prepend><UiIcon name="save" /></template>
               保存配置
             </VBtn>

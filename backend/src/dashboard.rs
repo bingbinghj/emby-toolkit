@@ -39,31 +39,20 @@ async fn count(state: &AppState, user: &str, kind: &str) -> Result<u64> {
         .ok_or_else(|| ApiError::bad("Emby 未返回有效媒体统计"))
 }
 
-async fn music_count(state: &AppState, user: &str) -> Result<u64> {
-    // MoviePilot reports albums when Emby has album records, then falls back
-    // to songs for libraries without them.
-    match count(state, user, "MusicAlbum").await? {
-        0 => count(state, user, "Audio").await,
-        albums => Ok(albums),
-    }
-}
-
 async fn statistics(state: &AppState, user: &str) -> Value {
     let mut result = json!({});
-    let (movies, series, episodes, music) = tokio::join!(
+    let (movies, series, episodes) = tokio::join!(
         count(state, user, "Movie"),
         count(state, user, "Series"),
         count(state, user, "Episode"),
-        music_count(state, user)
     );
     for ((key, _), value) in [
         ("movie_count", "Movie"),
         ("tv_count", "Series"),
         ("episode_count", "Episode"),
-        ("music_count", "Audio"),
     ]
     .into_iter()
-    .zip([movies, series, episodes, music])
+    .zip([movies, series, episodes])
     {
         match value {
             Ok(count) => result[key] = json!({"count":count}),
@@ -77,7 +66,7 @@ async fn statistics(state: &AppState, user: &str) -> Value {
     .await
     {
         Ok(Ok(monthly)) => {
-            for key in ["movie_count", "tv_count", "episode_count", "music_count"] {
+            for key in ["movie_count", "tv_count", "episode_count"] {
                 result[key]["month_count"] = monthly[key].clone();
             }
             result["month"] = monthly["month"].clone();
@@ -87,7 +76,7 @@ async fn statistics(state: &AppState, user: &str) -> Value {
                 Ok(Err(error)) => error.1,
                 _ => "本月入库统计读取超时".into(),
             };
-            for key in ["movie_count", "tv_count", "episode_count", "music_count"] {
+            for key in ["movie_count", "tv_count", "episode_count"] {
                 result[key]["month_count"] = Value::Null;
             }
             result["month"] = json!({"period":chrono::Local::now().format("%Y-%m").to_string(),"state":"unavailable","source":"etk-history","error":reason});
@@ -158,7 +147,7 @@ async fn libraries(state: &AppState, user: &str) -> Result<Value> {
         }
         if matches!(
             string(item, "CollectionType").as_str(),
-            "boxsets" | "playlists"
+            "boxsets" | "playlists" | "music"
         ) {
             continue;
         }
@@ -171,7 +160,6 @@ async fn libraries(state: &AppState, user: &str) -> Result<Value> {
         let kind = match string(library, "collection_type").as_str() {
             "movies" | "movie" => "Movie",
             "tvshows" | "tv" => "Series",
-            "music" => "MusicAlbum",
             _ => "Movie,Series",
         };
         let response = state

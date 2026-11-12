@@ -1,8 +1,11 @@
 <template>
-  <section class="notification-center" :class="{ 'is-dark-theme': isDarkTheme }" aria-label="实时日志">
+  <section class="notification-center" :class="{ 'is-dark-theme': isDarkTheme, 'is-standalone': standalone }" aria-label="实时日志">
     <header class="notification-heading">
       <VCardTitle tag="h2" class="pa-0">实时日志</VCardTitle>
-      <VBtn variant="text" icon="mdi-close" color="default" size="small" aria-label="关闭实时日志" title="关闭" @click="$emit('close')" />
+      <VBtn variant="text" icon="mdi-download" color="default" class="logging-heading-action" size="small" aria-label="导出实时日志" title="下载日志" @click="downloadLogs" :disabled="!filteredLogs.length" />
+      <VBtn v-if="!standalone" variant="text" icon="mdi-open-in-new" color="default" class="logging-heading-action" size="small" aria-label="在新窗口中打开实时日志" title="在新窗口中打开" :href="router.resolve({ name: 'Logs' }).href" target="_blank" rel="noopener noreferrer" />
+      <VSpacer />
+      <VBtn v-if="!standalone" variant="text" icon="mdi-close" color="default" size="small" aria-label="关闭实时日志" title="关闭" @click="$emit('close')" />
     </header>
     <VTabs v-model="activeTab" color="primary" density="compact" class="notification-tabs">
       <VTab value="logs" prepend-icon="mdi-console-line">实时日志</VTab>
@@ -18,8 +21,7 @@
           <template #selection="{ item }"><span class="font-weight-medium">{{ item.title }}</span></template>
         </VSelect>
         <VTextField v-model="keyword" clearable hide-details variant="plain" density="compact" prepend-inner-icon="mdi-magnify" placeholder="搜索日志" aria-label="搜索实时日志" class="notification-search logging-search" />
-        <VBtn variant="text" icon :class="{ 'is-live': following }" class="logging-stream-action" :aria-label="following ? '暂停日志流' : '继续日志流'" :title="following ? '暂停日志流' : '继续日志流'" @click="following = !following"><VIcon :icon="following ? 'mdi-pause' : 'mdi-play'" /></VBtn>
-        <VBtn variant="text" icon="mdi-download" class="logging-stream-action" aria-label="导出实时日志" title="导出日志" @click="downloadLogs" :disabled="!filteredLogs.length" />
+        <VBtn variant="text" color="default" icon :class="{ 'is-live': following }" class="logging-stream-action" :aria-label="following ? '暂停日志流' : '继续日志流'" :title="following ? '暂停日志流' : '继续日志流'" @click="following = !following"><VIcon :icon="following ? 'mdi-pause' : 'mdi-play'" /></VBtn>
       </div>
       <div ref="logRef" class="notification-log logging-shell" role="region" aria-label="实时日志内容" tabindex="0" @scroll="handleScroll">
         <LogRecord v-for="(group, index) in logGroups" :key="group.key" :lines="group.lines" :keyword="keyword" :stripe="index % 2 ? 'odd' : 'even'" />
@@ -37,14 +39,16 @@
 <script setup>
 import { computed, ref, watch, nextTick } from 'vue';
 import { useDisplay, useTheme } from 'vuetify';
+import { useRouter } from 'vue-router';
 import LogViewer from './LogViewer.vue';
 import LogRecord from './LogRecord.vue';
 import { groupLogRecords, matchesLogRecord } from '@/utils/logRecords';
 
-const props = defineProps({ task: { type: Object, default: () => ({}) } });
+const props = defineProps({ task: { type: Object, default: () => ({}) }, standalone: Boolean });
 defineEmits(['close']);
 const display = useDisplay();
 const theme = useTheme();
+const router = useRouter();
 const isDarkTheme = computed(() => theme.global.current.value.dark);
 const activeTab = ref('logs'), logRef = ref(null);
 const keyword = ref(''), logFilter = ref('all'), following = ref(true), displayedLogs = ref([]);
@@ -79,26 +83,29 @@ function handleScroll() {
 <style scoped>
 .notification-center { --logging-shell-background:linear-gradient(180deg,var(--logging-shell-bg),rgba(var(--v-theme-surface),0.9)); --logging-shell-bg:rgba(var(--v-theme-surface),0.96); --logging-record-bg-even:rgba(var(--v-theme-surface-variant),0.01); --logging-record-bg-odd:rgba(var(--v-theme-surface-variant),0.005); --logging-border:rgba(var(--v-theme-on-surface),0.12); --logging-text:rgba(var(--v-theme-on-surface),0.88); display:flex; flex-direction:column; box-sizing:border-box; height:min(850px, calc(100dvh - 48px)); min-height:0; min-width:0; gap:16px; padding:24px; overflow:hidden; }
 .notification-center.is-dark-theme { --logging-shell-bg:rgba(var(--v-theme-surface),0.72); --logging-record-bg-even:rgba(var(--v-theme-on-surface),0.02); --logging-record-bg-odd:rgba(var(--v-theme-on-surface),0.008); --logging-shadow:inset 0 1px 0 rgba(255,255,255,0.04); }
-.notification-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-shrink:0; }
+.notification-center.is-standalone { height:100dvh; }
+.notification-heading { display:flex; align-items:center; gap:8px; flex-shrink:0; }
 .notification-heading :deep(.v-card-title) { white-space:normal; overflow-wrap:anywhere; }
+.logging-heading-action { color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,rgb(var(--v-theme-primary))); }
 .notification-tabs { flex-shrink:0; }
+.notification-tabs :deep(.v-tab--selected) { color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,rgb(var(--v-theme-primary))) !important; }
 .notification-live { display:flex; flex:1; flex-direction:column; min-height:0; min-width:0; gap:12px; overflow:hidden; }
 .logging-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; flex-shrink:0; }
 .logging-search { flex:1 1 9rem; min-inline-size:5rem; }
 .logging-level-select { flex:0 0 7rem; min-inline-size:7rem; }
 .logging-stream-action { color:var(--ui-text-muted); }
-.logging-stream-action.is-live { color:rgb(var(--v-theme-success)); }
+.logging-stream-action.is-live { color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,rgb(var(--v-theme-success))); }
 .logging-search :deep(.v-field), .logging-level-select :deep(.v-field) { border-radius:var(--app-field-radius); background:transparent !important; box-shadow:none !important; }
 .logging-search :deep(.v-field__outline), .logging-search :deep(.v-field__overlay), .logging-level-select :deep(.v-field__outline), .logging-level-select :deep(.v-field__overlay) { display:none; }
 .logging-search :deep(.v-field__input) { padding-inline-start:0; }
 .logging-level-select :deep(.v-field__input) { padding-inline:0; }
 .logging-level-toggle { flex:0 0 auto; overflow:hidden; border:1px solid rgba(var(--v-theme-on-surface),0.14); border-radius:var(--app-control-radius); background:transparent; block-size:2rem; box-shadow:none !important; }
 .logging-level-toggle :deep(.logging-level-toggle__button) { border-color:rgba(var(--v-theme-on-surface),0.1); border-radius:0; block-size:100%; color:var(--ui-text-muted); font-size:0.75rem; font-weight:600; letter-spacing:0; min-inline-size:auto; padding-inline:1.125rem; text-transform:none; }
-.logging-level-toggle :deep(.logging-level-toggle__button--debug) { color:rgb(var(--v-theme-secondary)); }
-.logging-level-toggle :deep(.logging-level-toggle__button--info) { color:rgb(var(--v-theme-success)); }
-.logging-level-toggle :deep(.logging-level-toggle__button--warning) { color:rgb(var(--v-theme-warning)); }
-.logging-level-toggle :deep(.logging-level-toggle__button--error) { color:rgb(var(--v-theme-error)); }
-.logging-level-toggle :deep(.logging-level-toggle__button--active) { background:rgba(var(--v-theme-primary),0.16); color:var(--ui-text); }
+.logging-level-toggle :deep(.logging-level-toggle__button--debug) { color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,rgb(var(--v-theme-secondary))); }
+.logging-level-toggle :deep(.logging-level-toggle__button--info) { color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,rgb(var(--v-theme-success))); }
+.logging-level-toggle :deep(.logging-level-toggle__button--warning) { color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,rgb(var(--v-theme-warning))); }
+.logging-level-toggle :deep(.logging-level-toggle__button--error) { color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,rgb(var(--v-theme-error))); }
+.logging-level-toggle :deep(.logging-level-toggle__button--active) { background:rgba(var(--v-theme-primary),0.16); color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,rgb(var(--v-theme-primary))); }
 .notification-log { position:relative; display:flex; flex-direction:column; gap:6px; flex:1 1 0; min-height:0; min-width:0; overflow:auto; overscroll-behavior:contain; padding:14px; border:1px solid var(--logging-border); background:var(--logging-shell-background); box-shadow:var(--logging-shadow); }
 .logging-empty { display:flex; align-items:center; justify-content:center; flex:1; gap:8px; color:var(--ui-text-muted); }
 .notification-footer { display:flex; align-items:center; flex-wrap:wrap; gap:8px; flex-shrink:0; }

@@ -295,6 +295,21 @@ test('a pristine editor reload keeps the separate current JSON retention directo
   assert.ok(f.context.mediaInfoSaveFeedback.value.details.some(detail => detail.includes(preservedDirectory)));
 });
 
+test('successful cleanup does not report a previously retained conflict backup as still present', async () => {
+  const f = fixture({ post: async () => ({ data: { ...result, conflict_backup_directories: [] } }) });
+  const changed = setConflict(f, { ...jsonConflictRecord(), conflict_backup_directories: [preservedDirectory] });
+  f.context.mediaOperationFeedback.value = { type: 'info', message: '当前 JSON 备份已保留', details: [preservedDirectory] };
+  f.context.mediaInfoSaveFeedback.value = f.context.mediaOperationFeedback.value;
+  f.context.mediaInfoData.value[0].MediaSourceInfo.MediaStreams[0].Title = '未保存草稿';
+  f.context.confirm(changed);
+  assert.match(f.dialogs[0].content, /完整验收后删除原恢复备份及关联的冲突 JSON 备份/);
+  await f.dialogs[0].onPositiveClick();
+  assert.equal(f.context.mediaOperationFeedback.value, null);
+  assert.equal(f.context.mediaInfoSaveFeedback.value.message, '恢复已完成，当前编辑草稿已保留');
+  assert.ok(f.context.mediaInfoSaveFeedback.value.details.every(detail => !detail.includes(preservedDirectory)));
+  assert.equal(f.context.mediaRecoveryState.value.pending, false);
+});
+
 test('a confirmation for an older shown JSON hash cannot submit after status changes', async () => {
   const f = fixture();
   f.context.confirm(setConflict(f));

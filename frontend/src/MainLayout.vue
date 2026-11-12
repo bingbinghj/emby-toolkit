@@ -514,7 +514,7 @@ const clearDragState = () => {
     </template>
     <template #navbar-actions>
       <VBtn v-if="authStore.isAdmin" icon variant="text" color="default" title="实时日志" aria-label="实时日志" @click="notificationOpen = true">
-        <VBadge :model-value="Boolean(taskStatus?.is_running)" color="primary" dot><VIcon icon="mdi-console-line" /></VBadge>
+        <VBadge :model-value="Boolean(taskStatus?.is_running)" color="primary" dot><VIcon icon="mdi-bell-outline" /></VBadge>
       </VBtn>
       <VBtn icon="mdi-palette-outline" color="default" variant="text" title="主题与壁纸" aria-label="主题与壁纸" @click="openThemeCustomizer" />
       <VMenu v-if="authStore.isLoggedIn" location="bottom end" offset="8">
@@ -625,7 +625,7 @@ const clearDragState = () => {
         <VAlert type="info" variant="tonal" density="compact">拖到分组之间可设为独立一级导航，拖入分组可设为二级导航。支持一级排序和跨组拖拽；关闭分组显示时，其下开启的菜单会提升为一级。</VAlert>
       </VCardText>
       <VCardActions><VBtn color="error" :loading="isSavingMenu" :disabled="isMenuLoading" prepend-icon="mdi-restore" @click="confirmResetMenu">恢复默认</VBtn>
-          <VSpacer /><VBtn class="menu-apply-button" color="default" variant="text" :loading="isSavingMenu" :disabled="!menuConfigLoaded" prepend-icon="mdi-content-save-outline" @click="saveMenuConfig">保存</VBtn>
+          <VSpacer /><VBtn class="menu-apply-button" color="primary" variant="flat" :loading="isSavingMenu" :disabled="!menuConfigLoaded" prepend-icon="mdi-content-save-outline" @click="saveMenuConfig">保存</VBtn>
       </VCardActions>
     </VCard>
   </VDialog>

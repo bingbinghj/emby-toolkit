@@ -1,7 +1,7 @@
 import { test, expect } from './fixtures.js';
 
 const dashboard = {
-  statistics: { movie_count: { count: 772 }, tv_count: { count: 208 }, episode_count: { count: 13781 }, music_count: { count: 3 } },
+  statistics: { movie_count: { count: 772 }, tv_count: { count: 208 }, episode_count: { count: 13781 } },
   recent: [{ id: '101', name: '最新入库电影', item_type: 'Movie', production_year: 2026, image_tag: 'poster-tag' }],
   libraries: [{ id: 'movies', name: '我的电影', collection_type: 'movies', image_tag: 'library-composite', item_count: 772 }], errors: {},
 };
@@ -19,6 +19,8 @@ test('dashboard shows actual 115 space, Emby statistics and navigable Emby cover
   await expect(page.getByText('已使用 50.0%', { exact: true })).toBeVisible();
   await expect(page.getByTestId('dashboard-movie_count')).toHaveText('772');
   await expect(page.getByTestId('dashboard-episode_count')).toHaveText('13,781');
+  await expect(page.getByTestId('dashboard-music_count')).toHaveCount(0);
+  await expect(page.locator('[data-dashboard-module="statistics"]').getByText('音乐', { exact: true })).toHaveCount(0);
   const recent = page.getByRole('link', { name: '编辑最新入库电影', exact: true });
   await expect(recent).toHaveAttribute('href', '/edit-media/101');
   await expect(recent.locator('img')).toHaveAttribute('src', /\/image_proxy\/Items\/101\/Images\/Primary.*poster-tag/);
@@ -252,7 +254,7 @@ test('module drag handles become available only during layout editing', async ({
 });
 
 
-test('latest series use the MP gradient and keep long titles inside safe rounded insets', async ({ page, api }, testInfo) => {
+test('latest series use theme colors and keep long titles inside safe rounded insets', async ({ page, api }, testInfo) => {
   const name = '这是完整的最新入库电视剧名称，需要两行显示以避免被圆角裁切';
   api.respond('GET', '/api/dashboard/media', { ...dashboard, recent: [{ id: 'latest-series', name, item_type: 'Series', production_year: 2026, image_tag: 'latest-series-poster' }] });
   await page.goto('/dashboard');
@@ -260,7 +262,7 @@ test('latest series use the MP gradient and keep long titles inside safe rounded
   await expect(card).toHaveAttribute('href', '/edit-media/latest-series');
   await expect(card.locator('.dashboard-poster-title')).toHaveAttribute('title', name);
   await expect(card.locator('.dashboard-poster-subtitle')).toHaveText('2026');
-  await expect(card.locator('.dashboard-media-type .v-chip__content')).toHaveCSS('color', 'rgb(255, 255, 255)');
+  await expect(card.locator('.dashboard-media-type')).toHaveClass(/bg-primary/);
   await card.hover();
   await expect(card.locator('.dashboard-poster-overlay')).toHaveCSS('opacity', '1');
   const geometry = await card.evaluate(element => {
@@ -268,14 +270,15 @@ test('latest series use the MP gradient and keep long titles inside safe rounded
     const overlay = element.querySelector('.dashboard-poster-overlay');
     const title = element.querySelector('.dashboard-poster-title').getBoundingClientRect();
     const bounds = element.getBoundingClientRect();
-    return { imageBottom: image.bottom, titleBottom: title.bottom, titleLeft: title.left, titleRight: title.right, cardBottom: bounds.bottom, cardLeft: bounds.left, cardRight: bounds.right, gradient: getComputedStyle(overlay).backgroundImage, color: getComputedStyle(element.querySelector('.dashboard-poster-title')).color, radius: getComputedStyle(element).borderRadius };
+    const themeForeground = getComputedStyle(element).getPropertyValue('--v-theme-on-surface').split(',').map(value => value.trim()).join(', ');
+    return { imageBottom: image.bottom, titleBottom: title.bottom, titleLeft: title.left, titleRight: title.right, cardBottom: bounds.bottom, cardLeft: bounds.left, cardRight: bounds.right, gradient: getComputedStyle(overlay).backgroundImage, color: getComputedStyle(element.querySelector('.dashboard-poster-title')).color, themeForeground: `rgb(${themeForeground})`, radius: getComputedStyle(element).borderRadius };
   });
   expect(geometry.titleBottom).toBeLessThanOrEqual(geometry.cardBottom - 20);
   expect(geometry.titleLeft).toBeGreaterThanOrEqual(geometry.cardLeft + 8);
   expect(geometry.titleRight).toBeLessThanOrEqual(geometry.cardRight - 8);
   expect(Math.abs(geometry.imageBottom - geometry.cardBottom)).toBeLessThanOrEqual(2);
   expect(geometry.gradient).toContain('linear-gradient');
-  expect(geometry.color).toBe('rgb(255, 255, 255)');
+  expect(geometry.color).toBe(geometry.themeForeground);
   expect(parseFloat(geometry.radius)).toBeGreaterThan(0);
   await page.screenshot({ path: testInfo.outputPath('latest-long-title.png'), fullPage: true });
   await expect(page.locator('.dashboard-fab-stack')).toHaveCSS('position', 'fixed');
@@ -450,7 +453,7 @@ test('narrow GridStack summary widgets keep statistics and 115 capacities inside
       return bounds.left >= rect.left && bounds.right <= rect.right && bounds.top >= rect.top && bounds.bottom <= rect.bottom;
     });
   })).toBe(true);
-  await expect(statistics.locator('.v-avatar')).toHaveCount(4);
+  await expect(statistics.locator('.v-avatar')).toHaveCount(3);
   for (const avatar of await statistics.locator('.v-avatar').all()) await expect(avatar).toBeVisible();
   const storage = page.locator('[data-dashboard-module="storage"] .dashboard-card');
   await expect(storage.locator('.storage-icon')).toBeHidden();

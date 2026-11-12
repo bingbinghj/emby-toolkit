@@ -7,6 +7,9 @@ const configurationWrites = api => api.requests.filter(request => request.method
 test('MP media server card supports keyboard editing and a scrolling full screen mobile dialog', async ({ page, api }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/settings/general?tab=system');
+  await expect(card(page).getByLabel(/音乐数量/)).toHaveCount(0);
+  await expect(card(page).getByLabel(/电影数量/)).toBeVisible();
+  await expect(card(page).getByLabel(/电视剧数量/)).toBeVisible();
   await card(page).focus();
   await card(page).press('Enter');
   let dialog = editor(page);

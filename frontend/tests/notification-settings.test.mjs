@@ -12,13 +12,13 @@ function fixture({ save = async () => true, post = async () => ({ data: { messag
     authStore: { user, isLoggedIn: true, accountInfo: {}, fetchAccountInfo: account },
     configModel: { value: { telegram_bot_token: 'fixture-token', telegram_channel_id: '@fixture', telegram_notify_types: ['library_new'], telegram_enabled: true, telegram_channel_name: 'Telegram', telegram_topic_id: '', telegram_users: '', telegram_admins: '', telegram_api_url: '', notification_scope: { library_new: 'admin', recognize_fail: 'admin' }, notification_time: { start: '00:00', end: '23:59' }, unrelated: 'keep' } },
     channelDraft: { value: null }, telegramChatId: { value: '456' }, loading: { value: false }, accountError: { value: '' }, configError: { value: '' },
-    isSavingChatId: { value: false }, isTestingTelegram: { value: false }, isFetchingBotLink: { value: false },
-    canSave: { value: true }, canTest: { value: true }, busy: { value: false },
+    isSavingChatId: { value: false }, isTestingTelegram: { value: false }, isFetchingBotLink: { value: false }, savingCard: { value: '' },
+    canSave: { value: true }, canSaveConfig: { value: true }, canTest: { value: true }, busy: { value: false },
     handleSaveConfig: async payload => { calls.push({ path: '/api/config', payload: plain(payload) }); return save(payload); },
     axios: { post: async (path, payload) => { calls.push({ path, payload: plain(payload) }); return post(path, payload); } },
     message: { success: text => messages.push({ type: 'success', text }), error: text => messages.push({ type: 'error', text }) },
   });
-  vm.runInContext(`const isCurrentAccount = user => pageActive && authStore.isLoggedIn && authStore.user === user;\n${['loadAccount', 'saveChatId', 'testTelegram', 'openBotChat'].map(name => source.match(new RegExp(`^const ${name} = async \\(\\) => \\{[\\s\\S]*?^};`, 'm'))?.[0] || (() => { throw new Error(`Missing handler ${name}`); })()).join('\n')}\nthis.load = loadAccount; this.save = saveChatId; this.test = testTelegram; this.openBot = openBotChat;`, context);
+  vm.runInContext(`const isCurrentAccount = user => pageActive && authStore.isLoggedIn && authStore.user === user;\n${['loadAccount', 'saveChatId', 'testTelegram', 'openBotChat'].map(name => source.match(new RegExp(`^const ${name} = async \\(\\) => \\{[\\s\\S]*?^};`, 'm'))?.[0] || (() => { throw new Error(`Missing handler ${name}`); })()).join('\n')}\n${source.match(/^const saveNotificationCard = async \(field\) => \{[\s\S]*?^};/m)[0]}\nthis.load = loadAccount; this.save = saveChatId; this.saveCard = saveNotificationCard; this.test = testTelegram; this.openBot = openBotChat;`, context);
   return { context, calls, messages, opened };
 }
 
@@ -26,7 +26,7 @@ test('notification save submits only notification fields then the selected perso
   const f = fixture();
   await f.context.save();
   assert.deepEqual(f.calls, [
-    { path: '/api/config', payload: { telegram_bot_token: 'fixture-token', telegram_channel_id: '@fixture', telegram_notify_types: ['library_new'], telegram_enabled: true, telegram_channel_name: 'Telegram', telegram_topic_id: '', telegram_users: '', telegram_admins: '', telegram_api_url: '', notification_scope: { library_new: 'admin', recognize_fail: 'admin' }, notification_time: { start: '00:00', end: '23:59' } } },
+    { path: '/api/config', payload: { telegram_bot_token: 'fixture-token', telegram_channel_id: '@fixture', telegram_notify_types: ['library_new'], telegram_enabled: true, telegram_channel_name: 'Telegram', telegram_topic_id: '', telegram_users: '', telegram_admins: '', telegram_api_url: '' } },
     { path: '/api/portal/telegram-chat-id', payload: { chat_id: '456' } },
   ]);
   assert.equal(f.context.authStore.accountInfo.telegram_chat_id, '456');
@@ -114,16 +114,69 @@ test('notification test uses dialog drafts and cannot silently substitute saved 
   assert.deepEqual(f.calls, [{ path: '/api/telegram/test', payload: { token: 'draft-token', chat_id: '@draft-channel', api_url: '', topic_id: '' } }]);
 });
 
-test('notification save removes the nonfunctional intercept switch while preserving real scope and time', async () => {
+test('channel save filters unsupported types and leaves other card drafts unsaved', async () => {
   const f = fixture();
   f.context.configModel.value.telegram_notify_types = ['library_new', 'recognize_fail', 'intercept_notify'];
   f.context.configModel.value.notification_scope.library_new = 'all';
   f.context.configModel.value.notification_time = { start: '23:00', end: '06:00' };
   await f.context.save();
   assert.deepEqual(f.calls[0].payload.telegram_notify_types, ['library_new', 'recognize_fail']);
-  assert.equal(f.calls[0].payload.notification_scope.library_new, 'all');
-  assert.deepEqual(f.calls[0].payload.notification_time, { start: '23:00', end: '06:00' });
+  assert.equal(Object.hasOwn(f.calls[0].payload, 'notification_scope'), false);
+  assert.equal(Object.hasOwn(f.calls[0].payload, 'notification_time'), false);
+  assert.equal(f.context.configModel.value.notification_scope.library_new, 'all');
+  assert.deepEqual(plain(f.context.configModel.value.notification_time), { start: '23:00', end: '06:00' });
   assert.equal(Object.hasOwn(f.calls[0].payload, 'unrelated'), false);
+});
+
+for (const field of ['notification_scope', 'notification_time']) {
+  test(`${field} saves only its own card and does not write a personal chat ID`, async () => {
+    const f = fixture();
+    f.context.canSave.value = false;
+    f.context.accountError.value = '个人账号读取失败';
+    const draft = plain(f.context.configModel.value[field]);
+    await f.context.saveCard(field);
+    assert.deepEqual(f.calls, [{ path: '/api/config', payload: { [field]: draft } }]);
+    assert.equal(f.messages.at(-1).type, 'success');
+    assert.equal(f.context.savingCard.value, '');
+  });
+
+  test(`${field} keeps drafts and can retry after a failed save`, async () => {
+    let succeeds = false;
+    const f = fixture({ save: async () => succeeds });
+    f.context.configError.value = '模拟卡片写入失败';
+    const draft = plain(f.context.configModel.value[field]);
+    await f.context.saveCard(field);
+    assert.deepEqual(plain(f.context.configModel.value[field]), draft);
+    assert.equal(f.context.savingCard.value, '');
+    assert.match(f.messages.at(-1).text, /模拟卡片写入失败/);
+    succeeds = true;
+    await f.context.saveCard(field);
+    assert.equal(f.calls.length, 2);
+    assert.equal(f.messages.at(-1).type, 'success');
+  });
+}
+
+test('unknown, unread or busy notification cards never submit writes', async () => {
+  const f = fixture();
+  await f.context.saveCard('telegram_bot_token');
+  f.context.canSaveConfig.value = false;
+  await f.context.saveCard('notification_scope');
+  f.context.canSaveConfig.value = true;
+  f.context.busy.value = true;
+  await f.context.saveCard('notification_time');
+  assert.deepEqual(f.calls, []);
+});
+
+test('a late notification card save cannot display feedback for a new account', async () => {
+  let release;
+  const f = fixture({ save: () => new Promise(resolve => { release = resolve; }) });
+  const saving = f.context.saveCard('notification_scope');
+  assert.equal(f.context.savingCard.value, 'notification_scope');
+  f.context.authStore.user = { id: 'new-user' };
+  release(true);
+  await saving;
+  assert.deepEqual(f.messages, []);
+  assert.equal(f.context.savingCard.value, '');
 });
 
 

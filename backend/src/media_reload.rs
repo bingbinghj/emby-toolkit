@@ -1369,8 +1369,8 @@ fn ensure_target_unfiltered(target: &SavedTarget, live: &Value) -> Result<()> {
 }
 
 async fn ensure_sync_supported(state: &AppState, settings: &Value) -> Result<()> {
-    // PRO 3.0.0.57 synchronously applies only the first bundle from a nonempty
-    // request body. An empty array does not import the target's JSON file.
+    // PRO reads the first nonempty Bundle, but its importer can return early
+    // for complete native information. Its response serializes current data.
     if settings["IsModSupported"] != true {
         return Err(conflict("神医当前未支持原生章节恢复，未提交媒体信息同步"));
     }
@@ -1398,7 +1398,7 @@ async fn sync_one(
     payload: Value,
     context: &JobContext,
     before: &Value,
-) -> Result<()> {
+) -> Result<Value> {
     let live = identity_details(state, target).await?;
     ensure_target_unfiltered(target, &live)?;
     if METADATA_FIELDS
@@ -1441,7 +1441,134 @@ async fn sync_one(
         "[媒体信息重载] 媒体ID {} 原生 JSON 同步已返回，继续验收媒体流、章节和图片",
         target.id
     );
+    Ok(restored)
+}
+
+async fn ensure_single_clear_scope(
+    state: &AppState,
+    target: &SavedTarget,
+    live: &Value,
+    context: &JobContext,
+) -> Result<()> {
+    let refuse = || conflict("神医未导入编辑值，关联清理范围不是唯一当前媒体，未清理任何项目");
+    let key = string(live, "PresentationUniqueKey");
+    if key.is_empty()
+        || !matches!(live["Type"].as_str(), Some("Movie" | "Episode"))
+        || !string(live, "ExtraType").is_empty()
+        || live["PartCount"].as_u64() != Some(1)
+    {
+        return Err(refuse());
+    }
+    // The public Items API has no PresentationUniqueKey query parameter.
+    // Read an unfiltered, complete native inventory before trusting uniqueness.
+    let items = crate::emby::query_items(
+        state,
+        &[
+            ("Recursive", "true".into()),
+            (
+                "IncludeItemTypes",
+                "Movie,Episode,Video,MusicVideo,Audio".into(),
+            ),
+            ("Fields", "Path,PresentationUniqueKey,ExtraType".into()),
+            ("EnableImages", "false".into()),
+            ("EnableUserData", "false".into()),
+            ("GroupItemsIntoCollections", "false".into()),
+        ],
+        context,
+    )
+    .await?;
+    if items
+        .iter()
+        .any(|item| string(item, "PresentationUniqueKey").is_empty())
+    {
+        return Err(refuse());
+    }
+    let members = items
+        .iter()
+        .filter(|item| item["PresentationUniqueKey"] == key && string(item, "ExtraType").is_empty())
+        .collect::<Vec<_>>();
+    if members.len() != 1 || members[0]["Id"] != target.id || members[0]["Path"] != target.path {
+        return Err(refuse());
+    }
+    let sources = live["MediaSources"].as_array().ok_or_else(refuse)?;
+    if sources.len() != 1
+        || !media_info::item_source(
+            live,
+            &[&target.path, target.source.as_deref().unwrap_or("")],
+        )
+        .is_some_and(|source| source == &sources[0])
+    {
+        return Err(refuse());
+    }
+    // Inspect the unfiltered native response: the editor helper applies a
+    // UserId and drops malformed rows, so it cannot prove an empty clear scope.
+    let parts = state
+        .emby(
+            Method::GET,
+            &format!("Videos/{}/AdditionalParts", target.id),
+            &[],
+            None,
+        )
+        .await?;
+    if !parts["Items"].as_array().is_some_and(Vec::is_empty)
+        || parts["TotalRecordCount"].as_u64() != Some(0)
+    {
+        return Err(refuse());
+    }
+    let user_id = string(&*state.config.read().await, "emby_user_id");
+    let user = state
+        .emby(Method::GET, &format!("Users/{user_id}"), &[], None)
+        .await?;
+    let policy = &user["Policy"];
+    if user["Id"] != user_id
+        || policy["IsAdministrator"] != true
+        || !policy["MaxParentalRating"].is_null()
+        || !policy["BlockUnratedItems"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+        || !policy["BlockedTags"].as_array().is_some_and(Vec::is_empty)
+        || policy["IsTagBlockingModeInclusive"] != false
+        || policy["AllowTagOrRating"] != false
+    {
+        return Err(refuse());
+    }
+    let extras = state
+        .emby(
+            Method::GET,
+            &format!("Users/{user_id}/Items/{}/SpecialFeatures", target.id),
+            &[],
+            None,
+        )
+        .await?;
+    if !extras.as_array().is_some_and(Vec::is_empty) {
+        return Err(refuse());
+    }
     Ok(())
+}
+
+async fn restore_bridge(bridge: &crate::chapter_bif::Bridge) -> Result<()> {
+    check_ancestors(&bridge.destination).await?;
+    let bytes = tokio::fs::read(&bridge.source).await?;
+    match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&bridge.destination)
+        .await
+    {
+        Ok(mut file) => {
+            file.write_all(&bytes).await?;
+            file.sync_all().await?;
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if tokio::fs::read(&bridge.destination).await? == bytes {
+                Ok(())
+            } else {
+                Err(conflict("BIF 旁车已由其它操作创建，保留用户文件及恢复备份"))
+            }
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn thumbnail_times(response: &Value) -> Result<Value> {
@@ -1713,12 +1840,12 @@ pub(crate) async fn reload(
             thumbnails.insert(target.id.clone(), thumbnail_times(&before)?);
         }
     }
-    let root = if thumbnails.is_empty()
-        && !affected.iter().any(|target| {
-            media_edit::list(&observations[&target.id]["Chapters"])
-                .iter()
-                .any(|c| !string(c, "ImageTag").is_empty())
-        }) {
+    // A no-op Sync may require resetting a single verified native item. Protect
+    // its whole metadata directory, including images without chapter thumbnails.
+    let root = if affected
+        .iter()
+        .all(|target| observations[&target.id]["Type"] == "Audio")
+    {
         None
     } else {
         let configured = string(&*state.config.read().await, "emby_metadata_path");
@@ -1897,28 +2024,7 @@ pub(crate) async fn reload(
                 if !json_unchanged(&bridge.destination, &bridge.source, &files).await? {
                     return Err(conflict("BIF 旁车在同步前被修改，保留用户新文件及恢复备份"));
                 }
-                check_ancestors(&bridge.destination).await?;
-                let bytes = tokio::fs::read(&bridge.source).await?;
-                match tokio::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&bridge.destination)
-                    .await
-                {
-                    Ok(mut file) => {
-                        file.write_all(&bytes).await?;
-                        file.sync_all().await?;
-                        Ok(())
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                        if tokio::fs::read(&bridge.destination).await? == bytes {
-                            Ok(())
-                        } else {
-                            Err(conflict("BIF 旁车已由其它操作创建，保留用户文件及恢复备份"))
-                        }
-                    }
-                    Err(error) => Err(error.into()),
-                }
+                restore_bridge(bridge).await
             }
             .await;
             if let Err(error) = restored {
@@ -1961,6 +2067,10 @@ pub(crate) async fn reload(
             .filter(|t| ready.contains(&t.id))
             .copied()
             .collect::<Vec<_>>();
+        let resource_files = files
+            .into_iter()
+            .filter(|(path, _)| !formal_paths.contains(path))
+            .collect::<BTreeMap<_, _>>();
         let mut synchronized = BTreeSet::new();
         for target in &ready {
             let synced = async {
@@ -1982,14 +2092,122 @@ pub(crate) async fn reload(
                 }
                 let payload: Value = serde_json::from_slice(&bytes)
                     .map_err(|_| conflict("已保护的同步 JSON 无效，恢复备份已保留"))?;
-                sync_one(
+                let restored = sync_one(
                     state,
                     target,
-                    payload,
+                    payload.clone(),
                     &recovery_context,
                     &observations[&target.id],
                 )
-                .await
+                .await?;
+                let mut reported = restored[0]["MediaSourceInfo"].clone();
+                reported["Chapters"] = restored[0]["Chapters"].clone();
+                if !differences(target, &reported).is_empty() {
+                    let live = identity_details(state, target).await?;
+                    if !differences(target, &live).is_empty() {
+                        let current = identity_details(state, target).await?;
+                        if METADATA_FIELDS
+                            .iter()
+                            .chain(
+                                [
+                                    "PresentationUniqueKey",
+                                    "PartCount",
+                                    "ExtraType",
+                                    "MediaSources",
+                                    "MediaStreams",
+                                    "Chapters",
+                                ]
+                                .iter(),
+                            )
+                            .any(|field| current[*field] != observations[&target.id][*field])
+                        {
+                            return Err(conflict(
+                                "媒体或关联范围在重导入准备期间变化，未清理媒体信息",
+                            ));
+                        }
+                        let response_bytes = serde_json::to_vec(&restored).unwrap();
+                        check_ancestors(path).await?;
+                        let observed_json = current_json(path)
+                            .await?
+                            .ok_or_else(|| conflict("JSON 在同步返回后丢失，未清理媒体信息"))?;
+                        if !json_equivalent(&observed_json, &response_bytes, path)? {
+                            return Err(conflict(
+                                "JSON 在同步返回后被修改，保留用户新文件及恢复备份，未清理媒体信息",
+                            ));
+                        }
+                        for resource in resource_files
+                            .values()
+                            .filter(|resource| resource.owners.contains(&target.id))
+                        {
+                            writable_parent(&resource.path).await?;
+                            if !tokio::fs::symlink_metadata(&resource.path).await?.is_file()
+                                || tokio::fs::read(&resource.path).await?
+                                    != tokio::fs::read(&resource.backup).await?
+                            {
+                                return Err(conflict(
+                                    "恢复资源在重导入准备期间变化，未清理媒体信息",
+                                ));
+                            }
+                        }
+                        recovery_context
+                            .activity(
+                                "重新导入当前媒体信息",
+                                &format!(
+                                    "媒体ID {}：神医返回旧值，已保护原资源，正在核对唯一目标",
+                                    target.id
+                                ),
+                            )
+                            .await;
+                        ensure_single_clear_scope(state, target, &current, &recovery_context).await?;
+                        // ClearMediaInfo expands by presentation key and extras.
+                        // It is only allowed after proving that scope is this
+                        // single protected file; no unrequested sibling is reset.
+                        let cleared = state
+                            .emby_once(
+                                Method::POST,
+                                &format!("Items/{}/ClearMediaInfo", target.id),
+                                &[],
+                                None,
+                            )
+                            .await;
+                        // Once Clear was submitted, attempt every local recovery
+                        // even when its HTTP result or a JSON guard fails.
+                        let mut recovery_failures = vec![];
+                        let json_restored = async {
+                            let after_clear_json = current_json(path).await?;
+                            if let Some(current) = &after_clear_json
+                                && !json_equivalent(current, &response_bytes, path)?
+                            {
+                                return Err(conflict("JSON 在当前媒体清理期间变化，已保留用户文件及恢复备份"));
+                            }
+                            restore_json_guarded(path, backup, after_clear_json.as_deref()).await
+                        }.await;
+                        if let Err(error) = json_restored {
+                            recovery_failures.push(error.1);
+                        }
+                        if let Err(error) = restore_files(&resource_files, &BTreeSet::from([target.id.clone()])).await {
+                            recovery_failures.push(error.1);
+                        }
+                        for (_, bridge) in bridges.iter().filter(|(id, _)| *id == target.id) {
+                            if let Err(error) = restore_bridge(bridge).await {
+                                recovery_failures.push(error.1);
+                            }
+                        }
+                        if !recovery_failures.is_empty() {
+                            if let Err(error) = &cleared { recovery_failures.push(error.1.clone()); }
+                            return Err(conflict(recovery_failures.join("；")));
+                        }
+                        if let Err(error) = cleared {
+                            cache_warnings.push(format!(
+                                "{}：原生清理请求未正常返回，已保护资源并按实际身份继续补救同步：{}",
+                                target.id, error.1
+                            ));
+                        }
+                        let empty = identity_details(state, target).await?;
+                        sync_one(state, target, payload, &recovery_context, &empty).await?;
+                    }
+                }
+                Ok(())
             }
             .await;
             if let Err(error) = synced {
@@ -2001,10 +2219,6 @@ pub(crate) async fn reload(
                 synchronized.insert(target.id.clone());
             }
         }
-        let resource_files = files
-            .into_iter()
-            .filter(|(path, _)| !formal_paths.contains(path))
-            .collect::<BTreeMap<_, _>>();
         if let Err(error) = restore_files(&resource_files, &synchronized).await {
             failures.push(error.1);
         }
@@ -2090,7 +2304,7 @@ pub(crate) async fn reload(
             affected.len()
         );
         for warning in warnings {
-            tracing::warn!("[媒体信息重载] 原生媒体信息已确认，但缓存未全部同步：{warning}");
+            tracing::warn!("[媒体信息重载] 原生媒体信息已确认，仍有处理提醒：{warning}");
         }
     } else if let Err(error) = &outcome {
         tracing::warn!(

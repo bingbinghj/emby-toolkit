@@ -3,7 +3,7 @@
     <time v-if="records[0].timestamp" class="log-record-time">{{ records[0].timestamp.replace(/[,\.]\d+$/, '').replaceAll('-', '/') }}</time>
     <span v-else aria-hidden="true" />
     <div class="log-record-panel" :class="`is-${stripe}`">
-      <span class="log-record-accent" :class="{ 'is-burst': records.length > 1 }" aria-hidden="true" />
+      <span class="log-record-accent" aria-hidden="true" />
       <div class="log-record-lines">
         <div v-for="(record, recordIndex) in records" :key="recordIndex" class="log-record-line">
           <span v-if="record.level !== 'PLAIN'" class="log-record-level">{{ record.level }}:</span>
@@ -30,19 +30,19 @@ const records = computed(() => (props.lines.length ? props.lines : [props.line])
 <style scoped>
 .log-record { --log-accent: var(--ui-text-muted); display:grid; grid-template-columns:11rem minmax(0,1fr); align-items:start; flex-shrink:0; min-width:0; color:var(--ui-text); font:0.8125rem/1.6 'JetBrains Mono', 'Fira Code', Consolas, monospace; }
 .log-record-line { display:flex; align-items:flex-start; flex-wrap:wrap; gap:4px 12px; min-width:0; color:var(--ui-text); }
-.log-record-time { padding-block:10px; font-weight:600; line-height:1.5; color:inherit; overflow-wrap:anywhere; }
-.log-record-level { flex:0 0 4rem; min-width:4rem; font-weight:700; color:inherit; }
+.log-record-time { padding-block:10px; font-weight:600; line-height:1.5; color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,var(--ui-primary-text)); overflow-wrap:anywhere; }
+.log-record-level { flex:0 0 4rem; min-width:4rem; font-weight:700; color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,var(--log-accent)); }
 .log-record-file, .log-record-module { min-width:0; max-width:100%; overflow-wrap:anywhere; }
 .log-record-inline-time { color:inherit; }
 .log-record-panel { display:flex; align-items:stretch; gap:12px; padding:8px; min-width:0; border:1px solid rgba(var(--v-theme-on-surface),0.08); border-radius:var(--app-surface-radius, 12px); background:var(--logging-record-bg-even,var(--ui-surface-muted)); }
 .log-record-panel.is-odd { background:var(--logging-record-bg-odd,var(--ui-surface-muted)); }
-.log-record-accent { flex:0 0 8px; width:8px; height:8px; margin-top:7px; border-radius:50%; background:var(--log-accent); }
-.log-record-accent.is-burst { align-self:stretch; height:auto; margin-top:0; }
+.log-record-accent { flex:0 0 8px; width:8px; align-self:stretch; border-radius:2px; background:var(--log-accent); }
 .log-record-lines { display:flex; flex:1 1 auto; flex-direction:column; gap:2px; min-width:0; }
 .log-record-body { flex:1 1 10rem; min-width:0; margin:0; color:var(--logging-text,var(--ui-text)); white-space:pre-wrap; overflow-wrap:anywhere; }
 .log-record[data-level="WARNING"] { --log-accent:var(--ui-warning-text); }
 .log-record[data-level="ERROR"], .log-record[data-level="CRITICAL"] { --log-accent:var(--ui-error-text); }
-.log-record[data-level="INFO"] { --log-accent:rgb(var(--v-theme-success)); }
+.log-record[data-level="INFO"] { --log-accent:var(--ui-success-text); }
+.log-record[data-level="TRACE"], .log-record[data-level="DEBUG"] { --log-accent:rgb(var(--v-theme-secondary)); }
 mark { background:var(--ui-primary-solid); color:var(--ui-on-primary); border-radius:2px; padding:0 1px; }
 @media (max-width:960px) { .log-record { grid-template-columns:9.5rem minmax(0,1fr); gap:6px; } .log-record-level { flex-basis:4.75rem; min-width:4.75rem; } }
 @media (max-width:640px) { .log-record { grid-template-columns:minmax(0,1fr); gap:4px; } .log-record-time { padding-block:0; } .log-record > span[aria-hidden] { display:none; } .log-record-panel { padding-inline:10px; } .log-record-line { gap:8px; } }

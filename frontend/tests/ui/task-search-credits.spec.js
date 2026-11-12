@@ -80,13 +80,13 @@ test('movie editor hides credits extraction and renders save as an icon plus tex
   await page.goto('/edit-media/101');
   await expect(page.getByTestId('episode-extract-credits')).toHaveCount(0);
   const actorSave = page.locator('.media-edit-page .editor-actions').getByRole('button', { name: '保存', exact: true });
-  await expect(actorSave).toHaveClass(/v-btn--variant-text/);
+  await expect(actorSave).toHaveClass(/v-btn--variant-flat/);
   await expect(actorSave.locator('.v-btn__prepend .v-icon')).toBeVisible();
   await page.getByTestId('media-info-open').click();
   await expect(page.getByTestId('media-info-extract-credits')).toHaveCount(0);
   const save = page.getByTestId('media-info-save');
   await expect(save).toHaveText('保存');
-  await expect(save).toHaveClass(/v-btn--variant-text/);
+  await expect(save).toHaveClass(/v-btn--variant-flat/);
   await expect(save.locator('.v-btn__prepend .v-icon')).toBeVisible();
   await expect(save).toBeEnabled();
 });
@@ -151,6 +151,22 @@ test('series editor extracts only the selected episode rather than the series id
   await expect(page.getByTestId('media-info-credits-feedback')).toContainText('已提取第九集片尾');
   expect(api.requests.filter(request => request.method === 'POST' && request.path.endsWith('/extract_credits')).map(request => request.path)).toEqual(['/api/media/102/extract_credits']);
 });
+
+for (const [kind, id, label] of [['Series', '201', '整部电视剧'], ['Season', '202', '当前季']]) {
+  test(`${kind} detail button extracts the full selected scope`, async ({ page, api }) => {
+    api.respond('GET', `/api/media_for_editing/${id}`, { ...mediaDetails, item_id: id, item_type: kind, item_name: '测试电视剧' });
+    api.queueTask('POST', `/api/media/${id}/extract_credits`, { message: `已验收${label}片尾`, failed: 0, updated: 2 });
+    await page.goto(`/edit-media/${id}`);
+    const extract = page.getByTestId('scope-extract-credits');
+    await expect(extract).toHaveText(`提取${label}片尾`);
+    await expect(extract).toBeEnabled();
+    await extract.click();
+    await expect(extract).toBeDisabled();
+    await expect(page.getByTestId('credits-extraction-feedback')).toContainText(`已验收${label}片尾`);
+    await expect(extract).toBeEnabled();
+    expect(api.requests.filter(request => request.method === 'POST' && request.path.endsWith('/extract_credits')).map(request => request.path)).toEqual([`/api/media/${id}/extract_credits`]);
+  });
+}
 
 
 test('episode detail button extracts that episode and reports verified completion', async ({ page, api }) => {

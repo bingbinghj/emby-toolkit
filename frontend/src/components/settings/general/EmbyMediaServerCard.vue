@@ -16,7 +16,6 @@ let requestVersion = 0;
 const counts = computed(() => [
   { icon: 'mdi-movie-roll', title: '电影', value: formatDashboardCount(statistics.value?.movie_count?.count) },
   { icon: 'mdi-television-box', title: '电视剧', value: formatDashboardCount(statistics.value?.tv_count?.count) },
-  { icon: 'mdi-music-box-multiple', title: '音乐', value: formatDashboardCount(statistics.value?.music_count?.count) },
 ]);
 watch(() => [props.ready, props.refreshKey], async () => {
   const version = ++requestVersion;
@@ -39,7 +38,7 @@ function edit() { if (!props.disabled) emit('edit'); }
 
 <template>
   <VCard variant="tonal" class="app-card-shell app-card-colorful emby-media-server-card"
-    style="--app-card-accent-rgb:86,202,0" role="button" tabindex="0"
+    style="--app-card-accent-rgb:var(--v-theme-success)" role="button" tabindex="0"
     aria-label="编辑 Emby 媒体服务器" :aria-disabled="disabled" :disabled="disabled"
     @click="edit" @keydown.self.enter.prevent="edit" @keydown.self.space.prevent="edit">
     <VIcon class="media-server-edit" icon="mdi-pencil-outline" size="18" aria-hidden="true" />
@@ -63,7 +62,7 @@ function edit() { if (!props.disabled) emit('edit'); }
 <style scoped>
 .emby-media-server-card { cursor:pointer; min-width:0; }
 .media-server-edit { position:absolute; top:12px; right:12px; color:var(--ui-text-muted); }
-.media-server-counts { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; min-height:24px; }
+.media-server-counts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; min-height:24px; }
 .media-server-counts > span { display:flex; align-items:center; min-width:0; }
 .media-server-count { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 html[data-theme='glass'][data-glass-color-scheme='dark'] .app-card-summary { background-color:rgba(var(--v-theme-surface),0.2); }

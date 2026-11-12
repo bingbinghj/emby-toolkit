@@ -256,12 +256,7 @@ fn frontend_entry(text: &str) -> Option<String> {
     if parts.len() != 4 || !matches!(parts[2], "INFO" | "WARNING" | "ERROR" | "CRITICAL") {
         return None;
     }
-    Some(format!(
-        "[{}] [{}] {}",
-        parts[0].get(11..19)?,
-        parts[2],
-        parts[3]
-    ))
+    Some(text.trim_end().to_string())
 }
 #[derive(Clone)]
 pub struct LogWriter(pub Arc<LogStore>);

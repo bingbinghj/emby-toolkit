@@ -47,7 +47,6 @@ pub async fn monthly_statistics(
         .bind(start).bind(end).fetch_all(&state.db).await?;
     let mut movies = BTreeSet::new();
     let mut shows = BTreeSet::new();
-    let mut music = BTreeSet::new();
     let mut episodes = 0_u64;
     for item in records {
         let year = item["production_year"]
@@ -90,9 +89,6 @@ pub async fn monthly_statistics(
                 });
                 episodes += 1;
             }
-            Some("Audio") => {
-                music.insert(fallback);
-            }
             _ => {}
         }
     }
@@ -104,7 +100,7 @@ pub async fn monthly_statistics(
         .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
         .is_none_or(|time| time.with_timezone(&chrono::Utc) > start);
     Ok(
-        json!({"movie_count":movies.len(),"tv_count":shows.len(),"episode_count":episodes,"music_count":music.len(),
+        json!({"movie_count":movies.len(),"tv_count":shows.len(),"episode_count":episodes,
         "month":{"period":now.format("%Y-%m").to_string(),"state":"recording","source":"etk-history","recording_since":since,"partial":partial}}),
     )
 }

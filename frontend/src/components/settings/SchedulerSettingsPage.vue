@@ -41,46 +41,51 @@
       <VAlert v-if="taskRunFeedback" :type="taskRunFeedback.type" variant="tonal" :title="taskRunFeedback.message" role="status">
         <div v-for="detail in taskRunFeedback.details" :key="detail">{{ detail }}</div>
       </VAlert>
-      <VCard class="dashboard-card manual-tasks-card d-none d-md-block" data-testid="scheduler-desktop-tasks">
-        <VTable v-if="filteredManualTasks.length" class="scheduler-table">
-          <thead><tr><th scope="col">分类</th><th scope="col">任务名称</th><th scope="col">任务状态</th><th scope="col" /></tr></thead>
-          <tbody>
-            <tr v-for="task in filteredManualTasks" :key="task.key" class="task-record" :data-task-key="task.key">
-              <td class="scheduler-category-cell">{{ task.category_name || '其他任务' }}</td>
-              <td class="scheduler-task-cell">
-                <div class="temp-task-name">{{ task.name }}</div>
-                <p class="temp-task-description">{{ getTaskHelp(task) }}</p>
-                <div v-if="isCurrentTask(task) && isBackgroundTaskRunning" class="scheduler-progress">
-                  <VProgressLinear :model-value="backgroundTaskStatus.progress" :indeterminate="!backgroundTaskStatus.progress_known" color="primary" height="4" rounded />
-                  <div class="scheduler-progress-meta"><span>{{ backgroundTaskStatus.message }}</span><strong v-if="backgroundTaskStatus.progress_known">{{ backgroundTaskStatus.progress }}%</strong></div>
-                </div>
-              </td>
-              <td><VChip :color="getTaskRowColor(task)">{{ getTaskRowState(task) }}</VChip></td>
-              <td>
-                <VBtn size="small" prepend-icon="mdi-play" :loading="isTriggeringTask === task.key" :disabled="isBackgroundTaskRunning || Boolean(isTriggeringTask)" @click="triggerTaskNow(task.key)">执行</VBtn>
-              </td>
-            </tr>
-          </tbody>
-        </VTable>
-        <VEmptyState v-else :title="taskSearchQuery.trim() ? '未找到匹配任务' : '暂无可用任务'" icon="mdi-timer-off-outline" />
-      </VCard>
-      <div class="mobile-scheduler-view d-md-none" data-testid="scheduler-mobile-tasks">
-        <div v-if="filteredManualTasks.length" class="mobile-scheduler-list">
-          <article v-for="task in filteredManualTasks" :key="task.key" class="mobile-scheduler-card task-record" :data-task-key="task.key">
-            <div class="mobile-scheduler-icon"><VIcon :icon="getTaskIcon(task)" size="30" /></div>
-            <div class="mobile-scheduler-content">
-              <h3 class="temp-task-name">{{ task.name }}</h3>
-              <div class="mobile-scheduler-meta"><p>{{ task.category_name || '其他任务' }}</p><span class="mobile-scheduler-status" :class="{ 'mobile-scheduler-status--running': isCurrentTask(task) && isBackgroundTaskRunning }">{{ getTaskRowState(task) }}</span></div>
-            </div>
-            <div class="mobile-scheduler-actions"><VBtn icon class="mobile-scheduler-run-btn" aria-label="执行" :loading="isTriggeringTask === task.key" :disabled="isBackgroundTaskRunning || Boolean(isTriggeringTask)" @click="triggerTaskNow(task.key)"><VIcon icon="mdi-play" size="24" /></VBtn></div>
-            <p class="temp-task-description mobile-scheduler-description">{{ getTaskHelp(task) }}</p>
-            <div v-if="isCurrentTask(task) && isBackgroundTaskRunning" class="mobile-scheduler-progress">
-              <VProgressLinear :model-value="backgroundTaskStatus.progress" :indeterminate="!backgroundTaskStatus.progress_known" color="primary" height="4" rounded />
-              <div class="scheduler-progress-meta"><span>{{ backgroundTaskStatus.message }}</span><strong v-if="backgroundTaskStatus.progress_known">{{ backgroundTaskStatus.progress }}%</strong></div>
-            </div>
-          </article>
-        </div>
-        <VEmptyState v-else :title="taskSearchQuery.trim() ? '未找到匹配任务' : '暂无可用任务'" icon="mdi-timer-off-outline" />
+      <div class="scheduler-category-list d-none d-md-block" data-testid="scheduler-desktop-tasks">
+        <VCard v-for="group in manualTaskGroups" :key="group.name" class="dashboard-card manual-tasks-card scheduler-category-card" :data-task-category="group.name">
+          <VCardItem :title="group.name"><template #prepend><VIcon :icon="getTaskIcon(group.tasks[0])" color="primary" /></template></VCardItem>
+          <VTable class="scheduler-table">
+            <thead><tr><th scope="col">任务名称</th><th scope="col">任务状态</th><th scope="col" /></tr></thead>
+            <tbody>
+              <tr v-for="task in group.tasks" :key="task.key" class="task-record" :data-task-key="task.key">
+                <td class="scheduler-task-cell">
+                  <div class="temp-task-name">{{ task.name }}</div>
+                  <p class="temp-task-description">{{ getTaskHelp(task) }}</p>
+                  <div v-if="isCurrentTask(task) && isBackgroundTaskRunning" class="scheduler-progress">
+                    <VProgressLinear :model-value="backgroundTaskStatus.progress" :indeterminate="!backgroundTaskStatus.progress_known" color="primary" height="4" rounded />
+                    <div class="scheduler-progress-meta"><span>{{ backgroundTaskStatus.message }}</span><strong v-if="backgroundTaskStatus.progress_known">{{ backgroundTaskStatus.progress }}%</strong></div>
+                  </div>
+                </td>
+                <td><VChip :color="getTaskRowColor(task)">{{ getTaskRowState(task) }}</VChip></td>
+                <td>
+                  <VBtn size="small" prepend-icon="mdi-play" :loading="isTriggeringTask === task.key" :disabled="isBackgroundTaskRunning || Boolean(isTriggeringTask)" @click="triggerTaskNow(task.key)">执行</VBtn>
+                </td>
+              </tr>
+            </tbody>
+          </VTable>
+        </VCard>
+        <VEmptyState v-if="!manualTaskGroups.length" :title="taskSearchQuery.trim() ? '未找到匹配任务' : '暂无可用任务'" icon="mdi-timer-off-outline" />
+      </div>
+      <div class="mobile-scheduler-view scheduler-category-list d-md-none" data-testid="scheduler-mobile-tasks">
+        <VCard v-for="group in manualTaskGroups" :key="group.name" class="dashboard-card scheduler-category-card" :data-task-category="group.name">
+          <VCardItem :title="group.name"><template #prepend><VIcon :icon="getTaskIcon(group.tasks[0])" color="primary" /></template></VCardItem>
+          <div class="mobile-scheduler-list">
+            <article v-for="task in group.tasks" :key="task.key" class="mobile-scheduler-card task-record" :data-task-key="task.key">
+              <div class="mobile-scheduler-icon"><VIcon :icon="getTaskIcon(task)" size="30" /></div>
+              <div class="mobile-scheduler-content">
+                <h3 class="temp-task-name">{{ task.name }}</h3>
+                <div class="mobile-scheduler-meta"><p>{{ task.category_name || '其他任务' }}</p><span class="mobile-scheduler-status" :class="{ 'mobile-scheduler-status--running': isCurrentTask(task) && isBackgroundTaskRunning }">{{ getTaskRowState(task) }}</span></div>
+              </div>
+              <div class="mobile-scheduler-actions"><VBtn icon color="primary" class="mobile-scheduler-run-btn" aria-label="执行" :loading="isTriggeringTask === task.key" :disabled="isBackgroundTaskRunning || Boolean(isTriggeringTask)" @click="triggerTaskNow(task.key)"><VIcon icon="mdi-play" size="24" /></VBtn></div>
+              <p class="temp-task-description mobile-scheduler-description">{{ getTaskHelp(task) }}</p>
+              <div v-if="isCurrentTask(task) && isBackgroundTaskRunning" class="mobile-scheduler-progress">
+                <VProgressLinear :model-value="backgroundTaskStatus.progress" :indeterminate="!backgroundTaskStatus.progress_known" color="primary" height="4" rounded />
+                <div class="scheduler-progress-meta"><span>{{ backgroundTaskStatus.message }}</span><strong v-if="backgroundTaskStatus.progress_known">{{ backgroundTaskStatus.progress }}%</strong></div>
+              </div>
+            </article>
+          </div>
+        </VCard>
+        <VEmptyState v-if="!manualTaskGroups.length" :title="taskSearchQuery.trim() ? '未找到匹配任务' : '暂无可用任务'" icon="mdi-timer-off-outline" />
       </div>
     </div>
     <VDialog v-model="showTgMenuConfigModal" max-width="600" persistent>
@@ -95,7 +100,7 @@
             </div>
           </div>
         </VCardText>
-        <VCardActions><VSpacer /><VBtn variant="text" @click="showTgMenuConfigModal = false">取消</VBtn><VBtn color="default" variant="text" prepend-icon="mdi-content-save-outline" @click="saveTgMenuConfig">保存</VBtn></VCardActions>
+        <VCardActions><VSpacer /><VBtn variant="text" @click="showTgMenuConfigModal = false">取消</VBtn><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" @click="saveTgMenuConfig">保存</VBtn></VCardActions>
       </VCard>
     </VDialog>
     <VDialog v-model="showSyncModeModal" max-width="560" persistent>
@@ -216,6 +221,15 @@ const filteredManualTasks = computed(() => {
   const query = taskSearchQuery.value.trim().toLocaleLowerCase();
   return availableTasksForManualRun.value.filter(task => !query || [task.name, task.help, task.description, task.category_name, task.key]
     .some(value => String(value || '').toLocaleLowerCase().includes(query)));
+});
+const manualTaskGroups = computed(() => {
+  const groups = new Map();
+  for (const task of filteredManualTasks.value) {
+    const name = task.category_name || '其他任务';
+    if (!groups.has(name)) groups.set(name, { name, tasks: [] });
+    groups.get(name).tasks.push(task);
+  }
+  return [...groups.values()];
 });
 const isCurrentTask = (task) => Boolean(backgroundTaskStatus.value.task_id && backgroundTaskStatus.value.last_action === task.name);
 const getTaskRowState = (task) => {
@@ -382,7 +396,7 @@ watch([configModel, availableTasksForTgMenu], ([newConfig, tgMenuTasks]) => {
 .scheduler-overview > * { min-width: 0; }
 .center-container { display: flex; justify-content: center; align-items: center; min-height: 320px; }
 .scheduler-page :deep(.v-card-title), .scheduler-page :deep(.v-card-subtitle) { white-space: normal; overflow-wrap: anywhere; }
-.scheduler-category-cell { white-space: nowrap; }
+.scheduler-category-list > .scheduler-category-card + .scheduler-category-card { margin-block-start: 24px; }
 .scheduler-task-cell { min-inline-size: 220px; padding-block: 16px !important; }
 .temp-task-name { line-height: 1.5; overflow-wrap: anywhere; }
 .temp-task-description { margin: 6px 0 0; font-size: 12px; line-height: 1.6; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); overflow-wrap: anywhere; white-space: normal; }
@@ -402,7 +416,7 @@ watch([configModel, availableTasksForTgMenu], ([newConfig, tgMenuTasks]) => {
 .mobile-scheduler-status { display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; background: rgba(var(--v-theme-on-surface), .06); color: rgba(var(--v-theme-on-surface), .92); font-size: 12px; font-weight: 600; line-height: 1.3; padding-block: 5px; padding-inline: 10px; white-space: nowrap; }
 .mobile-scheduler-status--running { background: rgba(var(--v-theme-success), .14); }
 .mobile-scheduler-actions { display: inline-flex; align-items: center; }
-.mobile-scheduler-run-btn { border-radius: 50%; background: linear-gradient(135deg, #ff4f87, #e91e63) !important; block-size: 46px; box-shadow: 0 10px 22px rgba(233, 30, 99, .28); color: #fff !important; inline-size: 46px; }
+.mobile-scheduler-run-btn { border-radius: 50%; block-size: 46px; box-shadow: 0 10px 22px rgba(var(--v-theme-primary), .28); inline-size: 46px; }
 .mobile-scheduler-run-btn.v-btn--disabled { background: rgba(var(--v-theme-on-surface), .12) !important; box-shadow: none; color: rgba(var(--v-theme-on-surface), .42) !important; }
 .mobile-scheduler-description { grid-column: 2 / -1; margin-block-start: 10px; }
 .mobile-scheduler-progress { grid-column: 2 / -1; margin-block-start: 8px; min-inline-size: 0; }

@@ -53,6 +53,12 @@ const routes = [
     meta: { requiresAuth: true },
   },
   {
+    path: '/logs',
+    name: 'Logs',
+    component: () => import('../components/LogPage.vue'),
+    meta: { requiresAuth: true, standalone: true },
+  },
+  {
     path: '/media-organize',
     name: 'MediaOrganize',
     component: MediaOrganizePage,

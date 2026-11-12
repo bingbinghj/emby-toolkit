@@ -117,15 +117,16 @@ test('media snapshots project safe display fields and reject nested or unsafe ca
 });
 
 test('statistics replace atomically only when the whole widget has a confirmed successful result', () => {
-  const valid = { movie_count: { count: 1 }, tv_count: { count: 2 }, episode_count: { count: 3 }, music_count: { count: 0 } };
+  const valid = { movie_count: { count: 1 }, tv_count: { count: 2 }, episode_count: { count: 3 } };
   assert.deepEqual(projectDashboardStatistics(valid), valid);
+  assert.deepEqual(projectDashboardStatistics({ ...valid, music_count: { count: null, error: '音乐不可用' } }), valid);
   assert.throws(() => projectDashboardStatistics({ ...valid, movie_count: { count: 0, error: '未确认' } }));
   assert.throws(() => projectDashboardStatistics({ ...valid, episode_count: { count: null } }));
 });
 
 test('monthly additions preserve actual history counts, source and partial recording metadata', () => {
   const current = new Date(2026, 10, 15);
-  const value = Object.fromEntries(['movie_count', 'tv_count', 'episode_count', 'music_count'].map((key, index) => [key, { count: 100, month_count: index }]));
+  const value = Object.fromEntries(['movie_count', 'tv_count', 'episode_count'].map((key, index) => [key, { count: 100, month_count: index }]));
   value.month = { period: '2026-11', state: 'recording', source: 'etk-history', recording_since: '2026-11-10T18:30:57Z', partial: true, private_token: 'must-not-cache' };
   const projected = projectDashboardStatistics(value);
   assert.equal(dashboardMonthlyCount(projected, 'movie_count', current), 0);
@@ -137,7 +138,7 @@ test('monthly additions preserve actual history counts, source and partial recor
 
 test('legacy, cross-month and failed monthly statistics never become a confirmed zero', () => {
   const current = new Date(2026, 10, 15);
-  const base = { movie_count: { count: 11 }, tv_count: { count: 7 }, episode_count: { count: 42 }, music_count: { count: 3 } };
+  const base = { movie_count: { count: 11 }, tv_count: { count: 7 }, episode_count: { count: 42 } };
   assert.equal(dashboardMonthlyCount(projectDashboardStatistics(base), 'movie_count', current), null);
   const value = { ...base, movie_count: { count: 12, month_count: null }, month: { period: '2026-11', state: 'unavailable', source: 'etk-history', error: '历史记录读取失败' } };
   const projected = projectDashboardStatistics(value);
@@ -149,7 +150,7 @@ test('legacy, cross-month and failed monthly statistics never become a confirmed
 });
 
 test('malformed monthly numbers and identity metadata cannot become a successful snapshot', () => {
-  const valid = { movie_count: { count: 1 }, tv_count: { count: 2 }, episode_count: { count: 3 }, music_count: { count: 0 } };
+  const valid = { movie_count: { count: 1 }, tv_count: { count: 2 }, episode_count: { count: 3 } };
   for (const count of ['3', -1, 1.5, Infinity, Number.MAX_SAFE_INTEGER + 1]) assert.throws(() => projectDashboardStatistics({ ...valid, movie_count: { count: 1, month_count: count } }));
   for (const month of [{ period: '2026-13', state: 'recording', source: 'etk-history' }, { period: '2026-11', state: 'recording', source: 'emby-created-date' }, { period: '2026-11', state: 'recording', source: 'etk-history', error: { token: 'private' } }]) assert.throws(() => projectDashboardStatistics({ ...valid, month }));
 });
@@ -158,6 +159,7 @@ test('malformed monthly numbers and identity metadata cannot become a successful
 test('library snapshots retain confirmed zero and error counts without persisting private fields', () => {
   assert.deepEqual(projectDashboardItems([{ id: 'movies', name: '电影', item_count: 0, token: 'private' }], true), [{ id: 'movies', name: '电影', item_count: 0 }]);
   assert.deepEqual(projectDashboardItems([{ id: 'movies', name: '电影', item_count: null, count_error: '数量读取失败' }], true), [{ id: 'movies', name: '电影', item_count: null, count_error: '数量读取失败' }]);
+  assert.deepEqual(projectDashboardItems([{ id: 'music', name: '音乐', collection_type: 'music', item_count: 12 }], true), []);
 });
 
 

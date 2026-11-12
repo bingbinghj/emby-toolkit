@@ -55,7 +55,7 @@
             <VBtn block color="info" variant="tonal" prepend-icon="mdi-file-document-outline" data-testid="media-info-open" @click="handleMediaInfoButtonClick">编辑媒体信息 (音轨/字幕)</VBtn>
             <VBtn block variant="tonal" prepend-icon="mdi-shield-check-outline" :loading="isRevalidatingFingerprints" @click="revalidateFingerprints(itemDetails.item_id || itemId)">重新校验指纹（{{ fingerprintScopeLabel }}）</VBtn>
             <VBtn v-if="['Series', 'Season', 'Episode'].includes(itemDetails.item_type)" block color="warning" variant="tonal" prepend-icon="mdi-image-refresh-outline" :loading="isReplacingEpisodeImages" @click="confirmEpisodeImageReplacement">替换剧集图</VBtn>
-            <VBtn v-if="itemDetails.item_type === 'Episode'" block color="default" variant="tonal" class="media-credits-action" prepend-icon="mdi-movie-open-outline" :loading="isExtractingCredits" :disabled="creditsExtractionBlocked" data-testid="episode-extract-credits" @click="extractEpisodeCredits(itemDetails.item_id || itemId)">提取片尾</VBtn>
+            <VBtn v-if="['Series', 'Season', 'Episode'].includes(itemDetails.item_type)" block color="default" variant="tonal" class="media-credits-action" prepend-icon="mdi-movie-open-outline" :loading="isExtractingCredits" :disabled="creditsExtractionBlocked" :data-testid="itemDetails.item_type === 'Episode' ? 'episode-extract-credits' : 'scope-extract-credits'" @click="extractEpisodeCredits(itemDetails.item_id || itemId)">提取{{ fingerprintScopeLabel }}片尾</VBtn>
             <VBtn block color="warning" variant="tonal" prepend-icon="mdi-file-edit-outline" @click="openRenameEditor">重命名媒体</VBtn>
             <VBtn block color="warning" variant="tonal" prepend-icon="mdi-cloud-search-outline" :loading="isRepairingP115Orphan" @click="confirmMediaAction('检查115孤儿文件', `确认只检查${p115OrphanScopeLabel}？`, repairCurrentP115Orphans)">检查115孤儿文件</VBtn>
           </VCardText>
@@ -107,7 +107,7 @@
           <VCardActions class="editor-actions">
             <VBtn variant="tonal" prepend-icon="mdi-plus" :disabled="isSaving" @click="showAddActorModal = true">添加演员</VBtn>
             <VSpacer /><VBtn variant="text" prepend-icon="mdi-arrow-left" @click="goBack">返回列表</VBtn>
-            <VBtn color="default" variant="text" prepend-icon="mdi-content-save-outline" :loading="isSaving" :disabled="isExtractingCredits" @click="handleSaveChanges">保存</VBtn>
+            <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSaving" :disabled="isExtractingCredits" @click="handleSaveChanges">保存</VBtn>
           </VCardActions>
         </VCard>
       </VCol>
@@ -289,7 +289,7 @@
         </VCardText>
         <VCardActions class="editor-actions">
           <VBtn color="warning" variant="tonal" prepend-icon="mdi-wrench-outline" :loading="isRepairingTruehdCore" :disabled="isSavingMediaInfo" @click="confirmMediaAction('纠正多出音轨', '将丢弃当前未保存修改；存在歧义时会只读探测 CD2，并且只纠正证据唯一的高清音轨兼容核心。是否继续？', repairCurrentAudioTracks)">纠正多出音轨</VBtn>
-          <VSpacer /><VBtn variant="text" @click="closeMediaInfoEditor">取消</VBtn><VBtn color="default" variant="text" prepend-icon="mdi-content-save-outline" :disabled="isRepairingTruehdCore || isFillingMediaInfoTitles || mediaRecoveryBlocked || isExtractingCredits" :loading="isSavingMediaInfo" data-testid="media-info-save" @click="saveMediaInfo">保存</VBtn>
+          <VSpacer /><VBtn variant="text" @click="closeMediaInfoEditor">取消</VBtn><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :disabled="isRepairingTruehdCore || isFillingMediaInfoTitles || mediaRecoveryBlocked || isExtractingCredits" :loading="isSavingMediaInfo" data-testid="media-info-save" @click="saveMediaInfo">保存</VBtn>
         </VCardActions>
       </VCard>
     </VDialog>
@@ -312,7 +312,7 @@
             <div v-if="renamePreview.target_local_path" class="rename-result-row"><span class="rename-result-label">本地路径</span><code>{{ renamePreview.target_local_path }}</code></div>
           </div>
         </VCardText>
-        <VCardActions><VSpacer /><VBtn variant="tonal" prepend-icon="mdi-eye-outline" :loading="isPreviewingRename" @click="previewRename">预览</VBtn><VBtn color="default" variant="text" prepend-icon="mdi-content-save-outline" :loading="isExecutingRename" :disabled="!renamePreview" @click="executeRename">保存</VBtn></VCardActions>
+        <VCardActions><VSpacer /><VBtn variant="tonal" prepend-icon="mdi-eye-outline" :loading="isPreviewingRename" @click="previewRename">预览</VBtn><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isExecutingRename" :disabled="!renamePreview" @click="executeRename">保存</VBtn></VCardActions>
       </VCard>
     </VDialog>
 
@@ -330,6 +330,7 @@ import axios from 'axios';
 import { useMessage, useDialog } from '@/composables/useFeedback';
 import { debounce } from 'lodash-es';
 import { textColorForBackground } from '../theme.js';
+import { useTheme } from 'vuetify';
 import { useTaskStatus } from '../composables/useTaskStatus.js';
 import {
   buildMediaInfoLanguageOptions,
@@ -348,6 +349,7 @@ const route = useRoute();
 const router = useRouter();
 const message = useMessage();
 const dialog = useDialog();
+const theme = useTheme();
 const { isBackgroundTaskRunning } = useTaskStatus();
 const imagePreview = ref(null);
 const previewMediaImage = (url, title) => {
@@ -727,9 +729,10 @@ const recoverMediaInfo = async (record, currentJsonHashes = null) => {
     if (data?.recovered_id !== record.id || typeof data.pending !== 'boolean' || typeof data.backup_deleted !== 'boolean') throw new Error(data?.error || data?.message || '恢复或备份清理尚未通过验收');
     if (!await loadMediaRecovery() || session !== mediaRecoverySession) return;
     const warnings = mediaOperationDetails(Array.isArray(data.warning_details) ? data.warning_details : []);
-    const preservedDirectories = [...new Set([...(Array.isArray(data.conflict_backup_directories) ? data.conflict_backup_directories : []), ...(Array.isArray(record.conflict_backup_directories) ? record.conflict_backup_directories : [])])].filter(directory => typeof directory === 'string' && directory);
+    const preservedDirectories = [...new Set(Array.isArray(data.conflict_backup_directories) ? data.conflict_backup_directories : [])].filter(directory => typeof directory === 'string' && directory);
     const preservedDetails = preservedDirectories.map(directory => `当前 JSON 已另行备份并保留：${directory}`);
     if (preservedDetails.length) mediaOperationFeedback.value = { type: 'info', message: '当前 JSON 备份已保留', details: preservedDetails };
+    else if (mediaOperationFeedback.value?.message === '当前 JSON 备份已保留') mediaOperationFeedback.value = null;
     if (status === 207 || !data.backup_deleted) {
       if (!warnings.length) warnings.push(data.message || `恢复备份尚未删除：${record.directory}`);
       mediaRecoveryError.value = warnings.join('；');
@@ -747,6 +750,7 @@ const recoverMediaInfo = async (record, currentJsonHashes = null) => {
     }
     if (mediaOperationFeedback.value?.message === '恢复备份尚未删除，请重试清理') mediaOperationFeedback.value = null;
     if (mediaInfoSaveFeedback.value?.message === '恢复备份尚未删除，请重试清理') mediaInfoSaveFeedback.value = null;
+    if (!preservedDetails.length && mediaInfoSaveFeedback.value?.message === '当前 JSON 备份已保留') mediaInfoSaveFeedback.value = null;
     if (warnings.length) message.warning(mediaOperationFeedback.value.message);
     else message.success(data.message || (record.kind === 'verified-cleanup' ? '恢复备份已清理' : '媒体信息与原神医配置已验收，恢复备份已删除'));
     if (record.kind === 'verified-cleanup') {
@@ -790,7 +794,7 @@ const confirmMediaRecovery = (record) => {
   const cleanup = record.kind === 'verified-cleanup';
   mediaRecoveryDialog = dialog.warning({
     title: cleanup ? '清理恢复备份' : conflict ? '备份当前 JSON 并恢复' : '恢复媒体信息',
-    content: cleanup ? `媒体信息与原神医配置已通过验收。本次将删除已验收的恢复备份。当前编辑草稿会保留。\n备份目录：${record.directory}` : conflict ? `当前 JSON 已发生变化。将先把以下当前文件备份到独立留存目录，再恢复原请求 JSON；完整验收后删除原恢复备份，并保留当前 JSON 备份。当前编辑草稿会保留。\n${record.json_conflicts.map(item => `${item.item_id}：${item.path}\nSHA256：${hashes[item.item_id]}`).join('\n')}` : `将核对备份与 Emby 数据并恢复原神医配置，验收成功后删除备份。当前未保存的草稿会保留。\n恢复目录：${record.directory}`,
+    content: cleanup ? `媒体信息与原神医配置已通过验收。本次将删除已验收的恢复备份及关联的冲突 JSON 备份。当前编辑草稿会保留。\n备份目录：${record.directory}` : conflict ? `当前 JSON 已发生变化。将先把以下当前文件备份到独立留存目录，再恢复原请求 JSON；完整验收后删除原恢复备份及关联的冲突 JSON 备份。验收失败时保留全部备份。当前编辑草稿会保留。\n${record.json_conflicts.map(item => `${item.item_id}：${item.path}\nSHA256：${hashes[item.item_id]}`).join('\n')}` : `将核对备份与 Emby 数据并恢复原神医配置，验收成功后删除原恢复备份及关联的冲突 JSON 备份。当前未保存的草稿会保留。\n恢复目录：${record.directory}`,
     positiveText: cleanup ? '开始清理' : conflict ? '备份并恢复' : '开始恢复', negativeText: '取消',
     onPositiveClick: () => session === mediaRecoverySession ? recoverMediaInfo(record, hashes) : undefined,
     onClose: () => { isConfirmingMediaRecovery.value = false; mediaRecoveryDialog = null; },
@@ -1906,7 +1910,8 @@ const itemTypeInChinese = computed(() => {
 });
 
 const getAvatarColor = (name) => {
-  const colors = ['#f56a00', '#7265e6', '#ffbf00', '#00a2ae', '#4caf50', '#2196f3'];
+  const colors = ['primary', 'secondary', 'success', 'info', 'warning', 'error']
+    .map(color => theme.current.value.colors[color]);
   if (!name || name.length === 0) return colors[0];
   let hash = 0;
   for (let i = 0; i < name.length; i++) {

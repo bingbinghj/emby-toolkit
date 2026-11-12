@@ -1,6 +1,7 @@
 <template>
   <div class="etk-app-content">
-    <MainLayout v-if="!route.meta.public" :task-status="backgroundTaskStatus" />
+    <RouterView v-if="route.meta.standalone" />
+    <MainLayout v-else-if="!route.meta.public" :task-status="backgroundTaskStatus" />
     <PublicLayout v-else><RouterView /></PublicLayout>
   </div>
 </template>

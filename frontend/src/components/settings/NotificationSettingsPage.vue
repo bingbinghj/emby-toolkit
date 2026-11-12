@@ -6,7 +6,6 @@
       <div v-if="configError">{{ configError }}</div><div v-if="accountError">{{ accountError }}</div>
       <VBtn variant="text" :loading="loadingConfig || loading" @click="retryLoading">重新读取通知设置</VBtn>
     </VAlert>
-    <VForm @submit.prevent="saveChatId">
       <SettingCard v-show="settingsSearch.showCard('通知渠道')" class="mb-6" title="通知渠道" subtitle="设置消息发送渠道参数">
         <VProgressLinear v-if="loadingConfig" indeterminate />
         <VCardText v-if="configModel">
@@ -23,6 +22,9 @@
           </div>
         </VCardText>
         <VCardText v-else><VSkeletonLoader v-if="loadingConfig" type="list-item-two-line" /><VAlert v-else type="warning" variant="tonal">尚未读取通知配置，请重新读取后保存。</VAlert></VCardText>
+        <template #actions>
+          <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save" aria-label="保存通知渠道" :loading="isSavingChatId" :disabled="busy || !canSave" @click="saveChatId">保存</VBtn>
+        </template>
       </SettingCard>
 
       <SettingCard v-show="settingsSearch.showCard('通知发送范围')" class="mb-6" title="通知发送范围" subtitle="对应消息类型只会发送给设定的用户。">
@@ -38,6 +40,9 @@
           </div>
           <p class="text-caption text-medium-emphasis mt-3 mb-0">自动入库未关联操作用户时，按管理员范围发送。</p>
         </VCardText>
+        <template #actions>
+          <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save" aria-label="保存通知发送范围" :loading="savingCard === 'notification_scope'" :disabled="busy || !canSaveConfig" @click="saveNotificationCard('notification_scope')">保存</VBtn>
+        </template>
       </SettingCard>
 
       <SettingCard v-show="settingsSearch.showCard('通知发送时间')" class="mb-6" title="通知发送时间" subtitle="设定消息发送的时间范围。">
@@ -47,11 +52,10 @@
             <VCol cols="12" sm="6"><VTextField data-field="notification_time.end" v-model="configModel.notification_time.end" label="结束时间" type="time" prepend-inner-icon="mdi-clock-end" :disabled="busy" /></VCol>
           </VRow>
         </VCardText>
+        <template #actions>
+          <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save" aria-label="保存通知发送时间" :loading="savingCard === 'notification_time'" :disabled="busy || !canSaveConfig" @click="saveNotificationCard('notification_time')">保存</VBtn>
+        </template>
       </SettingCard>
-      <div v-show="!settingsSearch.query.value.trim() || settingsSearch.results.value.some(entry => entry.route === 'notification')" class="notification-actions">
-        <VBtn color="default" type="submit" variant="text" prepend-icon="mdi-content-save" aria-label="保存通知设置" :loading="isSavingChatId" :disabled="busy || !canSave">保存</VBtn>
-      </div>
-    </VForm>
 
     <VDialog v-model="channelDialogOpen" scrollable max-width="40rem" :fullscreen="!display.mdAndUp.value" :persistent="busy">
       <VCard v-if="channelDraft" data-settings-card="通知渠道">
@@ -106,14 +110,16 @@ import { notificationKinds, scopeOptions } from '@/utils/notificationOptions';
 const authStore = useAuthStore();
 const message = useMessage();
 const display = useDisplay();
-const { configModel, loadingConfig, handleSaveConfig, configError, fetchConfigData } = useConfig();
+const { configModel, loadingConfig, savingConfig, handleSaveConfig, configError, fetchConfigData } = useConfig();
 const loading = ref(true), accountError = ref(''), telegramChatId = ref('');
 const showBotToken = ref(false), isSavingChatId = ref(false), isTestingTelegram = ref(false), isFetchingBotLink = ref(false);
+const savingCard = ref('');
 let pageActive = true;
 let loadedChatId = '';
 const isCurrentAccount = user => pageActive && authStore.isLoggedIn && authStore.user === user;
-const busy = computed(() => isSavingChatId.value || isTestingTelegram.value || isFetchingBotLink.value);
-const canSave = computed(() => Boolean(configModel.value) && !loadingConfig.value && !loading.value && !accountError.value);
+const busy = computed(() => savingConfig.value || Boolean(savingCard.value) || isSavingChatId.value || isTestingTelegram.value || isFetchingBotLink.value);
+const canSaveConfig = computed(() => Boolean(configModel.value) && !loadingConfig.value);
+const canSave = computed(() => canSaveConfig.value && !loading.value && !accountError.value);
 const canTest = computed(() => {
   if (!canSave.value) return false;
   const draft = channelDraft.value;
@@ -200,24 +206,41 @@ const saveChatId = async () => {
   const submitted = { telegram_bot_token: config.telegram_bot_token, telegram_channel_id: config.telegram_channel_id,
     telegram_channel_name: config.telegram_channel_name || 'Telegram', telegram_topic_id: config.telegram_topic_id || '', telegram_users: config.telegram_users || '', telegram_admins: config.telegram_admins || '', telegram_api_url: config.telegram_api_url || '',
     telegram_notify_types: (config.telegram_notify_types || []).filter(kind => ['library_new', 'recognize_fail'].includes(kind)),
-    telegram_enabled: config.telegram_enabled ?? true, notification_scope: { ...config.notification_scope }, notification_time: { ...config.notification_time } };
+    telegram_enabled: config.telegram_enabled ?? true };
   isSavingChatId.value = true;
   let globalSaved = false;
   try {
     if (!await handleSaveConfig(submitted)) throw new Error(configError.value || '通知配置保存失败');
     globalSaved = true;
     if (!isCurrentAccount(user)) return;
-    const { data } = await axios.post('/api/portal/telegram-chat-id', { chat_id: chatId });
+    await axios.post('/api/portal/telegram-chat-id', { chat_id: chatId });
     if (!isCurrentAccount(user)) return;
     if (authStore.accountInfo) {
       authStore.accountInfo.telegram_chat_id = chatId;
       authStore.accountInfo.telegram_channel_id = submitted.telegram_channel_id;
     }
-    message.success(data.message || '通知设置已保存');
+    loadedChatId = chatId;
+    message.success('通知渠道已保存');
   } catch (error) {
     if (isCurrentAccount(user)) message.error(`${globalSaved ? '全局配置已保存，个人通知保存失败：' : ''}${error.response?.data?.error || error.response?.data?.message || error.message || '保存失败'}`);
   } finally {
     isSavingChatId.value = false;
+  }
+};
+
+const saveNotificationCard = async (field) => {
+  if (!['notification_scope', 'notification_time'].includes(field) || !canSaveConfig.value || busy.value) return;
+  const user = authStore.user;
+  const title = field === 'notification_scope' ? '通知发送范围' : '通知发送时间';
+  const submitted = { [field]: { ...configModel.value[field] } };
+  savingCard.value = field;
+  try {
+    if (!await handleSaveConfig(submitted)) throw new Error(configError.value || `${title}保存失败`);
+    if (isCurrentAccount(user)) message.success(`${title}已保存`);
+  } catch (error) {
+    if (isCurrentAccount(user)) message.error(error.response?.data?.error || error.message || `${title}保存失败`);
+  } finally {
+    savingCard.value = '';
   }
 };
 

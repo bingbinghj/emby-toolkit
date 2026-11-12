@@ -594,8 +594,8 @@ onScopeDispose(cancelGlassPreview)
         </VBtn>
         <VBtn
           :slim="false"
-          color="default"
-          variant="text"
+          color="primary"
+          variant="flat"
           prepend-icon="mdi-content-save"
           :loading="isSaving"
           @click="saveSettings"
