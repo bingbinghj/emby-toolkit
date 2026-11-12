@@ -1375,12 +1375,41 @@ fn needs_file_import(info: &Value, live: &Value) -> bool {
         || has_filtered_markers(&live["Chapters"])
 }
 
-async fn ensure_file_import_supported(state: &AppState, settings: &Value, id: &str) -> Result<()> {
+fn ensure_file_import_controls(settings: &Value, id: &str, applied: bool) -> Result<()> {
     if settings["ExclusiveExtract"] != true {
         return Err(conflict(format!(
             "{id}：神医同步会移除片头片尾标记，独占提取未开启，无法安全使用原生文件恢复，已停止保存"
         )));
     }
+    let controls = if applied {
+        settings["ExclusiveControlFeatures"].clone()
+    } else {
+        crate::strm::temporary_features(settings, "restore_media_info")?
+    };
+    let controls = controls.as_str().unwrap_or("");
+    if controls
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>()
+        != BTreeSet::from(["IgnoreFileChange"])
+        || applied && settings["PersistMediaInfoMode"] != "Restore"
+        || settings["IsModSupported"] != true
+    {
+        return Err(conflict(format!(
+            "{id}：当前神医独占控制未通过文件恢复验证，已停止保存，未清理媒体信息"
+        )));
+    }
+    Ok(())
+}
+
+async fn ensure_file_import_supported(
+    state: &AppState,
+    settings: &Value,
+    id: &str,
+    applied: bool,
+) -> Result<()> {
+    ensure_file_import_controls(settings, id, applied)?;
     let swagger = ensure_sync_supported(state, settings).await?;
     let operation = &swagger["paths"]["/Items/{Id}/Refresh"]["post"];
     let parameters = media_edit::list(&operation["parameters"]);
@@ -1414,7 +1443,7 @@ pub(crate) async fn preflight_file_import(
         return Ok(());
     }
     let settings = crate::strm::config(state).await?;
-    ensure_file_import_supported(state, &settings, &target.id).await?;
+    ensure_file_import_supported(state, &settings, &target.id, false).await?;
     let live = identity_details(state, target).await?;
     ensure_target_reload_supported(target, &live)?;
     ensure_single_clear_scope(state, target, &live, context).await
@@ -1427,6 +1456,7 @@ async fn refresh_from_file(
 ) -> Result<Option<String>> {
     let live = identity_details(state, target).await?;
     ensure_single_clear_scope(state, target, &live, context).await?;
+    ensure_file_import_controls(&crate::strm::config(state).await?, &target.id, true)?;
     context
         .activity(
             "从正式 JSON 恢复媒体信息",
@@ -1445,7 +1475,10 @@ async fn refresh_from_file(
             &format!("Items/{}/Refresh", target.id),
             &[
                 ("Recursive", "false".into()),
-                ("MetadataRefreshMode", "FullRefresh".into()),
+                // PRO's persistence hook distinguishes Default (2) from
+                // FullRefresh (3). Only the former was verified to restore
+                // complete streams, exact markers and original pictures.
+                ("MetadataRefreshMode", "Default".into()),
                 ("ImageRefreshMode", "ValidationOnly".into()),
                 ("ReplaceAllMetadata", "false".into()),
                 ("ReplaceAllImages", "false".into()),
@@ -1822,9 +1855,16 @@ async fn verify_reloaded(
                 saved_details(state, target).await?;
                 identity_details(state, target).await
             };
-            let live = tokio::time::timeout_at(deadline, readback)
-                .await
-                .map_err(|_| conflict("重载回读超时，JSON 和恢复备份已保留"))??;
+            let live = match tokio::time::timeout_at(deadline, readback).await {
+                Ok(result) => result?,
+                Err(_) if !pending[&target.id].is_empty() => break,
+                Err(_) => {
+                    return Err(conflict(format!(
+                        "{}：重载回读超时，JSON 和恢复备份已保留",
+                        target.id
+                    )));
+                }
+            };
             let mut reasons = differences(target, &live);
             for field in METADATA_FIELDS {
                 if live[*field] != before[&target.id][*field] {
@@ -1964,7 +2004,7 @@ pub(crate) async fn reload(
     }
     ensure_sync_supported(state, &settings).await?;
     if let Some(id) = file_imports.first() {
-        ensure_file_import_supported(state, &settings, id).await?;
+        ensure_file_import_supported(state, &settings, id, true).await?;
     }
     for target in affected
         .iter()
@@ -2357,6 +2397,9 @@ pub(crate) async fn reload(
                             )
                             .await;
                         ensure_single_clear_scope(state, target, &current, &recovery_context).await?;
+                        if file_import {
+                            ensure_file_import_controls(&crate::strm::config(state).await?, &target.id, true)?;
+                        }
                         // ClearMediaInfo expands by presentation key and extras.
                         // It is only allowed after proving that scope is this
                         // single protected file; no unrequested sibling is reset.
@@ -2523,6 +2566,24 @@ pub(crate) async fn reload(
         );
     }
     outcome
+}
+
+#[cfg(test)]
+mod file_import_control_tests {
+    use super::*;
+
+    #[test]
+    fn file_controls_predict_temporary_changes_but_require_actual_ignore_only() {
+        let mut settings = json!({"ExclusiveExtract":true,"IsModSupported":true,"PersistMediaInfoMode":"Default","ExclusiveControlFeatures":"CatchAllAllow,ExtractOnFileChange"});
+        assert!(ensure_file_import_controls(&settings, "61688", false).is_ok());
+        assert!(ensure_file_import_controls(&settings, "61688", true).is_err());
+        settings["PersistMediaInfoMode"] = json!("Restore");
+        settings["ExclusiveControlFeatures"] = json!("IgnoreFileChange");
+        assert!(ensure_file_import_controls(&settings, "61688", true).is_ok());
+        settings["ExclusiveControlFeatures"] = json!("IgnoreFileChange,CatchAllBlock");
+        assert!(ensure_file_import_controls(&settings, "61688", false).is_err());
+        assert!(ensure_file_import_controls(&settings, "61688", true).is_err());
+    }
 }
 
 #[cfg(test)]

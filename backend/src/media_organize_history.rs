@@ -119,6 +119,31 @@ fn identity(path: &str) -> String {
         Sha256::digest(crate::media_paths::clean(path).as_bytes())
     )
 }
+pub(crate) async fn retry_files(state: &AppState, event: &Value) -> Result<BTreeSet<String>> {
+    let paths = list(&event["files"])
+        .into_iter()
+        .filter_map(|file| file.as_str().map(str::to_string))
+        .map(|path| (identity(&path), path))
+        .collect::<HashMap<_, _>>();
+    if paths.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let current_ids = list(&event["history_ids"])
+        .into_iter()
+        .filter_map(|id| id.as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    // Only the latest finished admission for each explicit file determines
+    // whether its cached assets still have unfinished work to retry.
+    let failed: Vec<String> = sqlx::query_scalar("SELECT source_identity FROM (SELECT DISTINCT ON (source_identity) source_identity,status FROM media_organize_history WHERE source_identity=ANY($1) AND id<>ALL($2) AND status<>'processing' ORDER BY source_identity,created_at DESC,id DESC) previous WHERE status='failed'")
+        .bind(paths.keys().cloned().collect::<Vec<_>>())
+        .bind(current_ids)
+        .fetch_all(&state.db)
+        .await?;
+    Ok(failed
+        .into_iter()
+        .filter_map(|id| paths.get(&id).cloned())
+        .collect())
+}
 fn safe_text(text: &str) -> String {
     static URLS: LazyLock<regex::Regex> = LazyLock::new(|| {
         regex::Regex::new(r#"(?i)https?://[^\s\"'<>，；。)]+"#)
@@ -299,7 +324,14 @@ pub async fn finish(state: &AppState, event: &Value, result: &Result<Value>) -> 
         && result
             .as_ref()
             .is_ok_and(|report| report["updated"].as_u64().unwrap_or(0) > 0)
-        && state.config.read().await["emby_webhook_ingest_enabled"] == true
+        && match result
+            .as_ref()
+            .ok()
+            .and_then(|report| report["awaiting_emby"].as_bool())
+        {
+            Some(awaiting) => awaiting,
+            None => state.config.read().await["emby_webhook_ingest_enabled"] == true,
+        }
     {
         if status == "warning" {
             preparation["_preparation_warning"] = json!(message);

@@ -1,4 +1,10 @@
-use crate::{cast, error::Result, media_edit::list, nfo, state::string};
+use crate::{
+    AppState, cast,
+    error::{ApiError, Result},
+    media_edit::list,
+    nfo,
+    state::string,
+};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeSet, HashSet},
@@ -12,6 +18,7 @@ pub struct Options<'a> {
     pub series_refresh: bool,
     pub seasons: &'a [i64],
     pub episodes: &'a [(i64, i64)],
+    pub movie_paths: &'a [PathBuf],
     pub config: &'a Value,
     pub studio_mapping: &'a Value,
     pub keyword_mapping: &'a Value,
@@ -38,19 +45,121 @@ async fn write(path: &Path, content: &str, force: bool) -> Result<bool> {
         return Ok(false);
     }
     tracing::debug!("NFO 文件写入开始：{}", path.display());
-    if let Err(error) = tokio::fs::write(path, content).await {
-        tracing::warn!(
-            "NFO 文件写入失败：{}，{error}，继续处理其它文件",
-            path.display()
-        );
-        return Ok(false);
-    }
+    tokio::fs::write(path, content).await.map_err(|error| {
+        ApiError(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            format!("NFO 文件写入失败：{}，{error}", path.display()),
+        )
+    })?;
     tracing::debug!(
         "NFO 文件写入完成：{}，{} 字节",
         path.display(),
         content.len()
     );
     Ok(true)
+}
+
+pub async fn movie_paths(state: &AppState, item: &Value, template: &Value) -> Result<Vec<PathBuf>> {
+    let path = string(item, "Path");
+    let id = string(item, "Id");
+    let tmdb = match &template["id"] {
+        Value::String(id) => id.clone(),
+        Value::Number(id) => id.to_string(),
+        _ => String::new(),
+    };
+    let original = string(&item["ProviderIds"], "Tmdb");
+    if !original.is_empty() && tmdb != original {
+        return Err(ApiError::bad(
+            "NFO 模板的 TMDb 与当前电影绑定不一致，未写入 NFO",
+        ));
+    }
+    if id.is_empty() || id == "pending" || !state.configured().await {
+        return Ok(vec![PathBuf::from(path)]);
+    }
+    let fields = "Id,Type,Path,ProviderIds,MediaSources,PartCount";
+    let current = crate::media_edit::details(state, &id, fields).await?;
+    let bound = string(&current["ProviderIds"], "Tmdb");
+    if current["Id"] != id
+        || current["Type"] != "Movie"
+        || current["Path"] != path
+        || (!bound.is_empty() && bound != tmdb)
+    {
+        return Err(ApiError::bad(
+            "电影原生身份、路径或 TMDb 绑定在 NFO 写入前变化",
+        ));
+    }
+    let mut ids = BTreeSet::from([id.clone()]);
+    let mut native_ids = HashSet::from([id.clone()]);
+    let sources = list(&current["MediaSources"]);
+    for source in &sources {
+        let owner = string(source, "ItemId");
+        let owner = if !owner.is_empty() {
+            owner
+        } else if let Some(owner) = source["Id"]
+            .as_str()
+            .and_then(|value| value.strip_prefix("mediasource_"))
+        {
+            owner.to_string()
+        } else if sources.len() == 1 {
+            id.clone()
+        } else {
+            return Err(ApiError::bad(
+                "电影关联媒体源缺少可确认的原生 Item ID，未写入 NFO",
+            ));
+        };
+        native_ids.insert(owner.clone());
+        ids.insert(owner);
+    }
+    if !tmdb.is_empty()
+        && let Some(row) = crate::metadata::row(state, &tmdb, "Movie").await?
+    {
+        for cached in list(&row["emby_item_ids_json"]) {
+            if let Some(cached) = cached.as_str().filter(|value| !value.is_empty()) {
+                ids.insert(cached.to_string());
+            }
+        }
+    }
+    let mut paths = BTreeSet::new();
+    for owner in ids {
+        let live = if owner == id {
+            current.clone()
+        } else {
+            crate::media_edit::details(state, &owner, fields).await?
+        };
+        let native_path = string(&live, "Path");
+        let bound = string(&live["ProviderIds"], "Tmdb");
+        if live["Id"] != owner
+            || live["Type"] != "Movie"
+            || native_path.is_empty()
+            || (!tmdb.is_empty()
+                && bound != tmdb
+                && !(bound.is_empty() && native_ids.contains(&owner)))
+        {
+            return Err(ApiError::bad(
+                "电影关联版本的原生身份、路径或 TMDb 绑定未确认，未写入 NFO",
+            ));
+        }
+        if owner != id && crate::emby::path_ignored(state, &native_path).await? {
+            continue;
+        }
+        if !native_path.starts_with("http") {
+            paths.insert(PathBuf::from(native_path));
+        }
+        if live["PartCount"].as_u64().unwrap_or(1) > 1 {
+            for part in crate::media_edit::additional_parts(state, &owner, &live).await? {
+                let path = string(&part, "Path");
+                if path.is_empty() {
+                    return Err(ApiError::bad(
+                        "已确认的电影额外分段缺少原生路径，未写入 NFO",
+                    ));
+                }
+                if !path.starts_with("http") {
+                    paths.insert(PathBuf::from(path));
+                }
+            }
+        }
+    }
+    Ok(paths.into_iter().collect())
 }
 fn season_dir(path: &Path) -> bool {
     let name = path
@@ -219,7 +328,9 @@ pub async fn sync(
         return Ok(0);
     }
     let path = Path::new(&raw);
-    let directory = if path.is_file() || path.extension().is_some() {
+    let directory = if path.is_dir() {
+        path
+    } else if path.is_file() || path.extension().is_some() {
         path.parent().unwrap_or(Path::new(""))
     } else {
         path
@@ -243,34 +354,11 @@ pub async fn sync(
     let mut out_of_scope = 0;
     match kind {
         "Movie" => {
-            static SKIP: LazyLock<regex::Regex> = LazyLock::new(|| {
-                regex::Regex::new(r"(?i)(^|[\s._\-\[\]()])(sample|trailer|trailers|preview|teaser|extra|extras|behind|featurette|花絮|预告|样片|片花|彩蛋|特辑|访谈)($|[\s._\-\[\]()])").unwrap()
-            });
-            let mut movies = files(directory, false)
-                .await?
-                .into_iter()
-                .filter(|p| {
-                    let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                    let extension = p
-                        .extension()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("")
-                        .to_lowercase();
-                    [
-                        "mp4", "mkv", "avi", "ts", "iso", "rmvb", "strm", "mov", "m2ts", "webm",
-                    ]
-                    .contains(&extension.as_str())
-                        && !name.starts_with('.')
-                        && episode_number(p).is_none()
-                        && !SKIP.is_match(name)
-                })
-                .collect::<Vec<_>>();
-            if path.is_file() && !movies.contains(&path.to_path_buf()) {
-                movies.push(path.into());
-            }
-            if movies.is_empty() {
-                movies.push(path.into());
-            }
+            let movies = if options.movie_paths.is_empty() {
+                vec![path.to_path_buf()]
+            } else {
+                options.movie_paths.to_vec()
+            };
             let xml = nfo::build("Movie", &data, cast);
             for movie in movies {
                 written +=

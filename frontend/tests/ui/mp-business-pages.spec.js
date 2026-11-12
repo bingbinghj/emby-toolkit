@@ -44,6 +44,6 @@ for (const width of [390, 1440]) {
         await expect(page.getByText('可填写字体下载链接，或上传字体到服务器后填写本地路径；本地路径优先于下载链接。', { exact: true })).toBeVisible();
       }
     }
-    expect(api.requests.some(request => request.method === 'POST' && request.path !== '/api/config/cover_generator/preview')).toBe(false);
+    expect(api.requests.some(request => ['POST', 'PATCH'].includes(request.method) && request.path !== '/api/config/cover_generator/preview')).toBe(false);
   });
 }

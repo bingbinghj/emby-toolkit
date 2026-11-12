@@ -457,10 +457,277 @@ fn identity_matches(stream: &Value, identity: &Value) -> bool {
         })
 }
 
-/// Match by ordinal and observed identity; never copy another episode's container or size.
+fn codec_identity(value: &Value) -> String {
+    match identity_text(value).as_str() {
+        "srt" | "subrip" => "subrip".into(),
+        "pgs" | "pgssub" | "hdmv_pgs_subtitle" => "pgssub".into(),
+        "vtt" | "webvtt" => "vtt".into(),
+        "dvdsub" | "dvd_subtitle" => "dvdsub".into(),
+        _ => identity_text(value),
+    }
+}
+fn channel_identity(value: &Value) -> String {
+    let number = value
+        .as_f64()
+        .or_else(|| value.as_str()?.trim().parse::<f64>().ok());
+    if let Some(number) = number.filter(|number| number.is_finite() && number.fract() == 0.0) {
+        format!("{number:.0}")
+    } else {
+        identity_text(value)
+    }
+}
+fn language_role(language: &Value, title: &Value, kind: &str) -> String {
+    let raw = identity_text(language).replace('_', "-");
+    match raw.as_str() {
+        "chs" | "zh-hans" | "zh-cn" => "chs".into(),
+        "cht" | "zh-hant" | "zh-tw" => "cht".into(),
+        "chi" | "zho" | "zh" | "" | "und" => {
+            if kind == "Subtitle"
+                && let Some(script) = crate::language::subtitle_script(title.as_str().unwrap_or(""))
+            {
+                return script.into();
+            }
+            if matches!(raw.as_str(), "" | "und") {
+                String::new()
+            } else {
+                "chi".into()
+            }
+        }
+        "en" => "eng".into(),
+        "ja" => "jpn".into(),
+        "ko" => "kor".into(),
+        _ => raw,
+    }
+}
+fn compatible_roles(stream: &Value, identity: &Value) -> bool {
+    let kind = identity["type"].as_str().unwrap_or("");
+    let source = language_role(&identity["language"], &identity["title"], kind);
+    let target = language_role(&stream["Language"], &stream["Title"], kind);
+    if kind == "Video" && (source.is_empty() || target.is_empty()) {
+        return true;
+    }
+    if source.is_empty() || target.is_empty() {
+        return same_original_title(stream, identity)
+            && !identity_text(&identity["codec"]).is_empty()
+            && !identity_text(&stream["Codec"]).is_empty()
+            && codec_identity(&identity["codec"]) == codec_identity(&stream["Codec"]);
+    }
+    source == target
+        || (source == "chi" && matches!(target.as_str(), "chs" | "cht"))
+        || (target == "chi" && matches!(source.as_str(), "chs" | "cht"))
+}
+fn codec_matches(stream: &Value, identity: &Value) -> bool {
+    identity.get("codec").is_none_or(|value| {
+        value.is_null()
+            || identity_text(value).is_empty()
+            || codec_identity(value) == codec_identity(&stream["Codec"])
+    })
+}
+fn stable_role_matches(stream: &Value, identity: &Value) -> bool {
+    (identity["type"] != "Audio"
+        || crate::language::is_commentary_title(identity["title"].as_str().unwrap_or(""))
+            == crate::language::is_commentary_title(stream["Title"].as_str().unwrap_or("")))
+        && compatible_roles(stream, identity)
+        && identity
+            .get("channels")
+            .filter(|value| !value.is_null())
+            .is_none_or(|value| channel_identity(value) == channel_identity(&stream["Channels"]))
+        && identity
+            .get("is_external")
+            .filter(|value| !value.is_null())
+            .is_none_or(|value| {
+                value.as_bool().unwrap_or(false) == stream["IsExternal"].as_bool().unwrap_or(false)
+            })
+}
+fn same_original_title(stream: &Value, identity: &Value) -> bool {
+    let title = identity_text(&identity["title"]);
+    !title.is_empty() && title == identity_text(&stream["Title"])
+}
+fn track_description(streams: &[Value], index: usize) -> String {
+    let stream = &streams[index];
+    let ordinal = streams[..=index]
+        .iter()
+        .filter(|other| other["Type"] == stream["Type"])
+        .count();
+    format!(
+        "第{ordinal}轨 Codec={} Channels={} Language={}（角色{}） Title={} IsExternal={}",
+        stream["Codec"],
+        stream["Channels"],
+        stream["Language"],
+        language_role(
+            &stream["Language"],
+            &stream["Title"],
+            stream["Type"].as_str().unwrap_or("")
+        ),
+        stream["Title"],
+        stream["IsExternal"]
+    )
+}
+fn unique_track(
+    candidates: &[usize],
+    streams: &[Value],
+    identity: &Value,
+    ordinal: Option<usize>,
+) -> Result<usize> {
+    if candidates.len() == 1 {
+        return Ok(candidates[0]);
+    }
+    let reason = if candidates.is_empty() {
+        let observed = ordinal
+            .map(|index| track_description(streams, index))
+            .unwrap_or_else(|| "原同类序号不存在".into());
+        format!(
+            "没有相容的目标轨道：源 Codec={} Channels={} Language={} Title={} IsExternal={}；{observed}",
+            identity["codec"],
+            identity["channels"],
+            identity["language"],
+            identity["title"],
+            identity["is_external"]
+        )
+    } else {
+        format!(
+            "存在 {} 条相容轨道，无法唯一匹配，未修改：{}",
+            candidates.len(),
+            candidates
+                .iter()
+                .take(4)
+                .map(|index| track_description(streams, *index))
+                .collect::<Vec<_>>()
+                .join("；")
+        )
+    };
+    Err(ApiError::bad(reason))
+}
+fn patch_fields(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "Video" => &["Title"],
+        "Audio" => &["Title", "Language", "IsDefault"],
+        "Subtitle" => &["Title", "Language", "IsDefault", "IsForced"],
+        _ => &[],
+    }
+}
+fn resolve_patch(streams: &[Value], patch: &Value) -> Result<usize> {
+    let identity = &patch["identity"];
+    let kind = identity["type"].as_str().unwrap_or("");
+    let fields = patch_fields(kind);
+    if fields.is_empty()
+        || patch["delete"] != true
+            && !patch["changes"]
+                .as_object()
+                .is_some_and(|changes| changes.keys().any(|field| fields.contains(&field.as_str())))
+    {
+        return Err(ApiError::bad("没有可应用的字段"));
+    }
+    let ordinal = identity["ordinal"]
+        .as_u64()
+        .or_else(|| identity["ordinal"].as_str()?.parse().ok())
+        .filter(|ordinal| *ordinal > 0)
+        .ok_or_else(|| ApiError::bad("补丁缺少有效的类型内轨道序号"))?;
+    let same_type = streams
+        .iter()
+        .enumerate()
+        .filter(|(_, stream)| stream["Type"] == kind)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let observed = same_type.get((ordinal - 1) as usize).copied();
+    if patch["delete"] == true {
+        if identity_text(&identity["codec"]).is_empty()
+            || identity.get("language").is_none()
+            || identity.get("title").is_none()
+            || kind == "Subtitle" && !identity["is_external"].is_boolean()
+        {
+            return Err(ApiError::bad("删除补丁缺少完整的原轨道身份，未修改"));
+        }
+        if observed.is_none() {
+            return Err(ApiError::bad("删除目标缺少对应的同类轨道，未修改"));
+        }
+        let candidates = same_type
+            .into_iter()
+            .filter(|index| identity_matches(&streams[*index], identity))
+            .collect::<Vec<_>>();
+        return unique_track(&candidates, streams, identity, observed);
+    }
+    if let Some(index) = observed
+        && identity_matches(&streams[index], identity)
+        && identity.get("language").is_some()
+        && identity.get("title").is_some()
+        && (compatible_roles(&streams[index], identity)
+            || language_role(&identity["language"], &identity["title"], kind).is_empty()
+                && language_role(&streams[index]["Language"], &streams[index]["Title"], kind)
+                    .is_empty())
+        && (kind != "Video"
+            || same_type
+                .iter()
+                .filter(|other| identity_matches(&streams[**other], identity))
+                .count()
+                == 1)
+    {
+        return Ok(index);
+    }
+    let candidates = same_type
+        .into_iter()
+        .filter(|index| stable_role_matches(&streams[*index], identity))
+        .collect::<Vec<_>>();
+    if kind == "Video" && candidates.len() == 1 {
+        return Ok(candidates[0]);
+    }
+    let strong = candidates
+        .iter()
+        .copied()
+        .filter(|index| {
+            same_original_title(&streams[*index], identity)
+                && (kind == "Video"
+                    || !language_role(&identity["language"], &identity["title"], kind).is_empty()
+                        && !language_role(
+                            &streams[*index]["Language"],
+                            &streams[*index]["Title"],
+                            kind,
+                        )
+                        .is_empty())
+        })
+        .collect::<Vec<_>>();
+    if !strong.is_empty() {
+        let encoding = strong
+            .iter()
+            .copied()
+            .filter(|index| codec_matches(&streams[*index], identity))
+            .collect::<Vec<_>>();
+        return unique_track(
+            if encoding.is_empty() {
+                &strong
+            } else {
+                &encoding
+            },
+            streams,
+            identity,
+            observed,
+        );
+    }
+    let encoding = candidates
+        .into_iter()
+        .filter(|index| codec_matches(&streams[*index], identity))
+        .collect::<Vec<_>>();
+    let titled = encoding
+        .iter()
+        .copied()
+        .filter(|index| same_original_title(&streams[*index], identity))
+        .collect::<Vec<_>>();
+    unique_track(
+        if titled.is_empty() {
+            &encoding
+        } else {
+            &titled
+        },
+        streams,
+        identity,
+        observed,
+    )
+}
+
+/// Plan against the original target; each logical role may be edited only once.
 pub fn apply_patches(info: &Value, patches: &Value) -> (Value, Value) {
     let mut output = info.clone();
-    let mut report = serde_json::json!({"matched":0,"skipped":[]});
+    let mut report = serde_json::json!({"matched":0,"skipped":[],"explicit_language_positions":[]});
     let Some(streams) = streams_mut(&mut output) else {
         report["skipped"]
             .as_array_mut()
@@ -468,62 +735,50 @@ pub fn apply_patches(info: &Value, patches: &Value) -> (Value, Value) {
             .push(serde_json::json!({"reason":"目标媒体信息缺少MediaStreams"}));
         return (output, report);
     };
-    let mut used = std::collections::HashSet::new();
+    let plans = patches
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|patch| (patch, resolve_patch(streams, patch)))
+        .collect::<Vec<_>>();
+    let mut counts = BTreeMap::<usize, usize>::new();
+    for (_, result) in &plans {
+        if let Ok(index) = result {
+            *counts.entry(*index).or_default() += 1;
+        }
+    }
     let mut deleted = std::collections::BTreeSet::new();
-    for patch in patches.as_array().into_iter().flatten() {
+    let mut explicit_languages = vec![];
+    for (patch, result) in plans {
         let identity = &patch["identity"];
         let kind = identity["type"].as_str().unwrap_or("");
-        let allowed: &[&str] = match kind {
-            "Video" => &["Title"],
-            "Audio" => &["Title", "Language", "IsDefault"],
-            "Subtitle" => &["Title", "Language", "IsDefault", "IsForced"],
-            _ => &[],
-        };
-        let changes = patch["changes"]
-            .as_object()
-            .map(|v| {
-                v.iter()
-                    .filter(|(k, _)| allowed.contains(&k.as_str()))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let ordinal = identity["ordinal"]
-            .as_u64()
-            .or_else(|| identity["ordinal"].as_str().and_then(|s| s.parse().ok()))
-            .unwrap_or(0);
-        let index = ordinal.checked_sub(1).and_then(|i| {
-            streams
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| s["Type"] == kind)
-                .nth(i as usize)
-                .map(|(i, _)| i)
+        let result = result.and_then(|index| {
+            if counts[&index] == 1 {
+                Ok(index)
+            } else {
+                Err(ApiError::bad("多个补丁竞争同一目标轨道，全部保持原值"))
+            }
         });
-        let reason = if allowed.is_empty() || changes.is_empty() && patch["delete"] != true {
-            Some("没有可应用的字段")
-        } else if ordinal == 0 {
-            Some("补丁缺少有效的类型内轨道序号")
-        } else {
-            match index {
-                None => Some("缺少对应的同类轨道"),
-                Some(index) if used.contains(&index) => Some("同一目标轨道被重复匹配"),
-                Some(index) if !identity_matches(&streams[index], identity) => {
-                    Some("同类轨道身份不一致")
-                }
-                Some(_) => None,
+        let index = match result {
+            Ok(index) => index,
+            Err(error) => {
+                report["skipped"].as_array_mut().unwrap().push(serde_json::json!({"type":kind,"index":identity["index"],"ordinal":identity["ordinal"],"reason":error.1}));
+                continue;
             }
         };
-        if let Some(reason) = reason {
-            report["skipped"].as_array_mut().unwrap().push(serde_json::json!({"type":kind,"index":identity["index"],"ordinal":ordinal,"reason":reason}));
-            continue;
-        }
-        let index = index.unwrap();
-        used.insert(index);
         if patch["delete"] == true {
             deleted.insert(index);
         } else {
-            for (field, value) in changes {
+            for (field, value) in patch["changes"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(field, _)| patch_fields(kind).contains(&field.as_str()))
+            {
                 streams[index][field] = value.clone();
+                if field == "Language" {
+                    explicit_languages.push(index);
+                }
             }
             if patch["changes"]["IsDefault"] == true && matches!(kind, "Audio" | "Subtitle") {
                 for (other, stream) in streams.iter_mut().enumerate() {
@@ -535,6 +790,12 @@ pub fn apply_patches(info: &Value, patches: &Value) -> (Value, Value) {
         }
         report["matched"] = serde_json::json!(report["matched"].as_u64().unwrap() + 1);
     }
+    report["explicit_language_positions"] = serde_json::json!(
+        explicit_languages
+            .iter()
+            .map(|position| position - deleted.range(..*position).count())
+            .collect::<Vec<_>>()
+    );
     for index in deleted.into_iter().rev() {
         streams.remove(index);
     }

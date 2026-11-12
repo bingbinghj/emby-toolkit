@@ -1945,7 +1945,7 @@
     :fullscreen="isMobile"
     max-width="800"
     width="calc(100vw - 24px)"
-    @update:model-value="$event || (promptModalVisible = false)"
+    @update:model-value="$event || closePromptModal()"
   >
     <VCard class="settings-dialog">
       <VCardTitle class="d-flex align-center justify-space-between ga-2">
@@ -1955,7 +1955,7 @@
           variant="text"
           size="small"
           aria-label="关闭配置 AI 提示词"
-          @click="promptModalVisible = false"
+          @click="closePromptModal"
         />
       </VCardTitle>
       <VCardText>
@@ -1969,6 +1969,10 @@
         </VAlert>
         <div class="settings-loading">
           <VProgressLinear v-if="loadingPrompts" indeterminate color="primary" class="mb-3" />
+          <VAlert v-if="promptLoadError" type="error" variant="tonal" class="mb-3">
+            {{ promptLoadError }}
+            <VBtn class="mt-2" variant="tonal" :disabled="loadingPrompts || savingPrompts" @click="openPromptModal">重试加载提示词</VBtn>
+          </VAlert>
           <VTabs v-model="activePromptTab" class="mb-4" show-arrows>
             <VTab value="fast_mode">
               <span class="mp-title-with-icon">
@@ -2011,6 +2015,7 @@
             <VWindowItem value="fast_mode" eager>
               <VTextarea
                 v-model="promptsModel.fast_mode"
+                :disabled="!promptsLoaded || loadingPrompts || savingPrompts"
                 placeholder="输入提示词..."
                 style="font-family: monospace"
                 auto-grow
@@ -2021,6 +2026,7 @@
             <VWindowItem value="quality_mode" eager>
               <VTextarea
                 v-model="promptsModel.quality_mode"
+                :disabled="!promptsLoaded || loadingPrompts || savingPrompts"
                 placeholder="输入提示词..."
                 style="font-family: monospace"
                 auto-grow
@@ -2031,6 +2037,7 @@
             <VWindowItem value="overview_translation" eager>
               <VTextarea
                 v-model="promptsModel.overview_translation"
+                :disabled="!promptsLoaded || loadingPrompts || savingPrompts"
                 placeholder="输入提示词..."
                 style="font-family: monospace"
                 auto-grow
@@ -2042,6 +2049,7 @@
             <VWindowItem value="title_translation" eager>
               <VTextarea
                 v-model="promptsModel.title_translation"
+                :disabled="!promptsLoaded || loadingPrompts || savingPrompts"
                 placeholder="输入提示词..."
                 style="font-family: monospace"
                 auto-grow
@@ -2053,6 +2061,7 @@
             <VWindowItem value="transliterate_mode" eager>
               <VTextarea
                 v-model="promptsModel.transliterate_mode"
+                :disabled="!promptsLoaded || loadingPrompts || savingPrompts"
                 placeholder="输入提示词..."
                 style="font-family: monospace"
                 auto-grow
@@ -2063,6 +2072,7 @@
             <VWindowItem value="batch_joke_fallback" eager>
               <VTextarea
                 v-model="promptsModel.batch_joke_fallback"
+                :disabled="!promptsLoaded || loadingPrompts || savingPrompts"
                 placeholder="输入提示词..."
                 style="font-family: monospace"
                 auto-grow
@@ -2077,6 +2087,7 @@
         <VBtn
           color="warning"
           :loading="savingPrompts"
+          :disabled="loadingPrompts || savingPrompts"
           @click="confirmSettingAction('确定要丢弃所有自定义修改，恢复到系统默认提示词吗？', resetPrompts, '确认')"
           variant="outlined"
         >
@@ -2084,8 +2095,8 @@
           恢复默认
         </VBtn>
         <VSpacer />
-        <VBtn @click="promptModalVisible = false" color="secondary">取消</VBtn>
-        <VBtn variant="flat" color="primary" @click="savePrompts" :loading="savingPrompts">
+        <VBtn @click="closePromptModal" color="secondary">取消</VBtn>
+        <VBtn variant="flat" color="primary" @click="savePrompts" :loading="savingPrompts" :disabled="!promptsLoaded || loadingPrompts || savingPrompts">
           <template #prepend><UiIcon name="save" /></template>
           保存配置
         </VBtn>
@@ -2134,6 +2145,9 @@ const { smAndDown: isMobile } = useDisplay();
 const promptModalVisible = ref(false);
 const loadingPrompts = ref(false);
 const savingPrompts = ref(false);
+const promptsLoaded = ref(false);
+const promptLoadError = ref('');
+let promptRequestGeneration = 0;
 const promptsModel = ref({
   fast_mode: '',
   quality_mode: '',
@@ -2142,6 +2156,19 @@ const promptsModel = ref({
   transliterate_mode: '',
   batch_joke_fallback: ''
 });
+const promptKeys = Object.keys(promptsModel.value);
+const validPromptResponse = data => data && typeof data === 'object' && !Array.isArray(data)
+  && promptKeys.every(key => typeof data[key] === 'string');
+const isCurrentPromptRequest = (generation, owner) => componentIsMounted.value && promptModalVisible.value
+  && generation === promptRequestGeneration && owner === configModel.value;
+const closePromptModal = () => {
+  promptModalVisible.value = false;
+  promptRequestGeneration++;
+  loadingPrompts.value = false;
+  savingPrompts.value = false;
+  promptsLoaded.value = false;
+  promptLoadError.value = '';
+};
 
 const tableInfo = {
   'app_settings': { cn: '基础配置' },
@@ -2214,7 +2241,14 @@ const mediaServerRevision = ref(0), mediaServerSaveError = ref(''), mediaServerT
 const savingCard = ref(null);
 let mediaServerProbeVersion = 0, mediaServerProbeController = null;
 const formRef = ref(null);
-const { configModel, loadingConfig, savingConfig, configError, handleSaveConfig } = useConfig();
+const { configModel, loadingConfig, savingConfig, configError, handleSaveConfig, captureConfigRefresh } = useConfig();
+const reloadChangedConfig = async (context, tables) => {
+  if (!Array.isArray(tables) || !tables.includes('app_settings')) return '';
+  const loaded = await context.refresh();
+  return context.isCurrent() && !loaded && configError.value
+    ? '重新读取配置失败：' + configError.value : '';
+};
+watch(configModel, closePromptModal, { flush: 'sync' });
 const settingsSearch = useSettingsSearch('general', { ready: computed(() => Boolean(configModel.value) && !loadingConfig.value), disabled: loadingConfig });
 const mediaServerSaving = computed(() => savingConfig.value || savingCard.value === 'emby');
 const mediaServerBusy = computed(() => mediaServerSaving.value || isTestingMediaServer.value);
@@ -2280,15 +2314,19 @@ async function testMediaServerConnection() {
   }
 }
 async function saveMediaServer() {
-  if (!mediaServerDraft.value || mediaServerBusy.value) return;
+  if (!componentIsMounted.value || !configModel.value || !mediaServerDraft.value || mediaServerBusy.value) return;
   const draft = mediaServerDraft.value;
+  const owner = configModel.value;
   savingCard.value = 'emby';
   mediaServerSaveError.value = '';
   try {
     const validation = await mediaServerFormRef.value?.validate();
-    if (validation?.valid === false || !mediaServerDialogOpen.value || mediaServerDraft.value !== draft) return;
+    if (validation?.valid === false || !componentIsMounted.value || owner !== configModel.value
+      || !mediaServerDialogOpen.value || mediaServerDraft.value !== draft) return;
     const payload = JSON.parse(JSON.stringify(Object.fromEntries(mediaServerFields.map(field => [field, draft[field]]))));
-    if (await handleSaveConfig(payload)) {
+    const success = await handleSaveConfig(payload);
+    if (!componentIsMounted.value || owner !== configModel.value) return;
+    if (success) {
       mediaServerRevision.value += 1;
       message.success('此卡片设置已保存！');
       cancelMediaServerProbe();
@@ -2297,6 +2335,7 @@ async function saveMediaServer() {
       mediaServerSaveError.value = configError.value || '配置保存失败，请检查后端日志。';
     }
   } catch (failed) {
+    if (!componentIsMounted.value || owner !== configModel.value) return;
     mediaServerSaveError.value = failed.message || '请检查媒体服务器中的配置项。';
   } finally {
     savingCard.value = null;
@@ -2341,21 +2380,26 @@ watch([settingsSearch.selected, loadingConfig], ([entry]) => {
   if (entry?.route === 'general' && entry.card === '存储') openStorageDialog();
 }, { immediate: true, flush: 'sync' });
 async function saveStorageSettings() {
-  if (!storageDraft.value || storageBusy.value) return;
+  if (!componentIsMounted.value || !configModel.value || !storageDraft.value || storageBusy.value) return;
   const draft = storageDraft.value;
+  const owner = configModel.value;
   savingCard.value = 'p115Account';
   storageSaveError.value = '';
   try {
     const validation = await storageFormRef.value?.validate();
-    if (validation?.valid === false || !storageDialogOpen.value || storageDraft.value !== draft) return;
+    if (validation?.valid === false || !componentIsMounted.value || owner !== configModel.value
+      || !storageDialogOpen.value || storageDraft.value !== draft) return;
     const payload = JSON.parse(JSON.stringify(Object.fromEntries(storageConfigFields.map(field => [field, draft[field]]))));
-    if (await handleSaveConfig(payload)) {
+    const success = await handleSaveConfig(payload);
+    if (!componentIsMounted.value || owner !== configModel.value) return;
+    if (success) {
       message.success('此卡片设置已保存！');
       storageDialogOpen.value = false;
     } else {
       storageSaveError.value = configError.value || '配置保存失败，请检查后端日志。';
     }
   } catch (failed) {
+    if (!componentIsMounted.value || owner !== configModel.value) return;
     storageSaveError.value = failed.message || '请检查存储中的配置项。';
   } finally {
     savingCard.value = null;
@@ -2405,14 +2449,22 @@ const handleResetActorMappings = async () => {
   }
 };
 const refreshAIModels = async () => {
+  if (!componentIsMounted.value) return;
   if (!configModel.value?.ai_api_key) {
     message.warning('请先填写 API Key 再刷新模型列表。');
     return;
   }
 
+  const generation = ++aiModelsRequestGeneration;
+  const owner = configModel.value;
+  const connection = JSON.stringify([owner.ai_provider, owner.ai_base_url, owner.ai_api_key]);
+  const isCurrent = () => componentIsMounted.value && generation === aiModelsRequestGeneration
+    && owner === configModel.value && connection === JSON.stringify([owner.ai_provider, owner.ai_base_url, owner.ai_api_key]);
+  const payload = JSON.parse(JSON.stringify(owner));
   isFetchingAIModels.value = true;
   try {
-    const response = await axios.post('/api/ai/models', configModel.value);
+    const response = await axios.post('/api/ai/models', payload);
+    if (!isCurrent()) return;
     const models = Array.isArray(response.data?.models) ? response.data.models : [];
 
     aiModelOptions.value = models.map(model => ({
@@ -2431,10 +2483,11 @@ const refreshAIModels = async () => {
 
     message.success(`已刷新 ${models.length} 个模型，请在下拉框中选择。`);
   } catch (error) {
+    if (!isCurrent()) return;
     const errorMsg = error.response?.data?.message || error.message;
     message.error(`刷新模型失败: ${errorMsg}`);
   } finally {
-    isFetchingAIModels.value = false;
+    if (generation === aiModelsRequestGeneration) isFetchingAIModels.value = false;
   }
 };
 
@@ -2445,6 +2498,8 @@ watch(
     configModel.value?.ai_api_key
   ],
   () => {
+    aiModelsRequestGeneration++;
+    isFetchingAIModels.value = false;
     aiModelOptions.value = [];
   }
 );
@@ -2482,41 +2537,69 @@ const testAI = async () => {
   }
 };
 const openPromptModal = async () => {
+  if (!componentIsMounted.value || !configModel.value
+    || (promptModalVisible.value && (loadingPrompts.value || savingPrompts.value))) return;
   promptModalVisible.value = true;
+  const generation = ++promptRequestGeneration;
+  const owner = configModel.value;
   loadingPrompts.value = true;
+  savingPrompts.value = false;
+  promptsLoaded.value = false;
+  promptLoadError.value = '';
   try {
     const response = await axios.get('/api/ai/prompts');
+    if (!isCurrentPromptRequest(generation, owner)) return;
+    if (!validPromptResponse(response.data)) throw new Error('提示词响应无效，请重试。');
     promptsModel.value = response.data;
+    promptsLoaded.value = true;
   } catch (error) {
-    message.error('加载提示词失败');
+    if (!isCurrentPromptRequest(generation, owner)) return;
+    promptLoadError.value = error.response?.data?.error || error.message || '加载提示词失败，请重试。';
+    message.error(promptLoadError.value);
   } finally {
-    loadingPrompts.value = false;
+    if (isCurrentPromptRequest(generation, owner)) loadingPrompts.value = false;
   }
 };
 
 const savePrompts = async () => {
+  if (!componentIsMounted.value || !promptModalVisible.value || !configModel.value
+    || !promptsLoaded.value || loadingPrompts.value || savingPrompts.value) return;
+  const generation = promptRequestGeneration;
+  const owner = configModel.value;
+  const payload = JSON.parse(JSON.stringify(promptsModel.value));
   savingPrompts.value = true;
   try {
-    await axios.post('/api/ai/prompts', promptsModel.value);
+    await axios.post('/api/ai/prompts', payload);
+    if (!isCurrentPromptRequest(generation, owner)) return;
     message.success('提示词已保存');
-    promptModalVisible.value = false;
+    closePromptModal();
   } catch (error) {
+    if (!isCurrentPromptRequest(generation, owner)) return;
     message.error('保存失败');
   } finally {
-    savingPrompts.value = false;
+    if (isCurrentPromptRequest(generation, owner)) savingPrompts.value = false;
   }
 };
 
 const resetPrompts = async () => {
+  if (!componentIsMounted.value || !promptModalVisible.value || !configModel.value
+    || loadingPrompts.value || savingPrompts.value) return;
+  const generation = promptRequestGeneration;
+  const owner = configModel.value;
   savingPrompts.value = true;
   try {
     const response = await axios.post('/api/ai/prompts/reset');
+    if (!isCurrentPromptRequest(generation, owner)) return;
+    if (!validPromptResponse(response.data.prompts)) throw new Error('默认提示词响应无效，请重试。');
     promptsModel.value = response.data.prompts;
+    promptsLoaded.value = true;
+    promptLoadError.value = '';
     message.success('已恢复默认提示词');
   } catch (error) {
+    if (!isCurrentPromptRequest(generation, owner)) return;
     message.error('重置失败');
   } finally {
-    savingPrompts.value = false;
+    if (isCurrentPromptRequest(generation, owner)) savingPrompts.value = false;
   }
 };
 watch(() => configModel.value?.refresh_emby_after_update, (isRefreshEnabled) => {
@@ -2531,6 +2614,7 @@ const aiProviderOptions = ref([
 ]);
 
 const isFetchingAIModels = ref(false);
+let aiModelsRequestGeneration = 0;
 const aiModelOptions = ref([]);
 const aiModelSelectOptions = computed(() => {
   const currentModel = (configModel.value?.ai_model_name || '').trim();
@@ -2568,19 +2652,36 @@ const showClearTablesModal = async () => {
   }
 };
 const handleClearTables = async () => {
+  if (!componentIsMounted.value || isClearing.value) return;
   if (tablesToClear.value.length === 0) {
     message.warning('请至少选择一个要清空的数据表。');
     return;
   }
+  const submitted = [...tablesToClear.value];
+  const context = captureConfigRefresh();
+  const applyCleared = data => {
+    if (!Array.isArray(data.cleared_tables) || JSON.stringify(tablesToClear.value) !== JSON.stringify(submitted)) return;
+    tablesToClear.value = submitted.filter(name => !data.cleared_tables.includes(name));
+    if (!tablesToClear.value.length) clearTablesModalVisible.value = false;
+  };
   isClearing.value = true;
   try {
-    const response = await axios.post('/api/actions/clear_tables', { tables: tablesToClear.value });
-    message.success(response.data.message || '成功清空所选数据表！');
-    clearTablesModalVisible.value = false;
-    tablesToClear.value = [];
+    const response = await axios.post('/api/actions/clear_tables', { tables: submitted });
+    const data = response.data || {};
+    const warning = await reloadChangedConfig(context, data.cleared_tables);
+    if (!componentIsMounted.value || !context.isCurrent()) return;
+    applyCleared(data);
+    const summary = data.message || '成功清空所选数据表！';
+    if (warning) message.warning(summary + '；' + warning);
+    else message.success(summary);
   } catch (error) {
-    const errorMsg = error.response?.data?.error || '清空操作失败，请检查后端日志。';
+    const data = error.response?.data || {};
+    const warning = await reloadChangedConfig(context, data.cleared_tables);
+    if (!componentIsMounted.value || !context.isCurrent()) return;
+    applyCleared(data);
+    const errorMsg = data.error || '清空操作失败，请检查后端日志。';
     message.error(errorMsg);
+    if (warning) message.warning('已有数据表已清空；' + warning);
   } finally {
     isClearing.value = false;
   }
@@ -3170,19 +3271,22 @@ const cardFields = {
 };
 const saveCard = async (cardKey) => {
   const fields = cardFields[cardKey];
-  if (!fields || savingConfig.value || !configModel.value) return;
+  if (!componentIsMounted.value || !fields || savingConfig.value || !configModel.value) return;
+  const owner = configModel.value;
   try {
     const payload = JSON.parse(JSON.stringify(Object.fromEntries(
       fields.map(field => [field, configModel.value[field]])
     )));
     savingCard.value = cardKey;
     const success = await handleSaveConfig(payload);
+    if (!componentIsMounted.value || owner !== configModel.value) return;
     if (success) {
       message.success('此卡片设置已保存！');
     } else {
       message.error(configError.value || '配置保存失败，请检查后端日志。');
     }
   } catch (errors) {
+    if (!componentIsMounted.value || owner !== configModel.value) return;
     message.error('请检查此卡片中的必填项或错误项！');
   } finally {
     savingCard.value = null;
@@ -3338,34 +3442,44 @@ const confirmImport = () => {
   startImportProcess();
 };
 
-const startImportProcess = () => {
+const startImportProcess = async () => {
+  if (!componentIsMounted.value || isImporting.value) return;
   if (!fileToImport.value) {
     message.error("没有要上传的文件。");
     return;
   }
+  const submittedFile = fileToImport.value;
+  const submittedTables = [...tablesToImport.value];
+  const context = captureConfigRefresh();
   isImporting.value = true;
   const msgReactive = message.loading('正在上传并恢复数据...', { duration: 0 });
 
   const formData = new FormData();
-  formData.append('file', fileToImport.value);
-  formData.append('tables', tablesToImport.value.join(','));
+  formData.append('file', submittedFile);
+  formData.append('tables', submittedTables.join(','));
 
-  axios.post('/api/database/import', formData, {
-    headers: { 'Content-Type': 'multipart/form-data' }
-  })
-  .then(response => {
-    msgReactive.destroy();
-    message.success(response.data?.message || '恢复任务已成功提交！');
-  })
-  .catch(error => {
-    msgReactive.destroy();
+  try {
+    const response = await axios.post('/api/database/import', formData, {
+      headers: { 'Content-Type': 'multipart/form-data' }
+    });
+    const data = response.data || {};
+    const configWarning = data.data_restored === true
+      ? await reloadChangedConfig(context, data.restored_tables) : '';
+    if (!componentIsMounted.value || !context.isCurrent()) return;
+    const summary = data.message || (data.data_restored === true ? '数据库已恢复。' : '恢复任务已成功提交！');
+    const details = Array.isArray(data.warning_details) ? data.warning_details.filter(value => typeof value === 'string') : [];
+    const texts = [...new Set([summary, ...details, configWarning].filter(Boolean))].join('；');
+    if (response.status === 207 || Number(data.warnings) > 0 || data.config_reloaded === false || configWarning) message.warning(texts);
+    else message.success(texts);
+  } catch (error) {
+    if (!componentIsMounted.value || !context.isCurrent()) return;
     const errorMsg = error.response?.data?.error || '恢复失败，未知错误。';
     message.error(errorMsg, { duration: 8000 });
-  })
-  .finally(() => {
+  } finally {
+    msgReactive.destroy();
     isImporting.value = false;
-    fileToImport.value = null;
-  });
+    if (fileToImport.value === submittedFile) fileToImport.value = null;
+  }
 };
 
 const handleCleanupOfflineMedia = async () => {
@@ -3419,6 +3533,9 @@ onMounted(async () => {
 });
 onUnmounted(() => {
   componentIsMounted.value = false;
+  closePromptModal();
+  aiModelsRequestGeneration++;
+  isFetchingAIModels.value = false;
   cancelMediaServerProbe();
   renamePreviewRequest += 1;
   if (renamePreviewTimer) clearTimeout(renamePreviewTimer);

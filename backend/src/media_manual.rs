@@ -21,13 +21,30 @@ pub fn router() -> Router<AppState> {
         .route("/api/actions/translate_cast_sa", post(translate))
 }
 async fn record(state: &AppState, id: &str, item: &Value) -> Result<Value> {
-    let bound: Option<Value> = sqlx::query_scalar(
-        "SELECT to_jsonb(m) FROM media_metadata m WHERE emby_item_ids_json @> $1 LIMIT 1",
+    let mut bound: Vec<Value> = sqlx::query_scalar(
+        "SELECT to_jsonb(m) FROM media_metadata m WHERE emby_item_ids_json @> $1 LIMIT 2",
     )
     .bind(json!([id]))
-    .fetch_optional(&state.db)
+    .fetch_all(&state.db)
     .await?;
-    if let Some(bound) = bound {
+    if bound.len() > 1 {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "同一 Emby 媒体项存在多个缓存绑定，请先同步元数据，未选择任意记录".into(),
+        ));
+    }
+    if let Some(bound) = bound.pop() {
+        let kind = string(item, "Type");
+        let native = string(&item["ProviderIds"], "Tmdb");
+        if matches!(kind.as_str(), "Movie" | "Series")
+            && !native.is_empty()
+            && (string(&bound, "tmdb_id") != native || string(&bound, "item_type") != kind)
+        {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "缓存 TMDb 或媒体类型与当前原生绑定不一致，未读取错误演员或写入 NFO".into(),
+            ));
+        }
         return Ok(bound);
     }
     crate::metadata::row(
@@ -188,7 +205,7 @@ async fn submit(
 }
 pub async fn save(state: &AppState, id: &str, body: &Value, context: &JobContext) -> Result<Value> {
     context.checkpoint().await?;
-    let mut item=details(state,id,"Id,Type,Name,Path,People,ProviderIds,Genres,ParentId,ParentIndexNumber,IndexNumber,SeriesId").await?;
+    let mut item=details(state,id,"Id,Type,Name,Path,People,ProviderIds,Genres,MediaSources,PartCount,ParentId,ParentIndexNumber,IndexNumber,SeriesId").await?;
     let media_name = string(&item, "Name");
     tracing::info!(
         item_id = id,
@@ -197,6 +214,11 @@ pub async fn save(state: &AppState, id: &str, body: &Value, context: &JobContext
     );
     let row = record(state, id, &item).await?;
     let kind = string(&row, "item_type");
+    if kind != string(&item, "Type") {
+        return Err(ApiError::bad(
+            "缓存媒体类型与当前原生媒体不一致，未写入 NFO",
+        ));
+    }
     let tmdb = string(&row, "tmdb_id");
     let original = cast(state, &row, &mut item, Some(context)).await?;
     let (payload, _) = crate::metadata::reconstruct_full(state, &tmdb, &kind, true)
@@ -234,8 +256,15 @@ pub async fn save(state: &AppState, id: &str, body: &Value, context: &JobContext
     let keywords = crate::db::setting(&state.db, "keyword_mapping")
         .await?
         .unwrap_or(defaults["DEFAULT_KEYWORD_MAPPING"].clone());
+    let movie_paths = if kind == "Movie" {
+        crate::nfo_files::movie_paths(state, &item, &payload).await?
+    } else {
+        vec![]
+    };
+    context.checkpoint().await?;
     let options = crate::nfo_files::Options {
         force: true,
+        movie_paths: &movie_paths,
         config: &config,
         studio_mapping: &studio,
         keyword_mapping: &keywords,

@@ -15,6 +15,7 @@ function fixture(context) {
     activeContextSearch: { value: context && { query: { value: '' }, composing: { value: false },
       onInput: value => inputs.push(value), submit: () => submissions.push(true), clear: () => clears.push(true), ...context } },
     fallbackSearch: { value: '' }, searchComposing: { value: false }, searchDisabled: { value: false }, searchOpen: { value: true },
+    searchRequestSequence: 0, searchWindowSession: 0, authStore: { isLoggedIn: true, user: { id: 'admin' } },
     router: { push: async route => navigations.push(JSON.parse(JSON.stringify(route))) },
     message: { error: error => errors.push(error) },
   });

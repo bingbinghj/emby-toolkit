@@ -23,6 +23,8 @@ const isMobile = computed(() => mdAndDown.value);
 const notificationOpen = ref(false), themeCustomizerOpen = ref(false), avatarLoadFailed = ref(false);
 const searchOpen = ref(false), desktopSearchInput = ref(null), mobileSearchInput = ref(null);
 const fallbackSearch = ref(''), searchComposing = ref(false);
+let searchRequestSequence = 0, searchWindowSession = 0;
+watch(searchOpen, () => { ++searchWindowSession; }, { flush: 'sync' });
 const searchAvailable = computed(() => authStore.isLoggedIn && (Boolean(activeContextSearch.value) || authStore.isAdmin));
 const searchShortcutLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ K' : 'Ctrl K';
 const searchLabel = computed(() => unref(activeContextSearch.value?.label) || '搜索全部媒体');
@@ -44,18 +46,28 @@ function updateSearch(value) {
 async function submitSearch() {
   if (searchDisabled.value || searchComposing.value) return;
   const context = activeContextSearch.value;
+  const sequence = ++searchRequestSequence, session = searchWindowSession, requestedUser = authStore.user;
+  const query = searchWord.value.trim();
+  const isCurrent = () => sequence === searchRequestSequence && session === searchWindowSession
+    && context === activeContextSearch.value && query === searchWord.value.trim()
+    && authStore.isLoggedIn && authStore.user === requestedUser;
   try {
     if (context) await context.submit?.();
     else await router.push({ name: 'ReviewList', query: searchWord.value.trim() ? { q: searchWord.value.trim() } : {} });
-    searchOpen.value = false;
-  } catch (error) { message.error(error.response?.data?.error || error.message || '搜索失败'); }
+    if (isCurrent()) searchOpen.value = false;
+  } catch (error) { if (isCurrent()) message.error(error.response?.data?.error || error.message || '搜索失败'); }
 }
 async function clearSearch() {
   if (searchDisabled.value) return;
+  const sequence = ++searchRequestSequence, session = searchWindowSession, requestedUser = authStore.user;
   updateSearch('');
   const context = activeContextSearch.value;
+  const query = searchWord.value.trim();
+  const isCurrent = () => sequence === searchRequestSequence && session === searchWindowSession
+    && context === activeContextSearch.value && query === searchWord.value.trim()
+    && authStore.isLoggedIn && authStore.user === requestedUser;
   try { if (context) await (context.clear || context.submit)?.(); }
-  catch (error) { message.error(error.response?.data?.error || error.message || '清空搜索失败'); }
+  catch (error) { if (isCurrent()) message.error(error.response?.data?.error || error.message || '清空搜索失败'); }
 }
 function startSearchComposition() {
   searchComposing.value = true;
@@ -172,7 +184,7 @@ function moveMenuToGroup(key, groupKey) {
   moveNavigationItem(menuConfigTree.value, key, groupKey);
 }
 onMounted(() => { initMenuConfig(); window.addEventListener(THEME_CUSTOMIZER_OPEN_EVENT, openThemeCustomizer); window.addEventListener('keydown', searchShortcut); });
-onBeforeUnmount(() => { window.removeEventListener(THEME_CUSTOMIZER_OPEN_EVENT, openThemeCustomizer); window.removeEventListener('keydown', searchShortcut); });
+onBeforeUnmount(() => { ++searchRequestSequence; window.removeEventListener(THEME_CUSTOMIZER_OPEN_EVENT, openThemeCustomizer); window.removeEventListener('keydown', searchShortcut); });
 
 const triggerRestart = async () => {
   message.info('正在发送重启指令...');
@@ -202,13 +214,13 @@ const handleUserSelect = async (key) => {
       onPositiveClick: triggerRestart,
     });
   } else if (key === 'logout') {
-    await authStore.logout();
-    router.push({ name: 'Login' });
+    if (await authStore.logout()) router.push({ name: 'Login' });
   }
 };
 
 // ================= 自定义菜单逻辑 (树形结构 + 拖拽) =================
 const isMenuEditorVisible = ref(false);
+let menuEditorSession = 0;
 const isSavingMenu = ref(false);
 const isMenuReady = ref(false);
 const isMenuLoading = ref(false);
@@ -310,14 +322,26 @@ watch(baseMenuOptions, () => {
 // 保存配置到后端
 const saveMenuConfig = async () => {
   if (!menuConfigLoaded.value || isSavingMenu.value) return;
+  const session = menuEditorSession, requestedUser = authStore.user;
+  const payload = JSON.parse(JSON.stringify(menuConfigTree.value));
+  const isCurrent = () => session === menuEditorSession && authStore.isLoggedIn && authStore.user === requestedUser;
   isSavingMenu.value = true;
   try {
-    await axios.post('/api/system/menu_config', menuConfigTree.value);
+    await axios.post('/api/system/menu_config', payload);
+    if (!isCurrent()) return;
+    if (JSON.stringify(menuConfigTree.value) !== JSON.stringify(payload)) {
+      message.info('提交时的导航配置已保存，当前修改尚未保存。');
+      return;
+    }
     isMenuEditorVisible.value = false;
     message.success('菜单配置已保存，全局生效');
 
   } catch (error) {
-    message.error(error.response?.data?.error || '保存菜单配置失败');
+    if (isCurrent()) {
+      const detail = error.response?.data?.error || error.message || '保存菜单配置失败';
+      message.error(JSON.stringify(menuConfigTree.value) === JSON.stringify(payload) ? detail
+        : `提交时的导航配置保存失败，当前修改已保留：${detail}`);
+    }
   } finally {
     isSavingMenu.value = false;
   }
@@ -482,8 +506,8 @@ const clearDragState = () => {
   dragTarget.value = null;
   dragPosition.value = '';
 };
-watch(isMenuEditorVisible, visible => { if (!visible) clearDragState(); });
-onBeforeUnmount(clearDragState);
+watch(isMenuEditorVisible, visible => { ++menuEditorSession; if (!visible) clearDragState(); }, { flush: 'sync' });
+onBeforeUnmount(() => { ++menuEditorSession; clearDragState(); });
 
 </script>
 

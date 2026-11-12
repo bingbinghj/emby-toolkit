@@ -15,7 +15,7 @@ function fixture({ get, post, remove } = {}) {
     isSavingUser: { value: false }, userSaveError: { value: '' }, userDialogOpen: { value: true },
     isUploadingAvatar: { value: false }, isDeletingAvatar: { value: false },
     creatingUser: { value: false }, loadingUserDetails: { value: false }, originalUser: { value: { policy: {}, configuration: {} } },
-    createPassword: { value: '' }, createConfirmPassword: { value: '' }, libraries: { value: [] }, librariesError: { value: '' },
+    createPassword: { value: '' }, createConfirmPassword: { value: '' }, passwordSetupPending: { value: false }, libraries: { value: [] }, librariesError: { value: '' },
     avatarAction: { value: 'keep' }, avatarPreview: { value: '' }, avatarFile: { value: null }, fileInput: { value: null },
     userBusy: { get value() { return context.isSavingUser.value || context.isUploadingAvatar.value || context.isDeletingAvatar.value; } },
     changedUserFields, userFieldsMatch, validAvatar, structuredClone, FormData,
@@ -153,11 +153,11 @@ test('creating a user targets the native creation endpoint and clears password o
 
 test('a partial creation receipt retries the confirmed user instead of creating a duplicate', async () => {
   let attempts = 0;
-  const created = { id: 'new-id', name: 'New Account', is_administrator: false, is_disabled: false, policy: {}, configuration: {} };
+  const created = { id: 'new-id', name: 'New Account', is_administrator: false, is_disabled: false, has_password: true, policy: {}, configuration: {} };
   const f = fixture({
     get: async path => ({ data: path === '/api/portal/users' ? { users: [created] } : { user: created, libraries: { items: [] } } }),
     post: async () => {
-      if (++attempts === 1) throw { response: { data: { created: true, id: 'new-id', error: '密码保存尚未确认' } } };
+      if (++attempts === 1) throw { response: { data: { created: true, id: 'new-id', error: '权限保存尚未确认' } } };
       return { data: { id: 'new-id', user: created } };
     },
   });
@@ -169,6 +169,85 @@ test('a partial creation receipt retries the confirmed user instead of creating 
   await f.context.saveUserDetails();
   assert.deepEqual(f.requests.map(request => request.path), ['/api/portal/users', '/api/portal/users/new-id']);
 });
+
+function failedPasswordCreation(options = {}) {
+  const native = { id: 'new-id', name: 'New Account', is_administrator: false, is_disabled: true, has_password: false, policy: {}, configuration: {} };
+  const events = [];
+  let passwordPosted = false;
+  const f = fixture({
+    get: async path => {
+      events.push(path);
+      if (path === '/api/portal/users') return { data: { users: [structuredClone(native)] } };
+      if (passwordPosted && options.confirmation === 'read failed') throw new Error('密码回读不可用');
+      const user = structuredClone(native);
+      if (passwordPosted && options.confirmation === 'missing password') user.has_password = false;
+      if (passwordPosted && options.confirmation === 'wrong user') user.id = 'another-user';
+      return { data: { user, libraries: { items: [] } } };
+    },
+    post: async (path, body) => {
+      events.push(path);
+      if (path === '/api/portal/users') throw { response: { data: { created: true, id: 'new-id', user: structuredClone(native), error: '密码设置失败' } } };
+      if (path.endsWith('/password')) {
+        passwordPosted = true;
+        if (options.passwordError) throw new Error('密码设置仍不可用');
+        native.has_password = true;
+        return { data: { id: 'new-id' } };
+      }
+      Object.assign(native, body);
+      return { data: { id: 'new-id', user: structuredClone(native) } };
+    },
+  });
+  newUser(f);
+  return { ...f, events, native, options };
+}
+
+test('failed creation repairs and reads back its password before enabling the confirmed account', async () => {
+  const f = failedPasswordCreation();
+  await f.context.saveUserDetails();
+  assert.equal(f.context.passwordSetupPending.value, true);
+  assert.equal(f.context.createPassword.value, 'creation-secret');
+  await f.context.saveUserDetails();
+  assert.deepEqual(f.requests.map(request => request.path), ['/api/portal/users', '/api/portal/users/new-id/password', '/api/portal/users/new-id']);
+  const password = f.events.indexOf('/api/portal/users/new-id/password');
+  assert.ok(f.events.indexOf('/api/portal/users/new-id', password) < f.events.lastIndexOf('/api/portal/users/new-id'));
+  assert.equal(f.native.has_password, true);
+  assert.equal(f.native.is_disabled, false);
+  assert.equal(f.context.passwordSetupPending.value, false);
+  assert.equal(f.context.createPassword.value, '');
+  assert.equal(f.context.userDialogOpen.value, false);
+});
+
+test('a failed password retry keeps its draft and cannot enable the partial account', async () => {
+  const f = failedPasswordCreation({ passwordError: true });
+  await f.context.saveUserDetails();
+  await f.context.saveUserDetails();
+  assert.deepEqual(f.requests.map(request => request.path), ['/api/portal/users', '/api/portal/users/new-id/password']);
+  assert.equal(f.native.has_password, false);
+  assert.equal(f.native.is_disabled, true);
+  assert.equal(f.context.createPassword.value, 'creation-secret');
+  assert.equal(f.context.createConfirmPassword.value, 'creation-secret');
+  assert.equal(f.context.userDialogOpen.value, true);
+  assert.match(f.context.userSaveError.value, /密码/);
+  f.options.passwordError = false;
+  await f.context.saveUserDetails();
+  assert.equal(f.requests.filter(request => request.path === '/api/portal/users').length, 1);
+  assert.equal(f.native.has_password, true);
+  assert.equal(f.native.is_disabled, false);
+});
+
+for (const confirmation of ['read failed', 'missing password', 'wrong user']) {
+  test(`password ${confirmation} never enables the partial account`, async () => {
+    const f = failedPasswordCreation({ confirmation });
+    await f.context.saveUserDetails();
+    await f.context.saveUserDetails();
+    assert.deepEqual(f.requests.map(request => request.path), ['/api/portal/users', '/api/portal/users/new-id/password']);
+    assert.equal(f.native.is_disabled, true);
+    assert.equal(f.context.passwordSetupPending.value, true);
+    assert.equal(f.context.createPassword.value, 'creation-secret');
+    assert.equal(f.context.userDialogOpen.value, true);
+    assert.ok(f.context.userSaveError.value);
+  });
+}
 
 test('a matching username without an explicit creation receipt never becomes an editable account', async () => {
   const existing = { id: 'other-account', name: 'New Account', is_administrator: false, is_disabled: false };

@@ -1200,6 +1200,40 @@ mod native {
 
     #[tokio::test]
     #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn file_marker_save_rejects_unverified_control_before_any_native_write() {
+        for control in [
+            "CatchAllBlock",
+            "NoPersistIntegration",
+            "UnconditionalBlock",
+            "CatchAllAllowChapterImage",
+        ] {
+            let (mut f, edited) = file_marker_fixture().await;
+            f.native.host.settings.lock().await["ExclusiveControlFeatures"] = json!(control);
+            f.native.original_settings["ExclusiveControlFeatures"] = json!(control);
+            f.proxy.original_settings["ExclusiveControlFeatures"] = json!(control);
+            let before = f.native.host.item.lock().await.clone();
+            let original = tokio::fs::read(info_path(&before)).await.unwrap();
+            let result = f.save(json!({"mediainfo":edited}), false).await;
+            assert_eq!(result["state"], "failed", "{control}: {result}");
+            assert!(
+                result["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("未通过文件恢复验证"),
+                "{result}"
+            );
+            assert!(f.native.host.clear_ids.lock().await.is_empty());
+            assert!(f.proxy.refresh_ids.lock().await.is_empty());
+            assert!(f.proxy.sync_bodies.lock().await.is_empty());
+            assert!(f.proxy.file_imports.lock().await.is_empty());
+            assert_eq!(*f.native.host.item.lock().await, before);
+            assert_eq!(tokio::fs::read(info_path(&before)).await.unwrap(), original);
+            f.close().await;
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
     async fn file_marker_save_rejects_unprotected_alternate_scope_before_any_native_write() {
         let (f, edited) = file_marker_fixture().await;
         f.add_episode().await;
@@ -2227,17 +2261,34 @@ mod native {
                     return StatusCode::BAD_REQUEST.into_response();
                 }
                 let full = query["MetadataRefreshMode"] == "FullRefresh";
-                assert_eq!(query["Recursive"], if full { "false" } else { "true" });
+                let file_restore = proxy.file_import_enabled.load(Ordering::SeqCst)
+                    && query["MetadataRefreshMode"] == "Default"
+                    && query["ImageRefreshMode"] == "ValidationOnly";
+                assert_eq!(
+                    query["Recursive"],
+                    if full || file_restore {
+                        "false"
+                    } else {
+                        "true"
+                    }
+                );
                 assert_eq!(
                     query["ImageRefreshMode"],
-                    if full { "ValidationOnly" } else { "Default" }
+                    if full || file_restore {
+                        "ValidationOnly"
+                    } else {
+                        "Default"
+                    }
                 );
                 assert_eq!(query["ReplaceAllMetadata"], "false");
                 assert_eq!(query["ReplaceAllImages"], "false");
                 proxy.metadata_logs.lock().await.push(format!(
                     "2026-11-09 00:00:01.000 RefreshItem Start: {id} fixture"
                 ));
-                if full && proxy.file_import_enabled.load(Ordering::SeqCst) {
+                // The live PRO hook did not import the file for FullRefresh
+                // (3). Default (2) with ValidationOnly images restored the
+                // protected bundle; an HTTP 204 alone remains insufficient.
+                if file_restore {
                     let fault = proxy.protocol_fault.lock().await.clone();
                     if fault == "file-refresh-failed" {
                         return StatusCode::BAD_REQUEST.into_response();

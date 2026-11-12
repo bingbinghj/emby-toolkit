@@ -4,7 +4,7 @@ const path = '/api/media_info/recovery';
 const record = {
   id: 'saved-71b4d21e-f026-44c4-aa70-944c9c370e53',
   directory: '/config/backups/media-info-reload/saved-71b4d21e-f026-44c4-aa70-944c9c370e53',
-  target_ids: ['61616'], kind: 'media-reload', reason: '前次媒体刷新尚未完成验收，暂不修改神医配置', can_recover: true,
+  target_ids: ['101'], kind: 'media-reload', reason: '前次媒体刷新尚未完成验收，暂不修改神医配置', can_recover: true,
 };
 const pendingState = { pending: true, records: [record] };
 const cleanupRecord = { ...record, kind: 'verified-cleanup', reason: '媒体及原配置已验收，备份清理尚未完成，可重试删除' };
@@ -67,7 +67,7 @@ test('a background recovery is verified again before the editor resumes saving',
 });
 
 test('recovery failure retains its button, directory, draft and save restriction', async ({ page, api }) => {
-  api.queueTask('POST', path, { error: '61616：章节图片尚未恢复；原备份已保留' }, { id: 'failed-recovery', status: 409, state: 'failed', polls: 0 });
+  api.queueTask('POST', path, { error: '101：章节图片尚未恢复；原备份已保留' }, { id: 'failed-recovery', status: 409, state: 'failed', polls: 0 });
   await openPending(page, api);
   const title = editor(page).getByRole('textbox', { name: /音轨.*1.*标题/ });
   await title.fill('保留恢复期间的草稿');

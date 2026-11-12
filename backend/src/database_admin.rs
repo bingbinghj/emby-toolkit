@@ -207,8 +207,11 @@ async fn import(
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
             import_data(&state.db, &backup, &names, Some(&context)).await?;
+            let reload_requested = names.iter().any(|name| name == "app_settings");
+            let config_error = if reload_requested { state.reload_config().await.err() } else { None };
+            let warning_details: Vec<_> = config_error.iter().map(|error| format!("数据已恢复，但运行配置重载失败：{}", error.1)).collect();
             drop(_gate);
-            Ok(json!({"message":format!("已恢复 {} 个数据表",names.len())}))
+            Ok(json!({"message":if warning_details.is_empty() { format!("已恢复 {} 个数据表",names.len()) } else { warning_details.join("；") },"data_restored":true,"restored_tables":names,"config_reloaded":reload_requested.then(|| config_error.is_none()),"warnings":warning_details.len(),"warning_details":warning_details}))
         })
         .await?;
     Ok((
@@ -326,6 +329,9 @@ pub async fn import_data(
                 .await?;
         }
     }
+    if let Some(context) = context {
+        context.checkpoint().await?;
+    }
     transaction.commit().await?;
     if let Err(error) = correct_sequences(pool).await {
         tracing::error!("数据库导入已提交，后续 ID 计数器校准失败：{}", error.1);
@@ -433,13 +439,21 @@ async fn clear_review(State(state): State<AppState>) -> Result<Json<Value>> {
 async fn clear_tables(
     State(state): State<AppState>,
     Json(body): Json<Value>,
-) -> Result<Json<Value>> {
+) -> Result<(StatusCode, Json<Value>)> {
     let names = body["tables"]
         .as_array()
         .filter(|names| !names.is_empty())
         .ok_or_else(|| ApiError::bad("请求体必须包含非空 tables 数组"))?;
     let valid = regex::Regex::new(r"^[_\p{XID_Start}]\p{XID_Continue}*$").unwrap();
     let mut count = 0;
+    let mut cleared_tables = vec![];
+    let mut config_reloaded = None;
+    let failed = |error: ApiError, cleared: &[String], reloaded: Option<bool>| {
+        (
+            error.0,
+            Json(json!({"error":error.1,"cleared_tables":cleared,"config_reloaded":reloaded})),
+        )
+    };
     for name in names {
         let Some(name) = name.as_str().filter(|name| valid.is_match(name)) else {
             tracing::warn!("非法表名跳过清空：{name}");
@@ -451,10 +465,27 @@ async fn clear_tables(
             None
         };
         let quoted = format!("\"{}\"", name.replace('"', "\"\""));
-        count += sqlx::query(&format!("DELETE FROM {quoted}"))
+        count += match sqlx::query(&format!("DELETE FROM {quoted}"))
             .execute(&state.db)
-            .await?
-            .rows_affected();
+            .await
+        {
+            Ok(result) => result.rows_affected(),
+            Err(error) => return Ok(failed(error.into(), &cleared_tables, config_reloaded)),
+        };
+        cleared_tables.push(name.to_string());
+        if name == "app_settings" {
+            if let Err(error) = state.reload_config().await {
+                return Ok(failed(
+                    ApiError(
+                        error.0,
+                        format!("数据表已清空，但运行配置重载失败：{}", error.1),
+                    ),
+                    &cleared_tables,
+                    Some(false),
+                ));
+            }
+            config_reloaded = Some(true);
+        }
         if name == "translation_cache" {
             state
                 .ai
@@ -462,8 +493,11 @@ async fn clear_tables(
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
     }
-    Ok(Json(
-        json!({"message":format!("操作成功！共清空 {} 个表，删除 {count} 行数据。",names.len())}),
+    Ok((
+        StatusCode::OK,
+        Json(
+            json!({"message":format!("操作成功！共清空 {} 个表，删除 {count} 行数据。",names.len()),"cleared_tables":cleared_tables,"config_reloaded":config_reloaded}),
+        ),
     ))
 }
 

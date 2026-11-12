@@ -219,6 +219,10 @@ html[data-theme='glass'][data-glass-color-scheme='dark'] .theme-horizontal-nav__
 .theme-navbar-center { justify-content: center; }
 .theme-navbar-actions { justify-content: flex-end; }
 @media (width <= 1279px) { .theme-navbar-row { grid-template-columns: auto minmax(0, 1fr) auto; } }
+// Reserve the larger 3×40px edge group and its 8px gaps symmetrically.
+.theme-navbar-row:has(.theme-navbar-center:not(:empty)) {
+  grid-template-columns: minmax(0, 1fr) min(240px, max(0px, calc(100% - 288px))) minmax(0, 1fr);
+}
 .layout-navbar { border-block-end: 1px solid rgba(var(--v-theme-on-surface), .08); }
 .layout-navbar--horizontal { border-radius: calc(var(--shell-navbar-scroll-progress, 0) * 24px); transform: translateY(calc(var(--shell-navbar-scroll-progress, 0) * 12px)); margin-inline: calc(var(--shell-navbar-scroll-progress, 0) * 16px); max-inline-size: calc(100% - var(--shell-navbar-scroll-progress, 0) * 32px); }
 .theme-horizontal-nav { display: flex; align-items: center; gap: 4px; padding-block-end: 8px; }

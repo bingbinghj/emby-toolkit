@@ -16,7 +16,10 @@ use std::path::PathBuf;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/config/cover_generator", get(config).post(save))
+        .route(
+            "/api/config/cover_generator",
+            get(config).post(save).patch(save_partial),
+        )
         .route("/api/config/cover_generator/libraries", get(libraries))
         .route("/api/config/cover_generator/preview", post(preview))
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024 * 1024))
@@ -38,6 +41,13 @@ async fn save(State(state): State<AppState>, Json(config): Json<Value>) -> Resul
         return Err(ApiError::bad("封面配置必须是对象"));
     }
     db::save_setting(&state.db, "cover_generator_config", &config).await?;
+    Ok(Json(json!({"message":"配置已成功保存！"})))
+}
+async fn save_partial(
+    State(state): State<AppState>,
+    Json(patch): Json<Value>,
+) -> Result<Json<Value>> {
+    db::patch_setting(&state.db, "cover_generator_config", &patch).await?;
     Ok(Json(json!({"message":"配置已成功保存！"})))
 }
 async fn libraries(State(state): State<AppState>) -> Result<Json<Value>> {
@@ -172,9 +182,13 @@ pub async fn generate(
     library_ids: Option<&[String]>,
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
-    let Some(config) = db::setting(&state.db, "cover_generator_config").await? else {
+    let Some(stored) = db::setting(&state.db, "cover_generator_config").await? else {
         return Err(ApiError::bad("未找到封面生成器配置"));
     };
+    let mut config = defaults();
+    if let Some(stored) = stored.as_object() {
+        config.as_object_mut().unwrap().extend(stored.clone());
+    }
     if config["enabled"] != true {
         return Ok(json!({"updated":0,"message":"封面生成器未启用"}));
     }

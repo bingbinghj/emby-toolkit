@@ -71,6 +71,10 @@ impl JobContext {
     pub fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
     }
+    pub(crate) fn request_stop(&self) {
+        self.cancel.cancel();
+        self.wake.notify_waiters();
+    }
     pub(crate) fn pause_generation(&self) -> u64 {
         self.pause_generation.load(Ordering::Acquire)
     }

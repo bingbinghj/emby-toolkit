@@ -1,7 +1,8 @@
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{Request, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -16,6 +17,7 @@ use std::{
     time::Duration,
 };
 use tokio::sync::Mutex;
+use tower::ServiceExt;
 
 #[derive(Clone, Default)]
 struct Host {
@@ -221,7 +223,8 @@ impl Fixture {
             .connect(&url)
             .await
             .unwrap();
-        let directory = tempfile::tempdir().unwrap();
+        let directory =
+            tempfile::tempdir_in("/root/emby-toolkit-nov12-followup3-verification").unwrap();
         let state = AppState::new(pool, directory.path().join("app"))
             .await
             .unwrap();
@@ -820,4 +823,209 @@ async fn moviepilot_requires_every_eligible_group_and_unrelated_cover_warnings_d
         "封面警告不得阻止已完成标题的提取：{job}"
     );
     f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn moviepilot_webhook_retries_failed_finalization_without_reextracting_known_media() {
+    async fn post_and_wait(fixture: &Fixture, body: &Value) -> Value {
+        let previous_task = fixture.state.jobs.status().await["task_id"].clone();
+        let response = webhook::router()
+            .with_state(fixture.state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/webhook/moviepilot?token=fixture-shared")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let status = fixture.state.jobs.status().await;
+                if status["task_id"] != previous_task
+                    && let Some(id) = status["task_id"].as_str()
+                    && let Some(job) = fixture.state.jobs.result(id).await
+                    && job["is_running"] == false
+                {
+                    return job;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("accepted webhook must finish a new task")
+    }
+
+    let fixture = Fixture::new(&["refresh_failed"], false, false).await;
+    fixture
+        .state
+        .save_config(&json!({
+            "emby_webhook_secret":"fixture-shared",
+            "monitor_paths":[fixture._directory.path()],
+            "monitor_extensions":["strm"],
+            "auto_extract_intro_fingerprint_on_ingest":false,
+            "auto_extract_credits_on_ingest":false,
+            "auto_extract_video_thumbnails_on_ingest":false
+        }))
+        .await
+        .unwrap();
+    let mut body = json!({
+        "event":"metadata.scrape.complete",
+        "success":true,
+        "root_path":fixture._directory.path(),
+        "file_list":fixture.files,
+        "media_type":"movie",
+        "tmdb_id":"101",
+        "batch_id":"retry-finalization"
+    });
+    let mut jobs = vec![];
+    let mut histories: Vec<String> = vec![];
+    let mut refresh_counts = vec![];
+    let mut info_counts = vec![];
+    let mut in_library: Vec<bool> = vec![];
+    for attempt in 0..3 {
+        if attempt == 1 {
+            fixture.host.refresh_failures.lock().await.clear();
+        } else if attempt == 2 {
+            body["batch_id"] = json!("completed-known-media");
+        }
+        jobs.push(post_and_wait(&fixture, &body).await);
+        histories.push(
+            sqlx::query_scalar(
+                "SELECT status FROM media_organize_history ORDER BY created_at DESC,id DESC LIMIT 1",
+            )
+            .fetch_one(&fixture.state.db)
+            .await
+            .unwrap(),
+        );
+        in_library.push(
+            sqlx::query_scalar(
+                "SELECT in_library FROM media_metadata WHERE tmdb_id='101' AND item_type='Movie'",
+            )
+            .fetch_one(&fixture.state.db)
+            .await
+            .unwrap(),
+        );
+        refresh_counts.push(
+            fixture
+                .host
+                .refresh_attempts
+                .lock()
+                .await
+                .iter()
+                .filter(|(id, mode)| id == "101" && mode == "FullRefresh")
+                .count(),
+        );
+        info_counts.push(*fixture.host.info_runs.lock().await);
+    }
+    fixture.close().await;
+
+    assert_eq!(jobs[0]["state"], "failed", "{}", jobs[0]);
+    assert!(
+        in_library[0],
+        "failed finalization must follow asset binding"
+    );
+    assert!(
+        refresh_counts[0] > 0,
+        "first attempt must reach final refresh"
+    );
+    assert_eq!(histories[0], "failed");
+    assert_eq!(
+        info_counts,
+        vec![1, 1, 1],
+        "known media must not be re-extracted"
+    );
+    assert_eq!(
+        jobs[1]["result"]["finalizations"][0]["report"]["metadata_refresh"]["completed"], true,
+        "same-batch retry must complete the failed finalization: {}",
+        jobs[1]
+    );
+    assert!(refresh_counts[1] > refresh_counts[0]);
+    assert_eq!(histories[1], "success");
+    assert_eq!(histories[2], "success");
+    assert_eq!(jobs[2]["result"]["updated"], 0, "{}", jobs[2]);
+    assert_eq!(
+        refresh_counts[2], refresh_counts[1],
+        "completed media must not be finalized twice"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn moviepilot_history_uses_the_completed_work_when_ingest_switch_changes_before_finish() {
+    for awaiting_emby in [false, true] {
+        let fixture = Fixture::new(&["complete"], false, false).await;
+        fixture
+            .state
+            .save_config(&json!({
+                "emby_webhook_ingest_enabled":awaiting_emby,
+                "auto_extract_intro_fingerprint_on_ingest":false,
+                "auto_extract_credits_on_ingest":false,
+                "auto_extract_video_thumbnails_on_ingest":false
+            }))
+            .await
+            .unwrap();
+        let mut event = json!({"source":"moviepilot","media_type":"movie",
+            "files":fixture.files,"tmdb_id":"101","batch_key":"ownership"});
+        event["history_ids"] = json!(
+            emby_toolkit::media_organize_history::begin_moviepilot(&fixture.state, &event)
+                .await
+                .unwrap()
+        );
+        let work = fixture.state.clone();
+        let id = fixture
+            .state
+            .jobs
+            .submit("入库收尾归属", move |context| async move {
+                let result = webhook::process_moviepilot(&work, &event, &context).await;
+                work.save_config(&json!({"emby_webhook_ingest_enabled":!awaiting_emby}))
+                    .await?;
+                emby_toolkit::media_organize_history::finish(&work, &event, &result).await?;
+                result
+            })
+            .await
+            .unwrap();
+        let job = tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let job = fixture.state.jobs.result(&id).await.unwrap();
+                if job["is_running"] == false {
+                    break job;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM media_organize_history")
+            .fetch_one(&fixture.state.db)
+            .await
+            .unwrap();
+        fixture.close().await;
+        assert_eq!(job["result"]["updated"], 1, "{job}");
+        if awaiting_emby {
+            assert!(
+                job["result"]["finalizations"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(
+                status, "processing",
+                "preparation still awaits actual finalization"
+            );
+        } else {
+            assert_eq!(
+                job["result"]["finalizations"][0]["report"]["metadata_refresh"]["completed"],
+                true
+            );
+            assert_eq!(
+                status, "success",
+                "completed finalization must remain complete"
+            );
+        }
+    }
 }

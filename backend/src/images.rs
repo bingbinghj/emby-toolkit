@@ -174,7 +174,9 @@ pub async fn download_with_overwrite_report(
         return Ok(json!({"downloaded":0,"warnings":0,"warning_details":[]}));
     }
     let path = Path::new(&raw);
-    let directory = if path.is_file() || path.extension().is_some() {
+    let directory = if path.is_dir() {
+        path
+    } else if path.is_file() || path.extension().is_some() {
         path.parent().unwrap_or(Path::new(""))
     } else {
         path

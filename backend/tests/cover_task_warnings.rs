@@ -1,10 +1,11 @@
 use axum::{
     Json, Router,
+    body::{Body, to_bytes},
     extract::{Query, State},
-    http::StatusCode,
+    http::{Method, Request, StatusCode, header},
     routing::{get, post},
 };
-use emby_toolkit::{AppState, covers, db, media_preflight};
+use emby_toolkit::{AppState, auth::Session, covers, db, media_preflight};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -14,11 +15,14 @@ use std::{
     },
     time::Duration,
 };
+use tower::ServiceExt;
 
 #[derive(Clone)]
 struct Host {
     uploads: Arc<AtomicUsize>,
     requests: Arc<AtomicUsize>,
+    primary_downloads: Arc<AtomicUsize>,
+    backdrop_downloads: Arc<AtomicUsize>,
     image: Arc<Vec<u8>>,
 }
 struct Fixture {
@@ -65,6 +69,8 @@ impl Fixture {
         let host = Host {
             uploads: Arc::default(),
             requests: Arc::default(),
+            primary_downloads: Arc::default(),
+            backdrop_downloads: Arc::default(),
             image: Arc::new(image.into_inner()),
         };
         let router = Router::new()
@@ -72,10 +78,11 @@ impl Fixture {
             .route("/Users/admin/Items", get(|State(host): State<Host>, Query(query): Query<HashMap<String,String>>| async move {
                 host.requests.fetch_add(1, Ordering::SeqCst);
                 Json(if query.get("Limit").is_some_and(|limit| limit=="0") { json!({"Items":[],"TotalRecordCount":2}) }
-                    else { json!({"Items":[{"Id":"bad","Name":"失败图片","ImageTags":{"Primary":"one"}},{"Id":"good","Name":"正常图片","ImageTags":{"Primary":"two"}}],"TotalRecordCount":2}) })
+                    else { json!({"Items":[{"Id":"bad","Name":"失败图片","ImageTags":{"Primary":"one"}},{"Id":"good","Name":"正常图片","ImageTags":{"Primary":"two"},"BackdropImageTags":["backdrop"]}],"TotalRecordCount":2}) })
             }))
             .route("/Items/bad/Images/Primary", get(|| async { StatusCode::BAD_GATEWAY }))
-            .route("/Items/good/Images/Primary", get(|State(host): State<Host>| async move { ([("Content-Type","image/png")], host.image.as_ref().clone()) }))
+            .route("/Items/good/Images/Primary", get(|State(host): State<Host>| async move { host.primary_downloads.fetch_add(1, Ordering::SeqCst); ([("Content-Type","image/png")], host.image.as_ref().clone()) }))
+            .route("/Items/good/Images/Backdrop/0", get(|State(host): State<Host>| async move { host.backdrop_downloads.fetch_add(1, Ordering::SeqCst); ([("Content-Type","image/png")], host.image.as_ref().clone()) }))
             .route("/Items/library/Images/Primary", post(|State(host): State<Host>| async move { host.uploads.fetch_add(1, Ordering::SeqCst); StatusCode::NO_CONTENT }))
             .with_state(host.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -110,6 +117,9 @@ impl Fixture {
         db::save_setting(&self.state.db, "cover_generator_config", &config)
             .await
             .unwrap();
+        self.generate_saved().await
+    }
+    async fn generate_saved(&self) -> Value {
         let work = self.state.clone();
         let id = self
             .state
@@ -121,6 +131,48 @@ impl Fixture {
             .unwrap();
         self.result(&id).await
     }
+    async fn enable_config_clients(&self) {
+        sqlx::query("INSERT INTO emby_users(id,name,is_administrator) VALUES('cover-a','Cover A',true),('cover-b','Cover B',true)")
+            .execute(&self.state.db).await.unwrap();
+    }
+    async fn config_request(
+        &self,
+        user: Option<&str>,
+        method: Method,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        let mut request = Request::builder()
+            .method(method)
+            .uri("/api/config/cover_generator")
+            .header(header::CONTENT_TYPE, "application/json");
+        if let Some(user) = user {
+            let token = self.state.sessions.sign_administrator(&Session {
+                user_id: user.into(),
+                name: user.into(),
+                setup_mode: false,
+                expires: chrono::Utc::now().timestamp() + 300,
+            });
+            request = request.header(header::COOKIE, format!("etk_session={token}"));
+        }
+        let response = emby_toolkit::router(self.state.clone())
+            .oneshot(
+                request
+                    .body(
+                        body.map(|value| Body::from(value.to_string()))
+                            .unwrap_or_else(Body::empty),
+                    )
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        (
+            status,
+            serde_json::from_slice(&bytes)
+                .unwrap_or(json!({"raw":String::from_utf8_lossy(&bytes)})),
+        )
+    }
     async fn close(self) {
         self.state.jobs.shutdown().await;
         self.server.abort();
@@ -131,6 +183,209 @@ impl Fixture {
             .unwrap();
         self.admin.close().await;
     }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; HTTP clients are localhost"]
+async fn partial_cover_clients_saving_different_sections_preserve_prior_saves() {
+    let f = Fixture::new().await;
+    f.enable_config_clients().await;
+    db::save_setting(
+        &f.state.db,
+        "cover_generator_config",
+        &json!({"future_option":{"keep":true}}),
+    )
+    .await
+    .unwrap();
+    let (first_status, first) = f.config_request(Some("cover-a"), Method::GET, None).await;
+    let (second_status, second) = f.config_request(Some("cover-b"), Method::GET, None).await;
+    assert_eq!(first["enabled"], false);
+    assert_eq!(second["enabled"], false);
+    let saved_first = f
+        .config_request(
+            Some("cover-a"),
+            Method::PATCH,
+            Some(json!({"enabled":true})),
+        )
+        .await;
+    let saved_second = f
+        .config_request(
+            Some("cover-b"),
+            Method::PATCH,
+            Some(json!({"cover_style":"multi_1"})),
+        )
+        .await;
+    let (status, observed) = f.config_request(Some("cover-a"), Method::GET, None).await;
+    f.close().await;
+    assert_eq!(first_status, StatusCode::OK);
+    assert_eq!(second_status, StatusCode::OK);
+    assert_eq!(saved_first.0, StatusCode::OK, "{}", saved_first.1);
+    assert_eq!(saved_second.0, StatusCode::OK, "{}", saved_second.1);
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        observed["enabled"], true,
+        "other section was overwritten: {observed}"
+    );
+    assert_eq!(observed["cover_style"], "multi_1");
+    assert_eq!(observed["future_option"], json!({"keep":true}));
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; HTTP clients are localhost"]
+async fn concurrent_cover_patches_preserve_both_cards_on_the_first_insert() {
+    let f = Fixture::new().await;
+    f.enable_config_clients().await;
+    assert!(
+        db::setting(&f.state.db, "cover_generator_config")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let (first, second) = tokio::join!(
+        f.config_request(
+            Some("cover-a"),
+            Method::PATCH,
+            Some(json!({"enabled":true}))
+        ),
+        f.config_request(
+            Some("cover-b"),
+            Method::PATCH,
+            Some(json!({"cover_style":"multi_1"}))
+        )
+    );
+    let (_, observed) = f.config_request(Some("cover-a"), Method::GET, None).await;
+    f.close().await;
+    assert_eq!(first.0, StatusCode::OK, "{}", first.1);
+    assert_eq!(second.0, StatusCode::OK, "{}", second.1);
+    assert_eq!(observed["enabled"], true);
+    assert_eq!(observed["cover_style"], "multi_1");
+    assert_eq!(observed["multi_1_use_primary"], true);
+    assert_eq!(observed["zh_font_size"], 1.0);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; HTTP clients are localhost"]
+async fn cover_patch_keeps_explicit_clears_and_legacy_post_still_replaces_everything() {
+    let f = Fixture::new().await;
+    f.enable_config_clients().await;
+    db::save_setting(&f.state.db, "cover_generator_config", &json!({"enabled":true,"cover_style":"multi_1","title_config":"电影: [旧标题, Old]","exclude_libraries":["old-library"],"future_option":{"keep":true}})).await.unwrap();
+    let cleared = f
+        .config_request(
+            Some("cover-a"),
+            Method::PATCH,
+            Some(json!({"title_config":"","exclude_libraries":[],"en_font_url":null})),
+        )
+        .await;
+    let (_, patched) = f.config_request(Some("cover-a"), Method::GET, None).await;
+    let replaced = f
+        .config_request(
+            Some("cover-b"),
+            Method::POST,
+            Some(json!({"enabled":false})),
+        )
+        .await;
+    let raw = db::setting(&f.state.db, "cover_generator_config")
+        .await
+        .unwrap();
+    let (_, reset) = f.config_request(Some("cover-a"), Method::GET, None).await;
+    f.close().await;
+    assert_eq!(cleared.0, StatusCode::OK);
+    assert_eq!(patched["enabled"], true);
+    assert_eq!(patched["cover_style"], "multi_1");
+    assert_eq!(patched["title_config"], "");
+    assert_eq!(patched["exclude_libraries"], json!([]));
+    assert!(patched["en_font_url"].is_null());
+    assert_eq!(patched["future_option"], json!({"keep":true}));
+    assert_eq!(replaced.0, StatusCode::OK);
+    assert_eq!(raw, Some(json!({"enabled":false})));
+    assert_eq!(reset["cover_style"], covers::defaults()["cover_style"]);
+    assert_eq!(reset["title_config"], covers::defaults()["title_config"]);
+    assert!(reset.get("future_option").is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; HTTP clients are localhost"]
+async fn invalid_or_unauthorized_cover_patches_do_not_create_configuration() {
+    let f = Fixture::new().await;
+    f.enable_config_clients().await;
+    for user in [None, Some("unknown-user")] {
+        let result = f
+            .config_request(user, Method::PATCH, Some(json!({"enabled":true})))
+            .await;
+        assert_eq!(result.0, StatusCode::FORBIDDEN, "{}", result.1);
+    }
+    for invalid in [json!(null), json!([]), json!(1), json!("invalid")] {
+        let result = f
+            .config_request(Some("cover-a"), Method::PATCH, Some(invalid))
+            .await;
+        assert_eq!(result.0, StatusCode::BAD_REQUEST, "{}", result.1);
+    }
+    let observed = db::setting(&f.state.db, "cover_generator_config")
+        .await
+        .unwrap();
+    f.close().await;
+    assert!(observed.is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; HTTP clients are localhost"]
+async fn a_failed_cover_sql_patch_leaves_the_saved_configuration_intact() {
+    let f = Fixture::new().await;
+    f.enable_config_clients().await;
+    let original = json!({"enabled":true,"future_option":{"keep":true}});
+    db::save_setting(&f.state.db, "cover_generator_config", &original)
+        .await
+        .unwrap();
+    sqlx::raw_sql("CREATE FUNCTION reject_cover_patch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.setting_key='cover_generator_config' AND NEW.value_json ? 'reject_patch' THEN RAISE EXCEPTION 'fixture cover write rejected'; END IF; RETURN NEW; END $$; CREATE TRIGGER cover_write_failure BEFORE INSERT OR UPDATE ON app_settings FOR EACH ROW EXECUTE FUNCTION reject_cover_patch();")
+        .execute(&f.state.db).await.unwrap();
+    let failed = f
+        .config_request(
+            Some("cover-a"),
+            Method::PATCH,
+            Some(json!({"enabled":false,"reject_patch":true})),
+        )
+        .await;
+    let observed = db::setting(&f.state.db, "cover_generator_config")
+        .await
+        .unwrap();
+    f.close().await;
+    assert!(failed.0.is_server_error(), "{}", failed.1);
+    assert_eq!(observed, Some(original));
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn cover_generation_uses_the_complete_defaults_after_a_partial_first_save() {
+    let f = Fixture::new().await;
+    f.enable_config_clients().await;
+    let saved = f
+        .config_request(
+            Some("cover-a"),
+            Method::PATCH,
+            Some(json!({"enabled":true,"cover_style":"multi_1","multi_1_use_main_font":true})),
+        )
+        .await;
+    assert_eq!(saved.0, StatusCode::OK, "{}", saved.1);
+    let raw = db::setting(&f.state.db, "cover_generator_config")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(raw.get("multi_1_use_primary").is_none());
+    let (_, view) = f.config_request(Some("cover-a"), Method::GET, None).await;
+    assert_eq!(view["multi_1_use_primary"], true);
+    let job = f.generate_saved().await;
+    let primary = f.host.primary_downloads.load(Ordering::SeqCst);
+    let backdrop = f.host.backdrop_downloads.load(Ordering::SeqCst);
+    let uploads = f.host.uploads.load(Ordering::SeqCst);
+    f.close().await;
+    assert_eq!(job["state"], "completed_with_warnings", "{job}");
+    assert_eq!(job["result"]["updated"], 1);
+    assert_eq!(
+        primary, 1,
+        "generation must use the primary-image default shown by GET"
+    );
+    assert_eq!(backdrop, 0);
+    assert_eq!(uploads, 1);
 }
 
 #[tokio::test]

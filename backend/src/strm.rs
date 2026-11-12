@@ -304,7 +304,7 @@ fn features(value: &Value) -> HashSet<String> {
         .map(str::to_string)
         .collect()
 }
-fn temporary_features(original: &Value, mode: &str) -> Result<Value> {
+pub(crate) fn temporary_features(original: &Value, mode: &str) -> Result<Value> {
     let removed: &[&str] = match mode {
         "preserve" | "restore_media_info" => {
             &["CatchAllAllow", "ExtractOnFileChange", "IgnoreFileChange"]

@@ -269,9 +269,11 @@ test('cover style numeric settings keep native stepping and scoped numeric saves
   await font.press('ArrowUp');
   await expect(font).toHaveValue('1.1');
   await page.locator('.v-card').filter({ has: page.getByText('封面样式与标题', { exact: true }) }).getByRole('button', { name: '保存', exact: true }).click();
-  await expect.poll(() => api.requests.some(request => request.method === 'POST' && request.path === '/api/config/cover_generator')).toBe(true);
-  const single = api.requests.find(request => request.method === 'POST' && request.path === '/api/config/cover_generator').body;
+  await expect.poll(() => api.requests.some(request => request.method === 'PATCH' && request.path === '/api/config/cover_generator')).toBe(true);
+  const single = api.requests.find(request => request.method === 'PATCH' && request.path === '/api/config/cover_generator').body;
   expect(single.zh_font_size).toBe(1.1);
+  expect(single).not.toHaveProperty('enabled');
+  expect(single).not.toHaveProperty('multi_1_blur');
   await page.getByRole('tab', { name: '多图风格设置', exact: true }).click();
   const blur = page.getByLabel('背景模糊程度', { exact: true }).filter({ visible: true }).first();
   await page.getByRole('checkbox', { name: '启用模糊背景', exact: true }).uncheck();

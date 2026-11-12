@@ -77,6 +77,7 @@ impl AppState {
             && !string(&config, "emby_api_key").is_empty()
     }
     pub async fn reload_config(&self) -> Result<()> {
+        let mut current = self.config.write().await;
         let mut config: Value =
             serde_json::from_str(include_str!("../assets/config_defaults.json"))
                 .expect("bundled defaults");
@@ -88,9 +89,9 @@ impl AppState {
             .unwrap()
             .remove("min_score_for_review");
         migrate_cookie_priority(&self.db, &mut config).await;
-        config["emby_server_id"] = self.config.read().await["emby_server_id"].clone();
+        config["emby_server_id"] = current["emby_server_id"].clone();
         self.logs.configure(&config);
-        *self.config.write().await = config;
+        *current = config;
         Ok(())
     }
     pub async fn save_config(&self, updates: &Value) -> Result<()> {

@@ -12,9 +12,9 @@
       <div v-for="detail in creditsExtractionFeedback.details" :key="detail" class="text-wrap">{{ detail }}</div>
     </VAlert>
 
-    <VAlert v-if="mediaRecoveryState.pending || mediaRecoveryError" type="warning" :title="mediaRecoveryState.pending ? (mediaRecoveryCleanupOnly ? '恢复备份待清理' : '媒体信息需要恢复') : '恢复状态未确认'" variant="tonal" class="mb-4" data-testid="media-recovery-alert">
-      <p>{{ mediaRecoveryCleanupOnly ? '媒体信息与原神医配置已通过验收，恢复备份尚未删除。' : '完成恢复验收与备份清理后才能继续保存媒体信息。' }}</p>
-      <div v-for="record in mediaRecoveryState.records" :key="record.id" class="mt-3">
+    <VAlert v-if="pageMediaRecoveryRecords.length || mediaRecoveryError" type="warning" :title="pageMediaRecoveryRecords.length ? (isRecoveryCleanupOnly(pageMediaRecoveryRecords) ? '恢复备份待清理' : '媒体信息需要恢复') : '恢复状态未确认'" variant="tonal" class="mb-4" data-testid="media-recovery-alert">
+      <p>{{ isRecoveryCleanupOnly(pageMediaRecoveryRecords) ? '媒体信息与原神医配置已通过验收，恢复备份尚未删除。' : '完成恢复验收与备份清理后才能继续保存媒体信息。' }}</p>
+      <div v-for="record in pageMediaRecoveryRecords" :key="record.id" class="mt-3">
         <div class="text-wrap">{{ record.reason }}</div><div class="text-break">恢复目录：{{ record.directory }}</div>
         <div v-for="directory in record.conflict_backup_directories || []" :key="directory" class="text-break">当前 JSON 已另行备份并保留：{{ directory }}</div>
         <div v-for="conflict in record.json_conflicts || []" :key="`${conflict.item_id}:${conflict.path}`" class="mt-3">
@@ -217,9 +217,9 @@
       <VCard>
         <VCardTitle class="d-flex align-center"><span class="flex-grow-1">编辑媒体信息 (音轨/字幕)</span><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭媒体信息编辑器" @click="closeMediaInfoEditor" /></VCardTitle>
         <VCardText>
-          <VAlert v-if="mediaRecoveryState.pending || mediaRecoveryError" type="warning" :title="mediaRecoveryState.pending ? (mediaRecoveryCleanupOnly ? '恢复备份待清理' : '媒体信息需要恢复') : '恢复状态未确认'" variant="tonal" class="mb-4" data-testid="media-recovery-alert">
-            <p>{{ mediaRecoveryCleanupOnly ? '媒体信息与原神医配置已通过验收，恢复备份尚未删除。' : '完成恢复验收与备份清理后才能继续保存媒体信息。' }}</p>
-            <div v-for="record in mediaRecoveryState.records" :key="record.id" class="mt-3">
+          <VAlert v-if="editorMediaRecoveryRecords.length || mediaRecoveryError" type="warning" :title="editorMediaRecoveryRecords.length ? (isRecoveryCleanupOnly(editorMediaRecoveryRecords) ? '恢复备份待清理' : '媒体信息需要恢复') : '恢复状态未确认'" variant="tonal" class="mb-4" data-testid="media-recovery-alert">
+            <p>{{ isRecoveryCleanupOnly(editorMediaRecoveryRecords) ? '媒体信息与原神医配置已通过验收，恢复备份尚未删除。' : '完成恢复验收与备份清理后才能继续保存媒体信息。' }}</p>
+            <div v-for="record in editorMediaRecoveryRecords" :key="record.id" class="mt-3">
               <div class="text-wrap">{{ record.reason }}</div><div class="text-break">恢复目录：{{ record.directory }}</div>
               <div v-for="directory in record.conflict_backup_directories || []" :key="directory" class="text-break">当前 JSON 已另行备份并保留：{{ directory }}</div>
               <div v-for="conflict in record.json_conflicts || []" :key="`${conflict.item_id}:${conflict.path}`" class="mt-3">
@@ -251,7 +251,7 @@
               <div v-if="mediaInfoCurrentVersionFileName" class="media-info-current-version-name" :title="mediaInfoCurrentVersionFileName"><span v-if="mediaInfoCurrentVersionMeta" class="media-info-version-accent">{{ mediaInfoCurrentVersionMeta }}</span><span class="media-info-version-filename">{{ mediaInfoCurrentVersionFileName }}</span></div>
               <VSelect :model-value="currentMediaInfoVersionId" :items="mediaInfoVersionOptions" item-title="label" item-value="value" label="媒体版本" class="media-info-version-select" color="warning" :disabled="isSavingMediaInfo || isRepairingTruehdCore || isDeletingMediaVersion" @update:model-value="handleMediaInfoVersionChange">
                 <template #selection="{ item }"><div class="media-info-version-option-label"><span class="media-info-version-accent">{{ mediaInfoVersionMeta(item.raw) }}</span><span class="media-info-version-filename">{{ item.raw.file_name || item.raw.display_name || item.raw.label }}</span></div></template>
-                <template #item="{ props, item }"><VListItem v-bind="props"><template #title><div class="media-info-version-option-label"><span class="media-info-version-accent">{{ mediaInfoVersionMeta(item.raw) }}</span><span class="media-info-version-filename">{{ item.raw.file_name || item.raw.display_name || item.raw.label }}</span></div></template></VListItem></template>
+                <template #item="{ props, item }"><VListItem v-bind="props" role="option"><template #title><div class="media-info-version-option-label"><span class="media-info-version-accent">{{ mediaInfoVersionMeta(item.raw) }}</span><span class="media-info-version-filename">{{ item.raw.file_name || item.raw.display_name || item.raw.label }}</span></div></template></VListItem></template>
               </VSelect>
             </div>
             <VBtn color="error" variant="tonal" prepend-icon="mdi-delete-outline" :loading="isDeletingMediaVersion" :disabled="isSavingMediaInfo || isRepairingTruehdCore" @click="confirmMediaAction('删除当前版本', '将永久删除当前选中的整套媒体版本，包括115云端文件、本地STRM、NFO、图片、媒体信息和Emby版本。其他格式版本不受影响，确认继续吗？', deleteCurrentMediaVersion)">删除当前版本</VBtn>
@@ -613,7 +613,13 @@ const mediaStreams = ref([]);
 const mediaInfoContext = ref({});
 const mediaInfoSaveFeedback = ref(null);
 const mediaRecoveryState = ref({ pending: false, records: [] });
-const mediaRecoveryCleanupOnly = computed(() => mediaRecoveryState.value.records.length > 0 && mediaRecoveryState.value.records.every(record => record.kind === 'verified-cleanup'));
+const mediaRecoveryRecordsFor = (mediaId) => {
+  const id = String(mediaId || '').trim();
+  return id ? mediaRecoveryState.value.records.filter(record => record.target_ids?.some(target => String(target) === id)) : [];
+};
+const pageMediaRecoveryRecords = computed(() => mediaRecoveryRecordsFor(itemId.value));
+const editorMediaRecoveryRecords = computed(() => mediaRecoveryRecordsFor(currentEditMediaId.value));
+const isRecoveryCleanupOnly = records => records.length > 0 && records.every(record => record.kind === 'verified-cleanup');
 const mediaRecoveryError = ref('');
 const isCheckingMediaRecovery = ref(false);
 const isRecoveringMediaInfo = ref(false);
@@ -2641,8 +2647,7 @@ const handleSaveChanges = async () => {
   color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
   font-size: 11px;
   line-height: 1.25;
-  white-space: normal;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
 }
 
 .media-info-table-scroll { overflow-x:auto; max-width:100%; }

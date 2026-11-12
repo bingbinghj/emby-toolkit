@@ -14,7 +14,7 @@ function deferred() {
   return { promise, resolve };
 }
 function fixture(overrides = {}) {
-  const requests = [], messages = [], intervals = new Map(), timeouts = new Map(), disposals = [];
+  const requests = [], messages = [], intervals = new Map(), timeouts = new Map(), disposals = [], watchers = [];
   const model = {
     emby_user_id: 'bad-id', ai_api_key: 'unrelated-secret',
     delay_between_items_sec: 0.5, media_info_retry_interval: 30, media_info_retry_attempts: 3,
@@ -23,6 +23,8 @@ function fixture(overrides = {}) {
     remove_actors_without_avatars: false, keyword_to_tags: true, studio_to_chinese: true,
     monitor_paths: ['/media/a'], local_strm_root: '/media', p115_app_id: 'fixture',
   };
+  const configState = { value: model }, configError = { value: '' };
+  let configOwner = 0;
   const toast = Object.fromEntries(['success', 'error', 'warning', 'info', 'loading'].map(kind => [kind, text => {
     messages.push({ kind, text }); return { destroy() {} };
   }]));
@@ -43,7 +45,8 @@ function fixture(overrides = {}) {
   const context = vm.createContext({
     console, FormData, JSON, Set, Map,
     ref: value => ({ value }), reactive: value => value,
-    computed: get => ({ get value() { return get(); } }), watch: () => () => {},
+    computed: get => ({ get value() { return get(); } }),
+    watch: (value, callback) => { watchers.push({ value, callback }); return () => {}; },
     onMounted() {}, onUnmounted: callback => disposals.push(callback), nextTick: async () => {},
     setInterval: callback => { const id = ++timerId; intervals.set(id, callback); return id; },
     clearInterval: id => intervals.delete(id),
@@ -55,8 +58,21 @@ function fixture(overrides = {}) {
     useSettingsSearch: () => ({ query: { value: '' }, results: { value: [] }, selected: { value: null }, notice: { value: '' }, showCard: () => true }),
     useMessage: () => toast, useDialog: () => ({ warning() {}, success() {}, error() {} }),
     useConfig: () => ({
-      configModel: { value: model }, loadingConfig: { value: false }, savingConfig: { value: false }, configError: { value: '' },
-      handleSaveConfig: async body => { requests.push({ method: 'SAVE', body }); return true; },
+      configModel: configState, loadingConfig: { value: false }, savingConfig: { value: false }, configError,
+      handleSaveConfig: async body => { requests.push({ method: 'SAVE', body }); return overrides.save ? overrides.save(body) : true; },
+      captureConfigRefresh: () => {
+        const owner = configOwner;
+        return {
+          isCurrent: () => owner === configOwner,
+          refresh: async () => {
+            if (owner !== configOwner) return false;
+            requests.push({ method: 'CONFIG_REFRESH' });
+            const result = overrides.refresh ? await overrides.refresh() : true;
+            if (owner === configOwner && result === false) configError.value = '配置重新读取失败';
+            return result;
+          },
+        };
+      },
     }), axios,
   });
   vm.runInContext(source + '\n' + `globalThis.page = {
@@ -68,13 +84,280 @@ function fixture(overrides = {}) {
     startCookiePolling, closeCookieModal, cookieQrcodeSessionId, cookieQrcodeStatus, cookieAppType, showCookieModal,
     fetchLocalFolders, fetchP115Folders, showLocalFolderModal, showP115FolderModal, loadingLocalFolders, loadingP115Folders, currentLocalTargetField,
     openP115FolderSelector, startWebAuth, isWebAuthing, p115Info, previewRenameFormats, renameFormatPreview,
-    monitorExtensionOptions, check115Status, p115StatusError, loading115Info
+    monitorExtensionOptions, check115Status, p115StatusError, loading115Info,
+    openPromptModal, savePrompts, resetPrompts, promptModalVisible, loadingPrompts, savingPrompts, promptsModel,
+    openStorageDialog, saveStorageSettings, storageFormRef, storageDraft, refreshAIModels, aiModelOptions, isFetchingAIModels,
+    handleClearTables, tablesToClear, clearTablesModalVisible, isClearing, isImporting,
+    closePromptModal: typeof closePromptModal === 'function' ? closePromptModal : () => { promptModalVisible.value = false; }
   };`, context);
   context.page.componentIsMounted.value = true;
   context.page.formRef.value = { validate: async () => ({ valid: overrides.valid ?? true }) };
   context.page.mediaServerFormRef.value = context.page.formRef.value;
-  return { page: context.page, requests, messages, intervals, timeouts, disposals };
+  return { page: context.page, requests, messages, intervals, timeouts, disposals, watchers,
+    invalidateConfigOwner: () => { configOwner++; configState.value = { newOwner: true }; } };
 }
+
+const settle = () => new Promise(resolve => setImmediate(resolve));
+const configRefreshes = f => f.requests.filter(request => request.method === 'CONFIG_REFRESH');
+
+test('completed restoration rereads only the configuration table actually restored', async () => {
+  for (const restored of [true, false]) {
+    const f = fixture({ post: async () => ({ status: 200, data: {
+      data_restored: true, restored_tables: restored ? ['app_settings'] : ['translation_cache'], message: '数据已恢复',
+    } }) });
+    f.page.fileToImport.value = new File(['{}'], 'backup.json');
+    f.page.tablesToImport.value = ['app_settings'];
+    await f.page.startImportProcess();
+    await settle();
+    assert.equal(configRefreshes(f).length, restored ? 1 : 0);
+  }
+});
+
+test('configuration read failure after restoration remains a warning about committed data', async () => {
+  const f = fixture({ post: async () => ({ status: 200, data: {
+    data_restored: true, restored_tables: ['app_settings'], message: '数据已恢复',
+  } }), refresh: async () => false });
+  f.page.fileToImport.value = new File(['{}'], 'backup.json');
+  f.page.tablesToImport.value = ['app_settings'];
+  await f.page.startImportProcess();
+  await settle();
+  assert.equal(configRefreshes(f).length, 1);
+  assert.equal(f.messages.some(message => message.kind === 'error'), false);
+  assert.ok(f.messages.some(message => message.kind === 'warning' && /数据已恢复.*配置.*读取失败/.test(message.text)));
+});
+
+test('server post-commit restore warnings are not replaced by success', async () => {
+  const f = fixture({ post: async () => ({ status: 200, data: {
+    data_restored: true, restored_tables: ['app_settings'], config_reloaded: false,
+    warnings: 1, warning_details: ['数据已恢复，运行配置重载失败'], message: '数据库恢复有提醒',
+  } }) });
+  f.page.fileToImport.value = new File(['{}'], 'backup.json');
+  f.page.tablesToImport.value = ['app_settings'];
+  await f.page.startImportProcess();
+  await settle();
+  assert.equal(f.messages.some(message => message.kind === 'success'), false);
+  assert.ok(f.messages.some(message => message.kind === 'warning' && /运行配置重载失败/.test(message.text)));
+});
+
+test('a completed old restore does not fetch for a new owner or clear a newer import draft', async () => {
+  const pending = deferred();
+  const f = fixture({ post: () => pending.promise });
+  f.page.fileToImport.value = new File(['old'], 'old.json');
+  f.page.tablesToImport.value = ['app_settings'];
+  const running = f.page.startImportProcess();
+  f.invalidateConfigOwner();
+  const nextFile = new File(['new'], 'new.json');
+  f.page.fileToImport.value = nextFile;
+  pending.resolve({ status: 200, data: { data_restored: true, restored_tables: ['app_settings'], message: '旧恢复完成' } });
+  await running;
+  await settle();
+  assert.equal(configRefreshes(f).length, 0);
+  assert.equal(f.page.fileToImport.value, nextFile);
+  assert.equal(f.messages.some(message => ['success', 'error', 'warning'].includes(message.kind)), false);
+});
+
+test('partial table clearing refreshes configuration only when app_settings was actually cleared', async () => {
+  for (const cleared of [['app_settings'], ['translation_cache']]) {
+    const f = fixture({ post: async () => { throw { response: { status: 500, data: {
+      error: '后续表清空失败', cleared_tables: cleared, config_reloaded: cleared[0] === 'app_settings' ? true : null,
+    } } }; } });
+    f.page.tablesToClear.value = ['app_settings', 'translation_cache'];
+    f.page.clearTablesModalVisible.value = true;
+    await f.page.handleClearTables();
+    assert.equal(configRefreshes(f).length, cleared.includes('app_settings') ? 1 : 0);
+    assert.deepEqual(plain(f.page.tablesToClear.value), ['app_settings', 'translation_cache'].filter(name => !cleared.includes(name)));
+    assert.ok(f.messages.some(message => message.kind === 'error' && /后续表清空失败/.test(message.text)));
+  }
+});
+
+test('successful configuration clearing preserves a newer table selection draft', async () => {
+  const pending = deferred();
+  const f = fixture({ post: () => pending.promise });
+  f.page.tablesToClear.value = ['app_settings'];
+  f.page.clearTablesModalVisible.value = true;
+  const running = f.page.handleClearTables();
+  f.page.tablesToClear.value = ['media_metadata'];
+  pending.resolve({ status: 200, data: { cleared_tables: ['app_settings'], config_reloaded: true, message: '数据表已清空' } });
+  await running;
+  assert.equal(configRefreshes(f).length, 1);
+  assert.deepEqual(plain(f.page.tablesToClear.value), ['media_metadata']);
+  assert.equal(f.page.clearTablesModalVisible.value, true);
+});
+
+const promptValues = name => Object.fromEntries(['fast_mode', 'quality_mode', 'overview_translation',
+  'title_translation', 'transliterate_mode', 'batch_joke_fallback'].map(key => [key, name + ':' + key]));
+const promptPosts = f => f.requests.filter(request => request.method === 'POST' && request.url === '/api/ai/prompts');
+
+test('a failed prompt read cannot overwrite custom prompts with initial empty values', async () => {
+  const f = fixture({ get: async () => { throw new Error('提示词读取失败'); } });
+  await f.page.openPromptModal();
+  await f.page.savePrompts();
+  assert.equal(promptPosts(f).length, 0);
+  assert.equal(f.page.promptModalVisible.value, true);
+  assert.equal(f.messages.some(message => message.kind === 'success'), false);
+});
+
+test('pending and invalid prompt reads cannot submit writes, and a successful retry allows explicit empty text', async () => {
+  const pending = deferred();
+  let reads = 0;
+  const f = fixture({ get: () => ++reads === 1 ? pending.promise : Promise.resolve({ data: promptValues('authoritative') }) });
+  const opening = f.page.openPromptModal();
+  await f.page.savePrompts();
+  assert.equal(promptPosts(f).length, 0);
+  pending.resolve({ data: { message: 'invalid prompt response' } });
+  await opening;
+  await f.page.savePrompts();
+  assert.equal(promptPosts(f).length, 0);
+  await f.page.openPromptModal();
+  f.page.promptsModel.value.fast_mode = '';
+  await f.page.savePrompts();
+  assert.equal(promptPosts(f).length, 1);
+  assert.deepEqual(plain(promptPosts(f)[0].body), { ...promptValues('authoritative'), fast_mode: '' });
+});
+
+test('a delayed prompt read cannot overwrite a later reopened dialog', async () => {
+  const pending = deferred();
+  let reads = 0;
+  const f = fixture({ get: () => ++reads === 1 ? pending.promise : Promise.resolve({ data: promptValues('new-dialog') }) });
+  const opening = f.page.openPromptModal();
+  f.page.closePromptModal();
+  await f.page.openPromptModal();
+  pending.resolve({ data: promptValues('old-dialog') });
+  await opening;
+  assert.deepEqual(plain(f.page.promptsModel.value), promptValues('new-dialog'));
+  assert.equal(f.page.loadingPrompts.value, false);
+  assert.equal(f.page.promptModalVisible.value, true);
+});
+
+test('a delayed prompt save cannot close a later reopened dialog', async () => {
+  const pending = deferred();
+  let reads = 0;
+  const f = fixture({ get: async () => ({ data: promptValues(++reads === 1 ? 'old-dialog' : 'new-dialog') }),
+    post: () => pending.promise });
+  await f.page.openPromptModal();
+  const saving = f.page.savePrompts();
+  f.page.closePromptModal();
+  await f.page.openPromptModal();
+  pending.resolve({ data: { message: 'saved' } });
+  await saving;
+  assert.equal(f.page.promptModalVisible.value, true);
+  assert.deepEqual(plain(f.page.promptsModel.value), promptValues('new-dialog'));
+  assert.equal(f.messages.some(message => message.kind === 'success'), false);
+  assert.equal(f.page.savingPrompts.value, false);
+});
+
+test('a prompt read after page unmount cannot fill or announce an obsolete dialog', async () => {
+  const pending = deferred();
+  const f = fixture({ get: () => pending.promise });
+  const opening = f.page.openPromptModal();
+  for (const dispose of f.disposals) dispose();
+  pending.resolve({ data: promptValues('obsolete') });
+  await opening;
+  assert.equal(f.page.promptsModel.value.fast_mode, '');
+  assert.equal(f.messages.some(message => message.kind === 'success'), false);
+});
+
+test('replacing the loaded configuration invalidates an open prompt draft before it can be saved', async () => {
+  const f = fixture({ get: async () => ({ data: promptValues('old-config') }) });
+  await f.page.openPromptModal();
+  const configWatcher = f.watchers.find(watcher => watcher.value === f.page.configModel);
+  assert.ok(configWatcher, 'configuration replacement must invalidate the dialog');
+  const previous = f.page.configModel.value;
+  f.page.configModel.value = { ...plain(previous), ai_api_key: 'replacement-config' };
+  configWatcher.callback(f.page.configModel.value, previous);
+  await f.page.savePrompts();
+  assert.equal(f.page.promptModalVisible.value, false);
+  assert.equal(promptPosts(f).length, 0);
+});
+
+test('an explicit reset can recover a failed prompt read before an ordinary save', async () => {
+  const values = promptValues('default');
+  const f = fixture({ get: async () => { throw new Error('failed read'); },
+    post: async url => ({ data: url === '/api/ai/prompts/reset' ? { prompts: values } : {} }) });
+  await f.page.openPromptModal();
+  await f.page.resetPrompts();
+  await f.page.savePrompts();
+  assert.deepEqual(plain(promptPosts(f)[0].body), values);
+});
+
+test('a late settings save cannot report failure after its page is unmounted', async () => {
+  const pending = deferred();
+  const f = fixture({ save: () => pending.promise });
+  const saving = f.page.saveCard('basic');
+  for (const dispose of f.disposals) dispose();
+  pending.resolve(false);
+  await saving;
+  assert.equal(f.messages.length, 0);
+});
+
+for (const kind of ['server', 'storage']) {
+  test('delayed ' + kind + ' validation cannot submit an obsolete owner draft', async () => {
+    const pending = deferred();
+    const f = fixture();
+    if (kind === 'server') {
+      f.page.openMediaServerDialog();
+      f.page.mediaServerFormRef.value = { validate: () => pending.promise };
+    } else {
+      f.page.openStorageDialog();
+      f.page.storageFormRef.value = { validate: () => pending.promise };
+    }
+    const saving = kind === 'server' ? f.page.saveMediaServer() : f.page.saveStorageSettings();
+    f.page.configModel.value = { ...plain(f.page.configModel.value), ai_api_key: 'new-owner' };
+    pending.resolve({ valid: true });
+    await saving;
+    assert.equal(f.requests.filter(request => request.method === 'SAVE').length, 0);
+  });
+}
+
+test('an old AI model list cannot fill a new owner configuration', async () => {
+  const pending = deferred();
+  const f = fixture({ post: () => pending.promise });
+  const initialOptions = plain(f.page.aiModelOptions.value);
+  const reading = f.page.refreshAIModels();
+  f.page.configModel.value = { ...plain(f.page.configModel.value), ai_api_key: 'new-owner', ai_model_name: '' };
+  pending.resolve({ data: { models: ['old-owner-model'] } });
+  await reading;
+  assert.equal(f.page.configModel.value.ai_model_name, '');
+  assert.deepEqual(plain(f.page.aiModelOptions.value), initialOptions);
+  assert.equal(f.messages.length, 0);
+});
+
+test('an older model read cannot replace a newer provider or clear its loading state', async () => {
+  const first = deferred(), second = deferred();
+  let reads = 0;
+  const f = fixture({ post: () => ++reads === 1 ? first.promise : second.promise });
+  const initialOptions = plain(f.page.aiModelOptions.value);
+  const old = f.page.refreshAIModels();
+  f.page.configModel.value.ai_api_key = 'new-provider-key';
+  const fresh = f.page.refreshAIModels();
+  first.resolve({ data: { models: ['old-provider-model'] } });
+  await old;
+  assert.equal(f.page.isFetchingAIModels.value, true);
+  assert.deepEqual(plain(f.page.aiModelOptions.value), initialOptions);
+  assert.equal(f.messages.length, 0);
+  second.resolve({ data: { models: ['new-provider-model'] } });
+  await fresh;
+  assert.equal(f.page.isFetchingAIModels.value, false);
+  assert.equal(f.page.configModel.value.ai_model_name, 'new-provider-model');
+  assert.deepEqual(plain(f.page.aiModelOptions.value), [{ label: 'new-provider-model', value: 'new-provider-model' }]);
+});
+
+test('editing model connection parameters without another read prevents old automatic model selection', async () => {
+  for (const [field, value] of [['ai_provider', 'gemini'], ['ai_base_url', 'https://new-provider.invalid'], ['ai_api_key', 'new-provider-key']]) {
+    const pending = deferred();
+    const f = fixture({ post: () => pending.promise });
+    Object.assign(f.page.configModel.value, { ai_provider: 'openai', ai_base_url: 'https://old-provider.invalid', ai_model_name: '' });
+    const initialOptions = plain(f.page.aiModelOptions.value);
+    const reading = f.page.refreshAIModels();
+    f.page.configModel.value[field] = value;
+    pending.resolve({ data: { models: ['old-provider-model'] } });
+    await reading;
+    assert.equal(f.page.configModel.value.ai_model_name, '', field);
+    assert.deepEqual(plain(f.page.aiModelOptions.value), initialOptions, field);
+    assert.equal(f.messages.length, 0, field);
+    assert.equal(f.page.isFetchingAIModels.value, false, field);
+  }
+});
 
 test('native settings card submits only its declared fields and leaves unrelated drafts out', async () => {
   const f = fixture();

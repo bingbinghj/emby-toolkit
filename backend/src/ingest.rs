@@ -470,10 +470,17 @@ async fn process(
     let keywords = crate::db::setting(&state.db, "keyword_mapping")
         .await?
         .unwrap_or(defaults["DEFAULT_KEYWORD_MAPPING"].clone());
+    let movie_paths = if kind == "Movie" {
+        crate::nfo_files::movie_paths(state, item, &payload).await?
+    } else {
+        vec![]
+    };
+    context.checkpoint().await?;
     let options = crate::nfo_files::Options {
         force: true,
         seasons: &target_numbers,
         episodes: &target_scope,
+        movie_paths: &movie_paths,
         config: &config,
         studio_mapping: &studio,
         keyword_mapping: &keywords,
@@ -855,9 +862,16 @@ pub async fn prepare_cached_report(
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+    let movie_paths = if kind == "Movie" {
+        crate::nfo_files::movie_paths(state, item, &payload).await?
+    } else {
+        vec![]
+    };
+    context.checkpoint().await?;
     let options = crate::nfo_files::Options {
         seasons: &seasons,
         episodes: &scope,
+        movie_paths: &movie_paths,
         config: &config,
         studio_mapping: &studios,
         keyword_mapping: &keywords,

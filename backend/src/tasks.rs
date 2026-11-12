@@ -586,12 +586,6 @@ async fn restore_metadata(state: &AppState, context: &crate::jobs::JobContext) -
     let keywords = crate::db::setting(&state.db, "keyword_mapping")
         .await?
         .unwrap_or(defaults["DEFAULT_KEYWORD_MAPPING"].clone());
-    let options = crate::nfo_files::Options {
-        config: &config,
-        studio_mapping: &studio,
-        keyword_mapping: &keywords,
-        ..Default::default()
-    };
     let mut updated = 0;
     let mut written = 0;
     let mut images = 0;
@@ -632,6 +626,31 @@ async fn restore_metadata(state: &AppState, context: &crate::jobs::JobContext) -
             let (payload, cast) = crate::metadata::reconstruct_full(state, &id, &kind, true)
                 .await?
                 .ok_or_else(|| ApiError::bad("缺失元数据缓存"))?;
+            let mut movie_paths = std::collections::BTreeSet::new();
+            if kind == "Movie" {
+                for asset in &assets {
+                    let path = crate::state::string(asset, "path");
+                    if !path.is_empty()
+                        && !path.starts_with("http")
+                        && !crate::emby::library_ignored(
+                            &config,
+                            &crate::state::string(asset, "source_library_id"),
+                        )
+                        && !crate::emby::path_ignored(state, &path).await?
+                    {
+                        movie_paths.insert(std::path::PathBuf::from(path));
+                    }
+                }
+            }
+            let movie_paths = movie_paths.into_iter().collect::<Vec<_>>();
+            let options = crate::nfo_files::Options {
+                movie_paths: &movie_paths,
+                config: &config,
+                studio_mapping: &studio,
+                keyword_mapping: &keywords,
+                ..Default::default()
+            };
+            context.checkpoint().await?;
             let item = json!({"Path":path,"Type":kind});
             let nfo = crate::nfo_files::sync(&kind, &item, &payload, &cast, &options).await?;
             let images =

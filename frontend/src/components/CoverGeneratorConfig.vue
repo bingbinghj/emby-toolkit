@@ -96,6 +96,10 @@
             </VWindowItem>
 
             <VWindowItem value="title-tab">
+              <VAlert v-if="titleConfigUnreadable" type="warning" variant="tonal" class="mb-4">
+                无法读取已保存的封面标题。请填写有效标题，或明确清空后再保存。
+                <template #append><VBtn variant="text" :disabled="isSaving" @click="clearInvalidTitleConfig">清空无效标题</VBtn></template>
+              </VAlert>
               <div class="d-flex flex-column ga-4">
                 <div v-for="(item, index) in titleConfigs" :key="item.id" class="title-config-row">
                   <VTextField v-model="item.library" label="媒体库名称" placeholder="与媒体库名称完全一致" hide-details />
@@ -196,7 +200,6 @@ const configLoadError = ref('');
 const isSaving = ref(false);
 const isGenerating = ref(false);
 const configData = ref({});
-let persistedConfig = {};
 const sectionFields = {
   basic: ['enabled', 'transfer_monitor', 'show_item_count', 'sort_by', 'max_safe_rating', 'exclude_libraries', 'badge_style', 'badge_size_ratio'],
   'style-tab': ['cover_style'],
@@ -208,6 +211,7 @@ const sectionFields = {
 const ratingLimitOptions = ref([]);
 // ★ 新增：用于封面标题UI的结构化数据
 const titleConfigs = ref([]);
+const titleConfigUnreadable = ref(false);
 
 const libraryOptions = ref([]);
 
@@ -218,17 +222,19 @@ const sortOptions = [
 
 // ★ 新增：将YAML字符串解析为结构化数组
 const parseYamlToData = (yamlString) => {
+  titleConfigUnreadable.value = false;
   try {
     if (!yamlString || yamlString.trim() === '') {
       titleConfigs.value = [];
       return;
     }
     const data = yaml.load(yamlString);
-    if (!data) {
+    if (data == null) {
       titleConfigs.value = [];
       return;
     }
-    if (typeof data !== 'object' || Array.isArray(data)) {
+    if (Object.prototype.toString.call(data) !== '[object Object]') {
+      titleConfigUnreadable.value = true;
       message.warning('封面标题配置需使用“媒体库名称: 标题列表”的格式。');
       titleConfigs.value = [];
       return;
@@ -243,6 +249,7 @@ const parseYamlToData = (yamlString) => {
       };
     });
   } catch (e) {
+    titleConfigUnreadable.value = true;
     message.error('封面标题配置 (YAML) 格式解析失败，请检查。');
     console.error("YAML Parse Error:", e);
     titleConfigs.value = []; // 解析失败则清空，避免UI出错
@@ -258,7 +265,7 @@ const convertDataToYaml = () => {
         acc[item.library.trim()] = [item.zh || '', item.en || ''];
       }
       return acc;
-    }, {});
+    }, Object.create(null));
 
     if (Object.keys(dataObject).length === 0) {
       return ''; // 如果没有有效配置，返回空字符串
@@ -287,6 +294,12 @@ const removeTitleConfig = (index) => {
   titleConfigs.value.splice(index, 1);
 };
 
+const clearInvalidTitleConfig = () => {
+  if (isSaving.value) return;
+  titleConfigs.value = [];
+  titleConfigUnreadable.value = false;
+};
+
 
 const fetchConfig = async () => {
   isLoading.value = true;
@@ -301,7 +314,6 @@ const fetchConfig = async () => {
       throw new Error('封面配置返回的数据无效，请重试。');
     }
     configData.value = response.data;
-    persistedConfig = structuredClone(response.data);
     configData.value.tab ||= 'style-tab';
     // ★ 修改：获取配置后，立即解析YAML
     parseYamlToData(configData.value.title_config);
@@ -328,12 +340,24 @@ const saveConfig = async (section) => {
     message.warning('请先成功加载封面配置，再保存。');
     return;
   }
+  const fields = sectionFields[section];
+  if (!Array.isArray(fields)) {
+    message.error('未知封面配置分区，未保存。');
+    return;
+  }
+  if (section === 'title-tab') {
+    const title = convertDataToYaml();
+    if (titleConfigUnreadable.value && !title) {
+      message.warning('请填写有效封面标题，或先明确清空无效标题。');
+      return;
+    }
+    configData.value.title_config = title;
+  }
+  const payload = JSON.parse(JSON.stringify(Object.fromEntries(fields.map(key => [key, configData.value[key]]))));
   isSaving.value = true;
-  if (section === 'title-tab') configData.value.title_config = convertDataToYaml();
-  const payload = { ...persistedConfig, ...Object.fromEntries(sectionFields[section].map(key => [key, configData.value[key]])) };
   try {
-    await axios.post('/api/config/cover_generator', payload);
-    persistedConfig = JSON.parse(JSON.stringify(payload));
+    await axios.patch('/api/config/cover_generator', payload);
+    if (section === 'title-tab') titleConfigUnreadable.value = false;
     message.success('配置已成功保存！');
   } catch (error) {
     message.error(error.response?.data?.error || error.response?.data?.message || '保存配置失败。');

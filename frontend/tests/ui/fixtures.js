@@ -125,6 +125,7 @@ export const test = base.extend({
     respond('GET', '/api/emby_libraries', [{ Id: 'movies', Name: '电影', CollectionType: 'movies' }]);
     respond('GET', '/api/config/cover_generator', () => storedCover);
     respond('POST', '/api/config/cover_generator', request => { storedCover = clone(request.body); return { message: '封面配置已保存' }; });
+    respond('PATCH', '/api/config/cover_generator', request => { Object.assign(storedCover, clone(request.body)); return { message: '封面配置已保存' }; });
     respond('POST', '/api/config/cover_generator/preview', request => ({ image: request.body.base_image }));
     respond('GET', '/api/config/cover_generator/libraries', [{ label: '电影', value: 'movies' }]);
     for (const name of ['keyword_mapping', 'studio_mapping', 'country_mapping', 'rating_priority', 'unified_ratings']) respond('GET', `/api/mappings/config/${name}`, []);

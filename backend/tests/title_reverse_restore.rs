@@ -542,7 +542,7 @@ impl Fixture {
                 }
             }
         }
-        let original_settings = json!({"ExclusiveControlFeatures":"NONE","PersistMediaInfoMode":"Default","LibraryScope":"library","MediaInfoJsonRootFolder":"","IncludeExtra":false,"IsModSupported":true});
+        let original_settings = json!({"ExclusiveControlFeatures":"","PersistMediaInfoMode":"Default","LibraryScope":"library","MediaInfoJsonRootFolder":"","IncludeExtra":false,"IsModSupported":true});
         let host = Host {
             directory: directory.path().into(),
             metadata_root: directory.path().join("metadata"),

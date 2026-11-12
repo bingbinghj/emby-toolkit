@@ -135,9 +135,15 @@ pub async fn build(
     })
 }
 async fn database_target(state: &AppState, id: &str) -> Result<Option<Target>> {
-    let row=sqlx::query("SELECT item_type,asset_details_json,file_sha1_json,file_pickcode_json,emby_item_ids_json FROM media_metadata WHERE emby_item_ids_json @> $1::jsonb LIMIT 1")
-        .bind(json!([id])).fetch_optional(&state.db).await?;
-    let Some(row) = row else {
+    let mut rows=sqlx::query("SELECT item_type,asset_details_json,file_sha1_json,file_pickcode_json,emby_item_ids_json FROM media_metadata WHERE emby_item_ids_json @> $1::jsonb LIMIT 2")
+        .bind(json!([id])).fetch_all(&state.db).await?;
+    if rows.len() > 1 {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "同一 Emby 项目存在多个元数据绑定，已停止读取，请先核对绑定和指纹".into(),
+        ));
+    }
+    let Some(row) = rows.pop() else {
         return Ok(None);
     };
     let assets = list(

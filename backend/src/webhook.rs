@@ -164,21 +164,94 @@ async fn verify(
     }
     Ok(())
 }
+fn merge_pending_event(old: &mut Value, event: &Value) {
+    let ids = list(&old["episode_ids"])
+        .into_iter()
+        .chain(list(&event["episode_ids"]))
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect::<std::collections::BTreeSet<_>>();
+    old["episode_ids"] = json!(ids);
+    old["history_ids"] = json!(
+        list(&old["history_ids"])
+            .into_iter()
+            .chain(list(&event["history_ids"]))
+            .collect::<Vec<_>>()
+    );
+}
+async fn submit_queued_event(state: &AppState, key: String, event: Value) {
+    let work = state.clone();
+    let retry_event = event.clone();
+    match state
+        .jobs
+        .submit("Webhook 入库", move |context| async move {
+            tracing::info!(
+                "Webhook 任务处理开始：来源 {}，Emby {}，目标分集 {} 个",
+                string(&event, "source"),
+                string(&event, "id"),
+                list(&event["episode_ids"]).len()
+            );
+            let result = std::panic::AssertUnwindSafe(async {
+                if event["source"] == "moviepilot" {
+                    let result = process_moviepilot(&work, &event, &context).await;
+                    if let Err(error) = &result {
+                        tracing::error!("MoviePilot Webhook 任务失败：{}", error.1);
+                    }
+                    if result.as_ref().map_or(true, |v| {
+                        v["failures"].as_array().is_some_and(|f| !f.is_empty())
+                    }) && let Some(key) = event["batch_key"].as_str()
+                    {
+                        work.webhooks.batches.lock().await.remove(key);
+                    }
+                    result
+                } else {
+                    process_emby(&work, &event, &context)
+                        .await
+                        .inspect_err(|error| {
+                            tracing::error!(
+                                "Emby Webhook 任务失败：Emby {}，{}",
+                                string(&event, "id"),
+                                error.1
+                            )
+                        })
+                }
+            })
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| {
+                Err(ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "任务执行异常".into(),
+                ))
+            });
+            if let Err(error) = crate::media_organize_history::finish(&work, &event, &result).await
+            {
+                tracing::error!("入库处理记录未能保存：{}", error.1);
+                if result.is_ok() {
+                    return Err(error);
+                }
+            }
+            result
+        })
+        .await
+    {
+        Ok(_) => (),
+        Err(error) => {
+            state
+                .webhooks
+                .pending
+                .lock()
+                .await
+                .entry(key)
+                .and_modify(|old| merge_pending_event(old, &retry_event))
+                .or_insert(retry_event);
+            tracing::warn!("Webhook 等待任务调度：{}", error.1);
+        }
+    }
+}
 async fn enqueue(state: &AppState, key: String, event: Value) {
     let mut pending = state.webhooks.pending.lock().await;
     if let Some(old) = pending.get_mut(&key) {
-        let ids = list(&old["episode_ids"])
-            .into_iter()
-            .chain(list(&event["episode_ids"]))
-            .filter_map(|v| v.as_str().map(str::to_string))
-            .collect::<std::collections::BTreeSet<_>>();
-        old["episode_ids"] = json!(ids);
-        old["history_ids"] = json!(
-            list(&old["history_ids"])
-                .into_iter()
-                .chain(list(&event["history_ids"]))
-                .collect::<Vec<_>>()
-        );
+        merge_pending_event(old, &event);
         tracing::info!(
             "Webhook 排队合并：任务 {key}，目标分集 {} 个",
             list(&old["episode_ids"]).len()
@@ -218,74 +291,7 @@ async fn enqueue(state: &AppState, key: String, event: Value) {
                 }
                 continue;
             };
-            let work = state.clone();
-            let retry_event = event.clone();
-            match state
-                .jobs
-                .submit("Webhook 入库", move |context| async move {
-                    tracing::info!(
-                        "Webhook 任务处理开始：来源 {}，Emby {}，目标分集 {} 个",
-                        string(&event, "source"),
-                        string(&event, "id"),
-                        list(&event["episode_ids"]).len()
-                    );
-                    let result = std::panic::AssertUnwindSafe(async {
-                        if event["source"] == "moviepilot" {
-                            let result = process_moviepilot(&work, &event, &context).await;
-                            if let Err(error) = &result {
-                                tracing::error!("MoviePilot Webhook 任务失败：{}", error.1);
-                            }
-                            if result.as_ref().map_or(true, |v| {
-                                v["failures"].as_array().is_some_and(|f| !f.is_empty())
-                            }) && let Some(key) = event["batch_key"].as_str()
-                            {
-                                work.webhooks.batches.lock().await.remove(key);
-                            }
-                            result
-                        } else {
-                            process_emby(&work, &event, &context)
-                                .await
-                                .inspect_err(|error| {
-                                    tracing::error!(
-                                        "Emby Webhook 任务失败：Emby {}，{}",
-                                        string(&event, "id"),
-                                        error.1
-                                    )
-                                })
-                        }
-                    })
-                    .catch_unwind()
-                    .await
-                    .unwrap_or_else(|_| {
-                        Err(ApiError(
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            "任务执行异常".into(),
-                        ))
-                    });
-                    if let Err(error) =
-                        crate::media_organize_history::finish(&work, &event, &result).await
-                    {
-                        tracing::error!("入库处理记录未能保存：{}", error.1);
-                        if result.is_ok() {
-                            return Err(error);
-                        }
-                    }
-                    result
-                })
-                .await
-            {
-                Ok(_) => (),
-                Err(error) => {
-                    state
-                        .webhooks
-                        .pending
-                        .lock()
-                        .await
-                        .entry(key)
-                        .or_insert(retry_event);
-                    tracing::warn!("Webhook 等待任务调度：{}", error.1);
-                }
-            }
+            submit_queued_event(&state, key, event).await;
         }
     });
 }
@@ -799,6 +805,7 @@ pub async fn process_emby(
     event: &Value,
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
+    context.checkpoint().await?;
     let id = string(event, "id");
     let item = details(
         state,
@@ -821,7 +828,7 @@ pub async fn process_emby(
         .collect::<Vec<_>>();
     if event["event"] == "metadata.update" {
         tracing::info!("Emby 元数据更新事件：《{media_name}》，Emby {id}，同步元数据库");
-        return mirror(state, &string(&event["original"], "Id")).await;
+        return mirror(state, &string(&event["original"], "Id"), context).await;
     }
     if event["event"] == "image.update" {
         return Ok(json!({"message":"图片更新已接收"}));
@@ -1375,8 +1382,10 @@ mod automatic_credits_tests {
     }
 }
 
-async fn mirror(state: &AppState, id: &str) -> Result<Value> {
+async fn mirror(state: &AppState, id: &str, context: &crate::jobs::JobContext) -> Result<Value> {
+    context.checkpoint().await?;
     let item=details(state,id,"ProviderIds,Type,Name,OriginalTitle,Overview,Tags,TagItems,OfficialRating,CustomRating,PremiereDate,ProductionYear").await?;
+    context.checkpoint().await?;
     let kind = string(&item, "Type");
     let tmdb = string(&item["ProviderIds"], "Tmdb");
     let Some(mut row) = crate::metadata::row(state, &tmdb, &kind).await? else {
@@ -1429,6 +1438,7 @@ async fn mirror(state: &AppState, id: &str) -> Result<Value> {
         .map(|key| format!("{key}=r.{key}"))
         .collect::<Vec<_>>()
         .join(",");
+    context.checkpoint().await?;
     sqlx::query(&format!("UPDATE media_metadata SET {update},last_synced_at=NOW() FROM jsonb_populate_record(NULL::media_metadata,$1) r WHERE media_metadata.tmdb_id=$2 AND media_metadata.item_type=$3")).bind(row).bind(tmdb).bind(kind).execute(&state.db).await?;
     tracing::info!(
         "Emby 元数据同步完成：《{}》，Emby {id}",
@@ -1616,6 +1626,7 @@ pub async fn process_moviepilot(
     event: &Value,
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
+    let awaiting_emby = state.config.read().await["emby_webhook_ingest_enabled"] == true;
     let mut files = vec![];
     for file in list(&event["files"]) {
         if !crate::emby::path_ignored(state, file.as_str().unwrap_or("")).await? {
@@ -1670,6 +1681,7 @@ pub async fn process_moviepilot(
         })
         .cloned()
         .collect::<Vec<_>>();
+    let retry_files = crate::media_organize_history::retry_files(state, event).await?;
     tracing::info!(
         "MoviePilot 新文件核对完成：TMDb {tmdb}，有效文件 {} 个，新增 {} 个，已关联 {} 个",
         files.len(),
@@ -1728,7 +1740,7 @@ pub async fn process_moviepilot(
                 .to_string_lossy()
         );
         current.push(string(&item, "Id"));
-        if !new_files.contains(file) {
+        if !new_files.contains(file) && !retry_files.contains(path) {
             continue;
         }
         let id = if item["Type"] == "Episode" {
@@ -1833,9 +1845,7 @@ pub async fn process_moviepilot(
                 Ok(result) => {
                     updated += result["updated"].as_u64().unwrap_or(0);
                     add_report_warnings(&mut postprocessing, &result);
-                    if state.config.read().await["emby_webhook_ingest_enabled"] == true
-                        && let Some(members) = prepared_members.get(&id)
-                    {
+                    if awaiting_emby && let Some(members) = prepared_members.get(&id) {
                         state.webhooks.mark_enhanced(&id, members).await;
                     }
                     let current = if episodes.is_empty() {
@@ -1850,7 +1860,7 @@ pub async fn process_moviepilot(
                         );
                         failures.push(error.1);
                     }
-                    if state.config.read().await["emby_webhook_ingest_enabled"] != true {
+                    if !awaiting_emby {
                         match finalize_inner(
                             state,
                             &id,
@@ -1961,7 +1971,7 @@ pub async fn process_moviepilot(
     } else {
         Value::Null
     };
-    let mut result = json!({"updated":updated,"failures":failures,"finalizations":finalizations,"message":message});
+    let mut result = json!({"updated":updated,"failures":failures,"finalizations":finalizations,"awaiting_emby":awaiting_emby,"message":message});
     add_report_warnings(&mut result, &postprocessing);
     add_automatic_result(&mut result, automatic);
     if failures.is_empty() && result["warnings"].as_u64().unwrap_or(0) > 0 {
@@ -2316,3 +2326,7 @@ async fn finalize_inner(
         json!({"title_fill":title_report,"metadata_refresh":{"completed":refresh_completed.load(std::sync::atomic::Ordering::Acquire)},"fingerprints":fingerprint_report,"audio_repair":audio_report,"warnings":warnings,"warning_details":warning_details}),
     )
 }
+
+#[cfg(test)]
+#[path = "webhook_tests.rs"]
+mod tests;

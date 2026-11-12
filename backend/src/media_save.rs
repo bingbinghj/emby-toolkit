@@ -954,15 +954,21 @@ async fn save_inner(
                 if let Some(source) = body["strm_source"].as_str() && crate::media_paths::strm_target(&target.path).await.unwrap_or_default() != source { return Err(ApiError::bad("STRM目标已变化，未清理Emby数据")); }
             }
             identity::verify(&target.asset,if target_id==id {&body["mediainfo"]} else {&original})?;
+            let mut explicit_language_positions = vec![];
             let mut info=if let Some(info)=rebuilt.get(target_id){info.clone()}
                 else if target_id==id {body["mediainfo"].clone()}
                 else {
                     let (info,report)=media_info::apply_patches(&original,&body["stream_patches"]);
+                    explicit_language_positions = report["explicit_language_positions"].as_array()
+                        .into_iter().flatten().filter_map(Value::as_u64)
+                        .map(|position| position as usize).collect();
                     reports.push(json!({"item_id":target_id,"path":target.path,"matched":report["matched"],"skipped":report["skipped"]}));
                     if report["matched"]==0 {return Ok(None);}
                     info
                 };
-            crate::language::normalize_subtitles_for_save(&mut info, &original);
+            crate::language::normalize_subtitles_for_save_with_explicit(
+                &mut info, &original, &explicit_language_positions,
+            );
             validate_requested_chapters(&info, &original)?;
             if file_refresh { crate::media_reload::ensure_json_streams_unfiltered(&info,target_id)?; }
             // A stale editing page may still contain empty chapters after a failed restore.

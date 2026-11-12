@@ -22,6 +22,11 @@ static NEUTRAL: LazyLock<regex::Regex> = LazyLock::new(|| {
 });
 static COMMENTARY_TITLE: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"(?i)(?:commentary|导评|導評)(?:\s*#?\s*(\d+))?").unwrap());
+pub(crate) fn is_commentary_title(title: &str) -> bool {
+    COMMENTARY_TITLE
+        .find_iter(title)
+        .any(|marker| boundary(title, marker.start(), marker.end(), marker.as_str()))
+}
 static REGION: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"(?i)\blatin[\s-]+america(?:n)?\b").unwrap());
 static TAIWAN_DUB: LazyLock<regex::Regex> =
@@ -58,7 +63,7 @@ pub fn token(text: &str) -> String {
     text.trim().to_lowercase().replace('_', "-")
 }
 
-fn subtitle_script(title: &str) -> Option<&'static str> {
+pub(crate) fn subtitle_script(title: &str) -> Option<&'static str> {
     let title = title
         .trim()
         .to_lowercase()
@@ -87,6 +92,14 @@ fn subtitle_script(title: &str) -> Option<&'static str> {
 // Use Python's script-title rules only for a title edit. An explicit language
 // edit takes priority, and untouched tracks retain their stored language.
 pub fn normalize_subtitles_for_save(info: &mut Value, original: &Value) {
+    normalize_subtitles_for_save_with_explicit(info, original, &[]);
+}
+
+pub(crate) fn normalize_subtitles_for_save_with_explicit(
+    info: &mut Value,
+    original: &Value,
+    explicit_language_positions: &[usize],
+) {
     let Some(original_streams) =
         media_info::container(original).and_then(|source| source["MediaStreams"].as_array())
     else {
@@ -100,10 +113,14 @@ pub fn normalize_subtitles_for_save(info: &mut Value, original: &Value) {
         .filter(|s| s["Type"] == "Subtitle")
         .map(|s| s["Index"].clone())
         .collect::<Vec<_>>();
-    for stream in streams
+    for (position, stream) in streams
         .iter_mut()
-        .filter(|stream| stream["Type"] == "Subtitle")
+        .enumerate()
+        .filter(|(_, stream)| stream["Type"] == "Subtitle")
     {
+        if explicit_language_positions.contains(&position) {
+            continue;
+        }
         let mut matching = original_streams.iter().filter(|candidate| {
             candidate["Type"] == stream["Type"] && candidate["Index"] == stream["Index"]
         });
@@ -507,10 +524,7 @@ pub fn fill(info: &Value, mappings: &Value, skip_chinese: bool) -> (Value, Value
             }));
             continue;
         }
-        let commentary = COMMENTARY_TITLE
-            .find_iter(&cleaned)
-            .any(|marker| boundary(&cleaned, marker.start(), marker.end(), marker.as_str()))
-            .then(|| display_title(&cleaned, &hits, ""));
+        let commentary = is_commentary_title(&cleaned).then(|| display_title(&cleaned, &hits, ""));
         let ready_title = commentary.clone().or_else(|| {
             (kind == "Audio" && hits.is_empty())
                 .then(|| mandarin_source(&cleaned))

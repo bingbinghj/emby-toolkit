@@ -130,8 +130,8 @@ async function handleLogin() {
   try {
     const validation = await formRef.value?.validate();
     if (!isPageActive || !validation?.valid) return;
-    await authStore.login({ ...credentials.value, remember: remember.value });
-    if (!isPageActive) return;
+    const applied = await authStore.login({ ...credentials.value, remember: remember.value });
+    if (!isPageActive || !applied) return;
     message.success('登录成功');
     router.push({ name: 'Dashboard' });
   } catch (error) {

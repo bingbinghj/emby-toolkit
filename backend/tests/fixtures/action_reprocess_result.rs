@@ -255,6 +255,10 @@ async fn selected_movie_reorganizes_its_related_versions_and_scrapes_without_tou
     tokio::fs::write(&other, "unrelated playback")
         .await
         .unwrap();
+    let other_nfo = other.with_extension("nfo");
+    tokio::fs::write(&other_nfo, "unrelated NFO bytes")
+        .await
+        .unwrap();
     let other_info = f.directory.path().join("other-mediainfo.json");
     tokio::fs::write(&other_info, "unrelated JSON")
         .await
@@ -344,6 +348,10 @@ async fn selected_movie_reorganizes_its_related_versions_and_scrapes_without_tou
     let nfo = tokio::fs::read_to_string(f.directory.path().join("61616.nfo"))
         .await
         .unwrap_or_default();
+    let related_nfo = tokio::fs::read_to_string(f.directory.path().join("61617.nfo"))
+        .await
+        .unwrap_or_default();
+    let other_nfo_bytes = tokio::fs::read(other_nfo).await.unwrap();
     server.abort();
     f.close().await;
     assert_eq!(outcome["result"]["updated"], 1, "{outcome}");
@@ -364,6 +372,8 @@ async fn selected_movie_reorganizes_its_related_versions_and_scrapes_without_tou
     );
     assert_eq!(actual_title.as_deref(), Some("重新整理后电影"));
     assert!(nfo.contains("重新整理后电影"), "{nfo}");
+    assert!(related_nfo.contains("重新整理后电影"), "{related_nfo}");
+    assert_eq!(other_nfo_bytes, b"unrelated NFO bytes");
     assert_eq!(actual_other, original_other);
     assert_eq!(other_bytes, b"unrelated playback");
     assert_eq!(other_info_bytes, b"unrelated JSON");

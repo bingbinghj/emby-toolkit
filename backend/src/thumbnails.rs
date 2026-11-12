@@ -350,13 +350,22 @@ async fn run_with_trace(
     let mut cursor = LogCursor::new(state).await?;
     let id = string(&current, "Id");
     context.checkpoint().await?;
-    api(
-        state,
-        Method::POST,
-        &format!("ScheduledTasks/Running/{id}"),
-        &[],
-    )
-    .await?;
+    let start_error = state
+        .emby_once(
+            Method::POST,
+            &format!("ScheduledTasks/Running/{id}"),
+            &[],
+            None,
+        )
+        .await
+        .err();
+    if let Some(error) = &start_error {
+        tracing::warn!(
+            "[神医缩略图] 启动请求未正常返回，仅回读本次执行状态和日志，不重复提交：{}",
+            error.1
+        );
+    }
+    let mut observed_start = start_error.is_none();
     let mut deadline = tokio::time::Instant::now() + timeout;
     let mut log_deadline = None;
     let mut stopped = false;
@@ -375,6 +384,18 @@ async fn run_with_trace(
             }
             let poll = async {
                 current = task(state).await?;
+                observed_start |= active(&current)
+                    || (!current["LastExecutionResult"]["StartTimeUtc"].is_null()
+                        && current["LastExecutionResult"]["StartTimeUtc"] != previous);
+                if !observed_start
+                    && current["State"] == "Idle"
+                    && let Some(error) = &start_error
+                {
+                    return Err(config_error(&format!(
+                        "神医缩略图任务启动未确认，未读取到本次执行，未重复提交：{}",
+                        error.1
+                    )));
+                }
                 trace.feed(&cursor.read(state).await?);
                 Ok::<_, ApiError>(())
             };
@@ -432,7 +453,7 @@ async fn run_with_trace(
         Err(ApiError::bad("等待神医提取结束超时，请检查Emby任务状态"))
     }
     .await;
-    if outcome.is_err() && !stopped {
+    if outcome.is_err() && !stopped && observed_start {
         let _ = api(
             state,
             Method::DELETE,

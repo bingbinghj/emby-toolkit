@@ -61,6 +61,7 @@ function menuFixture(read) {
     isMenuReady: { value: false }, isMenuLoading: { value: false }, menuConfigLoaded: { value: false },
     menuConfigError: { value: '' }, menuConfigTree: { value: [] }, menuRevision: { value: 0 }, isSavingMenu: { value: false },
     isMenuEditorVisible: { value: true }, nextTick: callback => callback(), console: { error() {} },
+    menuEditorSession: 0, authStore: { isLoggedIn: true, user: { id: 'admin' } },
     message: { success() {}, error() {} },
     axios: { get: read, post: async (path, body) => { requests.push({ path, body }); return { data: {} }; } },
   });

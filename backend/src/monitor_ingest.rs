@@ -770,7 +770,7 @@ async fn write_nfo(
     crate::nfo_files::prepare(kind, payload, options);
     let mut plan = BTreeMap::new();
     if kind == "Movie" {
-        for path in movie_files(&paths[0]).await? {
+        for path in paths {
             plan.insert(
                 path.with_extension("nfo"),
                 crate::nfo::build(kind, payload, cast),
@@ -1012,6 +1012,17 @@ pub fn image_plan(
     }
     plan
 }
+async fn check_refresh_connection(state: &AppState, config: &Value) -> Result<()> {
+    let current = state.config.read().await;
+    if string(&current, "emby_server_url").trim_end_matches('/')
+        != string(config, "emby_server_url").trim_end_matches('/')
+        || string(&current, "emby_api_key") != string(config, "emby_api_key")
+    {
+        return Err(ApiError::bad("Emby 连接配置已变化，停止实时监控刷新"));
+    }
+    Ok(())
+}
+
 pub async fn refresh_files(
     state: &AppState,
     paths: &[PathBuf],
@@ -1028,6 +1039,8 @@ pub async fn refresh_files(
     if string(&config, "emby_server_url").is_empty() || string(&config, "emby_api_key").is_empty() {
         return Ok(());
     }
+    let mut emby_state = state.clone();
+    emby_state.config = std::sync::Arc::new(tokio::sync::RwLock::new(config.clone()));
     let mut directories = BTreeSet::new();
     for path in paths {
         let directory = if metadata {
@@ -1050,8 +1063,9 @@ pub async fn refresh_files(
                 }
                 let current = check_active(state, &[], context, cancel, false).await?;
                 ensure(&directory, &current.roots).await?;
+                check_refresh_connection(state, &config).await?;
                 let path = map_emby(&directory, &config);
-                let response = state
+                let response = emby_state
                     .emby(
                         reqwest::Method::GET,
                         "Items",
@@ -1085,6 +1099,7 @@ pub async fn refresh_files(
                         if let Some(item) = item {
                             let current = check_active(state, &[], context, cancel, false).await?;
                             ensure(&directory, &current.roots).await?;
+                            check_refresh_connection(state, &config).await?;
                             let response = crate::emby::send(
                                 state
                                     .http

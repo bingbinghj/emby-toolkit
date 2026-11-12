@@ -74,6 +74,7 @@ pub async fn cache_with_batch(
     let mut online = HashSet::new();
     let mut top_online = HashSet::new();
     let mut top_ids: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    let mut native_works: HashMap<String, BTreeSet<(String, String)>> = HashMap::new();
     let mut work_titles = HashMap::new();
     let mut asset_paths: HashMap<String, HashSet<String>> = HashMap::new();
     for (index, row) in rows.iter().enumerate() {
@@ -102,6 +103,12 @@ pub async fn cache_with_batch(
             }
         }
         if matches!(work.1.as_str(), "Movie" | "Series") {
+            for id in &ids {
+                native_works
+                    .entry(id.clone())
+                    .or_default()
+                    .insert(work.clone());
+            }
             work_titles.insert(work.clone(), string(row, "title"));
             top_ids.entry(work.clone()).or_default().extend(ids.clone());
         }
@@ -292,7 +299,12 @@ pub async fn cache_with_batch(
             && asset_paths
                 .get(&id)
                 .is_some_and(|paths| paths.len() > 1 || !paths.contains(path));
-        if !full && online.contains(&id) && !changed {
+        let provider_changed = key(item).is_some_and(|work| {
+            native_works
+                .get(&id)
+                .is_some_and(|owners| owners.len() != 1 || !owners.contains(&work))
+        });
+        if !full && online.contains(&id) && !changed && !provider_changed {
             continue;
         }
         if let Some(work) = key(item)
@@ -404,7 +416,10 @@ pub async fn cache_with_batch(
             }
             for mut top in details {
                 let id = string(&top, "Id");
-                if !ids.contains(&id) || top["Type"] != work.1 {
+                if !ids.contains(&id)
+                    || top["Type"] != work.1
+                    || key(&top).is_some_and(|actual| actual != *work)
+                {
                     continue;
                 }
                 if emby::path_ignored(state, &string(&top, "Path")).await? {

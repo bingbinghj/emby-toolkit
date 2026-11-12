@@ -5,13 +5,13 @@ const recoveryId = 'media:saved-71b4d21e-f026-44c4-aa70-944c9c370e53';
 const currentHash = 'a'.repeat(64);
 const changedHash = 'b'.repeat(64);
 const currentPath = '/media/Tiga-mediainfo.json';
-const preservedDirectory = '/config/backups/media-info-conflicts/preserved-current-61616';
+const preservedDirectory = '/config/backups/media-info-conflicts/preserved-current-101';
 const conflict = {
-  item_id: '61616', path: currentPath, current_sha256: currentHash,
+  item_id: '101', path: currentPath, current_sha256: currentHash,
   changes: [{ path: '/0/MediaSourceInfo/MediaStreams/1/Title', expected: '原标题', current: '用户修改' }],
 };
 const record = {
-  id: recoveryId, kind: 'media-reload', target_ids: ['61616'],
+  id: recoveryId, kind: 'media-reload', target_ids: ['101'],
   directory: '/config/backups/media-info-reload/saved-71b4d21e-f026-44c4-aa70-944c9c370e53',
   reason: '当前媒体 JSON 与恢复备份内容不同，需要先保留当前文件再恢复',
   can_recover: true, json_conflicts: [conflict],
@@ -76,7 +76,7 @@ test('explicit confirmation submits the exact current hash and successful recove
   await expect(editor(page).getByTestId('media-info-save')).toBeEnabled();
   await expect(editor(page).getByTestId('media-recovery-alert')).toHaveCount(0);
   expect(recoveryPosts(api)).toHaveLength(1);
-  expect(recoveryPosts(api)[0].body).toEqual({ recovery_id: recoveryId, current_json_hashes: { '61616': currentHash } });
+  expect(recoveryPosts(api)[0].body).toEqual({ recovery_id: recoveryId, current_json_hashes: { '101': currentHash } });
   expect(api.requests.some(request => request.path === '/api/tasks/result/conflict-restore-task')).toBe(true);
   expect(api.requests.filter(request => request.method === 'POST' && request.path === '/api/media_info/edit/101')).toEqual([]);
 });
@@ -126,7 +126,7 @@ test('a current JSON change after confirmation retains the draft and requires th
   await expect(editor(page).getByTestId('media-info-save')).toBeDisabled();
   await expect(title).toHaveValue('保留失败后的草稿');
   expect(recoveryPosts(api)).toHaveLength(1);
-  expect(recoveryPosts(api)[0].body.current_json_hashes).toEqual({ '61616': currentHash });
+  expect(recoveryPosts(api)[0].body.current_json_hashes).toEqual({ '101': currentHash });
 
   api.respond('POST', recoveryPath, () => {
     api.respond('GET', recoveryPath, { pending: false, records: [] });
@@ -137,7 +137,7 @@ test('a current JSON change after confirmation retains the draft and requires th
   await expect(editor(page)).toContainText(preservedDirectory);
   await expect(title).toHaveValue('保留失败后的草稿');
   expect(recoveryPosts(api)).toHaveLength(2);
-  expect(recoveryPosts(api)[1].body).toEqual({ recovery_id: recoveryId, current_json_hashes: { '61616': changedHash } });
+  expect(recoveryPosts(api)[1].body).toEqual({ recovery_id: recoveryId, current_json_hashes: { '101': changedHash } });
 });
 
 test('an incomplete current JSON hash cannot authorize a conflict overwrite', async ({ page, api }) => {
@@ -160,7 +160,7 @@ test('duplicate conflict confirmation clicks submit only one preservation and re
   await operation.started;
   await expect(confirm).toBeDisabled();
   expect(recoveryPosts(api)).toHaveLength(1);
-  expect(recoveryPosts(api)[0].body.current_json_hashes).toEqual({ '61616': currentHash });
+  expect(recoveryPosts(api)[0].body.current_json_hashes).toEqual({ '101': currentHash });
   api.respond('GET', recoveryPath, { pending: false, records: [] });
   operation.release(success);
   await expect(editor(page).getByTestId('media-info-save')).toBeEnabled();

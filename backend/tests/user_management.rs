@@ -773,6 +773,58 @@ async fn failed_creation_is_not_replayed_and_partial_creation_has_precise_id_rec
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn partial_creation_password_retry_is_read_back_before_enabling_the_known_user() {
+    let f = Fixture::new().await;
+    let cookie = f.cookie(true, false);
+    f.native.fail_password.store(true, Ordering::SeqCst);
+    let (status, _, created) = f.request("/api/portal/users", &cookie,
+        Some(json!({"name":"New user","new_password":"fixture-only","is_administrator":false,"is_disabled":false}))).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(created["created"], true);
+    assert_eq!(created["id"], "created-member");
+    assert_eq!(created["user"]["has_password"], false);
+    assert_eq!(created["user"]["is_disabled"], true);
+    let writes_before = f.native.writes.lock().await.len();
+    f.native.fail_password.store(false, Ordering::SeqCst);
+    let (status, _, password) = f
+        .request(
+            "/api/portal/users/created-member/password",
+            &cookie,
+            Some(json!({"new_password":"fixture-only"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{password}");
+    assert_eq!(password["id"], "created-member");
+    let (status, _, confirmed) = f
+        .request("/api/portal/users/created-member", &cookie, None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{confirmed}");
+    assert_eq!(confirmed["user"]["has_password"], true);
+    assert_eq!(confirmed["user"]["is_disabled"], true);
+    let (status, _, enabled) = f
+        .request(
+            "/api/portal/users/created-member",
+            &cookie,
+            Some(details("New user", false, false)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{enabled}");
+    assert_eq!(enabled["user"]["has_password"], true);
+    assert_eq!(enabled["user"]["is_disabled"], false);
+    let writes = f.native.writes.lock().await;
+    assert_eq!(writes[writes_before].0, "Users/created-member/Password");
+    assert_eq!(writes[writes_before + 1].0, "Users/created-member/Policy");
+    assert_eq!(writes.len(), writes_before + 2);
+    assert_eq!(
+        writes.iter().filter(|write| write.0 == "Users/New").count(),
+        1
+    );
+    drop(writes);
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
 async fn any_user_avatar_updates_and_reset_require_native_readback() {
     let f = Fixture::new().await;
     f.native.avatar_success.store(true, Ordering::SeqCst);

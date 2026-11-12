@@ -63,14 +63,14 @@ test('settings save failure preserves the edited field and exposes backend reaso
   await expect(delay).toHaveValue('2.5');
 });
 
-test('cover basic settings retain style fields and submit current switch values', async ({ page, api }) => {
+test('cover basic settings only submit their card and retain unrelated style settings', async ({ page, api }) => {
   await page.goto('/settings/cover-generator');
   await page.getByLabel('启用封面生成', { exact: true }).check();
   await page.locator('.v-card').filter({ has: page.getByText('基础设置', { exact: true }) }).getByRole('button', { name: '保存', exact: true }).click();
-  await expect.poll(() => api.requests.some(request => request.method === 'POST' && request.path === '/api/config/cover_generator')).toBe(true);
-  const payload = api.requests.find(request => request.method === 'POST' && request.path === '/api/config/cover_generator').body;
+  await expect.poll(() => api.requests.some(request => request.method === 'PATCH' && request.path === '/api/config/cover_generator')).toBe(true);
+  const payload = api.requests.find(request => request.method === 'PATCH' && request.path === '/api/config/cover_generator').body;
   expect(payload.enabled).toBe(true);
-  expect(payload.cover_style).toBe('single_1');
+  expect(payload).not.toHaveProperty('cover_style');
   await expect(page.getByText('配置已成功保存！', { exact: true })).toBeVisible();
 });
 

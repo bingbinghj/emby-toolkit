@@ -151,6 +151,29 @@ async fn write(
             },
         );
     }
+    if replace_children {
+        let ids = records
+            .iter()
+            .flat_map(|record| list(&record["emby_item_ids_json"]))
+            .filter_map(|id| id.as_str().map(str::to_string))
+            .collect::<BTreeSet<_>>();
+        if !ids.is_empty() {
+            let previous: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('tmdb_id',tmdb_id,'item_type',item_type,'parent_series_tmdb_id',parent_series_tmdb_id) FROM media_metadata WHERE emby_item_ids_json ?| $1")
+                .bind(ids.into_iter().collect::<Vec<_>>()).fetch_all(&mut *transaction).await?;
+            for row in previous {
+                let kind = string(&row, "item_type");
+                let id = string(&row, "tmdb_id");
+                let parent = string(&row, "parent_series_tmdb_id");
+                work.insert(
+                    if matches!(kind.as_str(), "Episode" | "Season") && !parent.is_empty() {
+                        ("Series".into(), parent)
+                    } else {
+                        (kind, id)
+                    },
+                );
+            }
+        }
+    }
     for (kind, id) in work {
         versions::lock(&mut transaction, &kind, &id, "").await?;
     }
@@ -369,97 +392,146 @@ async fn preserve_sync_child_keys(
     Ok(output)
 }
 
-// An episode-group change moves only the incoming Emby versions between metadata keys.
-// Fingerprints follow the Emby ID; versions in other directories stay on their old keys.
+// Move only incoming native versions; unrelated directories retain their bindings.
 async fn replace_child_bindings(
     transaction: &mut Transaction<'_, Postgres>,
     records: &mut [Value],
 ) -> Result<()> {
-    let parents = records
+    let native_ids = records
         .iter()
-        .filter(|r| matches!(r["item_type"].as_str(), Some("Episode" | "Season")))
-        .map(|r| string(r, "parent_series_tmdb_id"))
-        .filter(|p| !p.is_empty())
+        .flat_map(|record| list(&record["emby_item_ids_json"]))
+        .filter_map(|id| id.as_str().map(str::to_string))
         .collect::<BTreeSet<_>>();
-    for parent in parents {
-        let rows:Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE parent_series_tmdb_id=$1 AND item_type IN ('Season','Episode') ORDER BY (tmdb_id ~ '^[0-9]+$') DESC,tmdb_id FOR UPDATE")
-            .bind(&parent).fetch_all(&mut **transaction).await?;
-        let mut destinations = HashMap::new();
-        let mut slots = HashMap::new();
-        for old in &rows {
-            let ids = list(&old["emby_item_ids_json"]);
-            for (index, id) in ids.iter().enumerate() {
-                let slot = json!({
-                    "emby_item_ids_json":[id],
-                    "asset_details_json":[list(&old["asset_details_json"]).get(index)],
-                    "file_sha1_json":[list(&old["file_sha1_json"]).get(index)],
-                    "file_pickcode_json":[list(&old["file_pickcode_json"]).get(index)]});
-                // The real key is ordered first; stale duplicate assets must not
-                // replace its fingerprint revision or verified identity.
-                slots
-                    .entry((string(old, "item_type"), id.clone()))
-                    .or_insert(slot);
-            }
-        }
-        for record in records
-            .iter_mut()
-            .filter(|r| string(r, "parent_series_tmdb_id") == parent)
-        {
-            let kind = string(record, "item_type");
-            let tmdb = string(record, "tmdb_id");
-            let ids = list(&record["emby_item_ids_json"]);
-            for id in &ids {
-                let key = (kind.clone(), id.clone());
-                if destinations
-                    .insert(key.clone(), tmdb.clone())
-                    .is_some_and(|before| before != tmdb)
+    if native_ids.is_empty() {
+        return Ok(());
+    }
+    let kinds = records
+        .iter()
+        .map(|record| string(record, "item_type"))
+        .collect::<BTreeSet<_>>();
+    let rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE item_type=ANY($1) AND emby_item_ids_json ?| $2 ORDER BY (tmdb_id ~ '^[0-9]+$') DESC,tmdb_id,item_type FOR UPDATE")
+        .bind(kinds.into_iter().collect::<Vec<_>>()).bind(native_ids.into_iter().collect::<Vec<_>>())
+        .fetch_all(&mut **transaction).await?;
+    let mut destinations = HashMap::new();
+    let mut slots = HashMap::<(String, Value), (bool, Value)>::new();
+    for old in &rows {
+        let source_id = string(old, "tmdb_id");
+        let numeric = !source_id.is_empty() && source_id.bytes().all(|b| b.is_ascii_digit());
+        for (index, id) in list(&old["emby_item_ids_json"]).iter().enumerate() {
+            let slot = json!({"emby_item_ids_json":[id],
+                "asset_details_json":[list(&old["asset_details_json"]).get(index)],
+                "file_sha1_json":[list(&old["file_sha1_json"]).get(index)],
+                "file_pickcode_json":[list(&old["file_pickcode_json"]).get(index)]});
+            let key = (string(old, "item_type"), id.clone());
+            if let Some((known_real, before)) = slots.get_mut(&key) {
+                // Existing real keys remain authoritative over stale synthetic duplicates.
+                if *known_real && !numeric {
+                    continue;
+                }
+                for field in ["file_sha1_json", "file_pickcode_json"] {
+                    let a = &before[field][0];
+                    let b = &slot[field][0];
+                    if !crate::fingerprints::missing(a)
+                        && !crate::fingerprints::missing(b)
+                        && if field == "file_sha1_json" {
+                            match (a.as_str(), b.as_str()) {
+                                (Some(a), Some(b)) => !a.eq_ignore_ascii_case(b),
+                                _ => a != b,
+                            }
+                        } else {
+                            a != b
+                        }
+                    {
+                        return Err(ApiError::bad("同一原生版本的指纹缓存冲突，已保留原绑定"));
+                    }
+                }
+                let a = &before["asset_details_json"][0];
+                let b = &slot["asset_details_json"][0];
+                for field in [
+                    "path",
+                    "fingerprint_target",
+                    "fingerprint_pending",
+                    "fingerprint_revision",
+                ] {
+                    if !a[field].is_null() && !b[field].is_null() && a[field] != b[field] {
+                        return Err(ApiError::bad("同一原生版本的身份缓存冲突，已保留原绑定"));
+                    }
+                }
+                if matches!((crate::identity::size(&a["size_bytes"]),crate::identity::size(&b["size_bytes"])),(Some(x),Some(y)) if x!=y)
                 {
-                    return Err(ApiError::bad("同一 Emby 版本不能绑定到多个元数据记录"));
+                    return Err(ApiError::bad(
+                        "同一原生版本的文件大小缓存冲突，已保留原绑定",
+                    ));
                 }
-                if let Some(old) = slots.get(&key) {
-                    versions::merge(old, record);
-                }
-            }
-        }
-        for old in rows {
-            let kind = string(&old, "item_type");
-            let tmdb = string(&old, "tmdb_id");
-            let ids = list(&old["emby_item_ids_json"]);
-            let retained = ids
-                .iter()
-                .enumerate()
-                .filter(|(_, id)| {
-                    destinations
-                        .get(&(kind.clone(), (*id).clone()))
-                        .is_none_or(|to| *to == tmdb)
-                })
-                .collect::<Vec<_>>();
-            if retained.len() == ids.len() {
-                continue;
-            }
-            if retained.is_empty() {
-                sqlx::query("DELETE FROM media_metadata WHERE tmdb_id=$1 AND item_type=$2")
-                    .bind(&tmdb)
-                    .bind(&kind)
-                    .execute(&mut **transaction)
-                    .await?;
+                versions::merge(&slot, before);
             } else {
-                let keep = |key: &str| {
-                    let values = list(&old[key]);
-                    json!(
-                        retained
-                            .iter()
-                            .map(|(i, _)| values.get(*i).cloned().unwrap_or(Value::Null))
-                            .collect::<Vec<_>>()
-                    )
-                };
-                sqlx::query("UPDATE media_metadata SET emby_item_ids_json=$1,asset_details_json=$2,file_sha1_json=$3,file_pickcode_json=$4,last_updated_at=NOW() WHERE tmdb_id=$5 AND item_type=$6")
-                    .bind(json!(retained.iter().map(|(_,id)|id).collect::<Vec<_>>())).bind(keep("asset_details_json")).bind(keep("file_sha1_json")).bind(keep("file_pickcode_json")).bind(&tmdb).bind(&kind).execute(&mut **transaction).await?;
+                slots.insert(key, (numeric, slot));
             }
         }
     }
+    for record in records.iter_mut() {
+        let kind = string(record, "item_type");
+        let tmdb = string(record, "tmdb_id");
+        let parent = string(record, "parent_series_tmdb_id");
+        for id in list(&record["emby_item_ids_json"]) {
+            let key = (kind.clone(), id.clone());
+            if destinations
+                .insert(key.clone(), (tmdb.clone(), parent.clone()))
+                .is_some_and(|before| before != (tmdb.clone(), parent.clone()))
+            {
+                return Err(ApiError::bad("同一 Emby 版本不能绑定到多个元数据记录"));
+            }
+            if let Some((_, slot)) = slots.get(&key) {
+                versions::merge(slot, record);
+            }
+        }
+    }
+    for old in rows {
+        let kind = string(&old, "item_type");
+        let tmdb = string(&old, "tmdb_id");
+        let parent = string(&old, "parent_series_tmdb_id");
+        let ids = list(&old["emby_item_ids_json"]);
+        let retained = ids
+            .iter()
+            .enumerate()
+            .filter(|(_, id)| {
+                destinations
+                    .get(&(kind.clone(), (*id).clone()))
+                    .is_none_or(|to| to.0 == tmdb)
+            })
+            .collect::<Vec<_>>();
+        if retained.len() == ids.len() {
+            continue;
+        }
+        let moved_parent = ids.iter().any(|id| {
+            destinations
+                .get(&(kind.clone(), id.clone()))
+                .is_some_and(|to| to.1 != parent)
+        });
+        if retained.is_empty() && !matches!(kind.as_str(), "Movie" | "Series") && !moved_parent {
+            sqlx::query("DELETE FROM media_metadata WHERE tmdb_id=$1 AND item_type=$2")
+                .bind(&tmdb)
+                .bind(&kind)
+                .execute(&mut **transaction)
+                .await?;
+            continue;
+        }
+        let keep = |key: &str| {
+            let values = list(&old[key]);
+            json!(
+                retained
+                    .iter()
+                    .map(|(i, _)| values.get(*i).cloned().unwrap_or(Value::Null))
+                    .collect::<Vec<_>>()
+            )
+        };
+        sqlx::query("UPDATE media_metadata SET emby_item_ids_json=$1,asset_details_json=$2,file_sha1_json=$3,file_pickcode_json=$4,in_library=$5,last_updated_at=NOW() WHERE tmdb_id=$6 AND item_type=$7")
+            .bind(json!(retained.iter().map(|(_,id)|id).collect::<Vec<_>>())).bind(if retained.is_empty(){Value::Null}else{keep("asset_details_json")})
+            .bind(keep("file_sha1_json")).bind(keep("file_pickcode_json")).bind(!retained.is_empty()).bind(&tmdb).bind(&kind).execute(&mut **transaction).await?;
+    }
     Ok(())
 }
+
 pub fn reconstruct(row: &Value) -> Value {
     let kind = string(row, "item_type");
     let mut output = json!({"id":string(row,"tmdb_id").parse::<i64>().unwrap_or(0),

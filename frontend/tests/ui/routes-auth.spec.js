@@ -111,3 +111,47 @@ test('mobile navigation opens without horizontal page overflow', async ({ page }
   await expect(page.getByRole('tab', { name: '系统', exact: true })).toHaveAttribute('aria-selected', 'true');
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(392);
 });
+
+test('a superseded logout cannot navigate or apply an old cookie after a new login', async ({ page, api }) => {
+  let user = { id: 'ui-test-user', name: 'UI Test', is_admin: true };
+  api.respond('GET', '/api/auth/check_status', () => ({ status: 'logged_in', user, remember: true }));
+  api.respond('GET', '/api/portal/account-info', () => ({ id: user.id, name: user.name, profile_image_tag: null }));
+  let releaseLogout, finishLogout, oldRequest;
+  const logoutFinished = new Promise(resolve => { finishLogout = resolve; });
+  await page.route('**/api/auth/logout', async route => {
+    oldRequest = route.request();
+    await new Promise(resolve => { releaseLogout = resolve; });
+    try {
+      await route.fulfill({ status: 200, contentType: 'application/json',
+        headers: { 'Set-Cookie': 'etk_session=; Max-Age=0; HttpOnly; SameSite=Lax; Path=/' }, body: JSON.stringify({ status: 'ok' }) });
+    } catch {
+      expect(oldRequest.failure()?.errorText).toContain('ERR_ABORTED');
+    } finally { finishLogout(); }
+  });
+  await page.route('**/api/auth/login', route => {
+    user = { id: 'account-b', name: 'B', is_admin: true };
+    return route.fulfill({ status: 200, contentType: 'application/json',
+      headers: { 'Set-Cookie': 'etk_session=new-login-b; HttpOnly; SameSite=Lax; Path=/' },
+      body: JSON.stringify({ status: 'ok', user, remember: true }) });
+  });
+  await page.goto('/dashboard');
+  await page.context().addCookies([{ name: 'etk_session', value: 'old-login-a', url: new URL(page.url()).origin }]);
+  await page.getByRole('button', { name: 'UI Test 的用户菜单', exact: true }).click();
+  await page.getByText('退出登录', { exact: true }).click();
+  await expect.poll(() => Boolean(releaseLogout)).toBe(true);
+  await page.evaluate(() => document.querySelector('#app').__vue_app__.config.globalProperties.$router.push('/login'));
+  const aborted = page.waitForEvent('requestfailed', { predicate: request => new URL(request.url()).pathname === '/api/auth/logout' });
+  await page.getByLabel('用户名', { exact: true }).fill('B');
+  await page.getByLabel('密码', { exact: true }).fill('fixture-only');
+  await page.getByRole('button', { name: '登录', exact: true }).click();
+  const failed = await aborted;
+  expect(failed.failure()?.errorText).toContain('ERR_ABORTED');
+  await expect(page).toHaveURL(/\/dashboard$/);
+  releaseLogout();
+  await logoutFinished;
+  await page.waitForTimeout(250);
+  await expect(page).toHaveURL(/\/dashboard$/);
+  await expect(page.getByRole('button', { name: 'B 的用户菜单', exact: true })).toBeVisible();
+  const cookies = await page.context().cookies();
+  expect(cookies.find(cookie => cookie.name === 'etk_session')?.value).toBe('new-login-b');
+});

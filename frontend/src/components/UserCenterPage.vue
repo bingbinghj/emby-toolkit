@@ -86,9 +86,10 @@
               <VCol cols="12" sm="6"><VTextField v-model="editingUser.name" label="用户名" prepend-inner-icon="mdi-account-outline" :disabled="userBusy || loadingUserDetails" maxlength="128" /></VCol>
               <VCol cols="12" sm="6"><VSelect v-model="editingUser.is_administrator" label="角色" :items="roleOptions" :disabled="userBusy || loadingUserDetails || editingUser.id === authStore.user?.id" @update:model-value="value => { if (value) editingUser.is_disabled = false; }" /></VCol>
               <VCol cols="12" sm="6"><VSelect v-model="editingUser.is_disabled" label="状态" :items="statusOptions" :disabled="userBusy || loadingUserDetails || editingUser.id === authStore.user?.id || editingUser.original_administrator || editingUser.is_administrator" /></VCol>
-              <VCol v-if="creatingUser" cols="12" sm="6"><VTextField v-model="createPassword" label="密码" :type="showCreatePassword ? 'text' : 'password'" :append-inner-icon="showCreatePassword ? 'mdi-eye-off-outline' : 'mdi-eye-outline'" :disabled="userBusy" autocomplete="new-password" maxlength="1024" @click:append-inner="showCreatePassword = !showCreatePassword" /></VCol>
-              <VCol v-if="creatingUser" cols="12" sm="6"><VTextField v-model="createConfirmPassword" label="确认密码" type="password" :disabled="userBusy" autocomplete="new-password" maxlength="1024" /></VCol>
+              <VCol v-if="creatingUser || passwordSetupPending" cols="12" sm="6"><VTextField v-model="createPassword" label="密码" :type="showCreatePassword ? 'text' : 'password'" :append-inner-icon="showCreatePassword ? 'mdi-eye-off-outline' : 'mdi-eye-outline'" :disabled="userBusy" autocomplete="new-password" maxlength="1024" @click:append-inner="showCreatePassword = !showCreatePassword" /></VCol>
+              <VCol v-if="creatingUser || passwordSetupPending" cols="12" sm="6"><VTextField v-model="createConfirmPassword" label="确认密码" type="password" :disabled="userBusy" autocomplete="new-password" maxlength="1024" /></VCol>
             </VRow>
+            <VAlert v-if="passwordSetupPending" type="warning" variant="tonal" class="mt-3">账号已创建，密码尚未确认。请设置密码后保存。</VAlert>
             <p v-if="editingUser.id === authStore.user?.id" class="text-body-2 text-medium-emphasis mb-0">当前登录用户需保留管理员权限和启用状态。</p>
             <p v-else-if="editingUser.original_administrator" class="text-body-2 text-medium-emphasis mb-0">如需禁用管理员，请先保存普通用户角色，再修改状态。</p>
           </div>
@@ -153,7 +154,7 @@ const loadingUsers = ref(false), usersError = ref('');
 const userDialogOpen = ref(false), editingUser = ref(null), originalUser = ref(null), creatingUser = ref(false);
 const loadingUserDetails = ref(false), isSavingUser = ref(false), userSaveError = ref(''), userTab = ref('profile');
 const libraries = ref([]), librariesError = ref(''), isDeletingUser = ref(false);
-const createPassword = ref(''), createConfirmPassword = ref(''), showCreatePassword = ref(false);
+const createPassword = ref(''), createConfirmPassword = ref(''), showCreatePassword = ref(false), passwordSetupPending = ref(false);
 const fileInput = ref(null), avatarFile = ref(null), avatarPreview = ref(''), avatarAction = ref('keep');
 const isUploadingAvatar = ref(false), isDeletingAvatar = ref(false);
 const userBusy = computed(() => isSavingUser.value || isSavingPassword.value || isUploadingAvatar.value || isDeletingAvatar.value || isDeletingUser.value);
@@ -206,6 +207,7 @@ const handleAvatarChange = event => {
 const clearUserDraft = () => {
   ++detailSequence; restoreCurrentAvatar(); editingUser.value = null; originalUser.value = null;
   createPassword.value = ''; createConfirmPassword.value = ''; showCreatePassword.value = false; loadingUserDetails.value = false;
+  passwordSetupPending.value = false;
 };
 const closeUserDialog = () => { if (userBusy.value) return; userDialogOpen.value = false; clearUserDraft(); };
 const addUser = () => {
@@ -257,10 +259,11 @@ const saveUserDetails = async () => {
   const requestedUser = authStore.user;
   const submitted = JSON.parse(JSON.stringify(editingUser.value));
   const wasCreating = creatingUser.value;
+  const needsPassword = wasCreating || passwordSetupPending.value;
   if (!String(submitted.name || '').trim()) { userSaveError.value = '请输入用户名'; return; }
   if (wasCreating && users.value.some(item => item.name.toLocaleLowerCase() === submitted.name.trim().toLocaleLowerCase())) { userSaveError.value = '用户名已存在'; return; }
-  if (wasCreating && !createPassword.value) { userSaveError.value = '请输入密码'; return; }
-  if (wasCreating && createPassword.value !== createConfirmPassword.value) { userSaveError.value = '两次输入的密码不一致'; return; }
+  if (needsPassword && !createPassword.value) { userSaveError.value = '请输入密码'; return; }
+  if (needsPassword && createPassword.value !== createConfirmPassword.value) { userSaveError.value = '两次输入的密码不一致'; return; }
   const body = { name: submitted.name.trim(), is_administrator: submitted.is_administrator, is_disabled: submitted.is_disabled };
   const policy = changedUserFields(submitted.policy, originalUser.value?.policy);
   const configuration = changedUserFields(submitted.configuration, originalUser.value?.configuration);
@@ -269,6 +272,15 @@ const saveUserDetails = async () => {
   if (wasCreating) body.new_password = createPassword.value;
   isSavingUser.value = true; userSaveError.value = '';
   try {
+    if (!wasCreating && passwordSetupPending.value) {
+      const { data: password } = await axios.post(`/api/portal/users/${encodeURIComponent(submitted.id)}/password`, { new_password: createPassword.value });
+      if (!isCurrentAccount(requestedUser) || editingUser.value?.id !== submitted.id) return;
+      if (password.id !== submitted.id) throw new Error('Emby 用户密码更新尚未确认');
+      const { data: confirmed } = await axios.get(`/api/portal/users/${encodeURIComponent(submitted.id)}`);
+      if (!isCurrentAccount(requestedUser) || editingUser.value?.id !== submitted.id) return;
+      if (confirmed.user?.id !== submitted.id || confirmed.user.has_password !== true) throw new Error('Emby 用户密码设置尚未确认，未继续保存用户资料');
+      passwordSetupPending.value = false; createPassword.value = ''; createConfirmPassword.value = '';
+    }
     const { data } = await axios.post(wasCreating ? '/api/portal/users' : `/api/portal/users/${encodeURIComponent(submitted.id)}`, body);
     if (!isCurrentAccount(requestedUser) || editingUser.value?.id !== submitted.id) return;
     if (!data.id || (!wasCreating && data.id !== submitted.id) || data.user?.id !== data.id || data.user.name !== body.name
@@ -288,10 +300,12 @@ const saveUserDetails = async () => {
       // Reuse only the account ID explicitly confirmed by the backend creation receipt.
       if (wasCreating) {
         await loadUsers();
+        if (!isCurrentAccount(requestedUser) || editingUser.value?.id !== submitted.id) return;
         const receipt = error.response?.data;
         if (receipt?.created === true && receipt.id && editingUser.value) {
           editingUser.value.id = receipt.id; creatingUser.value = false;
-          createPassword.value = ''; createConfirmPassword.value = '';
+          passwordSetupPending.value = receipt.user?.has_password !== true;
+          if (!passwordSetupPending.value) { createPassword.value = ''; createConfirmPassword.value = ''; }
           userSaveError.value += '；用户已创建，请核对资料后保存。';
           try {
             const { data } = await axios.get(`/api/portal/users/${encodeURIComponent(receipt.id)}`);
@@ -300,6 +314,8 @@ const saveUserDetails = async () => {
               editingUser.value.policy = structuredClone(data.user.policy || {});
               editingUser.value.configuration = structuredClone(data.user.configuration || {});
               libraries.value = data.libraries?.items || []; librariesError.value = data.libraries?.error || '';
+              passwordSetupPending.value = data.user.has_password !== true;
+              if (!passwordSetupPending.value) { createPassword.value = ''; createConfirmPassword.value = ''; }
             }
           } catch { /* Keep the confirmed ID and error visible; never submit another creation. */ }
         }

@@ -2,6 +2,7 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import axios from 'axios';
+import { invalidateConfigCache } from '../composables/useConfig.js';
 
 export const useAuthStore = defineStore('auth', () => {
   const isLoggedIn = ref(false);
@@ -9,6 +10,8 @@ export const useAuthStore = defineStore('auth', () => {
   const user = ref({});
   const accountInfo = ref(null);
   let accountRequest = null;
+  let authRevision = 0, statusRequest = 0;
+  let authController = null;
   const systemStatus = ref('unknown');
 
   const avatarUrl = computed(() => {
@@ -44,13 +47,19 @@ export const useAuthStore = defineStore('auth', () => {
   const userType = computed(() => user.value?.user_type || 'emby_user');
 
   async function checkAuthStatus() {
+    const revision = authRevision, request = ++statusRequest;
+    const current = () => revision === authRevision && request === statusRequest;
     try {
       const response = await axios.get('/api/auth/check_status');
+      if (!current()) return systemStatus.value;
       const status = response.data.status;
       systemStatus.value = status;
 
       if (status === 'logged_in') {
-        if (user.value?.id !== response.data.user?.id) accountInfo.value = null;
+        if (!isLoggedIn.value || user.value?.id !== response.data.user?.id) {
+          accountInfo.value = null;
+          invalidateConfigCache();
+        }
         isLoggedIn.value = true;
         remember.value = response.data.remember ?? true;
         user.value = response.data.user || {};
@@ -59,6 +68,7 @@ export const useAuthStore = defineStore('auth', () => {
         remember.value = false;
         user.value = {};
         accountInfo.value = null;
+        invalidateConfigCache();
         // 这里可以抛出特定错误供路由守卫捕获，或者直接返回状态
         if (status === 'setup_required') {
            throw new Error('SETUP_REQUIRED');
@@ -66,29 +76,63 @@ export const useAuthStore = defineStore('auth', () => {
       }
       return status;
     } catch (error) {
+      if (!current()) return systemStatus.value;
       isLoggedIn.value = false;
       remember.value = false;
+      user.value = {};
       accountInfo.value = null;
+      invalidateConfigCache();
       throw error;
     }
   }
 
   async function login(credentials) {
-    const response = await axios.post('/api/auth/login', credentials);
-    accountInfo.value = null;
-    isLoggedIn.value = true;
-    remember.value = response.data.remember ?? credentials.remember ?? true;
-    // 确保把后端返回的 user 对象完整存进去
-    user.value = response.data.user || {};
+    const revision = ++authRevision;
+    authController?.abort();
+    const controller = new AbortController();
+    authController = controller;
+    try {
+      const response = await axios.post('/api/auth/login', credentials, { signal: controller.signal });
+      if (revision !== authRevision) return false;
+      invalidateConfigCache();
+      accountInfo.value = null;
+      isLoggedIn.value = true;
+      remember.value = response.data.remember ?? credentials.remember ?? true;
+      user.value = response.data.user || {};
+      systemStatus.value = 'logged_in';
+      return true;
+    } catch (error) {
+      if (revision !== authRevision) return false;
+      throw error;
+    } finally {
+      if (authController === controller) authController = null;
+      // Also invalidate status reads that began while login was in flight.
+      if (revision === authRevision) ++authRevision;
+    }
   }
 
   async function logout() {
-    await axios.post('/api/auth/logout');
-    isLoggedIn.value = false;
-    remember.value = false;
-    user.value = {};
-    accountInfo.value = null;
-    systemStatus.value = 'login_required';
+    const revision = ++authRevision;
+    authController?.abort();
+    const controller = new AbortController();
+    authController = controller;
+    try {
+      await axios.post('/api/auth/logout', undefined, { signal: controller.signal });
+      if (revision !== authRevision) return false;
+      invalidateConfigCache();
+      isLoggedIn.value = false;
+      remember.value = false;
+      user.value = {};
+      accountInfo.value = null;
+      systemStatus.value = 'login_required';
+      return true;
+    } catch (error) {
+      if (revision !== authRevision) return false;
+      throw error;
+    } finally {
+      if (authController === controller) authController = null;
+      if (revision === authRevision) ++authRevision;
+    }
   }
 
   return {

@@ -21,6 +21,10 @@ use std::{
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
+#[path = "../tests/fixtures/monitor_lifecycle.rs"]
+mod lifecycle_tests;
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub enabled: bool,
@@ -258,9 +262,22 @@ impl Service {
                 path=rx.recv()=>if let Some(path)=path && settings.enabled && let Some(path)=settings.accepts(&path).await{queue.insert(path);deadline=Some(tokio::time::Instant::now()+Duration::from_secs(3));},
                 _=tick.tick()=>{
                     let config=self.state.config.read().await.clone();let next_signature=json!([config["monitor_enabled"],config["monitor_paths"],config["monitor_extensions"],config["monitor_exclude_dirs"],config["monitor_exclude_refresh_delay"]]).to_string();
-                    if next_signature!=signature{batch_cancel.cancel();batch_cancel=cancel.child_token();
+                    if next_signature!=signature{
+                        let next_settings=Settings::read(&config).await;
+                        let retains_scope = next_settings.enabled
+                            && settings.extensions.is_subset(&next_settings.extensions)
+                            && settings.roots.iter().all(|path| {
+                                next_settings.roots.iter().any(|root| path.starts_with(root))
+                            })
+                            && next_settings.exclude.iter().all(|path| {
+                                settings.excluded(path) || !settings.roots.iter().any(|root| {
+                                    path_excluded(root, std::slice::from_ref(path))
+                                        || path_excluded(path, std::slice::from_ref(root))
+                                })
+                            });
+                        if !retains_scope{batch_cancel.cancel();batch_cancel=cancel.child_token();}
                         if watcher.take().is_some(){tracing::info!("[实时监控] 目录监听实例已停止，重新加载配置");}
-                        settings=Settings::read(&config).await;signature=next_signature;
+                        settings=next_settings;signature=next_signature;
                         let mut retained=BTreeSet::new();for path in &queue{if let Some(path)=settings.accepts(path).await{retained.insert(path);}}queue=retained;
                         if settings.enabled&&!settings.roots.is_empty(){let tx=self.tx.clone();match notify::recommended_watcher(move|event:notify::Result<notify::Event>|{match event{
                             Ok(event)=>{let paths=match event.kind{EventKind::Create(CreateKind::File|CreateKind::Any)=>event.paths,EventKind::Modify(ModifyKind::Name(RenameMode::To))=>event.paths,EventKind::Modify(ModifyKind::Name(RenameMode::Both))=>event.paths.into_iter().skip(1).collect(),_=>vec![]};for path in paths{let _=tx.send(path);}},
@@ -344,8 +361,19 @@ async fn process_batch(
         }
         Ok(refresh.len())
     };
-    let (scrape_result, refresh_result) = tokio::join!(scrape_work, refresh_work);
-    let mut result = scrape_result?;
-    result["refresh_only"] = json!(refresh_result?);
-    Ok(result)
+    let work = async {
+        let (scrape_result, refresh_result) = tokio::join!(scrape_work, refresh_work);
+        let mut result = scrape_result?;
+        result["refresh_only"] = json!(refresh_result?);
+        Ok(result)
+    };
+    tokio::pin!(work);
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => {
+            context.request_stop();
+            work.await
+        },
+        result = &mut work => result,
+    }
 }

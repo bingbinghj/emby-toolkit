@@ -176,11 +176,22 @@ test('new Emby user creation validates confirmation and uses the bottom-right MP
   expect(api.requests.find(request => request.method === 'POST' && request.path === '/api/portal/users').body).toEqual({ name: '新用户', is_administrator: false, is_disabled: false, new_password: 'test-secret' });
 });
 
-test('a confirmed partial creation retries its actual Emby account instead of creating another user', async ({ page, api }) => {
-  const created = { id: 'partial-user', name: '已创建用户', is_administrator: false, is_disabled: false, policy: {}, configuration: {} };
-  api.respond('POST', '/api/portal/users', { created: true, id: 'partial-user', user: created, error: '密码保存未确认' }, 503);
-  api.respond('GET', '/api/portal/users/partial-user', { user: created, libraries: { items: [] } });
-  api.respond('POST', '/api/portal/users/partial-user', { id: 'partial-user', user: created, message: 'Emby 用户资料已保存' });
+test('a confirmed partial creation repairs its password before enabling its actual Emby account', async ({ page, api }) => {
+  const created = { id: 'partial-user', name: '已创建用户', is_administrator: false, is_disabled: true, has_password: false, policy: {}, configuration: {} };
+  const admin = { id: 'ui-test-user', name: 'UI Test', is_administrator: true, is_disabled: false, has_password: true };
+  let exists = false, profileBeforePassword = false;
+  api.respond('GET', '/api/portal/users', () => ({ users: exists ? [admin, created] : [admin] }));
+  api.respond('POST', '/api/portal/users', () => {
+    exists = true;
+    return { created: true, id: 'partial-user', user: created, error: '密码保存未确认' };
+  }, 502);
+  api.respond('GET', '/api/portal/users/partial-user', () => ({ user: created, libraries: { items: [] } }));
+  api.respond('POST', '/api/portal/users/partial-user/password', { error: '密码服务暂不可用' }, 503);
+  api.respond('POST', '/api/portal/users/partial-user', request => {
+    profileBeforePassword = !created.has_password;
+    Object.assign(created, request.body);
+    return { id: 'partial-user', user: created, message: 'Emby 用户资料已保存' };
+  });
   await page.goto('/user-management');
   await page.getByRole('button', { name: '添加用户', exact: true }).click();
   const overlay = page.locator('.v-overlay--active').filter({ has: page.getByLabel('用户名', { exact: true }) });
@@ -189,10 +200,29 @@ test('a confirmed partial creation retries its actual Emby account instead of cr
   await overlay.getByLabel('确认密码', { exact: true }).fill('test-secret');
   await overlay.getByRole('button', { name: '添加', exact: true }).click();
   await expect(overlay.getByText(/用户已创建，请核对资料后保存/)).toBeVisible();
+  await expect(overlay.getByLabel('密码', { exact: true })).toHaveValue('test-secret');
+  await overlay.getByRole('button', { name: '保存', exact: true }).click();
+  await expect(overlay.getByText('密码服务暂不可用', { exact: true })).toBeVisible();
+  await expect(overlay.getByLabel('密码', { exact: true })).toHaveValue('test-secret');
+  await expect(overlay.getByLabel('确认密码', { exact: true })).toHaveValue('test-secret');
+  expect(created.is_disabled).toBe(true);
+  expect(api.requests.filter(request => request.method === 'POST' && request.path === '/api/portal/users/partial-user')).toHaveLength(0);
+  api.respond('POST', '/api/portal/users/partial-user/password', () => {
+    created.has_password = true;
+    return { id: 'partial-user', message: '密码已保存' };
+  });
   await overlay.getByRole('button', { name: '保存', exact: true }).click();
   await expect(overlay).toHaveCount(0);
   expect(api.requests.filter(request => request.method === 'POST' && request.path === '/api/portal/users')).toHaveLength(1);
-  expect(api.requests.filter(request => request.method === 'POST' && request.path === '/api/portal/users/partial-user')).toHaveLength(1);
+  const passwordRequests = api.requests.filter(request => request.method === 'POST' && request.path === '/api/portal/users/partial-user/password');
+  expect(passwordRequests).toHaveLength(2);
+  expect(passwordRequests.every(request => request.body.new_password === 'test-secret')).toBe(true);
+  const confirmed = api.requests.slice(api.requests.lastIndexOf(passwordRequests[1]) + 1).filter(request => request.path === '/api/portal/users/partial-user');
+  expect(confirmed.map(request => request.method)).toEqual(['GET', 'POST']);
+  expect(confirmed[1].body).toEqual({ name: '已创建用户', is_administrator: false, is_disabled: false });
+  expect(profileBeforePassword).toBe(false);
+  expect(created.has_password).toBe(true);
+  expect(created.is_disabled).toBe(false);
 });
 
 test('closing the editor cancels an avatar draft without writing the user or the avatar', async ({ page, api }) => {
