@@ -49,7 +49,6 @@
   "studio_to_chinese": false,
   "media_info_retry_interval": 15,
   "media_info_retry_attempts": 3,
-  "subtitle_chinese_default_language": "chs",
   "auto_repair_truehd_core_on_ingest": false,
   "auto_fill_language_titles_on_ingest": false,
   "auto_extract_intro_fingerprint_on_ingest": false,

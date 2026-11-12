@@ -18,14 +18,12 @@ const props = defineProps({
   menus: { type: Array, default: () => [] },
   activeKey: String,
   layout: { type: String, default: 'vertical' },
-  expandedKeys: { type: Array, default: () => [] },
-  menuRevision: { type: Number, default: 0 },
   hasHeaderTabs: Boolean,
 });
 const emit = defineEmits(['navigate', 'update:layout']);
 const route = useRoute();
 const { mdAndDown, width } = useDisplay();
-const overlayOpen = ref(false), openHorizontalGroup = ref(null), opened = ref([]);
+const overlayOpen = ref(false), openHorizontalGroup = ref(null);
 const collapsed = computed(() => !mdAndDown.value && props.layout === 'collapsed');
 const horizontal = computed(() => !mdAndDown.value && props.layout === 'horizontal');
 const theme = useTheme();
@@ -50,7 +48,6 @@ const scrollProgress = ref(0);
 const navbarAwayFromTop = ref(false), floatingNavbarScale = ref(1);
 let scrollFrame;
 
-watch([() => props.expandedKeys, () => props.menuRevision], ([keys]) => { opened.value = [...keys]; }, { immediate: true, deep: true });
 watch(() => route.fullPath, () => {
   overlayOpen.value = false;
   openHorizontalGroup.value = null;
@@ -113,19 +110,15 @@ onBeforeUnmount(() => { window.removeEventListener('scroll', updateScroll); canc
         <slot name="brand" :rail="collapsed" />
         <VBtn v-if="mdAndDown" icon="mdi-close" variant="text" color="default" size="small" aria-label="关闭导航" @click="overlayOpen = false" />
       </div>
-      <VList v-model:opened="opened" class="nav-items" color="primary" nav density="comfortable" open-strategy="multiple">
+      <VList class="nav-items" color="primary" nav density="comfortable">
         <template v-for="menu in menus" :key="menu.key">
-          <VListGroup v-if="menu.children" :value="menu.key">
-            <template #activator="{ props: groupProps, isOpen }">
-              <VListItem v-bind="groupProps" :title="menu.label" :prepend-icon="menu.icon" :aria-expanded="isOpen" />
-            </template>
-            <VListItem v-for="item in menu.children" :key="item.key" :title="item.label" :prepend-icon="item.icon"
-              :active="item.key === activeKey" :value="item.key" @click="navigate(item.key)" />
-          </VListGroup>
-          <VTooltip v-else :text="menu.label" location="end" :disabled="!collapsed">
+          <div v-if="menu.children && !collapsed" class="nav-section-title" role="heading" aria-level="2" :data-menu-section="menu.key">
+            <div class="title-wrapper"><span class="title-text">{{ menu.label }}</span></div>
+          </div>
+          <VTooltip v-for="item in menu.children || [menu]" :key="item.key" :text="item.label" location="end" :disabled="!collapsed">
             <template #activator="{ props: tooltipProps }">
-              <VListItem v-bind="tooltipProps" :title="menu.label" :prepend-icon="menu.icon"
-                :active="menu.key === activeKey" :value="menu.key" @click="navigate(menu.key)" />
+              <VListItem v-bind="tooltipProps" :title="item.label" :prepend-icon="item.icon"
+                :active="item.key === activeKey" :value="item.key" @click="navigate(item.key)" />
             </template>
           </VTooltip>
         </template>
@@ -204,7 +197,7 @@ onBeforeUnmount(() => { window.removeEventListener('scroll', updateScroll); canc
 .layout-vertical-nav :deep(.v-navigation-drawer__content) { display: flex; flex-direction: column; }
 .nav-items { flex: 1 0 auto; inline-size: 100%; padding: 8px 10px 24px; }
 .nav-items :deep(.v-list-item) { min-block-size: 52px; margin-block-end: 6px; }
-.nav-items :deep(.v-list-group) { margin-block-end: 12px; }
+.nav-section-title { padding-inline: 1.375rem 1rem; }
 // VApp already owns a Vuetify layout. Its nested VLayout otherwise registers these as
 // absolute items; retain Vuetify's offsets while attaching the shell to the viewport.
 .layout-vertical-nav, .layout-navbar { position: fixed !important; }

@@ -691,6 +691,6 @@ async fn edit_data(state: &AppState, id: &str) -> Result<Json<Value>> {
         .cloned();
     Ok(Json(
         json!({"sha1":target.sha,"fingerprint_pending":false,"media_path":target.path,"mediainfo_path":path,"versions":target.versions,
-        "current_version_id":target.top_id,"iso_language_options":options,"subtitle_chinese_default_language":state.config.read().await["subtitle_chinese_default_language"],"mediainfo":info}),
+        "current_version_id":target.top_id,"iso_language_options":options,"mediainfo":info}),
     ))
 }

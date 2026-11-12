@@ -94,7 +94,7 @@
             </button>
           </div>
         </VCardText>
-        <VCardActions class="app-dialog-actions"><VSpacer /><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save" @click="saveModules">保存</VBtn></VCardActions>
+        <VCardActions class="app-dialog-actions"><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save" @click="saveModules">保存</VBtn></VCardActions>
       </VCard>
     </VDialog>
     <Teleport to="body">

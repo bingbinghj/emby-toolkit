@@ -38,19 +38,6 @@
     "route": "general"
   },
   {
-    "field": "subtitle_chinese_default_language",
-    "label": "中文字幕默认语言",
-    "card": "基础设置",
-    "category": "system",
-    "keywords": [
-      "中文字幕默认语言",
-      "基础设置",
-      "媒体处理与语言显示",
-      "仅用于媒体信息编辑器中未明确简繁的中文字幕“修正语言 (Language)”选项，方便填充标题；保留明确的 chs、cht。"
-    ],
-    "route": "general"
-  },
-  {
     "field": "max_actors_to_process",
     "label": "最大主要演员数",
     "card": "基础设置",
@@ -502,11 +489,11 @@
   },
   {
     "field": "p115_app_id",
-    "label": "OpenAPI",
+    "label": "自定义 AppID",
     "card": "存储",
     "category": "directory",
     "keywords": [
-      "OpenAPI",
+      "自定义 AppID",
       "存储",
       "115 授权方式与连接状态",
       "请先填写 AppID 并保存此卡片，然后再扫码授权。"

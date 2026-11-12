@@ -3607,7 +3607,13 @@ mod native {
         edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("日语");
         edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Language"] = json!("jpn");
         edited[0]["MediaSourceInfo"]["MediaStreams"][5]["Title"] = json!("手动更新繁中字幕");
-        edited[0]["MediaSourceInfo"]["MediaStreams"][5]["Language"] = json!("cht");
+        // Like the Python editor's title-only change, leave the original code
+        // and display fields untouched until the save normalization runs.
+        edited[0]["MediaSourceInfo"]["MediaStreams"][5]["Language"] = json!("chi");
+        edited[0]["MediaSourceInfo"]["MediaStreams"][5]["DisplayLanguage"] = json!("Chinese");
+        edited[0]["MediaSourceInfo"]["MediaStreams"][5]["DisplayTitle"] =
+            json!("Chinese (默认 ASS)");
+        edited[0]["MediaSourceInfo"]["MediaStreams"][6]["Language"] = json!("chs");
         let result = f.save(json!({"mediainfo":edited}), false).await;
         let live = f.native.host.item.lock().await.clone();
         let saved: Value =
@@ -3633,6 +3639,14 @@ mod native {
             assert_eq!(streams[1]["Language"], "jpn");
             assert_eq!(streams[5]["Title"], "手动更新繁中字幕");
             assert_eq!(streams[5]["Language"], "cht");
+            assert_eq!(streams[5]["DisplayLanguage"], "Chinese Traditional");
+            assert_eq!(streams[5]["DisplayTitle"], "Chinese Traditional (默认 ASS)");
+            // An explicit language wins over an existing title, and an
+            // untouched script-bearing title cannot silently change chi.
+            assert_eq!(streams[6]["Title"], "特效繁中");
+            assert_eq!(streams[6]["Language"], "chs");
+            assert_eq!(streams[7]["Title"], "中文简体");
+            assert_eq!(streams[7]["Language"], "chi");
         }
         assert_eq!(live["Chapters"], old["Chapters"]);
         assert!(resources);
@@ -4142,6 +4156,68 @@ mod native {
             "only the explicit pre-save probe may refresh"
         );
         assert_eq!(f.native.host.starts.load(Ordering::SeqCst), 0);
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn original_intro_marker_save_reports_the_cause_without_touching_files_or_native_data() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        let chapters = json!([
+            {"Name":"片头","MarkerType":"IntroStart","StartPositionTicks":870646766_u64},
+            {"Name":"片尾","MarkerType":"IntroEnd","StartPositionTicks":1854477611_u64}
+        ]);
+        {
+            let mut item = f.native.host.item.lock().await;
+            item["Chapters"] = chapters.clone();
+            seed_chapter_images(&f.native.host, &item).await;
+            seed_standard_bif(&f.native.host, &item).await;
+            for chapter in item["Chapters"].as_array_mut().unwrap() {
+                chapter["ImageTag"] = json!("original-marker-image");
+            }
+        }
+        let mut original = f.native.original.clone();
+        original[0]["Chapters"] = chapters;
+        let file = f.native.directory.path().join("61616-mediainfo.json");
+        let bytes = serde_json::to_vec(&original).unwrap();
+        tokio::fs::write(&file, &bytes).await.unwrap();
+        let before = f.native.host.item.lock().await.clone();
+        let bif = tokio::fs::read(local_bif(&before)).await.unwrap();
+        let images = before["Chapters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|chapter| {
+                let path = chapter_image(&f.native.host, &before, chapter);
+                let bytes = std::fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect::<Vec<_>>();
+        let mut edited = original;
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("不会写入的新标题");
+        let result = f.save(json!({"mediainfo":edited}), false).await;
+        assert_eq!(result["state"], "failed", "{result}");
+        assert!(
+            result["message"]
+                .as_str()
+                .unwrap()
+                .contains("神医同步会移除片头片尾标记"),
+            "{result}"
+        );
+        assert!(
+            result["message"].as_str().unwrap().contains("已停止保存"),
+            "{result}"
+        );
+        assert_eq!(tokio::fs::read(&file).await.unwrap(), bytes);
+        assert_eq!(*f.native.host.item.lock().await, before);
+        assert_eq!(tokio::fs::read(local_bif(&before)).await.unwrap(), bif);
+        for (path, bytes) in images {
+            assert_eq!(tokio::fs::read(path).await.unwrap(), bytes);
+        }
+        assert!(f.proxy.metadata_ids.lock().await.is_empty());
+        assert!(f.proxy.sync_bodies.lock().await.is_empty());
+        assert!(f.native.host.clear_ids.lock().await.is_empty());
+        assert_eq!(recovery_status(&f.native.state).await["pending"], false);
         f.close().await;
     }
 

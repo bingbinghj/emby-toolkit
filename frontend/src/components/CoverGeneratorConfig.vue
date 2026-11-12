@@ -22,9 +22,6 @@
           <template #prepend>
             <VAvatar color="primary" variant="tonal" rounded><VIcon icon="mdi-tune-variant" /></VAvatar>
           </template>
-          <template #append>
-            <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSaving" @click="saveConfig('basic')">保存</VBtn>
-          </template>
         </VCardItem>
         <VCardText>
           <VRow>
@@ -60,15 +57,15 @@
             </VRow>
           </template>
         </VCardText>
+        <VCardActions class="px-6 pb-4">
+          <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSaving" @click="saveConfig('basic')">保存</VBtn>
+        </VCardActions>
       </VCard>
 
       <VCard>
         <VCardItem title="封面样式与标题">
           <template #prepend>
             <VAvatar color="primary" variant="tonal" rounded><VIcon icon="mdi-image-edit-outline" /></VAvatar>
-          </template>
-          <template #append>
-            <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSaving" @click="saveConfig(configData.tab || 'style-tab')">保存</VBtn>
           </template>
         </VCardItem>
         <VTabs v-model="configData.tab" class="px-4" color="primary" show-arrows>
@@ -143,6 +140,9 @@
             </VWindowItem>
           </VWindow>
         </VCardText>
+        <VCardActions class="px-6 pb-4">
+          <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSaving" @click="saveConfig(configData.tab || 'style-tab')">保存</VBtn>
+        </VCardActions>
       </VCard>
     </div>
   </VContainer>

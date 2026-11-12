@@ -32,6 +32,11 @@ async function expectFilledPrimary(button) {
   expect(values.background).toBe(values.primary);
   expect(values.foreground).toBe(values.onPrimary);
   expect(values.icon).toBe(values.onPrimary);
+  const position = await button.evaluate(element => {
+    const footer = element.closest('.v-card-actions');
+    return { left: element.getBoundingClientRect().left, expected: footer.getBoundingClientRect().left + parseFloat(getComputedStyle(footer).paddingLeft) };
+  });
+  expect(Math.abs(position.left - position.expected)).toBeLessThanOrEqual(2);
   const luminance = color => color.match(/[\d.]+/g).slice(0, 3).map(channel => Number(channel) / 255)
     .reduce((sum, value, index) => sum + (value <= .04045 ? value / 12.92 : ((value + .055) / 1.055) ** 2.4)
       * [.2126, .7152, .0722][index], 0);

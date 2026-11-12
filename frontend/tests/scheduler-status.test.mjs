@@ -20,14 +20,23 @@ function fixture(status = {}) {
     computed: fn => ({ get value() { return fn(); } }),
     backgroundTaskStatus: { value: status }, isTriggeringTask: { value: null },
     availableTasksForManualRun: { value: tasks }, taskSearchQuery: { value: '' },
+    manualTaskOrder: { value: tasks.map(task => task.key) }, manualOrderDirty: { value: false }, manualOrderSaving: { value: false },
+    configModel: { value: { manual_task_order: tasks.map(task => task.key), tg_menu_tasks: ['backup-mediainfo'], ai_enabled: true } },
+    configError: { value: null }, savedRequests: [], messages: [],
   });
+  context.message = { success: value => context.messages.push(value), error: value => context.messages.push(value) };
+  context.handleSaveConfig = async payload => {
+    context.savedRequests.push(JSON.parse(JSON.stringify(payload)));
+    Object.assign(context.configModel.value, payload);
+    return true;
+  };
   const statusStart = source.indexOf('const currentTaskStateLabel = computed(');
   const statusEnd = source.indexOf('));', statusStart) + 3;
   const filterStart = source.indexOf('const filteredManualTasks = computed(');
   const filterEnd = source.indexOf('});', filterStart) + 3;
   vm.runInContext(source.slice(statusStart, statusEnd) + '\n' + source.slice(filterStart, filterEnd)
-    + '\n' + ['isCurrentTask', 'getTaskRowState', 'getTaskRowColor'].map(definition).join('\n')
-    + '\nthis.current = isCurrentTask; this.state = getTaskRowState; this.color = getTaskRowColor; this.tasks = filteredManualTasks;', context);
+    + '\n' + ['isCurrentTask', 'getTaskRowState', 'getTaskRowColor', 'normalizeManualTaskOrder', 'reorderManualTaskGroup', 'saveManualTaskOrder'].map(definition).join('\n')
+    + '\nthis.current = isCurrentTask; this.state = getTaskRowState; this.color = getTaskRowColor; this.tasks = filteredManualTasks; this.normalizeOrder = normalizeManualTaskOrder; this.reorderGroup = reorderManualTaskGroup; this.saveOrder = saveManualTaskOrder;', context);
   return context;
 }
 
@@ -86,4 +95,64 @@ test('rerunning the same completed task displays submitting instead of its previ
   f.backgroundTaskStatus.value = { task_id: 'new-run', last_action: '提取片尾', current_action: '提取第九集', state: 'running', is_running: true };
   assert.equal(f.state(tasks[0]), '运行中');
   assert.equal(f.color(tasks[0]), 'success');
+});
+
+test('saved task keys discard stale or duplicate entries and append new tasks in catalog order', () => {
+  const f = fixture();
+  assert.deepEqual(Array.from(f.normalizeOrder(['missing', tasks[1].key, null, tasks[1].key], tasks)), [tasks[1].key, tasks[0].key]);
+  assert.deepEqual(Array.from(f.normalizeOrder({ invalid: true }, tasks)), tasks.map(task => task.key));
+  assert.deepEqual(tasks.map(task => task.key), ['extract-episode-credits', 'backup-mediainfo']);
+});
+
+test('reordering filtered task cards preserves hidden tasks, other categories and the TG menu without saving', () => {
+  const f = fixture();
+  const hidden = { key: 'hidden-media', category_name: '媒体信息' };
+  const other = { key: 'other-category', category_name: '系统维护' };
+  f.availableTasksForManualRun.value = [tasks[0], hidden, tasks[1], other];
+  f.manualTaskOrder.value = f.availableTasksForManualRun.value.map(task => task.key);
+  f.reorderGroup({ tasks: [tasks[1], tasks[0]] });
+  assert.deepEqual(Array.from(f.manualTaskOrder.value), [tasks[1].key, hidden.key, tasks[0].key, other.key]);
+  assert.equal(f.manualOrderDirty.value, true);
+  assert.deepEqual(f.savedRequests, []);
+  assert.deepEqual(f.configModel.value.tg_menu_tasks, ['backup-mediainfo']);
+  assert.deepEqual(f.availableTasksForManualRun.value.map(task => task.key), [tasks[0].key, hidden.key, tasks[1].key, other.key]);
+});
+
+test('task ordering saves only its key and keeps the same draft available after a failed save', async () => {
+  const f = fixture();
+  f.reorderGroup({ tasks: [tasks[1], tasks[0]] });
+  f.handleSaveConfig = async () => false;
+  f.configError.value = '模拟服务器保存失败';
+  await f.saveOrder();
+  assert.equal(f.manualOrderDirty.value, true);
+  assert.equal(f.manualOrderSaving.value, false);
+  assert.deepEqual(Array.from(f.manualTaskOrder.value), [tasks[1].key, tasks[0].key]);
+  assert.deepEqual(f.messages, ['模拟服务器保存失败']);
+  f.handleSaveConfig = async payload => {
+    f.savedRequests.push(JSON.parse(JSON.stringify(payload)));
+    Object.assign(f.configModel.value, payload);
+    return true;
+  };
+  await f.saveOrder();
+  assert.deepEqual(f.savedRequests, [{ manual_task_order: [tasks[1].key, tasks[0].key] }]);
+  assert.equal(f.manualOrderDirty.value, false);
+  assert.equal(f.configModel.value.ai_enabled, true);
+});
+
+test('a completed task-order save does not replace a new drag made while the request was pending', async () => {
+  const f = fixture();
+  f.reorderGroup({ tasks: [tasks[1], tasks[0]] });
+  let complete;
+  f.handleSaveConfig = payload => new Promise(resolve => {
+    complete = () => { Object.assign(f.configModel.value, payload); resolve(true); };
+  });
+  const saving = f.saveOrder();
+  assert.equal(f.manualOrderSaving.value, true);
+  f.reorderGroup({ tasks: [tasks[0], tasks[1]] });
+  complete();
+  await saving;
+  assert.deepEqual(Array.from(f.manualTaskOrder.value), [tasks[0].key, tasks[1].key]);
+  assert.equal(f.manualOrderDirty.value, true);
+  assert.equal(f.manualOrderSaving.value, false);
+  assert.deepEqual(Array.from(f.configModel.value.manual_task_order), [tasks[1].key, tasks[0].key]);
 });

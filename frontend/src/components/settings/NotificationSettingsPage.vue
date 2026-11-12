@@ -6,7 +6,7 @@
       <div v-if="configError">{{ configError }}</div><div v-if="accountError">{{ accountError }}</div>
       <VBtn variant="text" :loading="loadingConfig || loading" @click="retryLoading">重新读取通知设置</VBtn>
     </VAlert>
-      <SettingCard v-show="settingsSearch.showCard('通知渠道')" class="mb-6" title="通知渠道" subtitle="设置消息发送渠道参数">
+      <SettingCard v-show="settingsSearch.showCard('通知渠道')" class="mb-6" title="通知渠道" subtitle="设置消息发送渠道参数" actions-start>
         <VProgressLinear v-if="loadingConfig" indeterminate />
         <VCardText v-if="configModel">
           <div class="grid gap-3 grid-app-card">
@@ -27,7 +27,7 @@
         </template>
       </SettingCard>
 
-      <SettingCard v-show="settingsSearch.showCard('通知发送范围')" class="mb-6" title="通知发送范围" subtitle="对应消息类型只会发送给设定的用户。">
+      <SettingCard v-show="settingsSearch.showCard('通知发送范围')" class="mb-6" title="通知发送范围" subtitle="对应消息类型只会发送给设定的用户。" actions-start>
         <VCardText v-if="configModel">
           <div class="notification-scope-table" role="table" aria-label="通知发送范围">
             <div class="scope-header" role="row"><span role="columnheader">消息类型</span><span role="columnheader">范围</span></div>
@@ -45,7 +45,7 @@
         </template>
       </SettingCard>
 
-      <SettingCard v-show="settingsSearch.showCard('通知发送时间')" class="mb-6" title="通知发送时间" subtitle="设定消息发送的时间范围。">
+      <SettingCard v-show="settingsSearch.showCard('通知发送时间')" class="mb-6" title="通知发送时间" subtitle="设定消息发送的时间范围。" actions-start>
         <VCardText v-if="configModel">
           <VRow>
             <VCol cols="12" sm="6"><VTextField data-field="notification_time.start" v-model="configModel.notification_time.start" label="开始时间" type="time" prepend-inner-icon="mdi-clock-start" :disabled="busy" /></VCol>

@@ -57,6 +57,95 @@ static NON_DUB_PREFIX: LazyLock<regex::Regex> = LazyLock::new(|| {
 pub fn token(text: &str) -> String {
     text.trim().to_lowercase().replace('_', "-")
 }
+
+fn subtitle_script(title: &str) -> Option<&'static str> {
+    let title = title
+        .trim()
+        .to_lowercase()
+        .replace("簡體", "简体")
+        .replace("繁體", "繁体")
+        .replace("雙語", "双语");
+    if title.starts_with("简繁") || title.starts_with("繁简") {
+        return None;
+    }
+    let simplified = ["简体", "简中", "中简"].iter().any(|s| title.contains(s));
+    let traditional = ["繁体", "繁中", "中繁"].iter().any(|s| title.contains(s));
+    if simplified || traditional {
+        return (simplified != traditional).then_some(if simplified { "chs" } else { "cht" });
+    }
+    let (language, rest) = if let Some(rest) = title.strip_prefix('简') {
+        ("chs", rest)
+    } else {
+        ("cht", title.strip_prefix('繁')?)
+    };
+    let dual =
+        rest.find("双语").is_some_and(|offset| offset > 0) && !rest.starts_with(['体', '中']);
+    let compact = rest.chars().count() == 1 && "英日韩西德法葡俄泰越意".contains(rest);
+    (dual || compact).then_some(language)
+}
+
+// Use Python's script-title rules only for a title edit. An explicit language
+// edit takes priority, and untouched tracks retain their stored language.
+pub fn normalize_subtitles_for_save(info: &mut Value, original: &Value) {
+    let Some(original_streams) =
+        media_info::container(original).and_then(|source| source["MediaStreams"].as_array())
+    else {
+        return;
+    };
+    let Some(streams) = media_info::streams_mut(info) else {
+        return;
+    };
+    let subtitle_indices = streams
+        .iter()
+        .filter(|s| s["Type"] == "Subtitle")
+        .map(|s| s["Index"].clone())
+        .collect::<Vec<_>>();
+    for stream in streams
+        .iter_mut()
+        .filter(|stream| stream["Type"] == "Subtitle")
+    {
+        let mut matching = original_streams.iter().filter(|candidate| {
+            candidate["Type"] == stream["Type"] && candidate["Index"] == stream["Index"]
+        });
+        let Some(before) = matching.next() else {
+            continue;
+        };
+        if matching.next().is_some()
+            || subtitle_indices
+                .iter()
+                .filter(|index| **index == stream["Index"])
+                .count()
+                != 1
+            || before["Title"] == stream["Title"]
+            || before["Language"] != stream["Language"]
+        {
+            continue;
+        }
+        let Some(language) = subtitle_script(stream["Title"].as_str().unwrap_or("")) else {
+            continue;
+        };
+        let display = if language == "chs" {
+            "Chinese Simplified"
+        } else {
+            "Chinese Traditional"
+        };
+        stream["Language"] = json!(language);
+        if stream.get("DisplayLanguage").is_some() {
+            stream["DisplayLanguage"] = json!(display);
+        }
+        if let Some(title) = stream["DisplayTitle"]
+            .as_str()
+            .and_then(|s| s.strip_prefix("Chinese"))
+        {
+            let suffix = title
+                .strip_prefix(" Simplified")
+                .or_else(|| title.strip_prefix(" Traditional"))
+                .unwrap_or(title);
+            stream["DisplayTitle"] = json!(format!("{display}{suffix}"));
+        }
+    }
+}
+
 pub fn lookup(language: &str, mappings: &Value) -> Option<Value> {
     let key = token(language);
     let match_custom = |key: &str| {

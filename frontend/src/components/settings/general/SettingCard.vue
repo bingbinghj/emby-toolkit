@@ -2,6 +2,7 @@
 defineProps({
   title: { type: String, required: true },
   subtitle: { type: String, default: '' },
+  actionsStart: { type: Boolean, default: false },
 });
 </script>
 
@@ -14,7 +15,7 @@ defineProps({
     </VCardItem>
     <div class="setting-card__content">
         <slot />
-        <VCardActions v-if="$slots.actions" class="justify-end"><slot name="actions" /></VCardActions>
+        <VCardActions v-if="$slots.actions" :class="actionsStart ? 'justify-start' : 'justify-end'"><slot name="actions" /></VCardActions>
     </div>
   </VCard>
 </template>

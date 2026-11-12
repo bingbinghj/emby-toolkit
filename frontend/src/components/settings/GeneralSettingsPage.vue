@@ -11,7 +11,7 @@
             <VWindowItem value="system" eager>
               <VRow class="mp-aligned-grid settings-card-grid settings-grid">
                 <VCol cols="12" v-show="settingsSearch.showCard('基础设置')">
-                  <SettingCard class="dashboard-card" title="基础设置" subtitle="媒体处理与语言显示">
+                  <SettingCard class="dashboard-card" title="基础设置" subtitle="媒体处理与语言显示" actions-start>
 
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="delay_between_items_sec">
@@ -50,22 +50,6 @@
                         <div class="settings-hint">
                           <span class="text-medium-emphasis">
                             仅重试仍缺少有效媒体信息的项目；设为 0 时只验收，不补提取。
-                          </span>
-                        </div>
-                      </div>
-                      <div class="settings-field" data-field="subtitle_chinese_default_language">
-                        <VSelect
-                          v-model="configModel.subtitle_chinese_default_language"
-                          :items="subtitleChineseDefaultLanguageOptions"
-                          item-title="label"
-                          item-value="value"
-                          :return-object="false"
-                          label="中文字幕默认语言"
-                        ></VSelect>
-                        <div class="settings-hint">
-                          <span class="text-medium-emphasis">
-                            仅用于媒体信息编辑器中未明确简繁的中文字幕“修正语言
-                            (Language)”选项，方便填充标题；保留明确的 chs、cht。
                           </span>
                         </div>
                       </div>
@@ -135,7 +119,7 @@
                       </div>
                     </VCardText>
                     <template #actions>
-                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
+                      <div class="d-flex ga-3 flex-wrap align-center justify-start">
                         <VBtn
                           color="primary"
                           variant="flat"
@@ -320,19 +304,19 @@
                         </VCardText>
                         <VDivider />
                         <VCardActions class="app-dialog-actions">
+                          <VBtn color="primary" variant="flat" aria-label="保存媒体服务器" prepend-icon="mdi-content-save-outline"
+                            :loading="savingCard === 'emby'" :disabled="mediaServerBusy || !mediaServerDraft" @click="saveMediaServer">保存</VBtn>
                           <VBtn variant="tonal" prepend-icon="mdi-lan-connect" aria-label="测试媒体服务器连接"
                             :loading="isTestingMediaServer" :disabled="mediaServerSaving" @click="testMediaServerConnection">测试连接</VBtn>
                           <VSpacer />
                           <VBtn color="default" variant="text" aria-label="取消媒体服务器配置" :disabled="mediaServerBusy" @click="closeMediaServerDialog">取消</VBtn>
-                          <VBtn color="primary" variant="flat" aria-label="保存媒体服务器" prepend-icon="mdi-content-save-outline"
-                            :loading="savingCard === 'emby'" :disabled="mediaServerBusy || !mediaServerDraft" @click="saveMediaServer">保存</VBtn>
                         </VCardActions>
                       </VCard>
                     </VDialog>
                   </SettingCard>
                 </VCol>
                 <VCol cols="12" v-show="settingsSearch.showCard('AI 增强')">
-                  <SettingCard class="dashboard-card" title="AI 增强" subtitle="翻译服务与处理策略">
+                  <SettingCard class="dashboard-card" title="AI 增强" subtitle="翻译服务与处理策略" actions-start>
 
                     <template #append>
                       <div class="d-flex ga-3 flex-wrap align-center">
@@ -500,7 +484,7 @@
                       </div>
                     </VCardText>
                     <template #actions>
-                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
+                      <div class="d-flex ga-3 flex-wrap align-center justify-start">
                         <VBtn
                           color="primary"
                           variant="flat"
@@ -517,7 +501,7 @@
                   </SettingCard>
                 </VCol>
                 <VCol cols="12" v-show="settingsSearch.showCard('日志配置')">
-                  <SettingCard class="dashboard-card" title="日志配置" subtitle="日志保留与文件大小">
+                  <SettingCard class="dashboard-card" title="日志配置" subtitle="日志保留与文件大小" actions-start>
 
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="log_rotation_size_mb">
@@ -550,7 +534,7 @@
                       </div>
                     </VCardText>
                     <template #actions>
-                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
+                      <div class="d-flex ga-3 flex-wrap align-center justify-start">
                         <VBtn
                           color="primary"
                           variant="flat"
@@ -720,8 +704,9 @@
                                 </div>
                               </div>
                             </div>
-                            <div class="settings-field" data-field="p115_auth_method">
+                            <div class="settings-field storage-auth-radio" data-field="p115_auth_method">
                               <VRadioGroup
+                                :mobile-layout="false"
                                 :disabled="storageSaving"
                                 v-model="storageDraft.p115_auth_method"
                                 name="auth_method_group"
@@ -737,9 +722,9 @@
                             <!-- 方式一：网页登录授权 -->
                             <div
                               v-if="storageDraft.p115_auth_method === 'web' || !storageDraft.p115_auth_method"
-                              class="settings-field"
+                              class="settings-field storage-auth-row"
                             >
-                              <div class="settings-field-label text-body-2 font-weight-medium mb-2">OpenAPI</div>
+                              <div class="storage-auth-label text-body-2 font-weight-medium">OpenAPI</div>
                               <div style="width: 100%" class="d-flex ga-3 flex-column">
                                 <div class="d-flex ga-3 flex-wrap align-center justify-space-between">
                                   <VChip size="small" :color="p115Info?.has_token ? 'success' : 'secondary'">
@@ -758,9 +743,10 @@
                             <!-- 方式二：自定义 AppID 扫码 -->
                             <div
                               v-if="storageDraft.p115_auth_method === 'qrcode'"
-                              class="settings-field"
+                              class="settings-field storage-auth-row"
                               data-field="p115_app_id"
                             >
+                              <div class="storage-auth-label text-body-2 font-weight-medium">OpenAPI</div>
                               <div style="width: 100%" class="d-flex ga-3 flex-column">
                                 <div class="d-flex ga-3 flex-wrap align-center justify-space-between">
                                   <VChip size="small" :color="p115Info?.has_token ? 'success' : 'secondary'">
@@ -779,7 +765,8 @@
                                     :disabled="storageSaving"
                                     v-model="storageDraft.p115_app_id"
                                     placeholder="先保存此卡片的自定义 AppID 再扫码"
-                                    label="OpenAPI"
+                                    label="自定义 AppID"
+                                    aria-label="自定义 AppID"
                                   ></VTextField>
                                 </div>
                                 <div class="settings-hint">
@@ -790,8 +777,8 @@
                               </div>
                             </div>
                             <!--  Cookie  -->
-                            <div class="settings-field">
-                              <div class="settings-field-label text-body-2 font-weight-medium mb-2">Cookie</div>
+                            <div class="settings-field storage-auth-row">
+                              <div class="storage-auth-label text-body-2 font-weight-medium">Cookie</div>
                               <div style="width: 100%" class="d-flex ga-3 flex-column">
                                 <div class="d-flex ga-3 flex-wrap align-center justify-space-between">
                                   <VChip
@@ -836,8 +823,9 @@
                                 </div>
                               </div>
                             </div>
-                            <div class="settings-field mb-4" data-field="p115_api_priority">
+                            <div class="settings-field storage-auth-radio mb-4" data-field="p115_api_priority">
                               <VRadioGroup
+                                :mobile-layout="false"
                                 :disabled="storageSaving"
                                 v-model="storageDraft.p115_api_priority"
                                 name="api_priority_group"
@@ -866,17 +854,17 @@
                         </VCardText>
                         <VDivider />
                         <VCardActions class="app-dialog-actions">
-                          <VSpacer />
-                          <VBtn color="default" variant="text" aria-label="取消存储配置" :disabled="storageBusy" @click="closeStorageDialog">取消</VBtn>
                           <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" aria-label="保存存储"
                             :loading="savingCard === 'p115Account'" :disabled="storageBusy" @click="saveStorageSettings">保存</VBtn>
+                          <VSpacer />
+                          <VBtn color="default" variant="text" aria-label="取消存储配置" :disabled="storageBusy" @click="closeStorageDialog">取消</VBtn>
                         </VCardActions>
                       </VCard>
                     </VDialog>
                   </SettingCard>
                 </VCol>
                 <VCol cols="12" v-show="settingsSearch.showCard('目录')">
-                  <SettingCard class="dashboard-card" title="目录" subtitle="媒体目录与文件身份">
+                  <SettingCard class="dashboard-card" title="目录" subtitle="媒体目录与文件身份" actions-start>
 
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="emby_metadata_path">
@@ -972,7 +960,7 @@
                       </div>
                     </VCardText>
                     <template #actions>
-                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
+                      <div class="d-flex ga-3 flex-wrap align-center justify-start">
                         <VBtn
                           color="primary"
                           variant="flat"
@@ -993,7 +981,7 @@
             <VWindowItem value="rule" eager>
               <VRow class="mp-aligned-grid settings-card-grid settings-grid">
                 <VCol cols="12" v-show="settingsSearch.showCard('实时监控')">
-                  <SettingCard class="dashboard-card" title="实时监控" subtitle="自动发现本地媒体变化">
+                  <SettingCard class="dashboard-card" title="实时监控" subtitle="自动发现本地媒体变化" actions-start>
 
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="monitor_enabled">
@@ -1105,7 +1093,7 @@
                       </div>
                     </VCardText>
                     <template #actions>
-                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
+                      <div class="d-flex ga-3 flex-wrap align-center justify-start">
                         <VBtn
                           color="primary"
                           variant="flat"
@@ -1122,7 +1110,7 @@
                   </SettingCard>
                 </VCol>
                 <VCol cols="12" v-show="settingsSearch.showCard('入库自动处理')">
-                  <SettingCard class="dashboard-card" title="入库自动处理" subtitle="新媒体入库后的增强任务">
+                  <SettingCard class="dashboard-card" title="入库自动处理" subtitle="新媒体入库后的增强任务" actions-start>
 
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="auto_repair_truehd_core_on_ingest">
@@ -1193,7 +1181,7 @@
                       </div>
                     </VCardText>
                     <template #actions>
-                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
+                      <div class="d-flex ga-3 flex-wrap align-center justify-start">
                         <VBtn
                           color="primary"
                           variant="flat"
@@ -1210,7 +1198,7 @@
                   </SettingCard>
                 </VCol>
                 <VCol cols="12" v-show="settingsSearch.showCard('整理 & 刮削')">
-                  <SettingCard class="dashboard-card" title="整理 & 刮削" subtitle="电影与电视剧的目录和文件名">
+                  <SettingCard class="dashboard-card" title="整理 & 刮削" subtitle="电影与电视剧的目录和文件名" actions-start>
 
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="tmdb_image_language_preference">
@@ -1325,7 +1313,7 @@
                       </div>
                     </VCardText>
                     <template #actions>
-                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
+                      <div class="d-flex ga-3 flex-wrap align-center justify-start">
                         <VBtn
                           color="primary"
                           variant="flat"
@@ -1346,7 +1334,7 @@
             <VWindowItem value="search" eager>
               <VRow class="mp-aligned-grid settings-card-grid settings-grid">
                 <VCol cols="12" v-show="settingsSearch.showCard('数据源与API')">
-                  <SettingCard class="dashboard-card" title="数据源与API" subtitle="元数据服务与访问凭据">
+                  <SettingCard class="dashboard-card" title="数据源与API" subtitle="元数据服务与访问凭据" actions-start>
 
                     <VCardText class="settings-card-body">
                       <div class="settings-field" data-field="tmdb_api_key">
@@ -1413,7 +1401,7 @@
                       </div>
                     </VCardText>
                     <template #actions>
-                      <div class="d-flex ga-3 flex-wrap align-center justify-end">
+                      <div class="d-flex ga-3 flex-wrap align-center justify-start">
                         <VBtn
                           color="primary"
                           variant="flat"
@@ -2083,24 +2071,24 @@
           </VWindow>
         </div>
       </VCardText>
-      <VCardActions class="justify-end flex-wrap ga-2">
+      <VCardActions class="justify-start flex-wrap ga-2">
         <div style="width: 100%" class="d-flex ga-3 flex-wrap align-center justify-space-between">
-          <VBtn
-            color="warning"
-            :loading="savingPrompts"
-            @click="confirmSettingAction('确定要丢弃所有自定义修改，恢复到系统默认提示词吗？', resetPrompts, '确认')"
-            variant="outlined"
-          >
-            <template #prepend><UiIcon name="refresh" /></template>
-            恢复默认
-          </VBtn>
           <div class="d-flex ga-3 flex-wrap align-center">
-            <VBtn @click="promptModalVisible = false" color="secondary">取消</VBtn>
             <VBtn variant="flat" color="primary" @click="savePrompts" :loading="savingPrompts">
               <template #prepend><UiIcon name="save" /></template>
               保存配置
             </VBtn>
+            <VBtn
+              color="warning"
+              :loading="savingPrompts"
+              @click="confirmSettingAction('确定要丢弃所有自定义修改，恢复到系统默认提示词吗？', resetPrompts, '确认')"
+              variant="outlined"
+            >
+              <template #prepend><UiIcon name="refresh" /></template>
+              恢复默认
+            </VBtn>
           </div>
+          <VBtn @click="promptModalVisible = false" color="secondary">取消</VBtn>
         </div>
       </VCardActions>
     </VCard>
@@ -2382,10 +2370,6 @@ let renamePreviewRequest = 0;
 const movieRenamePreviewParts = computed(() => String(renameFormatPreview.value.movie || '').split('/').filter(Boolean));
 const tvRenamePreviewParts = computed(() => String(renameFormatPreview.value.tv || '').split('/').filter(Boolean));
 let renamePreviewTimer = null;
-const subtitleChineseDefaultLanguageOptions = [
-  { label: '简体', value: 'chs' },
-  { label: '中文', value: 'zho' },
-];
 const message = useMessage();
 const dialog = useDialog();
 const isResettingMappings = ref(false);
@@ -3175,7 +3159,7 @@ const check115Status = async () => {
 // 辅助函数：获取规则摘要
 
 const cardFields = {
-  basic: ['delay_between_items_sec', 'media_info_retry_interval', 'media_info_retry_attempts', 'subtitle_chinese_default_language', 'max_actors_to_process', 'max_episode_actors_to_process', 'extract_thumb', 'actor_role_add_prefix', 'remove_actors_without_avatars', 'keyword_to_tags', 'studio_to_chinese'],
+  basic: ['delay_between_items_sec', 'media_info_retry_interval', 'media_info_retry_attempts', 'max_actors_to_process', 'max_episode_actors_to_process', 'extract_thumb', 'actor_role_add_prefix', 'remove_actors_without_avatars', 'keyword_to_tags', 'studio_to_chinese'],
   monitor: ['monitor_enabled', 'monitor_paths', 'monitor_exclude_dirs', 'monitor_exclude_refresh_delay', 'monitor_extensions'],
   sources: ['tmdb_api_key', 'tmdb_api_base_url', 'douban_enable_online_api', 'api_douban_default_cooldown_seconds', 'douban_cookie'],
   p115Account: storageConfigFields,
@@ -3456,6 +3440,13 @@ onUnmounted(() => {
 .settings-container { min-width: 0; }
 .storage-card-grid { display:grid; grid-template-columns:minmax(0,360px); gap:12px; }
 .storage-dialog :deep(.v-card-text) { min-width:0; }
+.storage-auth-row { display:grid; grid-template-columns:4.5rem minmax(0,1fr); gap:12px; margin-block-end:20px; }
+.storage-auth-row > div { min-width:0; }
+.storage-auth-label { margin-block-start:6px; white-space:nowrap; }
+.storage-auth-radio { margin-block-end:20px; }
+.storage-auth-radio :deep(.v-input__control) { flex-direction:row; align-items:flex-start; gap:12px; }
+.storage-auth-radio :deep(.v-input__control > .v-label) { flex:0 0 4.5rem; margin:8px 0 0; white-space:nowrap; }
+.storage-auth-radio :deep(.v-selection-control-group) { flex:1 1 auto; min-width:0; }
 .media-server-card-grid { display:grid; grid-template-columns:minmax(0,360px); gap:12px; }
 .media-server-dialog :deep(.v-card-text) { min-width:0; }
 :is(.media-server-dialog, .storage-dialog) :deep(.app-responsive-input__native input::placeholder) {

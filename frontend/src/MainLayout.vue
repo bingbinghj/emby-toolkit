@@ -20,7 +20,6 @@ const message = useMessage(), dialog = useDialog();
 const appearance = useThemeCustomizer();
 const { mdAndDown } = useDisplay();
 const isMobile = computed(() => mdAndDown.value);
-const collapsed = computed(() => appearance.settings.value.layout === 'collapsed' && !isMobile.value);
 const notificationOpen = ref(false), themeCustomizerOpen = ref(false), avatarLoadFailed = ref(false);
 const searchOpen = ref(false), desktopSearchInput = ref(null), mobileSearchInput = ref(null);
 const fallbackSearch = ref(''), searchComposing = ref(false);
@@ -216,7 +215,6 @@ const isMenuLoading = ref(false);
 const menuConfigLoaded = ref(false);
 const menuConfigError = ref('');
 const menuConfigTree = ref([]); // 树形配置数据
-const menuRevision = ref(0);
 
 // 1. 基础菜单（包含所有权限允许的菜单，带有 defaultLabel 用于重置）
 const baseMenuOptions = computed(() => {
@@ -318,7 +316,6 @@ const saveMenuConfig = async () => {
     isMenuEditorVisible.value = false;
     message.success('菜单配置已保存，全局生效');
 
-    menuRevision.value += 1;
   } catch (error) {
     message.error(error.response?.data?.error || '保存菜单配置失败');
   } finally {
@@ -337,18 +334,12 @@ const resetMenuConfig = async () => {
     menuConfigError.value = '';
     message.success('已恢复默认菜单');
 
-    menuRevision.value += 1;
   } catch (error) {
     message.error(error.response?.data?.error || '重置菜单配置失败');
   } finally {
     isSavingMenu.value = false;
   }
 };
-
-// 计算默认展开的 keys
-const defaultExpandedKeys = computed(() => {
-  return menuConfigTree.value.filter(g => g.children && g.expanded).map(g => g.key);
-});
 
 // 最终渲染的菜单
 const menuOptions = computed(() => {
@@ -384,8 +375,8 @@ const menuOptions = computed(() => {
     // 如果该组下没有任何可见的子菜单，则直接跳过（不渲染组，也不渲染子项）
     if (visibleChildren.length === 0) return;
 
-    if (group.visible && !(collapsed.value && !isMobile.value)) {
-      // 2. 如果一级菜单可见，正常渲染为包含 children 的折叠组
+    if (group.visible) {
+      // 显示分区标题及其中的菜单项。
       finalMenu.push({
         key: group.key,
         label: group.label || baseGroup.defaultLabel,
@@ -405,9 +396,43 @@ const menuOptions = computed(() => {
 const dragSource = ref(null); // { key, groupKey }; null group means a top-level item.
 const dragTarget = ref(null);
 const dragPosition = ref('');
+const menuEditorContent = ref(null);
+let menuDragFrame = 0, menuDragVelocity = 0, menuDragTime = 0;
+
+const scrollMenuDrag = time => {
+  const content = menuEditorContent.value?.$el;
+  menuDragFrame = 0;
+  if (!content || !dragSource.value || !menuDragVelocity) return;
+  const before = content.scrollTop;
+  content.scrollTop += menuDragVelocity * Math.min(menuDragTime ? time - menuDragTime : 16, 32);
+  menuDragTime = time;
+  if (content.scrollTop !== before) menuDragFrame = requestAnimationFrame(scrollMenuDrag);
+};
+const updateMenuDragScroll = event => {
+  const content = menuEditorContent.value?.$el;
+  if (!content || !dragSource.value) return;
+  const rect = content.getBoundingClientRect();
+  const edge = Math.min(48, rect.height / 4);
+  menuDragVelocity = event.clientX < rect.left || event.clientX > rect.right
+    || event.clientY < rect.top || event.clientY > rect.bottom ? 0
+    : event.clientY < rect.top + edge ? -(1 - (event.clientY - rect.top) / edge) * .6
+    : event.clientY > rect.bottom - edge ? (1 - (rect.bottom - event.clientY) / edge) * .6 : 0;
+  if (menuDragVelocity && !menuDragFrame) {
+    menuDragTime = 0;
+    menuDragFrame = requestAnimationFrame(scrollMenuDrag);
+  } else if (!menuDragVelocity && menuDragFrame) {
+    cancelAnimationFrame(menuDragFrame);
+    menuDragFrame = 0;
+  }
+};
+const setMenuDragTarget = (key, groupKey, position) => {
+  if (dragTarget.value?.key !== key || dragTarget.value?.groupKey !== groupKey) dragTarget.value = { key, groupKey };
+  if (dragPosition.value !== position) dragPosition.value = position;
+};
 
 const onDragStart = (e, key, groupKey = null) => {
   dragSource.value = { key, groupKey };
+  document.addEventListener('dragover', updateMenuDragScroll, true);
   e.dataTransfer.effectAllowed = 'move';
   e.dataTransfer.setData('text/plain', key);
 };
@@ -417,19 +442,18 @@ const onDragOver = (e, key, groupKey = null) => {
   e.dataTransfer.dropEffect = 'move';
   const rect = e.currentTarget.getBoundingClientRect();
   const midY = rect.top + rect.height / 2;
-  dragPosition.value = e.clientY < midY ? 'top' : 'bottom';
-  dragTarget.value = { key, groupKey };
+  setMenuDragTarget(key, groupKey, e.clientY < midY ? 'top' : 'bottom');
 };
 
 const onDragOverEmpty = (e, groupKey = null) => {
   e.preventDefault();
   e.dataTransfer.dropEffect = 'move';
-  dragTarget.value = { key: null, groupKey };
-  dragPosition.value = 'inside';
+  setMenuDragTarget(null, groupKey, 'inside');
 };
 const onDragOverRootGap = (e, key) => {
-  onDragOver(e, key);
-  dragPosition.value = 'top';
+  e.preventDefault();
+  e.dataTransfer.dropEffect = 'move';
+  setMenuDragTarget(key, null, 'top');
 };
 
 const onDrop = (e, targetKey, groupKey = null) => {
@@ -451,17 +475,22 @@ const onDragEnd = () => {
 };
 
 const clearDragState = () => {
+  document.removeEventListener('dragover', updateMenuDragScroll, true);
+  cancelAnimationFrame(menuDragFrame);
+  menuDragFrame = menuDragVelocity = menuDragTime = 0;
   dragSource.value = null;
   dragTarget.value = null;
   dragPosition.value = '';
 };
+watch(isMenuEditorVisible, visible => { if (!visible) clearDragState(); });
+onBeforeUnmount(clearDragState);
 
 </script>
 
 <template>
   <DefaultLayout :menus="isMenuReady ? menuOptions : []" :active-key="String(activeMenuKey || '')"
     :has-header-tabs="settingsPage"
-    :expanded-keys="defaultExpandedKeys" :menu-revision="menuRevision" :layout="appearance.settings.value.layout" @navigate="handleMenuUpdate" @update:layout="setLayout">
+    :layout="appearance.settings.value.layout" @navigate="handleMenuUpdate" @update:layout="setLayout">
     <template #brand="{ rail }">
       <RouterLink :to="{ name: 'Dashboard' }" class="app-brand"><img src="./assets/logo.png" alt="Emby Toolkit" />
         <span v-if="!rail" class="app-brand-name">Emby Toolkit</span>
@@ -573,7 +602,7 @@ const clearDragState = () => {
       <VCardItem title="自定义导航" subtitle="修改菜单名称、显示状态和顺序，全局生效">
         <template #append><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭导航设置" @click="isMenuEditorVisible = false" /></template>
       </VCardItem>
-      <VCardText class="menu-editor-content">
+      <VCardText ref="menuEditorContent" class="menu-editor-content">
         <VAlert v-if="menuConfigError" type="warning" variant="tonal" title="导航设置尚未读取" class="mb-4">
           <div>{{ menuConfigError }}</div>
           <p class="mt-2">默认导航仍可使用，成功读取后才能保存更改。</p>
@@ -583,22 +612,21 @@ const clearDragState = () => {
           <template v-for="(group, groupIndex) in menuConfigTree" :key="group.key">
             <div class="menu-editor-root-dropzone" :data-before-key="group.key"
               :class="{ 'drag-over-top': dragTarget?.key === group.key && dragTarget?.groupKey === null && dragPosition === 'top' }"
-              @dragover.prevent.stop="onDragOverRootGap($event, group.key)" @drop.stop="onDrop($event, group.key)">拖至此处设为一级导航</div>
+              @dragover.prevent.stop="onDragOverRootGap($event, group.key)" @drop.stop="onDrop($event, group.key)">拖至此处设为独立导航</div>
             <VCard variant="outlined" class="menu-editor-node" :class="{ 'menu-editor-group': group.children, 'menu-editor-standalone': !group.children }" :data-menu-key="group.key">
               <VCardText>
                 <div class="menu-editor-group-heading" draggable="true" :class="{ 'is-dragging': dragSource?.key === group.key }"
                   @dragstart.stop="onDragStart($event, group.key)" @dragover.prevent.stop="onDragOver($event, group.key)"
                   @drop.stop="onDrop($event, group.key)" @dragend="onDragEnd">
                   <VIcon icon="mdi-drag" class="menu-drag-handle" />
-                  <VSwitch v-model="group.visible" density="compact" hide-details :aria-label="group.children ? `显示 ${getOriginalLabel(group.key)} 菜单组` : `显示 ${getOriginalLabel(group.key)}`" />
-                  <VTextField v-model="group.label" :placeholder="getOriginalLabel(group.key)" :label="group.children ? '菜单组名称' : '菜单名称'" density="compact" hide-details />
-                  <VSwitch v-if="group.children" v-model="group.expanded" label="默认展开" density="compact" hide-details />
-                  <VMenu v-else>
-                    <template #activator="{ props: moveProps }"><VBtn v-bind="moveProps" icon="mdi-folder-plus-outline" color="default" variant="text" size="small" :aria-label="`将 ${group.label} 移入分组`" /></template>
+                  <VSwitch v-model="group.visible" density="compact" hide-details :aria-label="group.children ? `显示 ${getOriginalLabel(group.key)} 分区` : `显示 ${getOriginalLabel(group.key)}`" />
+                  <VTextField v-model="group.label" :placeholder="getOriginalLabel(group.key)" :label="group.children ? '分区名称' : '菜单名称'" density="compact" hide-details />
+                  <VMenu v-if="!group.children">
+                    <template #activator="{ props: moveProps }"><VBtn v-bind="moveProps" icon="mdi-folder-plus-outline" color="default" variant="text" size="small" :aria-label="`将 ${group.label} 移入分区`" /></template>
                     <VList><VListItem v-for="target in menuGroups" :key="target.key" :title="target.label" @click="moveMenuToGroup(group.key, target.key)" /></VList>
                   </VMenu>
-                  <VBtn icon="mdi-chevron-up" color="default" variant="text" size="small" :disabled="groupIndex === 0" aria-label="上移一级导航" @click="moveRootMenu(groupIndex, -1)" />
-                  <VBtn icon="mdi-chevron-down" color="default" variant="text" size="small" :disabled="groupIndex === menuConfigTree.length - 1" aria-label="下移一级导航" @click="moveRootMenu(groupIndex, 1)" />
+                  <VBtn icon="mdi-chevron-up" color="default" variant="text" size="small" :disabled="groupIndex === 0" aria-label="上移导航" @click="moveRootMenu(groupIndex, -1)" />
+                  <VBtn icon="mdi-chevron-down" color="default" variant="text" size="small" :disabled="groupIndex === menuConfigTree.length - 1" aria-label="下移导航" @click="moveRootMenu(groupIndex, 1)" />
                 </div>
                 <div v-if="group.children" class="menu-editor-children" @dragover.prevent.stop="onDragOverEmpty($event, group.key)" @drop.stop="onDropEmpty($event, group.key)">
                   <div v-for="(child, childIndex) in group.children" :key="child.key" class="menu-editor-item" :data-menu-key="child.key" draggable="true"
@@ -610,7 +638,7 @@ const clearDragState = () => {
                     <VSwitch v-model="child.visible" density="compact" hide-details :aria-label="`显示 ${getOriginalLabel(child.key)}`" />
                     <VTextField v-model="child.label" :placeholder="getOriginalLabel(child.key)" label="菜单名称" density="compact" hide-details />
                     <div class="menu-editor-item-actions">
-                      <VBtn icon="mdi-arrow-top-right" color="default" variant="text" size="small" :aria-label="`将 ${child.label} 提升为一级导航`" @click="promoteMenuItem(group.key, child.key)" />
+                      <VBtn icon="mdi-arrow-top-right" color="default" variant="text" size="small" :aria-label="`将 ${child.label} 移出分区`" @click="promoteMenuItem(group.key, child.key)" />
                       <VBtn icon="mdi-chevron-up" color="default" variant="text" size="small" :disabled="childIndex === 0" aria-label="上移菜单" @click="moveMenuItem(groupIndex, childIndex, -1)" />
                       <VBtn icon="mdi-chevron-down" color="default" variant="text" size="small" :disabled="childIndex === group.children.length - 1" aria-label="下移菜单" @click="moveMenuItem(groupIndex, childIndex, 1)" />
                     </div>
@@ -620,12 +648,12 @@ const clearDragState = () => {
               </VCardText>
             </VCard>
           </template>
-          <div class="menu-editor-root-dropzone menu-editor-root-dropzone--last" @dragover.prevent.stop="onDragOverEmpty($event)" @drop.stop="onDropEmpty($event)">拖至此处设为一级导航</div>
+          <div class="menu-editor-root-dropzone menu-editor-root-dropzone--last" @dragover.prevent.stop="onDragOverEmpty($event)" @drop.stop="onDropEmpty($event)">拖至此处设为独立导航</div>
         </div>
-        <VAlert type="info" variant="tonal" density="compact">拖到分组之间可设为独立一级导航，拖入分组可设为二级导航。支持一级排序和跨组拖拽；关闭分组显示时，其下开启的菜单会提升为一级。</VAlert>
+        <VAlert type="info" variant="tonal" density="compact">拖到分区之间可设为独立导航，拖入分区可调整所属分区。菜单项始终直接显示；关闭分区显示时，其中开启的菜单仍会显示。</VAlert>
       </VCardText>
-      <VCardActions><VBtn color="error" :loading="isSavingMenu" :disabled="isMenuLoading" prepend-icon="mdi-restore" @click="confirmResetMenu">恢复默认</VBtn>
-          <VSpacer /><VBtn class="menu-apply-button" color="primary" variant="flat" :loading="isSavingMenu" :disabled="!menuConfigLoaded" prepend-icon="mdi-content-save-outline" @click="saveMenuConfig">保存</VBtn>
+      <VCardActions><VBtn class="menu-apply-button" color="primary" variant="flat" :loading="isSavingMenu" :disabled="!menuConfigLoaded" prepend-icon="mdi-content-save-outline" @click="saveMenuConfig">保存</VBtn>
+          <VBtn color="error" :loading="isSavingMenu" :disabled="isMenuLoading" prepend-icon="mdi-restore" @click="confirmResetMenu">恢复默认</VBtn>
       </VCardActions>
     </VCard>
   </VDialog>

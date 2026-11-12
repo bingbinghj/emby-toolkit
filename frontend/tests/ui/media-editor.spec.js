@@ -1,4 +1,48 @@
-import { test, expect, mediaDetails } from './fixtures.js';
+import { test, expect, mediaDetails, mediaInfo } from './fixtures.js';
+
+test('subtitle editor shows actual languages and original titles without modifying an untouched save', async ({ page, api }) => {
+  const stored = structuredClone(mediaInfo);
+  stored.mediainfo[0].MediaSourceInfo.MediaStreams = [
+    { Type: 'Subtitle', Index: 5, Codec: 'ass', Language: 'chi', Title: '粤语', DisplayLanguage: 'Chinese', DisplayTitle: 'Chinese (ASS)' },
+    { Type: 'Subtitle', Index: 6, Codec: 'ass', Language: 'chi', Title: '日语简体' },
+    { Type: 'Subtitle', Index: 7, Codec: 'ass', Language: 'yue', Title: '简体' },
+  ];
+  stored.iso_language_options = [{ label: '粤语', value: 'yue', aliases: ['yue'] }];
+  api.respond('GET', '/api/media_info/edit/101', stored);
+  await page.goto('/edit-media/101');
+  await page.getByTestId('media-info-open').click();
+  const dialog = page.locator('.v-overlay--active').filter({ has: page.getByTestId('media-info-save') });
+  for (const [ordinal, label, title] of [[1, '中文', '粤语'], [2, '中文', '日语简体'], [3, '粤语', '简体']]) {
+    const name = new RegExp(`字幕.*${ordinal}.*修正语言`);
+    const field = dialog.locator('.v-autocomplete').filter({ has: page.getByRole('textbox', { name }) });
+    await expect(field.getByText(label, { exact: true })).toBeVisible();
+    await expect(dialog.getByRole('textbox', { name: new RegExp(`字幕.*${ordinal}.*当前标题`) })).toHaveValue(title);
+  }
+  await dialog.getByTestId('media-info-save').click();
+  await expect.poll(() => api.requests.filter(request => request.method === 'POST' && request.path === '/api/media_info/edit/101').length).toBe(1);
+  const payload = api.requests.find(request => request.method === 'POST' && request.path === '/api/media_info/edit/101').body;
+  expect(payload.mediainfo).toEqual(stored.mediainfo);
+});
+
+test('choosing simplified from actual generic Chinese changes the code while retaining the original title', async ({ page, api }) => {
+  const stored = structuredClone(mediaInfo);
+  stored.mediainfo[0].MediaSourceInfo.MediaStreams[2] = { Type: 'Subtitle', Index: 5, Codec: 'ass', Language: 'chi', Title: '粤语' };
+  api.respond('GET', '/api/media_info/edit/101', stored);
+  await page.goto('/edit-media/101');
+  await page.getByTestId('media-info-open').click();
+  const dialog = page.locator('.v-overlay--active').filter({ has: page.getByTestId('media-info-save') });
+  const language = dialog.getByRole('textbox', { name: /字幕.*1.*修正语言/ });
+  await language.click();
+  await language.fill('简体');
+  await page.getByRole('option', { name: '简体', exact: true }).click();
+  await expect(dialog.getByRole('textbox', { name: /字幕.*1.*当前标题/ })).toHaveValue('粤语');
+  await dialog.getByTestId('media-info-save').click();
+  await expect.poll(() => api.requests.some(request => request.method === 'POST' && request.path === '/api/media_info/edit/101')).toBe(true);
+  const payload = api.requests.find(request => request.method === 'POST' && request.path === '/api/media_info/edit/101').body;
+  const subtitle = payload.mediainfo[0].MediaSourceInfo.MediaStreams.find(stream => stream.Type === 'Subtitle');
+  expect(subtitle.Language).toBe('chs');
+  expect(subtitle.Title).toBe('粤语');
+});
 
 test('VAutocomplete submits a primitive language code and retains save warnings in the editor', async ({ page, api }) => {
   api.respond('POST', '/api/media_info/edit/101', {

@@ -497,11 +497,6 @@ async fn config_save(
             value[key] = config.get(key).cloned().unwrap_or(json!(""));
         }
     }
-    if let Some(language) = value.get("subtitle_chinese_default_language")
-        && !matches!(language.as_str(), Some("chs" | "zho"))
-    {
-        value["subtitle_chinese_default_language"] = json!("chs");
-    }
     let mut effective = config.clone();
     effective
         .as_object_mut()

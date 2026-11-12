@@ -17,7 +17,7 @@
       </VCardActions>
     </VCard>
     <div v-if="isLoading" class="center-container"><VProgressCircular indeterminate color="primary" size="48" /></div>
-    <VAlert v-else-if="configError" type="error" variant="tonal">{{ configError }}</VAlert>
+    <VAlert v-else-if="configError && !configModel" type="error" variant="tonal">{{ configError }}</VAlert>
     <div v-else-if="configModel" class="scheduler-content">
       <div class="scheduler-overview">
         <VCard class="dashboard-card">
@@ -41,51 +41,48 @@
       <VAlert v-if="taskRunFeedback" :type="taskRunFeedback.type" variant="tonal" :title="taskRunFeedback.message" role="status">
         <div v-for="detail in taskRunFeedback.details" :key="detail">{{ detail }}</div>
       </VAlert>
-      <div class="scheduler-category-list d-none d-md-block" data-testid="scheduler-desktop-tasks">
+      <div class="scheduler-category-list" :data-testid="mdAndUp ? 'scheduler-desktop-tasks' : 'scheduler-mobile-tasks'">
         <VCard v-for="group in manualTaskGroups" :key="group.name" class="dashboard-card manual-tasks-card scheduler-category-card" :data-task-category="group.name">
           <VCardItem :title="group.name"><template #prepend><VIcon :icon="getTaskIcon(group.tasks[0])" color="primary" /></template></VCardItem>
-          <VTable class="scheduler-table">
-            <thead><tr><th scope="col">任务名称</th><th scope="col">任务状态</th><th scope="col" /></tr></thead>
-            <tbody>
-              <tr v-for="task in group.tasks" :key="task.key" class="task-record" :data-task-key="task.key">
-                <td class="scheduler-task-cell">
-                  <div class="temp-task-name">{{ task.name }}</div>
-                  <p class="temp-task-description">{{ getTaskHelp(task) }}</p>
-                  <div v-if="isCurrentTask(task) && isBackgroundTaskRunning" class="scheduler-progress">
-                    <VProgressLinear :model-value="backgroundTaskStatus.progress" :indeterminate="!backgroundTaskStatus.progress_known" color="primary" height="4" rounded />
-                    <div class="scheduler-progress-meta"><span>{{ backgroundTaskStatus.message }}</span><strong v-if="backgroundTaskStatus.progress_known">{{ backgroundTaskStatus.progress }}%</strong></div>
-                  </div>
-                </td>
-                <td><VChip :color="getTaskRowColor(task)">{{ getTaskRowState(task) }}</VChip></td>
-                <td>
-                  <VBtn size="small" prepend-icon="mdi-play" :loading="isTriggeringTask === task.key" :disabled="isBackgroundTaskRunning || Boolean(isTriggeringTask)" @click="triggerTaskNow(task.key)">执行</VBtn>
-                </td>
-              </tr>
-            </tbody>
-          </VTable>
+          <VCardText>
+            <Draggable :list="group.tasks" item-key="key" tag="div" class="scheduler-task-grid"
+              handle=".task-drag-handle" :group="manualTaskDragGroup"
+              :animation="150" :delay="150" :delay-on-touch-only="true" :force-fallback="true" :fallback-on-body="true"
+              @change="reorderManualTaskGroup(group)">
+              <template #item="{ element: task }">
+                <VCard variant="tonal" class="app-card-shell app-card-colorful scheduler-task-card task-record"
+                  :class="{ 'mobile-scheduler-card': !mdAndUp }" :data-task-key="task.key">
+                  <VBtn icon="mdi-drag" variant="text" size="small" class="app-card-top-action task-drag-handle"
+                    :aria-label="`拖动${task.name}调整顺序`" @click.stop />
+                  <VCardText class="app-card-summary scheduler-task-summary">
+                    <div class="app-card-summary__content">
+                      <h3 class="temp-task-name text-h6">{{ task.name }}</h3>
+                      <VChip :color="getTaskRowColor(task)" variant="tonal" size="small" class="align-self-start mt-2">{{ getTaskRowState(task) }}</VChip>
+                    </div>
+                    <div class="app-card-summary__media" aria-hidden="true"><VIcon :icon="getTaskIcon(task)" color="primary" size="48" /></div>
+                  </VCardText>
+                  <VCardText class="scheduler-task-details">
+                    <p class="temp-task-description">{{ getTaskHelp(task) }}</p>
+                    <div v-if="isCurrentTask(task) && isBackgroundTaskRunning" class="scheduler-progress">
+                      <VProgressLinear :model-value="backgroundTaskStatus.progress" :indeterminate="!backgroundTaskStatus.progress_known" color="primary" height="4" rounded />
+                      <div class="scheduler-progress-meta"><span>{{ backgroundTaskStatus.message }}</span><strong v-if="backgroundTaskStatus.progress_known">{{ backgroundTaskStatus.progress }}%</strong></div>
+                    </div>
+                  </VCardText>
+                  <VCardActions><VBtn color="primary" variant="flat" size="small" prepend-icon="mdi-play"
+                    :loading="isTriggeringTask === task.key" :disabled="isBackgroundTaskRunning || Boolean(isTriggeringTask)"
+                    @click="triggerTaskNow(task.key)">执行</VBtn></VCardActions>
+                </VCard>
+              </template>
+            </Draggable>
+          </VCardText>
         </VCard>
         <VEmptyState v-if="!manualTaskGroups.length" :title="taskSearchQuery.trim() ? '未找到匹配任务' : '暂无可用任务'" icon="mdi-timer-off-outline" />
       </div>
-      <div class="mobile-scheduler-view scheduler-category-list d-md-none" data-testid="scheduler-mobile-tasks">
-        <VCard v-for="group in manualTaskGroups" :key="group.name" class="dashboard-card scheduler-category-card" :data-task-category="group.name">
-          <VCardItem :title="group.name"><template #prepend><VIcon :icon="getTaskIcon(group.tasks[0])" color="primary" /></template></VCardItem>
-          <div class="mobile-scheduler-list">
-            <article v-for="task in group.tasks" :key="task.key" class="mobile-scheduler-card task-record" :data-task-key="task.key">
-              <div class="mobile-scheduler-icon"><VIcon :icon="getTaskIcon(task)" size="30" /></div>
-              <div class="mobile-scheduler-content">
-                <h3 class="temp-task-name">{{ task.name }}</h3>
-                <div class="mobile-scheduler-meta"><p>{{ task.category_name || '其他任务' }}</p><span class="mobile-scheduler-status" :class="{ 'mobile-scheduler-status--running': isCurrentTask(task) && isBackgroundTaskRunning }">{{ getTaskRowState(task) }}</span></div>
-              </div>
-              <div class="mobile-scheduler-actions"><VBtn icon color="primary" class="mobile-scheduler-run-btn" aria-label="执行" :loading="isTriggeringTask === task.key" :disabled="isBackgroundTaskRunning || Boolean(isTriggeringTask)" @click="triggerTaskNow(task.key)"><VIcon icon="mdi-play" size="24" /></VBtn></div>
-              <p class="temp-task-description mobile-scheduler-description">{{ getTaskHelp(task) }}</p>
-              <div v-if="isCurrentTask(task) && isBackgroundTaskRunning" class="mobile-scheduler-progress">
-                <VProgressLinear :model-value="backgroundTaskStatus.progress" :indeterminate="!backgroundTaskStatus.progress_known" color="primary" height="4" rounded />
-                <div class="scheduler-progress-meta"><span>{{ backgroundTaskStatus.message }}</span><strong v-if="backgroundTaskStatus.progress_known">{{ backgroundTaskStatus.progress }}%</strong></div>
-              </div>
-            </article>
-          </div>
-        </VCard>
-        <VEmptyState v-if="!manualTaskGroups.length" :title="taskSearchQuery.trim() ? '未找到匹配任务' : '暂无可用任务'" icon="mdi-timer-off-outline" />
+      <VAlert v-if="configError" type="error" variant="tonal">{{ configError }}</VAlert>
+      <div v-if="availableTasksForManualRun.length" class="scheduler-order-actions d-flex align-center flex-wrap ga-3">
+        <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" aria-label="保存任务顺序"
+          :loading="manualOrderSaving" :disabled="manualOrderSaving" @click="saveManualTaskOrder">保存任务顺序</VBtn>
+        <span v-if="manualOrderDirty" class="text-body-2 text-medium-emphasis">顺序已调整，保存后生效</span>
       </div>
     </div>
     <VDialog v-model="showTgMenuConfigModal" max-width="600" persistent>
@@ -100,7 +97,7 @@
             </div>
           </div>
         </VCardText>
-        <VCardActions><VSpacer /><VBtn variant="text" @click="showTgMenuConfigModal = false">取消</VBtn><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" @click="saveTgMenuConfig">保存</VBtn></VCardActions>
+        <VCardActions class="justify-start"><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" @click="saveTgMenuConfig">保存</VBtn><VBtn variant="text" @click="showTgMenuConfigModal = false">取消</VBtn></VCardActions>
       </VCard>
     </VDialog>
     <VDialog v-model="showSyncModeModal" max-width="560" persistent>
@@ -117,16 +114,20 @@
 </template>
 <script setup>
 import { ref, onMounted, onBeforeUnmount, watch, nextTick, computed } from 'vue';
+import { useDisplay } from 'vuetify';
 import { useMessage, useDialog } from '@/composables/useFeedback';
 import { useConfig } from '../../composables/useConfig.js';
 import { useTaskStatus } from '../../composables/useTaskStatus.js';
 import axios from 'axios';
 import FingerprintAuditPanel from './FingerprintAuditPanel.vue';
 import Sortable from 'sortablejs';
+import Draggable from 'vuedraggable';
 import { useContextSearch } from '../../composables/useContextSearch.js';
 
 const message = useMessage();
 const dialog = useDialog();
+const { mdAndUp } = useDisplay();
+const manualTaskDragGroup = { pull: false, put: false };
 
 const DUAL_MODE_TASKS = [
   'role-translation',
@@ -198,6 +199,9 @@ const confirmStopTask = () => {
 
 const availableTasksForManualRun = ref([]);
 const availableTasksForTgMenu = ref([]);
+const manualTaskOrder = ref([]);
+const manualOrderDirty = ref(false);
+const manualOrderSaving = ref(false);
 const taskSearchQuery = ref('');
 useContextSearch({
   label: '搜索任务', query: taskSearchQuery,
@@ -222,15 +226,49 @@ const filteredManualTasks = computed(() => {
   return availableTasksForManualRun.value.filter(task => !query || [task.name, task.help, task.description, task.category_name, task.key]
     .some(value => String(value || '').toLocaleLowerCase().includes(query)));
 });
+const normalizeManualTaskOrder = (keys, tasks) => {
+  const allowed = new Set(tasks.map(task => task.key));
+  const saved = Array.isArray(keys) ? keys.filter(key => typeof key === 'string' && allowed.has(key)) : [];
+  return [...new Set([...saved, ...tasks.map(task => task.key)])];
+};
 const manualTaskGroups = computed(() => {
   const groups = new Map();
+  const positions = new Map(manualTaskOrder.value.map((key, index) => [key, index]));
   for (const task of filteredManualTasks.value) {
     const name = task.category_name || '其他任务';
     if (!groups.has(name)) groups.set(name, { name, tasks: [] });
     groups.get(name).tasks.push(task);
   }
-  return [...groups.values()];
+  return [...groups.values()].map(group => ({ ...group, tasks: group.tasks.sort((a, b) =>
+    (positions.get(a.key) ?? Infinity) - (positions.get(b.key) ?? Infinity)) }));
 });
+const reorderManualTaskGroup = (group) => {
+  const visibleKeys = group.tasks.map(task => task.key);
+  const visible = new Set(visibleKeys);
+  let index = 0;
+  manualTaskOrder.value = normalizeManualTaskOrder(manualTaskOrder.value, availableTasksForManualRun.value)
+    .map(key => visible.has(key) ? visibleKeys[index++] : key);
+  manualOrderDirty.value = true;
+};
+const saveManualTaskOrder = async () => {
+  if (manualOrderSaving.value || !configModel.value || !availableTasksForManualRun.value.length) return;
+  const submitted = normalizeManualTaskOrder(manualTaskOrder.value, availableTasksForManualRun.value);
+  manualOrderSaving.value = true;
+  try {
+    const success = await handleSaveConfig({ manual_task_order: submitted });
+    if (!success || JSON.stringify(configModel.value.manual_task_order) !== JSON.stringify(submitted)) {
+      message.error(configError.value || '任务顺序保存未确认，请重试。');
+      return;
+    }
+    if (JSON.stringify(manualTaskOrder.value) === JSON.stringify(submitted)) manualOrderDirty.value = false;
+    message.success('任务顺序已保存。');
+  } finally {
+    manualOrderSaving.value = false;
+  }
+};
+watch([() => configModel.value?.manual_task_order, availableTasksForManualRun], ([saved, tasks]) => {
+  if (!manualOrderDirty.value && !manualOrderSaving.value) manualTaskOrder.value = normalizeManualTaskOrder(saved, tasks);
+}, { immediate: true });
 const isCurrentTask = (task) => Boolean(backgroundTaskStatus.value.task_id && backgroundTaskStatus.value.last_action === task.name);
 const getTaskRowState = (task) => {
   if (isTriggeringTask.value === task.key && !backgroundTaskStatus.value.is_running) return '提交中';
@@ -397,29 +435,22 @@ watch([configModel, availableTasksForTgMenu], ([newConfig, tgMenuTasks]) => {
 .center-container { display: flex; justify-content: center; align-items: center; min-height: 320px; }
 .scheduler-page :deep(.v-card-title), .scheduler-page :deep(.v-card-subtitle) { white-space: normal; overflow-wrap: anywhere; }
 .scheduler-category-list > .scheduler-category-card + .scheduler-category-card { margin-block-start: 24px; }
-.scheduler-task-cell { min-inline-size: 220px; padding-block: 16px !important; }
-.temp-task-name { line-height: 1.5; overflow-wrap: anywhere; }
+.scheduler-task-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 1fr)); gap: 12px; }
+.scheduler-task-card { display: flex; flex-direction: column; min-inline-size: 0; }
+.scheduler-task-summary { block-size: auto; min-block-size: 7.5rem; }
+.scheduler-task-summary .app-card-summary__content { padding-inline-end: 4.5rem; }
+.scheduler-task-details { padding-block-start: 0; }
+.scheduler-task-card :deep(.v-card-actions) { margin-block-start: auto; padding: 16px; }
+.task-drag-handle { position: absolute; inset-block-start: 4px; inset-inline-end: 4px; cursor: grab; touch-action: none; }
+.task-drag-handle:active { cursor: grabbing; }
+.scheduler-task-grid :deep(.sortable-ghost) { opacity: .4; }
+.temp-task-name { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
 .temp-task-description { margin: 6px 0 0; font-size: 12px; line-height: 1.6; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); overflow-wrap: anywhere; white-space: normal; }
 .task-status-message { white-space: pre-wrap; overflow-wrap: anywhere; }
 .scheduler-progress { margin-block-start: 8px; max-inline-size: 320px; }
 .scheduler-progress-meta { display: flex; justify-content: space-between; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: 11px; gap: 12px; margin-block-start: 4px; }
 .scheduler-progress-meta span { min-inline-size: 0; overflow-wrap: anywhere; white-space: normal; }
 .scheduler-progress-meta strong { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
-.mobile-scheduler-view { --mobile-scheduler-card-backdrop-filter: none; --mobile-scheduler-card-background: rgb(var(--v-theme-surface)); --mobile-scheduler-card-border: 0; --mobile-scheduler-card-shadow: none; min-block-size: 100%; padding-block: 12px calc(22px + env(safe-area-inset-bottom)); }
-.mobile-scheduler-list { display: flex; flex-direction: column; gap: 18px; }
-.mobile-scheduler-card { display: grid; align-items: center; padding: 18px; border: var(--mobile-scheduler-card-border); border-radius: var(--app-surface-radius); -webkit-backdrop-filter: var(--mobile-scheduler-card-backdrop-filter); backdrop-filter: var(--mobile-scheduler-card-backdrop-filter); background: var(--mobile-scheduler-card-background); box-shadow: var(--mobile-scheduler-card-shadow); column-gap: 14px; grid-template-columns: 62px minmax(0, 1fr) auto; }
-.mobile-scheduler-icon { display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; background: rgba(var(--v-theme-primary), .14); block-size: 58px; color: rgb(var(--v-theme-primary)); inline-size: 58px; }
-.mobile-scheduler-content { min-inline-size: 0; }
-.mobile-scheduler-content h3 { margin: 0; color: rgba(var(--v-theme-on-surface), .92); font-size: 18px; font-weight: 700; letter-spacing: .01em; line-height: 1.35; white-space: normal; }
-.mobile-scheduler-meta { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-block-start: 6px; min-inline-size: 0; }
-.mobile-scheduler-meta p { margin: 0; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: 14px; font-weight: 500; line-height: 1.4; white-space: normal; }
-.mobile-scheduler-status { display: inline-flex; align-items: center; justify-content: center; border-radius: 999px; background: rgba(var(--v-theme-on-surface), .06); color: rgba(var(--v-theme-on-surface), .92); font-size: 12px; font-weight: 600; line-height: 1.3; padding-block: 5px; padding-inline: 10px; white-space: nowrap; }
-.mobile-scheduler-status--running { background: rgba(var(--v-theme-success), .14); }
-.mobile-scheduler-actions { display: inline-flex; align-items: center; }
-.mobile-scheduler-run-btn { border-radius: 50%; block-size: 46px; box-shadow: 0 10px 22px rgba(var(--v-theme-primary), .28); inline-size: 46px; }
-.mobile-scheduler-run-btn.v-btn--disabled { background: rgba(var(--v-theme-on-surface), .12) !important; box-shadow: none; color: rgba(var(--v-theme-on-surface), .42) !important; }
-.mobile-scheduler-description { grid-column: 2 / -1; margin-block-start: 10px; }
-.mobile-scheduler-progress { grid-column: 2 / -1; margin-block-start: 8px; min-inline-size: 0; }
 .task-chain-list { display: grid; gap: 8px; }
 .task-chain-item { display: flex; align-items: center; gap: 12px; padding: 8px 12px; background: rgba(var(--v-theme-on-surface), .04); border: 1px solid rgba(var(--v-theme-on-surface), .12); border-radius: 8px; }
 .task-chain-item :deep(.v-label) { white-space: normal; overflow-wrap: anywhere; }
@@ -430,12 +461,4 @@ watch([configModel, availableTasksForTgMenu], ([newConfig, tgMenuTasks]) => {
 .sync-mode-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 16px; }
 @media (max-width: 899px) { .scheduler-overview { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 540px) { .sync-mode-actions { flex-direction: column; align-items: stretch; } }
-@media (max-width: 480px) {
-  .mobile-scheduler-card { padding: 16px; column-gap: 12px; grid-template-columns: 54px minmax(0, 1fr) auto; }
-  .mobile-scheduler-icon { block-size: 50px; inline-size: 50px; }
-  .mobile-scheduler-content h3 { font-size: 16px; }
-  .mobile-scheduler-meta p { font-size: 13px; }
-  .mobile-scheduler-status { padding-inline: 9px; }
-  .mobile-scheduler-run-btn { block-size: 42px; inline-size: 42px; }
-}
 </style>

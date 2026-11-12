@@ -82,7 +82,7 @@ test('native settings card submits only its declared fields and leaves unrelated
   const request = f.requests.find(item => item.method === 'SAVE');
   assert.deepEqual(Object.keys(request.body).sort(), plain(f.page.cardFields.basic).sort());
   assert.equal(request.body.delay_between_items_sec, 0.5);
-  assert.equal(request.body.subtitle_chinese_default_language, 'chs');
+  assert.equal(request.body.subtitle_chinese_default_language, undefined);
   assert.equal(request.body.ai_api_key, undefined);
 });
 

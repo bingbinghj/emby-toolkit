@@ -924,6 +924,7 @@ async fn save_inner(
                     if report["matched"]==0 {return Ok(None);}
                     info
                 };
+            crate::language::normalize_subtitles_for_save(&mut info, &original);
             if file_refresh { crate::media_reload::ensure_json_unfiltered(&info,target_id)?; }
             // A stale editing page may still contain empty chapters after a failed restore.
             if let Some(chapters) = media_info::object(&original).and_then(|root| root["Chapters"].as_array()) {
@@ -949,11 +950,11 @@ async fn save_inner(
         }
     }
     if saved.is_empty() {
-        return failed(
-            "没有可安全恢复的媒体信息，已停止保存，未清理 Emby 数据",
-            &failures,
-            409,
+        let message = failures.first().map_or_else(
+            || "没有可安全恢复的媒体信息，已停止保存，未清理 Emby 数据".into(),
+            |reason| format!("{reason}；已停止保存，未清理 Emby 数据"),
         );
+        return failed(&message, &failures, 409);
     }
     for group in &groups {
         for linked in group {

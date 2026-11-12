@@ -181,44 +181,9 @@ export const findMediaInfoLanguageOption = (options, language) => {
     || null;
 };
 
-export const resolveMediaInfoLanguageSelection = (
-  options,
-  stream,
-  defaultChineseSubtitleLanguage = 'chs',
-) => {
+export const resolveMediaInfoLanguageSelection = (options, stream) => {
   if (!stream) return null;
-  const languageOption = findMediaInfoLanguageOption(options, stream.Language);
-  if (stream.Type !== 'Subtitle') {
-    return languageOption?.value ?? stream.Language;
-  }
-
-  const languageToken = normalizeMediaInfoCodeToken(stream.Language);
-  const isChineseLanguage = [
-    'chi', 'zho', 'zh', 'chs', 'cht', 'yue', 'cmn', 'chinese',
-  ].includes(languageToken) || languageToken.startsWith('zh-') || languageToken.startsWith('yue-');
-  if (!isChineseLanguage) {
-    return languageOption?.value ?? stream.Language;
-  }
-
-  if (['chs', 'cht'].includes(languageOption?.value)) {
-    return languageOption?.value ?? stream.Language;
-  }
-  if (languageToken === 'yue' || languageToken.startsWith('yue-') || languageToken === 'zh-yue') {
-    return options.find(option => option.label === '繁体')?.value
-      ?? languageOption?.value
-      ?? stream.Language;
-  }
-  // 默认配置仅决定编辑器的初始选项，不根据标题推断或修改原始 Language。
-  if (languageOption?.value === CHINESE_SUBTITLE_GENERIC.value
-    || ['chi', 'zho', 'zh', 'cmn', 'zh-cmn', 'chinese'].includes(languageToken)) {
-    const configuredValue = defaultChineseSubtitleLanguage === CHINESE_SUBTITLE_GENERIC.value
-      ? CHINESE_SUBTITLE_GENERIC.value
-      : CHINESE_LANGUAGE_SEMANTICS.simplified.value;
-    return options.find(option => option.value === configuredValue)?.value
-      ?? languageOption?.value
-      ?? stream.Language;
-  }
-  return languageOption?.value ?? stream.Language;
+  return findMediaInfoLanguageOption(options, stream.Language)?.value ?? stream.Language;
 };
 
 export const getMediaInfoLanguageTitle = (streamType, optionLabel, language) => {

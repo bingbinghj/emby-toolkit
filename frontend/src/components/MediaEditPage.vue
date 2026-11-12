@@ -105,9 +105,9 @@
             </VForm>
           </VCardText>
           <VCardActions class="editor-actions">
+            <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSaving" :disabled="isExtractingCredits" @click="handleSaveChanges">保存</VBtn>
             <VBtn variant="tonal" prepend-icon="mdi-plus" :disabled="isSaving" @click="showAddActorModal = true">添加演员</VBtn>
             <VSpacer /><VBtn variant="text" prepend-icon="mdi-arrow-left" @click="goBack">返回列表</VBtn>
-            <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSaving" :disabled="isExtractingCredits" @click="handleSaveChanges">保存</VBtn>
           </VCardActions>
         </VCard>
       </VCol>
@@ -257,7 +257,7 @@
             <VBtn color="error" variant="tonal" prepend-icon="mdi-delete-outline" :loading="isDeletingMediaVersion" :disabled="isSavingMediaInfo || isRepairingTruehdCore" @click="confirmMediaAction('删除当前版本', '将永久删除当前选中的整套媒体版本，包括115云端文件、本地STRM、NFO、图片、媒体信息和Emby版本。其他格式版本不受影响，确认继续吗？', deleteCurrentMediaVersion)">删除当前版本</VBtn>
           </div>
           <VSelect v-if="mediaInfoSegmentOptions.length > 1" :model-value="String(currentEditMediaId || '')" :items="mediaInfoSegmentOptions" item-title="label" item-value="value" label="电影分段" class="mb-4" :disabled="isSavingMediaInfo || isRepairingTruehdCore" @update:model-value="handleMediaInfoSegmentChange" />
-          <VAlert type="info" variant="tonal" class="mb-4">修改语言标签后保存，系统会重载保存的媒体信息 JSON 并回读验收。<br /><strong>注意：</strong>字幕的标题 (Title) 必须包含“简体”或“繁体”字样，Emby 才能正确识别并显示为 Chinese Simplified/Traditional。</VAlert>
+          <VAlert type="info" variant="tonal" class="mb-4">修改语言后保存，系统会重载媒体信息并回读验收。<br /><strong>中文提示：</strong>选择“简体”或“繁体”并保存，Emby 会显示对应字形，原标题独立保留。使用“中文”时，也可通过标题中的简／繁标记识别字形。</VAlert>
           <VAlert v-if="canBatchApplyMediaInfo" type="warning" variant="tonal" class="mb-4">
             <VCheckbox v-model="applyToSelectedEpisodes" :label="`同时应用到已选 ${selectedEpisodeIds.length} 集（当前正在编辑的集也会保存）`" :disabled="isSavingMediaInfo || isRepairingTruehdCore" />
             <p class="text-caption">仅修改可唯一匹配的轨道；无法匹配的音轨和字幕保持原值。</p>
@@ -288,8 +288,9 @@
           </div>
         </VCardText>
         <VCardActions class="editor-actions">
+          <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :disabled="isRepairingTruehdCore || isFillingMediaInfoTitles || mediaRecoveryBlocked || isExtractingCredits" :loading="isSavingMediaInfo" data-testid="media-info-save" @click="saveMediaInfo">保存</VBtn>
           <VBtn color="warning" variant="tonal" prepend-icon="mdi-wrench-outline" :loading="isRepairingTruehdCore" :disabled="isSavingMediaInfo" @click="confirmMediaAction('纠正多出音轨', '将丢弃当前未保存修改；存在歧义时会只读探测 CD2，并且只纠正证据唯一的高清音轨兼容核心。是否继续？', repairCurrentAudioTracks)">纠正多出音轨</VBtn>
-          <VSpacer /><VBtn variant="text" @click="closeMediaInfoEditor">取消</VBtn><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :disabled="isRepairingTruehdCore || isFillingMediaInfoTitles || mediaRecoveryBlocked || isExtractingCredits" :loading="isSavingMediaInfo" data-testid="media-info-save" @click="saveMediaInfo">保存</VBtn>
+          <VSpacer /><VBtn variant="text" @click="closeMediaInfoEditor">取消</VBtn>
         </VCardActions>
       </VCard>
     </VDialog>
@@ -312,7 +313,7 @@
             <div v-if="renamePreview.target_local_path" class="rename-result-row"><span class="rename-result-label">本地路径</span><code>{{ renamePreview.target_local_path }}</code></div>
           </div>
         </VCardText>
-        <VCardActions><VSpacer /><VBtn variant="tonal" prepend-icon="mdi-eye-outline" :loading="isPreviewingRename" @click="previewRename">预览</VBtn><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isExecutingRename" :disabled="!renamePreview" @click="executeRename">保存</VBtn></VCardActions>
+        <VCardActions><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isExecutingRename" :disabled="!renamePreview" @click="executeRename">保存</VBtn><VSpacer /><VBtn variant="tonal" prepend-icon="mdi-eye-outline" :loading="isPreviewingRename" @click="previewRename">预览</VBtn></VCardActions>
       </VCard>
     </VDialog>
 
@@ -610,7 +611,6 @@ let mediaInfoLoadSequence = 0;
 const deletedMediaStreamSnapshots = ref([]);
 const mediaInfoLanguageSelections = ref({});
 const mediaInfoIsoLanguageOptions = ref([]);
-const subtitleChineseDefaultLanguage = ref('chs');
 const mediaInfoLanguageSelectRefs = new Map();
 const mediaInfoLanguageUndoStack = [];
 const closeMediaInfoEditor = () => {
@@ -1291,15 +1291,8 @@ const ensureMediaInfoLanguageOption = (stream) => {
   if (!['Audio', 'Subtitle'].includes(stream?.Type)) return;
   const language = String(stream?.Language || '').trim();
   if (!language) return;
-  const languageToken = normalizeMediaInfoCodeToken(language);
   const options = stream.Type === 'Audio' ? audioLanguageOptions.value : subtitleLanguageOptions.value;
   if (findMediaInfoLanguageOption(options, language)) return;
-  if (
-    stream.Type === 'Subtitle'
-    && (languageToken === 'yue' || languageToken.startsWith('yue-') || languageToken === 'zh-yue')
-  ) {
-    return;
-  }
   const isoEntry = mediaInfoIsoLanguageOptions.value.find(item => {
     const itemTokens = getMediaInfoLanguageAliases(item);
     return getMediaInfoLanguageTokens(language).some(token => itemTokens.includes(token));
@@ -1350,11 +1343,7 @@ const setMediaInfoLanguageSelectRef = (key, instance) => {
 const resolveInitialMediaInfoLanguageSelection = (stream) => {
   if (!stream) return null;
   const options = stream.Type === 'Audio' ? audioLanguageOptions.value : subtitleLanguageOptions.value;
-  return resolveMediaInfoLanguageSelection(
-    options,
-    stream,
-    subtitleChineseDefaultLanguage.value,
-  );
+  return resolveMediaInfoLanguageSelection(options, stream);
 };
 
 const getMediaInfoLanguageSelection = (stream) => {
@@ -1521,9 +1510,6 @@ const openMediaInfoEditor = async (targetId) => {
     mediaInfoIsoLanguageOptions.value = Array.isArray(res.data.iso_language_options)
       ? res.data.iso_language_options
       : [];
-    subtitleChineseDefaultLanguage.value = res.data.subtitle_chinese_default_language === 'zho'
-      ? 'zho'
-      : 'chs';
     mediaInfoData.value = res.data.mediainfo;
 
     let streams = [];

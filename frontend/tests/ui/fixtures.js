@@ -26,7 +26,7 @@ export const mediaDetails = {
 export const mediaInfo = {
   sha1: 'a'.repeat(40), fingerprint_pending: false,
   media_path: '/media/Browser.Movie.2026.mkv', mediainfo_path: '/config/Browser.Movie.2026-mediainfo.json',
-  subtitle_chinese_default_language: 'chs', iso_language_options: [],
+  iso_language_options: [],
   versions: [{ emby_id: '101', file_name: 'Browser.Movie.2026.mkv', display_name: '1080p MKV', path: '/media/Browser.Movie.2026.mkv' }],
   mediainfo: [{ MediaSourceInfo: { Container: 'mkv', MediaStreams: [
     { Type: 'Video', Index: 0, Codec: 'h264', Width: 1920, Height: 1080, Title: '', IsDefault: true },
