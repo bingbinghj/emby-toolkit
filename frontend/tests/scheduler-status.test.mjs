@@ -23,6 +23,7 @@ function fixture(status = {}) {
     manualTaskOrder: { value: tasks.map(task => task.key) }, manualOrderDirty: { value: false }, manualOrderSaving: { value: false },
     configModel: { value: { manual_task_order: tasks.map(task => task.key), tg_menu_tasks: ['backup-mediainfo'], ai_enabled: true } },
     configError: { value: null }, savedRequests: [], messages: [],
+    taskCatalogLoaded: { value: true }, pageActive: true,
   });
   context.message = { success: value => context.messages.push(value), error: value => context.messages.push(value) };
   context.handleSaveConfig = async payload => {

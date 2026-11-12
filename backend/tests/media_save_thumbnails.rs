@@ -2205,12 +2205,34 @@ mod native {
                         exported[0]["MediaSourceInfo"]["MediaStreams"] =
                             target["MediaStreams"].clone();
                         exported[0]["Chapters"] = target["Chapters"].clone();
-                        tokio::fs::write(
-                            info_path(&target),
-                            serde_json::to_vec(&exported).unwrap(),
-                        )
-                        .await
-                        .unwrap();
+                        let mut persisted = exported.clone();
+                        if fault == "sync-native-hmi-noop-confidence" {
+                            exported[0]["ZeroFingerprintConfidence"] = json!(false);
+                        }
+                        if fault == "sync-native-hmi-noop-derived-display" {
+                            for stream in persisted[0]["MediaSourceInfo"]["MediaStreams"]
+                                .as_array_mut()
+                                .unwrap()
+                            {
+                                stream["DisplayTitle"] = json!("Native calculated display");
+                                stream["DisplayLanguage"] = json!("Native calculated language");
+                            }
+                            for stream in exported[0]["MediaSourceInfo"]["MediaStreams"]
+                                .as_array_mut()
+                                .unwrap()
+                            {
+                                stream.as_object_mut().unwrap().remove("DisplayTitle");
+                                stream.as_object_mut().unwrap().remove("DisplayLanguage");
+                            }
+                        }
+                        if fault != "sync-native-hmi-noop-keeps-submitted-json" {
+                            tokio::fs::write(
+                                info_path(&target),
+                                serde_json::to_vec(&persisted).unwrap(),
+                            )
+                            .await
+                            .unwrap();
+                        }
                         if fault == "sync-native-hmi-noop-json-change" {
                             let mut user_file = exported.clone();
                             user_file[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] =
@@ -3939,6 +3961,90 @@ mod native {
         assert_eq!(f.proxy.video_reads.load(Ordering::SeqCst), 0);
         assert_eq!(f.native.host.starts.load(Ordering::SeqCst), 0);
         f.close_with_legacy(true).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn native_noop_reimport_accepts_unchanged_submitted_json_and_derived_native_display() {
+        for fault in [
+            "sync-native-hmi-noop-keeps-submitted-json",
+            "sync-native-hmi-noop-derived-display",
+            "sync-native-hmi-noop-confidence",
+        ] {
+            let f = ThumbnailFixture::with_flag(Some(false)).await;
+            f.native.host.item.lock().await["RunTimeTicks"] =
+                f.native.original[0]["MediaSourceInfo"]["RunTimeTicks"].clone();
+            *f.proxy.protocol_fault.lock().await = fault.into();
+            let before = f.native.host.item.lock().await.clone();
+            let bif = local_bif(&before);
+            let bif_bytes = tokio::fs::read(&bif).await.unwrap();
+            let images = before["Chapters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|chapter| {
+                    let path = chapter_image(&f.native.host, &before, chapter);
+                    let bytes = std::fs::read(&path).unwrap();
+                    (path, bytes)
+                })
+                .collect::<Vec<_>>();
+            let mut edited = f.native.original.clone();
+            if fault == "sync-native-hmi-noop-confidence" {
+                edited[0]["ZeroFingerprintConfidence"] = json!(true);
+            }
+            edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("本次编辑标题");
+            edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Language"] = json!("yue");
+            edited[0]["MediaSourceInfo"]["MediaStreams"][1]["IsDefault"] = json!(true);
+            let outcome = f.save(json!({"mediainfo":edited}), false).await;
+            let live = f.native.host.item.lock().await.clone();
+            let saved: Value =
+                serde_json::from_slice(&tokio::fs::read(info_path(&live)).await.unwrap()).unwrap();
+            let pending = recovery_status(&f.native.state).await["pending"].clone();
+            let clear_ids = f.native.host.clear_ids.lock().await.clone();
+            let retained_bif = tokio::fs::read(&bif).await.unwrap();
+            let retained_images = images
+                .iter()
+                .all(|(path, bytes)| std::fs::read(path).unwrap() == *bytes);
+            let extraction_starts = f.native.host.starts.load(Ordering::SeqCst);
+            let video_reads = f.proxy.video_reads.load(Ordering::SeqCst);
+            let restored_settings = f.native.host.settings.lock().await.clone();
+            let original_settings = f.proxy.original_settings.clone();
+            f.close_with_legacy(true).await;
+            assert_eq!(
+                outcome["result"]["metadata_refresh"]["state"], "verified",
+                "{fault}: {outcome}"
+            );
+            assert_eq!(outcome["result"]["warnings"], 0, "{fault}: {outcome}");
+            for streams in [
+                &live["MediaStreams"],
+                &saved[0]["MediaSourceInfo"]["MediaStreams"],
+            ] {
+                assert_eq!(streams[1]["Title"], "本次编辑标题", "{fault}");
+                assert_eq!(streams[1]["Language"], "yue", "{fault}");
+                assert_eq!(streams[1]["IsDefault"], true, "{fault}");
+            }
+            for field in [
+                "Name",
+                "Overview",
+                "ProviderIds",
+                "ImageTags",
+                "People",
+                "Genres",
+                "Chapters",
+            ] {
+                assert_eq!(live[field], before[field], "{fault}: {field}");
+            }
+            assert_eq!(retained_bif, bif_bytes, "{fault}");
+            assert!(retained_images, "{fault}");
+            assert_eq!(clear_ids, vec!["61616"], "{fault}");
+            assert_eq!(extraction_starts, 0, "{fault}");
+            assert_eq!(video_reads, 0, "{fault}");
+            assert_eq!(restored_settings, original_settings, "{fault}");
+            if fault == "sync-native-hmi-noop-confidence" {
+                assert_eq!(saved[0]["ZeroFingerprintConfidence"], true);
+            }
+            assert_eq!(pending, false, "{fault}");
+        }
     }
 
     #[tokio::test]

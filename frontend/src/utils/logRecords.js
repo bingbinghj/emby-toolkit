@@ -43,7 +43,7 @@ export function groupLogRecords(lines) {
     const timestamp = Date.parse(record.timestamp.replace(' ', 'T').replace(',', '.'));
     const previous = groups.at(-1);
     if (second && previous?.second === second && previous.level === record.level
-      && (!Number.isFinite(timestamp) || !Number.isFinite(previous.timestamp) || timestamp - previous.timestamp <= 100)) {
+      && (!Number.isFinite(timestamp) || !Number.isFinite(previous.timestamp) || Math.abs(timestamp - previous.timestamp) <= 100)) {
       previous.lines.push(line);
       previous.timestamp = timestamp;
     } else {

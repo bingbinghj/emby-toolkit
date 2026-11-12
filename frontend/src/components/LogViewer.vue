@@ -53,13 +53,18 @@ const fetchLogFiles = async () => {
   isLoadingFiles.value = true;
   try {
     const { data } = await axios.get('/api/logs/list');
-    if (!pageActive || sequence !== fileSequence) return;
+    if (!pageActive || sequence !== fileSequence) return false;
     if (!Array.isArray(data) || data.some(file => typeof file !== 'string')) throw new Error('日志文件列表格式无效');
     logFiles.value = data;
     if (!data.includes(selectedFile.value)) selectedFile.value = data[0] || null;
-    if (!selectedFile.value) logContent.value = [];
+    if (!selectedFile.value) {
+      logContent.value = [];
+      logPage.value = 1; logPages.value = 1; logTotalLines.value = 0;
+    }
+    return true;
   } catch (error) {
     if (pageActive && sequence === fileSequence) errorMessage.value = error.response?.data?.error || error.message || '获取日志文件列表失败';
+    return false;
   } finally {
     if (pageActive && sequence === fileSequence) isLoadingFiles.value = false;
   }
@@ -125,16 +130,22 @@ const clearSearch = () => {
   errorMessage.value = '';
 };
 async function refreshLogs() {
-  if (isLoading.value) return;
+  if (!pageActive || isLoading.value) return;
   if (isSearchMode.value) return executeSearch();
   errorMessage.value = '';
-  await fetchLogFiles();
+  if (!await fetchLogFiles() || !pageActive) return;
   if (selectedFile.value) await fetchLogContent(selectedFile.value);
 }
 function downloadLogs() {
-  const url = URL.createObjectURL(new Blob([displayedRecords.value.map(entry => entry.line).join('\n')], { type: 'text/plain;charset=utf-8' }));
+  const records = displayedRecords.value;
+  if (!records.length) return;
+  const text = records.map((entry, index) => entry.line
+    + (index < records.length - 1 && !/[\r\n]$/.test(entry.line) ? '\n' : '')).join('');
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
   const link = document.createElement('a');
-  link.href = url; link.download = selectedFile.value || 'etk-search.log'; link.click();
+  link.href = url;
+  link.download = isSearchMode.value ? 'etk-search.log' : records[0].file || 'etk.log';
+  link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 watch(() => props.show, async visible => { if (visible && !logFiles.value.length && !isLoading.value) await refreshLogs(); }, { immediate: true });

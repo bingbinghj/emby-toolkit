@@ -226,6 +226,57 @@ fn json_equivalent(left: &[u8], right: &[u8], path: &Path) -> Result<bool> {
     Ok(parse_recovery_json(left, path)? == parse_recovery_json(right, path)?)
 }
 
+fn sync_json_matches(
+    current: &[u8],
+    submitted: &[u8],
+    response: &[u8],
+    path: &Path,
+) -> Result<bool> {
+    let mut current = parse_recovery_json(current, path)?;
+    let submitted = parse_recovery_json(submitted, path)?;
+    if current == submitted {
+        return Ok(true);
+    }
+    let mut response = parse_recovery_json(response, path)?;
+    if current == response {
+        return Ok(true);
+    }
+    // PRO recalculates this envelope flag in the Sync DTO. A persisted value
+    // is accepted only when it still equals the protected submitted value.
+    let confidence_unchanged =
+        current
+            .as_array()
+            .zip(submitted.as_array())
+            .is_some_and(|(current, submitted)| {
+                current.len() == 1
+                    && submitted.len() == 1
+                    && current[0].get("ZeroFingerprintConfidence")
+                        == submitted[0].get("ZeroFingerprintConfidence")
+            });
+    // Native Sync responses and persisted exports can calculate these display
+    // fields differently. All identity, editable and unknown fields stay exact.
+    for value in [&mut current, &mut response] {
+        for bundle in value.as_array_mut().into_iter().flatten() {
+            if confidence_unchanged && let Some(bundle) = bundle.as_object_mut() {
+                bundle.remove("ZeroFingerprintConfidence");
+            }
+            for stream in bundle
+                .get_mut("MediaSourceInfo")
+                .and_then(|source| source.get_mut("MediaStreams"))
+                .and_then(Value::as_array_mut)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(stream) = stream.as_object_mut() {
+                    stream.remove("DisplayTitle");
+                    stream.remove("DisplayLanguage");
+                }
+            }
+        }
+    }
+    Ok(current == response)
+}
+
 fn json_hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -2368,7 +2419,12 @@ pub(crate) async fn reload(
                         let observed_json = current_json(path)
                             .await?
                             .ok_or_else(|| conflict("JSON 在同步返回后丢失，未清理媒体信息"))?;
-                        if !json_equivalent(&observed_json, &response_bytes, path)? {
+                        let matches = if file_import {
+                            json_equivalent(&observed_json, &response_bytes, path)?
+                        } else {
+                            sync_json_matches(&observed_json, &bytes, &response_bytes, path)?
+                        };
+                        if !matches {
                             return Err(conflict(
                                 "JSON 在同步返回后被修改，保留用户新文件及恢复备份，未清理媒体信息",
                             ));
@@ -2417,7 +2473,7 @@ pub(crate) async fn reload(
                         let json_restored = async {
                             let after_clear_json = current_json(path).await?;
                             if let Some(current) = &after_clear_json
-                                && !json_equivalent(current, &response_bytes, path)?
+                                && !json_equivalent(current, &observed_json, path)?
                             {
                                 return Err(conflict("JSON 在当前媒体清理期间变化，已保留用户文件及恢复备份"));
                             }
@@ -2589,6 +2645,129 @@ mod file_import_control_tests {
 #[cfg(test)]
 mod recovery_tests {
     use super::*;
+
+    #[test]
+    fn native_sync_json_retains_submitted_confidence_when_native_response_recalculates_it() {
+        let path = Path::new("/media/item-mediainfo.json");
+        let current = json!([{"ZeroFingerprintConfidence":true,"MediaSourceInfo":{
+            "Size":42,"MediaStreams":[{"Type":"Subtitle","Title":"original","Language":"jpn"}]
+        }}]);
+        let mut submitted = current.clone();
+        submitted[0]["MediaSourceInfo"]["MediaStreams"][0]["Title"] = json!("edited");
+        let mut response = current.clone();
+        response[0]["ZeroFingerprintConfidence"] = json!(false);
+        let bytes = |value: &Value| serde_json::to_vec(value).unwrap();
+        assert!(
+            sync_json_matches(
+                &bytes(&current),
+                &bytes(&submitted),
+                &bytes(&response),
+                path
+            )
+            .unwrap()
+        );
+        assert!(!json_equivalent(&bytes(&current), &bytes(&response), path).unwrap());
+        let mut changed = current.clone();
+        changed[0]["ZeroFingerprintConfidence"] = json!("external change");
+        assert!(
+            !sync_json_matches(
+                &bytes(&changed),
+                &bytes(&submitted),
+                &bytes(&response),
+                path
+            )
+            .unwrap()
+        );
+        changed = current;
+        changed[0]["UnknownFingerprintState"] = json!(true);
+        assert!(
+            !sync_json_matches(
+                &bytes(&changed),
+                &bytes(&submitted),
+                &bytes(&response),
+                path
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn native_sync_json_accepts_only_known_exports_and_calculated_stream_display_fields() {
+        let path = Path::new("/media/item-mediainfo.json");
+        let submitted = json!([{"MediaSourceInfo":{"Size":42,"MediaStreams":[{
+            "Type":"Subtitle","Index":1,"Codec":"ass","Title":"edited","Language":"chs",
+            "IsDefault":true,"IsForced":false,"IsHearingImpaired":false
+        }]}}]);
+        let mut response = submitted.clone();
+        response[0]["MediaSourceInfo"]["MediaStreams"][0]["Title"] = json!("original");
+        let mut current = response.clone();
+        current[0]["MediaSourceInfo"]["MediaStreams"][0]["DisplayTitle"] =
+            json!("Calculated title");
+        current[0]["MediaSourceInfo"]["MediaStreams"][0]["DisplayLanguage"] = json!("Chinese");
+        let bytes = |value: &Value| serde_json::to_vec(value).unwrap();
+        assert!(
+            sync_json_matches(
+                &bytes(&submitted),
+                &bytes(&submitted),
+                &bytes(&response),
+                path
+            )
+            .unwrap()
+        );
+        assert!(
+            sync_json_matches(
+                &bytes(&current),
+                &bytes(&submitted),
+                &bytes(&response),
+                path
+            )
+            .unwrap()
+        );
+        assert!(!json_equivalent(&bytes(&current), &bytes(&response), path).unwrap());
+        for (field, value) in [
+            ("Title", json!("user change")),
+            ("Language", json!("eng")),
+            ("IsDefault", json!(false)),
+            ("IsForced", json!(true)),
+            ("IsHearingImpaired", json!(true)),
+            ("Index", json!(2)),
+            ("Codec", json!("srt")),
+            ("Unknown", json!(true)),
+            ("Extra", json!({"DisplayTitle":"user change"})),
+        ] {
+            let mut changed = current.clone();
+            changed[0]["MediaSourceInfo"]["MediaStreams"][0][field] = value;
+            assert!(
+                !sync_json_matches(
+                    &bytes(&changed),
+                    &bytes(&submitted),
+                    &bytes(&response),
+                    path
+                )
+                .unwrap(),
+                "{field}"
+            );
+        }
+        current[0]["MediaSourceInfo"]["Size"] = json!(43);
+        assert!(
+            !sync_json_matches(
+                &bytes(&current),
+                &bytes(&submitted),
+                &bytes(&response),
+                path
+            )
+            .unwrap()
+        );
+        assert!(
+            sync_json_matches(
+                br#"[{"Title":"a","Title":"b"}]"#,
+                &bytes(&submitted),
+                &bytes(&response),
+                path
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn semantic_json_comparison_accepts_formatting_without_ignoring_real_changes() {

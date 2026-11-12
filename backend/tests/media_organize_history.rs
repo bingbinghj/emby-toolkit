@@ -828,3 +828,123 @@ async fn repeated_completed_events_cannot_finalize_a_later_admission_of_the_same
     assert!(new["completed_at"].is_null());
     f.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL in DATABASE_URL; upstream is localhost"]
+async fn stopping_full_role_translation_during_read_scan_preserves_processing_records() {
+    let f = Fixture::new().await;
+    f.state.config.write().await["ai_translate_actor_role"] = json!(true);
+    f.state.config.write().await["libraries_to_ignore"] = json!(["ignored-library"]);
+    sqlx::query(
+        "INSERT INTO processed_log(item_id,item_name) VALUES('kept-item','Previous processing')",
+    )
+    .execute(&f.state.db)
+    .await
+    .unwrap();
+    let before: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(t) FROM processed_log t")
+        .fetch_all(&f.state.db)
+        .await
+        .unwrap();
+    let mut blocker = f.state.db.begin().await.unwrap();
+    sqlx::query("LOCK TABLE media_metadata IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let submitted = emby_toolkit::tasks::submit_task(&f.state, "role-translation", true)
+        .await
+        .unwrap();
+    let id = submitted["task_id"].as_str().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_locks WHERE relation=to_regclass($1) AND mode='AccessShareLock' AND NOT granted)")
+                .bind(format!("{}.media_metadata", f.schema))
+                .fetch_one(&f.state.db).await.unwrap();
+            if waiting { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("the task must really wait on its read-only scan");
+    let response = emby_toolkit::router(f.state.clone())
+        .oneshot(
+            Request::post("/api/trigger_stop_task")
+                .header(header::COOKIE, f.cookie())
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json!({"task_id":id}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let stop_status = response.status();
+    blocker.rollback().await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let result = f.state.jobs.result(id).await.unwrap();
+            if result["is_running"] == false {
+                return result;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("role translation should finish after the read is released");
+    let after: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(t) FROM processed_log t")
+        .fetch_all(&f.state.db)
+        .await
+        .unwrap();
+    f.close().await;
+    assert_eq!(stop_status, StatusCode::OK);
+    assert_eq!(result["state"], "cancelled", "{result}");
+    assert_eq!(
+        after, before,
+        "a stop accepted during read-only scanning must not reset processing records"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL in DATABASE_URL; no real Emby writes"]
+async fn linked_history_completion_is_atomic_and_retryable_after_sql_failure() {
+    let f = Fixture::new().await;
+    let item = episode("ep1");
+    let path = "/media/ep1.strm";
+    let mut mp_event =
+        json!({"source":"moviepilot","media_type":"tv","title":"Atomic history","files":[path]});
+    let mp_ids = history::begin_moviepilot(&f.state, &mp_event)
+        .await
+        .unwrap();
+    mp_event["history_ids"] = json!(mp_ids);
+    history::bind_item(&f.state, &mp_event, path, &item)
+        .await
+        .unwrap();
+    let emby_ids = history::begin_emby(&f.state, "item.add", &item, path, None)
+        .await
+        .unwrap();
+    let event = json!({"source":"emby","history_ids":emby_ids});
+    sqlx::query("CREATE FUNCTION reject_linked_history_completion() RETURNS TRIGGER LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture linked history write failure'; END $$")
+        .execute(&f.state.db).await.unwrap();
+    sqlx::query("CREATE TRIGGER linked_history_completion_gate BEFORE UPDATE ON media_organize_history FOR EACH ROW WHEN (OLD.source='moviepilot' AND NEW.status='success') EXECUTE FUNCTION reject_linked_history_completion()")
+        .execute(&f.state.db).await.unwrap();
+    let result = Ok(json!({"updated":1,"message":"Metadata completed"}));
+    let failed = history::finish(&f.state, &event, &result).await.is_err();
+    let after_failure = f.rows().await;
+    sqlx::query("DROP TRIGGER linked_history_completion_gate ON media_organize_history")
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    let retried = history::finish(&f.state, &event, &result).await;
+    let after_retry = f.rows().await;
+    f.close().await;
+    assert!(
+        failed,
+        "the PostgreSQL fault must reach linked MoviePilot completion"
+    );
+    for id in [emby_ids[0].as_str(), mp_ids[0].as_str()] {
+        let row = after_failure.iter().find(|row| row["id"] == id).unwrap();
+        assert_eq!(row["status"], "processing", "{row}");
+        assert!(row["completed_at"].is_null(), "{row}");
+    }
+    assert!(retried.is_ok(), "{retried:?}");
+    for id in [emby_ids[0].as_str(), mp_ids[0].as_str()] {
+        let row = after_retry.iter().find(|row| row["id"] == id).unwrap();
+        assert_eq!(row["status"], "success", "{row}");
+        assert!(!row["completed_at"].is_null(), "{row}");
+    }
+}

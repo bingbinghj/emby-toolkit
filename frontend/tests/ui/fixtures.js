@@ -62,7 +62,7 @@ export const test = base.extend({
     respond('GET', '/api/system/menu_config', () => menu);
     respond('POST', '/api/system/menu_config', request => { menu = clone(request.body); return { message: '导航已保存' }; });
     respond('POST', '/api/system/menu_config/reset', () => { menu = []; return { message: '导航已重置' }; });
-    respond('GET', '/api/portal/account-info', { name: 'UI Test', status: 'active', registration_date: '2026-01-01T00:00:00Z', expiration_date: null, telegram_chat_id: '', telegram_channel_id: '', profile_image_tag: null });
+    respond('GET', '/api/portal/account-info', { id: user.id, name: 'UI Test', status: 'active', registration_date: '2026-01-01T00:00:00Z', expiration_date: null, telegram_chat_id: '', telegram_channel_id: '', profile_image_tag: null });
     const portalUsers = [
       { id: 'ui-test-user', name: 'UI Test', is_administrator: true, is_disabled: false, notes: '', telegram_chat_id: '', profile_image_tag: null },
       { id: 'member', name: 'Media Member', is_administrator: false, is_disabled: true, notes: '原备注', telegram_chat_id: '123', profile_image_tag: null },

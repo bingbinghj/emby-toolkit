@@ -25,10 +25,12 @@ export const useAuthStore = defineStore('auth', () => {
   function fetchAccountInfo() {
     const currentUser = user.value;
     if (!isLoggedIn.value || !currentUser?.id) return Promise.resolve(null);
-    if (accountRequest?.user === currentUser) return accountRequest.promise;
-    const request = { user: currentUser };
+    if (accountRequest?.user === currentUser && accountRequest.revision === authRevision) return accountRequest.promise;
+    const request = { user: currentUser, revision: authRevision };
     request.promise = axios.get('/api/portal/account-info').then(({ data }) => {
-      if (isLoggedIn.value && user.value === currentUser) accountInfo.value = data;
+      if (!isLoggedIn.value || user.value !== currentUser || request.revision !== authRevision) return null;
+      if (data?.id !== currentUser.id) throw new Error('当前用户资料尚未确认，请刷新后重试。');
+      accountInfo.value = data;
       return data;
     }).finally(() => {
       if (accountRequest === request) accountRequest = null;
@@ -46,13 +48,18 @@ export const useAuthStore = defineStore('auth', () => {
   // 为了兼容旧代码，加一个 userType
   const userType = computed(() => user.value?.user_type || 'emby_user');
 
-  async function checkAuthStatus() {
+  async function checkAuthStatus(options = {}) {
+    const ownedProbe = Object.hasOwn(options, 'expectedUser');
+    const expectedUser = options.expectedUser;
+    if (ownedProbe && (authController || user.value !== expectedUser)) return systemStatus.value;
     const revision = authRevision, request = ++statusRequest;
-    const current = () => revision === authRevision && request === statusRequest;
+    const current = () => revision === authRevision && request === statusRequest
+      && (!ownedProbe || (!authController && user.value === expectedUser));
     try {
-      const response = await axios.get('/api/auth/check_status');
+      const response = await axios.get('/api/auth/check_status', ownedProbe ? { timeout: 10000 } : undefined);
       if (!current()) return systemStatus.value;
       const status = response.data.status;
+      if (ownedProbe && status !== 'login_required') return status;
       systemStatus.value = status;
 
       if (status === 'logged_in') {
@@ -77,6 +84,7 @@ export const useAuthStore = defineStore('auth', () => {
       return status;
     } catch (error) {
       if (!current()) return systemStatus.value;
+      if (ownedProbe) return systemStatus.value;
       isLoggedIn.value = false;
       remember.value = false;
       user.value = {};
@@ -103,6 +111,14 @@ export const useAuthStore = defineStore('auth', () => {
       return true;
     } catch (error) {
       if (revision !== authRevision) return false;
+      if (error.response?.status === 403) {
+        invalidateConfigCache();
+        isLoggedIn.value = false;
+        remember.value = false;
+        user.value = {};
+        accountInfo.value = null;
+        systemStatus.value = 'login_required';
+      }
       throw error;
     } finally {
       if (authController === controller) authController = null;

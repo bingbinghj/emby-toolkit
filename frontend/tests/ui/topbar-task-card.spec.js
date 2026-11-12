@@ -8,7 +8,7 @@ const captureLegacyGrid = process.env.ETK_VERIFY_LEGACY_NAVBAR_GRID === '1';
 
 for (const glassEnabled of [false, true]) {
   for (const width of [390, 768, 1024, 1280, 1440, 1920, 2560, 3840, 4096]) {
-    test(`${width}px ${glassEnabled ? 'glass' : 'plain'} topbar keeps a visible task card centered across the whole navbar`, async ({ page, api }, testInfo) => {
+    test(`${width}px ${glassEnabled ? 'glass' : 'plain'} topbar keeps a visible task card centered across the page`, async ({ page, api }, testInfo) => {
       await page.setViewportSize({ width, height: width >= 3840 ? 2160 : width === 2560 ? 1440 : width === 1920 ? 1080 : 900 });
       await page.addInitScript(glassEnabled => {
         localStorage.setItem('moviepilot-theme-customizer', JSON.stringify({
@@ -33,7 +33,7 @@ for (const glassEnabled of [false, true]) {
           .filter(control => control.getClientRects().length && getComputedStyle(control).visibility !== 'hidden')
           .map(control => ({ control: rect(control), group: rect(group) })));
         const style = getComputedStyle(element);
-        return { card: rect(element), navbar: rect(element.closest('.layout-navbar')), row: rect(row),
+        return { card: rect(element), page: rect(element.closest('.v-application')), navbar: rect(element.closest('.layout-navbar')), row: rect(row),
           center: rect(row.querySelector('.theme-navbar-center')), leading: rect(leading), actions: rect(actions), controls,
           tracks: getComputedStyle(row).gridTemplateColumns,
           background: style.backgroundColor, borderStyle: style.borderTopStyle, borderWidth: parseFloat(style.borderTopWidth) };
@@ -45,14 +45,14 @@ for (const glassEnabled of [false, true]) {
         const legacy = await page.addStyleTag({ content: '.theme-navbar-row { grid-template-columns: auto minmax(0, 1fr) auto !important; }' });
         const before = await measure();
         writeFileSync(testInfo.outputPath('legacy-topbar-geometry.json'), JSON.stringify(before, null, 2));
-        expect(Math.abs(middle(before.card, 'x') - middle(before.navbar, 'x'))).toBeGreaterThan(2);
+        expect(Math.abs(middle(before.card, 'x') - middle(before.page, 'x'))).toBeGreaterThan(2);
         await legacy.evaluate(element => element.remove());
       }
       const geometry = await measure();
       writeFileSync(testInfo.outputPath('topbar-geometry.json'), JSON.stringify(geometry, null, 2));
       expect(Math.abs(middle(geometry.card, 'x') - middle(geometry.center, 'x'))).toBeLessThanOrEqual(2);
       expect(Math.abs(middle(geometry.card, 'y') - middle(geometry.row, 'y'))).toBeLessThanOrEqual(2);
-      expect(Math.abs(middle(geometry.card, 'x') - middle(geometry.navbar, 'x'))).toBeLessThanOrEqual(2);
+      expect(Math.abs(middle(geometry.card, 'x') - middle(geometry.page, 'x'))).toBeLessThan(1);
       expect(geometry.card.left).toBeGreaterThanOrEqual(geometry.leading.right + 4);
       expect(geometry.card.right).toBeLessThanOrEqual(geometry.actions.left - 4);
       for (const { control, group } of geometry.controls) {

@@ -669,3 +669,177 @@ fn logical_track_commentary_role_is_excluded_before_unique_main_audio_selection(
     expected["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("English Main Updated");
     assert_eq!(output, expected);
 }
+
+#[test]
+fn logical_track_original_forced_flag_rejects_full_and_forced_subtitle_mismatch() {
+    for target_title in ["English Full", "English Forced"] {
+        let original = logical_track_info(vec![json!({"Type":"Subtitle","Index":9,
+            "Codec":"ass","Language":"eng","Title":target_title,
+            "IsExternal":false,"IsForced":true})]);
+        let mut patch = logical_track_patch(
+            "Subtitle",
+            1,
+            "ass",
+            Value::Null,
+            "eng",
+            "English Full",
+            json!({"Title":"英语完整字幕"}),
+        );
+        patch[0]["identity"]["is_forced"] = json!(false);
+        let (output, report) = apply_patches(&original, &patch);
+        assert_eq!(report["matched"], 0, "{target_title}: {report}");
+        assert_eq!(output, original);
+    }
+}
+
+#[test]
+fn logical_track_editing_forced_flag_still_matches_original_subtitle_role() {
+    let original = logical_track_info(vec![
+        json!({"Type":"Subtitle","Index":9,"Codec":"ass","Language":"eng",
+            "Title":"English Full","IsExternal":false,"IsForced":true}),
+        json!({"Type":"Subtitle","Index":11,"Codec":"ass","Language":"eng",
+            "Title":"English Stereo","IsExternal":false,"IsForced":false}),
+    ]);
+    let mut patch = logical_track_patch(
+        "Subtitle",
+        1,
+        "ass",
+        Value::Null,
+        "eng",
+        "English Full",
+        json!({"Title":"本次强制字幕","IsForced":true}),
+    );
+    patch[0]["identity"]["is_forced"] = json!(false);
+    let (output, report) = apply_patches(&original, &patch);
+    assert_eq!(report["matched"], 1, "{report}");
+    let mut expected = original;
+    expected["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("本次强制字幕");
+    expected["MediaSourceInfo"]["MediaStreams"][1]["IsForced"] = json!(true);
+    assert_eq!(output, expected);
+}
+
+#[test]
+fn logical_track_matching_forced_flags_allow_original_title_variation() {
+    for forced in [false, true] {
+        let original = logical_track_info(vec![json!({"Type":"Subtitle","Index":9,
+            "Codec":"ass","Language":"eng","Title":"English Stereo",
+            "IsExternal":false,"IsForced":forced})]);
+        let mut patch = logical_track_patch(
+            "Subtitle",
+            1,
+            "ass",
+            Value::Null,
+            "eng",
+            "English Original",
+            json!({"Title":"本次字幕标题"}),
+        );
+        patch[0]["identity"]["is_forced"] = json!(forced);
+        let (output, report) = apply_patches(&original, &patch);
+        assert_eq!(report["matched"], 1, "{forced}: {report}");
+        let mut expected = original;
+        expected["MediaSourceInfo"]["MediaStreams"][0]["Title"] = json!("本次字幕标题");
+        assert_eq!(output, expected);
+    }
+}
+
+#[test]
+fn logical_track_legacy_subtitle_patch_needs_original_title_evidence_for_forced_target() {
+    for (source_title, matched) in [("English Full", 0), ("English Forced", 1)] {
+        let original = logical_track_info(vec![json!({"Type":"Subtitle","Index":9,
+            "Codec":"ass","Language":"eng","Title":"English Forced",
+            "IsExternal":false,"IsForced":true})]);
+        let patch = logical_track_patch(
+            "Subtitle",
+            1,
+            "ass",
+            Value::Null,
+            "eng",
+            source_title,
+            json!({"Title":"本次字幕标题"}),
+        );
+        let (output, report) = apply_patches(&original, &patch);
+        assert_eq!(report["matched"], matched, "{source_title}: {report}");
+        let mut expected = original;
+        if matched == 1 {
+            expected["MediaSourceInfo"]["MediaStreams"][0]["Title"] = json!("本次字幕标题");
+        }
+        assert_eq!(output, expected);
+    }
+}
+
+#[test]
+fn logical_track_forced_source_needs_original_title_evidence_when_target_flag_is_unknown() {
+    let original = logical_track_info(vec![json!({"Type":"Subtitle","Index":9,
+        "Codec":"ass","Language":"eng","Title":"English Full","IsExternal":false})]);
+    let mut patch = logical_track_patch(
+        "Subtitle",
+        1,
+        "ass",
+        Value::Null,
+        "eng",
+        "English Forced",
+        json!({"Title":"本次强制字幕"}),
+    );
+    patch[0]["identity"]["is_forced"] = json!(true);
+    let (output, report) = apply_patches(&original, &patch);
+    assert_eq!(report["matched"], 0, "{report}");
+    assert_eq!(output, original);
+}
+
+#[test]
+fn logical_track_original_hearing_impaired_flag_rejects_full_and_sdh_subtitle_mismatch() {
+    for (target_title, source_flag) in [
+        ("English Full", Some(false)),
+        ("English SDH", Some(false)),
+        ("English SDH", None),
+    ] {
+        let original = logical_track_info(vec![json!({"Type":"Subtitle","Index":9,
+            "Codec":"ass","Language":"eng","Title":target_title,
+            "IsExternal":false,"IsHearingImpaired":true})]);
+        let mut patch = logical_track_patch(
+            "Subtitle",
+            1,
+            "ass",
+            Value::Null,
+            "eng",
+            "English Full",
+            json!({"Title":"英语完整字幕"}),
+        );
+        if let Some(flag) = source_flag {
+            patch[0]["identity"]["is_hearing_impaired"] = json!(flag);
+        }
+        let (output, report) = apply_patches(&original, &patch);
+        assert_eq!(
+            report["matched"], 0,
+            "{target_title}/{source_flag:?}: {report}"
+        );
+        assert_eq!(output, original);
+    }
+}
+
+#[test]
+fn logical_track_sdh_role_still_uses_original_identity_when_editing_title_and_forced_flag() {
+    let original = logical_track_info(vec![
+        json!({"Type":"Subtitle","Index":9,"Codec":"ass","Language":"eng",
+            "Title":"English SDH","IsExternal":false,"IsForced":false,"IsHearingImpaired":false}),
+        json!({"Type":"Subtitle","Index":11,"Codec":"ass","Language":"eng",
+            "Title":"English SDH Alternate","IsExternal":false,"IsForced":false,"IsHearingImpaired":true}),
+    ]);
+    let mut patch = logical_track_patch(
+        "Subtitle",
+        1,
+        "ass",
+        Value::Null,
+        "eng",
+        "English SDH",
+        json!({"Title":"英语完整字幕","IsForced":true}),
+    );
+    patch[0]["identity"]["is_forced"] = json!(false);
+    patch[0]["identity"]["is_hearing_impaired"] = json!(true);
+    let (output, report) = apply_patches(&original, &patch);
+    assert_eq!(report["matched"], 1, "{report}");
+    let mut expected = original;
+    expected["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("英语完整字幕");
+    expected["MediaSourceInfo"]["MediaStreams"][1]["IsForced"] = json!(true);
+    assert_eq!(output, expected);
+}

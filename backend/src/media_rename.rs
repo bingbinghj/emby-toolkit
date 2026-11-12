@@ -446,6 +446,25 @@ impl Changes {
             }
         }
         for (old, new) in self.moves.iter().rev() {
+            match tokio::fs::symlink_metadata(old).await {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Ok(_) => {
+                    failures.push(format!(
+                        "文件改名回滚失败：{} → {}：原名称已被重新占用，未覆盖现有资源",
+                        new.display(),
+                        old.display()
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    failures.push(format!(
+                        "文件改名回滚失败：{} → {}：无法核对原名称是否空闲：{error}",
+                        new.display(),
+                        old.display()
+                    ));
+                    continue;
+                }
+            }
             if let Err(error) = tokio::fs::rename(new, old).await {
                 failures.push(format!(
                     "文件改名回滚失败：{} → {}：{error}",
@@ -1415,6 +1434,51 @@ mod rollback_tests {
             tokio::fs::read(old).await.unwrap(),
             b"original playback path"
         );
+    }
+
+    #[tokio::test]
+    async fn rollback_keeps_a_foreign_file_recreated_at_the_original_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = state(directory.path());
+        let old = directory.path().join("Old.strm");
+        let new = directory.path().join("New.strm");
+        let recovery = directory.path().join("recovery");
+        tokio::fs::create_dir(&recovery).await.unwrap();
+        tokio::fs::write(&old, b"the renamed movie").await.unwrap();
+        let mut changes = Changes {
+            moves: vec![],
+            contents: vec![],
+            cloud: vec![],
+        };
+        changes.move_path(old.clone(), new.clone()).await.unwrap();
+        tokio::fs::write(&old, b"external replacement must survive")
+            .await
+            .unwrap();
+        let error = changes
+            .rollback_after_error(
+                &state,
+                ApiError(StatusCode::CONFLICT, "later database failure".into()),
+                &recovery,
+            )
+            .await;
+        assert_eq!(
+            tokio::fs::read(&old).await.unwrap(),
+            b"external replacement must survive"
+        );
+        assert_eq!(tokio::fs::read(&new).await.unwrap(), b"the renamed movie");
+        assert!(
+            error.1.contains("later database failure") && error.1.contains("回滚失败"),
+            "{}",
+            error.1
+        );
+        let manifest: Value = serde_json::from_slice(
+            &tokio::fs::read(recovery.join("rollback-recovery.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["moves"], json!(changes.moves));
+        assert_eq!(manifest["rollback_failures"].as_array().unwrap().len(), 1);
     }
 
     #[tokio::test]

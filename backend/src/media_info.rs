@@ -449,12 +449,31 @@ fn identity_matches(stream: &Value, identity: &Value) -> bool {
             }
         }
     }
-    identity
-        .get("is_external")
-        .filter(|v| !v.is_null())
-        .is_none_or(|v| {
-            v.as_bool().unwrap_or(false) == stream["IsExternal"].as_bool().unwrap_or(false)
-        })
+    subtitle_role_match(stream, identity).unwrap_or(true)
+        && identity
+            .get("is_external")
+            .filter(|v| !v.is_null())
+            .is_none_or(|v| {
+                v.as_bool().unwrap_or(false) == stream["IsExternal"].as_bool().unwrap_or(false)
+            })
+}
+
+fn subtitle_role_match(stream: &Value, identity: &Value) -> Option<bool> {
+    if identity["type"] != "Subtitle" {
+        return Some(true);
+    }
+    let mut known = true;
+    for (source, target) in [
+        ("is_forced", "IsForced"),
+        ("is_hearing_impaired", "IsHearingImpaired"),
+    ] {
+        match (identity[source].as_bool(), stream[target].as_bool()) {
+            (Some(source), Some(target)) if source != target => return Some(false),
+            (Some(true), None) | (None, Some(true)) => known = false,
+            _ => {}
+        }
+    }
+    known.then_some(true)
 }
 
 fn codec_identity(value: &Value) -> String {
@@ -524,9 +543,10 @@ fn codec_matches(stream: &Value, identity: &Value) -> bool {
     })
 }
 fn stable_role_matches(stream: &Value, identity: &Value) -> bool {
-    (identity["type"] != "Audio"
-        || crate::language::is_commentary_title(identity["title"].as_str().unwrap_or(""))
-            == crate::language::is_commentary_title(stream["Title"].as_str().unwrap_or("")))
+    subtitle_role_match(stream, identity).unwrap_or_else(|| same_original_title(stream, identity))
+        && (identity["type"] != "Audio"
+            || crate::language::is_commentary_title(identity["title"].as_str().unwrap_or(""))
+                == crate::language::is_commentary_title(stream["Title"].as_str().unwrap_or("")))
         && compatible_roles(stream, identity)
         && identity
             .get("channels")
@@ -550,7 +570,7 @@ fn track_description(streams: &[Value], index: usize) -> String {
         .filter(|other| other["Type"] == stream["Type"])
         .count();
     format!(
-        "第{ordinal}轨 Codec={} Channels={} Language={}（角色{}） Title={} IsExternal={}",
+        "第{ordinal}轨 Codec={} Channels={} Language={}（角色{}） Title={} IsExternal={} IsForced={} IsHearingImpaired={}",
         stream["Codec"],
         stream["Channels"],
         stream["Language"],
@@ -560,7 +580,9 @@ fn track_description(streams: &[Value], index: usize) -> String {
             stream["Type"].as_str().unwrap_or("")
         ),
         stream["Title"],
-        stream["IsExternal"]
+        stream["IsExternal"],
+        stream["IsForced"],
+        stream["IsHearingImpaired"]
     )
 }
 fn unique_track(
@@ -577,12 +599,14 @@ fn unique_track(
             .map(|index| track_description(streams, index))
             .unwrap_or_else(|| "原同类序号不存在".into());
         format!(
-            "没有相容的目标轨道：源 Codec={} Channels={} Language={} Title={} IsExternal={}；{observed}",
+            "没有相容的目标轨道：源 Codec={} Channels={} Language={} Title={} IsExternal={} IsForced={} IsHearingImpaired={}；{observed}",
             identity["codec"],
             identity["channels"],
             identity["language"],
             identity["title"],
-            identity["is_external"]
+            identity["is_external"],
+            identity["is_forced"],
+            identity["is_hearing_impaired"]
         )
     } else {
         format!(

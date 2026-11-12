@@ -1047,6 +1047,8 @@ const createMediaStreamSnapshots = (streams) => {
         codec: stream.Codec || null,
         channels: stream.Type === 'Audio' ? (stream.Channels ?? null) : null,
         is_external: stream.Type === 'Subtitle' ? Boolean(stream.IsExternal) : null,
+        is_forced: stream.Type === 'Subtitle' && typeof stream.IsForced === 'boolean' ? stream.IsForced : null,
+        is_hearing_impaired: stream.Type === 'Subtitle' && typeof stream.IsHearingImpaired === 'boolean' ? stream.IsHearingImpaired : null,
         language: stream.Language ?? null,
         title: stream.Title ?? null
       },

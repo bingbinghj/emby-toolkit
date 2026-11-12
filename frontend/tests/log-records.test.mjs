@@ -67,3 +67,18 @@ test('native live dates remain distinct across days and retain precise grouping 
   assert.equal(parseLogRecord(lines[1]).timestamp, '2026-11-12 09:56:24,010');
   assert.deepEqual(groups.flatMap(group => group.lines), lines);
 });
+
+test('out-of-order timestamps cannot merge records separated by more than 100 ms', () => {
+  const line = (time, body) => `2026-11-12 12:30:45,${time} - source - INFO - ${body}`;
+  const lines = [line('900', 'later'), line('100', 'earlier'), line('050', 'close earlier'), line('300', 'later again')];
+  const groups = groupLogRecords(lines);
+  assert.deepEqual(groups.map(group => group.lines.length), [1, 2, 1]);
+  assert.deepEqual(groups.flatMap(group => group.lines), lines);
+});
+
+test('legacy time-only live records keep their unknown-precision grouping and original order', () => {
+  const lines = ['[12:30:45] [INFO] first', '[12:30:45] [INFO] second', '[12:30:45] [ERROR] third'];
+  const groups = groupLogRecords(lines);
+  assert.deepEqual(groups.map(group => group.lines.length), [2, 1]);
+  assert.deepEqual(groups.flatMap(group => group.lines), lines);
+});

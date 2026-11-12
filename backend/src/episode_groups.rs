@@ -176,10 +176,9 @@ pub async fn match_group(
     let mut groups = BTreeMap::new();
     for summary in summaries {
         let group = string(&summary, "id");
-        if !group.is_empty()
-            && let Ok(details) =
-                crate::tmdb::get(state, &format!("/tv/episode_group/{group}"), &[]).await
-        {
+        if !group.is_empty() {
+            let details =
+                crate::tmdb::get(state, &format!("/tv/episode_group/{group}"), &[]).await?;
             groups.insert(group, details);
         }
     }

@@ -323,6 +323,7 @@ async fn translate_roles(
         }
     }
     if full {
+        context.checkpoint().await?;
         sqlx::query("DELETE FROM processed_log WHERE NOT (item_id=ANY($1))")
             .bind(ignored_ids.iter().cloned().collect::<Vec<_>>())
             .execute(&state.db)

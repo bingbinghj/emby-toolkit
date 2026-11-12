@@ -17,6 +17,7 @@
       </VCardActions>
     </VCard>
     <div v-if="isLoading" class="center-container"><VProgressCircular indeterminate color="primary" size="48" /></div>
+    <VAlert v-if="taskCatalogError" type="error" variant="tonal" class="mb-4">{{ taskCatalogError }}<VBtn variant="text" :loading="taskCatalogLoading" @click="fetchAvailableTasks">重新读取任务</VBtn></VAlert>
     <VAlert v-else-if="configError && !configModel" type="error" variant="tonal">{{ configError }}</VAlert>
     <div v-else-if="configModel" class="scheduler-content">
       <div class="scheduler-overview">
@@ -25,7 +26,7 @@
             <template #prepend><VIcon icon="mdi-telegram" color="primary" /></template>
           </VCardItem>
           <VCardText>
-            <VBtn variant="tonal" color="primary" prepend-icon="mdi-cog-outline" @click="showTgMenuConfigModal = true">配置 TG 菜单任务</VBtn>
+            <VBtn variant="tonal" color="primary" prepend-icon="mdi-cog-outline" :disabled="!taskCatalogLoaded || tgMenuSaving" :loading="taskCatalogLoading" @click="openTgMenuConfig">配置 TG 菜单任务</VBtn>
             <p class="text-body-2 font-weight-medium mt-6 mb-3">当前 TG 菜单列表</p>
             <div v-if="enabledTgMenuTasks.length" class="d-flex flex-wrap ga-2">
               <VTooltip v-for="task in enabledTgMenuTasks" :key="task.key" location="top">
@@ -33,7 +34,7 @@
                 <div class="task-tooltip-content">{{ getTaskHelp(task) }}</div>
               </VTooltip>
             </div>
-            <p v-else class="text-body-2 text-medium-emphasis">暂未配置任何 TG 菜单任务</p>
+            <p v-else class="text-body-2 text-medium-emphasis">{{ taskCatalogLoaded ? '暂无可用 TG 菜单任务' : '任务目录尚未确认' }}</p>
           </VCardText>
         </VCard>
         <FingerprintAuditPanel class="fingerprint-overview-card" :running="isBackgroundTaskRunning" :task-state="backgroundTaskStatus.state" />
@@ -82,22 +83,23 @@
       <div v-if="availableTasksForManualRun.length" class="scheduler-order-actions d-flex align-center flex-wrap justify-end ga-3">
         <span v-if="manualOrderDirty" class="text-body-2 text-medium-emphasis">顺序已调整，保存后生效</span>
         <VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" aria-label="保存任务顺序"
-          :loading="manualOrderSaving" :disabled="manualOrderSaving" @click="saveManualTaskOrder">保存任务顺序</VBtn>
+          :loading="manualOrderSaving" :disabled="manualOrderSaving || !taskCatalogLoaded" @click="saveManualTaskOrder">保存任务顺序</VBtn>
       </div>
     </div>
     <VDialog v-model="showTgMenuConfigModal" max-width="600" persistent>
       <VCard title="配置 Telegram 快捷菜单">
         <VCardText>
-          <VAlert type="info" variant="tonal" class="mb-4">勾选需要显示的任务，并拖动调整顺序。</VAlert>
+          <VAlert type="info" variant="tonal" class="mb-4">勾选需要显示的任务，并拖动调整顺序。清空选择会使用默认菜单，维护任务入口仍会保留。</VAlert>
+          <VAlert v-if="tgMenuError" type="error" variant="tonal" class="mb-4">{{ tgMenuError }}</VAlert>
           <div ref="draggableContainerTgMenu" class="task-chain-list">
             <div v-for="task in configuredTgMenuSequence" :key="task.key" class="task-chain-item" :data-key="task.key">
               <VIcon icon="mdi-drag" class="drag-handle" aria-label="拖动调整任务顺序" />
-              <VCheckbox v-model="task.enabled" :label="task.name" hide-details density="compact" class="flex-grow-1" />
+              <VCheckbox v-model="task.enabled" :label="task.name" :disabled="tgMenuSaving" hide-details density="compact" class="flex-grow-1" />
               <VTooltip :text="getTaskHelp(task)" location="bottom"><template #activator="{ props: activatorProps }"><VIcon v-bind="activatorProps" icon="mdi-information-outline" size="18" class="text-medium-emphasis" /></template></VTooltip>
             </div>
           </div>
         </VCardText>
-        <VCardActions><VSpacer /><VBtn variant="text" @click="showTgMenuConfigModal = false">取消</VBtn><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" @click="saveTgMenuConfig">保存</VBtn></VCardActions>
+        <VCardActions><VSpacer /><VBtn variant="text" :disabled="tgMenuSaving" @click="showTgMenuConfigModal = false">取消</VBtn><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="tgMenuSaving" :disabled="tgMenuSaving || !taskCatalogLoaded || !configModel" @click="saveTgMenuConfig">保存</VBtn></VCardActions>
       </VCard>
     </VDialog>
     <VDialog v-model="showSyncModeModal" max-width="560" persistent>
@@ -145,6 +147,8 @@ const DEFAULT_TG_TASKS = [
   'clear-emby-activity-log',
   'backup-mediainfo',
   'repair-p115-fingerprints',
+  'repair-p115-orphans',
+  'repair-truehd-core-shift',
   'restore_mediainfo',
   'restore-truehd-core-backups',
   'clear-truehd-core-backups',
@@ -199,6 +203,8 @@ const confirmStopTask = () => {
 
 const availableTasksForManualRun = ref([]);
 const availableTasksForTgMenu = ref([]);
+const taskCatalogLoading = ref(false), taskCatalogLoaded = ref(false), taskCatalogError = ref('');
+let pageActive = true, taskCatalogRequest = 0;
 const manualTaskOrder = ref([]);
 const manualOrderDirty = ref(false);
 const manualOrderSaving = ref(false);
@@ -210,6 +216,7 @@ useContextSearch({
 const isTriggeringTask = ref(null);
 const taskRunFeedback = ref(null);
 const showTgMenuConfigModal = ref(false);
+const tgMenuSaving = ref(false), tgMenuError = ref('');
 const configuredTgMenuSequence = ref([]);
 const draggableContainerTgMenu = ref(null);
 let sortableInstanceTgMenu = null;
@@ -217,8 +224,10 @@ const showSyncModeModal = ref(false);
 const taskToRunInModal = ref(null);
 
 const enabledTgMenuTasks = computed(() => {
-  if (!configuredTgMenuSequence.value) return [];
-  return configuredTgMenuSequence.value.filter(t => t.enabled);
+  const saved = configModel.value?.tg_menu_tasks;
+  const keys = Array.isArray(saved) && saved.length ? saved : DEFAULT_TG_TASKS;
+  return [...new Set([...keys, 'clear-emby-activity-log', 'repair-truehd-core-shift', 'restore-truehd-core-backups', 'clear-truehd-core-backups'])]
+    .map(key => availableTasksForTgMenu.value.find(task => task.key === key)).filter(Boolean);
 });
 
 const filteredManualTasks = computed(() => {
@@ -251,11 +260,13 @@ const reorderManualTaskGroup = (group) => {
   manualOrderDirty.value = true;
 };
 const saveManualTaskOrder = async () => {
-  if (manualOrderSaving.value || !configModel.value || !availableTasksForManualRun.value.length) return;
+  if (manualOrderSaving.value || !taskCatalogLoaded.value || !configModel.value || !availableTasksForManualRun.value.length) return;
+  const owner = configModel.value;
   const submitted = normalizeManualTaskOrder(manualTaskOrder.value, availableTasksForManualRun.value);
   manualOrderSaving.value = true;
   try {
     const success = await handleSaveConfig({ manual_task_order: submitted });
+    if (!pageActive || configModel.value !== owner) return;
     if (!success || JSON.stringify(configModel.value.manual_task_order) !== JSON.stringify(submitted)) {
       message.error(configError.value || '任务顺序保存未确认，请重试。');
       return;
@@ -267,7 +278,8 @@ const saveManualTaskOrder = async () => {
   }
 };
 watch([() => configModel.value?.manual_task_order, availableTasksForManualRun], ([saved, tasks]) => {
-  if (!manualOrderDirty.value && !manualOrderSaving.value) manualTaskOrder.value = normalizeManualTaskOrder(saved, tasks);
+  if (manualOrderDirty.value) manualTaskOrder.value = normalizeManualTaskOrder(manualTaskOrder.value, tasks);
+  else if (!manualOrderSaving.value) manualTaskOrder.value = normalizeManualTaskOrder(saved, tasks);
 }, { immediate: true });
 const isCurrentTask = (task) => Boolean(backgroundTaskStatus.value.task_id && backgroundTaskStatus.value.last_action === task.name);
 const getTaskRowState = (task) => {
@@ -290,14 +302,24 @@ const getTaskHelp = (task) => {
 };
 
 const fetchAvailableTasks = async () => {
+  if (taskCatalogLoading.value || !pageActive) return;
+  const request = ++taskCatalogRequest;
+  taskCatalogLoading.value = true; taskCatalogLoaded.value = false; taskCatalogError.value = '';
   try {
     const manualResponse = await axios.get('/api/tasks/available?context=manual');
-    availableTasksForManualRun.value = manualResponse.data;
-
     const allResponse = await axios.get('/api/tasks/available?context=all');
+    if (!pageActive || request !== taskCatalogRequest) return;
+    if (![manualResponse.data, allResponse.data].every(tasks => Array.isArray(tasks)
+      && tasks.every(task => typeof task?.key === 'string' && task.key && typeof task.name === 'string'))) throw new Error('任务目录响应无效。');
+    availableTasksForManualRun.value = manualResponse.data;
     availableTasksForTgMenu.value = allResponse.data;
+    taskCatalogLoaded.value = true;
   } catch (error) {
-    message.error('获取可用任务列表失败。');
+    if (!pageActive || request !== taskCatalogRequest) return;
+    taskCatalogError.value = error.message === '任务目录响应无效。' ? error.message : '获取可用任务列表失败，请重新读取。';
+    message.error(taskCatalogError.value);
+  } finally {
+    if (pageActive && request === taskCatalogRequest) taskCatalogLoading.value = false;
   }
 };
 
@@ -358,22 +380,35 @@ const triggerTaskNow = async (taskIdentifier) => {
   }
 };
 
+const openTgMenuConfig = () => {
+  if (!pageActive || !configModel.value || !taskCatalogLoaded.value || tgMenuSaving.value) return;
+  const saved = configModel.value.tg_menu_tasks;
+  initializeSequence(Array.isArray(saved) && saved.length ? saved : DEFAULT_TG_TASKS, configuredTgMenuSequence, availableTasksForTgMenu.value);
+  tgMenuError.value = ''; showTgMenuConfigModal.value = true;
+};
 const saveTgMenuConfig = async () => {
-  const payload = { tg_menu_tasks: enabledTgMenuTasks.value.map(t => t.key) };
-  if (configModel.value) {
-    configModel.value.tg_menu_tasks = payload.tg_menu_tasks;
-  }
-  const success = await handleSaveConfig(payload);
-  showTgMenuConfigModal.value = false;
-  if (success) {
+  if (!pageActive || tgMenuSaving.value || !taskCatalogLoaded.value || !configModel.value) return;
+  const owner = configModel.value;
+  const payload = { tg_menu_tasks: configuredTgMenuSequence.value.filter(task => task.enabled).map(task => task.key) };
+  tgMenuSaving.value = true; tgMenuError.value = '';
+  sortableInstanceTgMenu?.option('disabled', true);
+  try {
+    const success = await handleSaveConfig(payload);
+    if (!pageActive || owner !== configModel.value) return;
+    if (!success || JSON.stringify(configModel.value.tg_menu_tasks) !== JSON.stringify(payload.tg_menu_tasks)) {
+      tgMenuError.value = configError.value || 'TG 菜单配置保存未确认，请重试。';
+      message.error(tgMenuError.value); return;
+    }
+    showTgMenuConfigModal.value = false;
     message.success('TG 菜单配置已保存。');
-  } else {
-    message.error(configError.value || 'TG 菜单配置保存失败。');
+  } finally {
+    tgMenuSaving.value = false;
+    sortableInstanceTgMenu?.option('disabled', false);
   }
 };
 
 const initializeSequence = (savedSequenceKeys, targetConfiguredSequence, sourceTasks) => {
-  if (!sourceTasks || sourceTasks.length === 0) return;
+  if (!sourceTasks || sourceTasks.length === 0) { targetConfiguredSequence.value = []; return; }
 
   const savedSequenceSet = new Set(savedSequenceKeys);
   const enabledTasks = savedSequenceKeys
@@ -419,12 +454,11 @@ watch([showTgMenuConfigModal, draggableContainerTgMenu], ([visible, container]) 
     sortableInstanceTgMenu = null;
   }
 });
-onBeforeUnmount(() => sortableInstanceTgMenu?.destroy());
+onBeforeUnmount(() => { pageActive = false; ++taskCatalogRequest; sortableInstanceTgMenu?.destroy(); });
 
-watch([configModel, availableTasksForTgMenu], ([newConfig, tgMenuTasks]) => {
-  if (newConfig && tgMenuTasks.length > 0) {
-    initializeSequence(newConfig.tg_menu_tasks || DEFAULT_TG_TASKS, configuredTgMenuSequence, tgMenuTasks);
-  }
+watch([() => configModel.value?.tg_menu_tasks, availableTasksForTgMenu], ([saved, tgMenuTasks]) => {
+  if (!configModel.value) { showTgMenuConfigModal.value = false; configuredTgMenuSequence.value = []; return; }
+  if (!showTgMenuConfigModal.value && !tgMenuSaving.value) initializeSequence(Array.isArray(saved) && saved.length ? saved : DEFAULT_TG_TASKS, configuredTgMenuSequence, tgMenuTasks);
 }, { immediate: true, deep: true });
 </script>
 

@@ -46,6 +46,8 @@ const flattenedMenus = computed(() => props.menus.flatMap(menu => menu.children 
 const dockMenus = computed(() => flattenedMenus.value.slice(0, 3));
 const scrollProgress = ref(0);
 const navbarAwayFromTop = ref(false), floatingNavbarScale = ref(1);
+const pageInlineSize = ref(document.documentElement.clientWidth);
+let pageResizeObserver;
 let scrollFrame;
 
 watch(() => route.fullPath, () => {
@@ -55,6 +57,7 @@ watch(() => route.fullPath, () => {
 watch(mdAndDown, value => { overlayOpen.value = false; if (value) navbarAwayFromTop.value = false; else updateScroll(); });
 function updateFloatingNavbarGeometry() {
   const viewportWidth = document.documentElement.clientWidth;
+  pageInlineSize.value = viewportWidth;
   const inset = Number.parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
   floatingNavbarScale.value = viewportWidth > inset * 2 ? (viewportWidth - inset * 2) / viewportWidth : 1;
 }
@@ -82,8 +85,13 @@ function updateScroll() {
     else if (scrollY >= 12) navbarAwayFromTop.value = true;
   });
 }
-onMounted(() => { window.addEventListener('scroll', updateScroll, { passive: true }); updateFloatingNavbarGeometry(); updateScroll(); });
-onBeforeUnmount(() => { window.removeEventListener('scroll', updateScroll); cancelAnimationFrame(scrollFrame); });
+onMounted(() => {
+  window.addEventListener('scroll', updateScroll, { passive: true });
+  updateFloatingNavbarGeometry(); updateScroll();
+  pageResizeObserver = new ResizeObserver(updateFloatingNavbarGeometry);
+  pageResizeObserver.observe(document.documentElement);
+});
+onBeforeUnmount(() => { pageResizeObserver?.disconnect(); window.removeEventListener('scroll', updateScroll); cancelAnimationFrame(scrollFrame); });
 </script>
 
 <template>
@@ -93,7 +101,7 @@ onBeforeUnmount(() => { window.removeEventListener('scroll', updateScroll); canc
       'layout-navbar-away-from-top': navbarAwayFromTop, 'layout-horizontal-nav-scrolled': horizontal && navbarAwayFromTop,
       'layout-app-shell': mdAndDown, 'layout-window-controls-overlay-shell': isWindowControlsOverlayMode,
       'layout-fixed-shell-backplate-active': showFixedBackplate }"
-    :style="{ '--shell-floating-navbar-scale-x': floatingNavbarScale }"
+    :style="{ '--shell-floating-navbar-scale-x': floatingNavbarScale, '--shell-page-inline-size': `${pageInlineSize}px` }"
     :data-shell-mode="mdAndDown ? 'app' : 'desktop'" :data-shell-display-environment="displayEnvironment"
     :data-shell-navbar-attachment="horizontal ? 'theme-qualified' : 'connected'"
     :data-glass-navigation-refraction="supportsRefraction ? 'chromium' : undefined"
@@ -222,6 +230,11 @@ html[data-theme='glass'][data-glass-color-scheme='dark'] .theme-horizontal-nav__
 // Reserve the larger 3×40px edge group and its 8px gaps symmetrically.
 .theme-navbar-row:has(.theme-navbar-center:not(:empty)) {
   grid-template-columns: minmax(0, 1fr) min(240px, max(0px, calc(100% - 288px))) minmax(0, 1fr);
+}
+// Keep the task at the page midpoint as the drawer and toolbar resize independently.
+.layout-wrapper[data-shell-mode='desktop']:not(.layout-horizontal-nav-active, .layout-window-controls-overlay-shell) .theme-navbar-row:has(.theme-navbar-center:not(:empty)) {
+  --navbar-page-card-width: min(240px, max(0px, calc(200% - var(--shell-page-inline-size) + 2 * var(--glass-v3-navigation-inset, 0px) - 272px)));
+  grid-template-columns: minmax(0, calc(100% - var(--shell-page-inline-size) / 2 + var(--glass-v3-navigation-inset, 0px) - var(--navbar-page-card-width) / 2)) var(--navbar-page-card-width) minmax(0, 1fr);
 }
 .layout-navbar { border-block-end: 1px solid rgba(var(--v-theme-on-surface), .08); }
 .layout-navbar--horizontal { border-radius: calc(var(--shell-navbar-scroll-progress, 0) * 24px); transform: translateY(calc(var(--shell-navbar-scroll-progress, 0) * 12px)); margin-inline: calc(var(--shell-navbar-scroll-progress, 0) * 16px); max-inline-size: calc(100% - var(--shell-navbar-scroll-progress, 0) * 32px); }

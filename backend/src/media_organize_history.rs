@@ -339,8 +339,9 @@ pub async fn finish(state: &AppState, event: &Value, result: &Result<Value>) -> 
         status = "processing";
         message = "ETK 预增强已完成，等待 Emby 入库回流验收".into();
     }
+    let mut transaction = state.db.begin().await?;
     let completed: Vec<Value> = sqlx::query_scalar("UPDATE media_organize_history SET status=$1,message=$2,completed_at=CASE WHEN $1='processing' THEN NULL ELSE NOW() END,item_json=item_json || $4 WHERE id=ANY($3) AND status='processing' RETURNING item_json || jsonb_build_object('item_id',item_id)")
-        .bind(status).bind(&message).bind(&ids).bind(preparation).fetch_all(&state.db).await?;
+        .bind(status).bind(&message).bind(&ids).bind(preparation).fetch_all(&mut *transaction).await?;
     if completed.is_empty() {
         return Ok(());
     }
@@ -348,8 +349,9 @@ pub async fn finish(state: &AppState, event: &Value, result: &Result<Value>) -> 
         // A MoviePilot admission remains pending until this exact file/episode
         // reaches Emby's finalization. Never promote its entire parent series.
         sqlx::query("UPDATE media_organize_history SET status=CASE WHEN $1='success' AND COALESCE(item_json->>'_preparation_warning','')<>'' THEN 'warning' ELSE $1 END,message=CASE WHEN COALESCE(item_json->>'_preparation_warning','')<>'' THEN $2 || '；预增强提醒：' || (item_json->>'_preparation_warning') ELSE $2 END,completed_at=NOW() WHERE source='moviepilot' AND status='processing' AND item_id IN (SELECT item_id FROM media_organize_history WHERE id=ANY($3) AND item_id IS NOT NULL)")
-            .bind(status).bind(&message).bind(ids).execute(&state.db).await?;
+            .bind(status).bind(&message).bind(ids).execute(&mut *transaction).await?;
     }
+    transaction.commit().await?;
     if status == "failed" {
         notify_failures(state, completed, &message);
     }
