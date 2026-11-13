@@ -190,17 +190,11 @@ async fn submit_queued_event(state: &AppState, key: String, event: Value) {
                 string(&event, "id"),
                 list(&event["episode_ids"]).len()
             );
-            let result = std::panic::AssertUnwindSafe(async {
+            let mut result = std::panic::AssertUnwindSafe(async {
                 if event["source"] == "moviepilot" {
                     let result = process_moviepilot(&work, &event, &context).await;
                     if let Err(error) = &result {
                         tracing::error!("MoviePilot Webhook 任务失败：{}", error.1);
-                    }
-                    if result.as_ref().map_or(true, |v| {
-                        v["failures"].as_array().is_some_and(|f| !f.is_empty())
-                    }) && let Some(key) = event["batch_key"].as_str()
-                    {
-                        work.webhooks.batches.lock().await.remove(key);
                     }
                     result
                 } else {
@@ -227,8 +221,16 @@ async fn submit_queued_event(state: &AppState, key: String, event: Value) {
             {
                 tracing::error!("入库处理记录未能保存：{}", error.1);
                 if result.is_ok() {
-                    return Err(error);
+                    result = Err(error);
                 }
+            }
+            if event["source"] == "moviepilot"
+                && result.as_ref().map_or(true, |v| {
+                    v["failures"].as_array().is_some_and(|f| !f.is_empty())
+                })
+                && let Some(key) = event["batch_key"].as_str()
+            {
+                work.webhooks.batches.lock().await.remove(key);
             }
             result
         })

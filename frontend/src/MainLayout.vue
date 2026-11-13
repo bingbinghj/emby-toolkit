@@ -2,10 +2,11 @@
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, unref } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { useDisplay } from 'vuetify';
+import { useElementBounding, useMutationObserver } from '@vueuse/core';
 import axios from 'axios';
 import { useAuthStore } from '@/stores/auth';
 import { refreshTaskStatus } from '@/composables/useTaskStatus';
-import { useMessage, useDialog } from '@/composables/useFeedback';
+import { useMessage, useDialog, feedbackDialogs } from '@/composables/useFeedback';
 import { useThemeCustomizer, THEME_CUSTOMIZER_OPEN_EVENT } from '@/composables/useThemeCustomizer';
 import { activeContextSearch } from '@/composables/useContextSearch';
 import { mergeNavigationConfig, moveNavigationItem } from '@/utils/navigationConfig';
@@ -98,6 +99,21 @@ watch([() => route.path, activeContextSearch, isMobile], () => {
   fallbackSearch.value = '';
 });
 const taskControlBusy = ref(false);
+const taskCardAnchor = ref(null), taskDialogLayer = ref(0);
+const taskCardBounds = useElementBounding(taskCardAnchor);
+const taskCardFloating = computed(() => Boolean(props.taskStatus?.is_running && taskDialogLayer.value));
+const taskCardStyle = computed(() => taskCardFloating.value ? {
+  position: 'fixed', left: `${taskCardBounds.left.value}px`, top: `${taskCardBounds.top.value}px`,
+  inlineSize: `${taskCardBounds.width.value}px`, zIndex: taskDialogLayer.value,
+} : undefined);
+function updateTaskDialogLayer() {
+  if (!props.taskStatus?.is_running && !taskDialogLayer.value) return;
+  const dialogs = [...document.querySelectorAll('.v-dialog.v-overlay--active')];
+  taskDialogLayer.value = dialogs.length ? Math.max(...dialogs.map(element => Number(getComputedStyle(element).zIndex) || 0)) + 1 : 0;
+  taskCardBounds.update();
+}
+useMutationObserver(document.body, updateTaskDialogLayer, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] });
+watch(() => props.taskStatus?.is_running, updateTaskDialogLayer, { flush: 'post' });
 const settingsPage = computed(() => ['settings-general', 'settings-notifications'].includes(route.name));
 const contentKey = computed(() => settingsPage.value ? route.name : route.path);
 const activeMenuKey = computed(() => route.name === 'MediaCenterLibrary' ? 'Dashboard'
@@ -350,16 +366,24 @@ const saveMenuConfig = async () => {
 // 恢复默认
 const resetMenuConfig = async () => {
   if (isSavingMenu.value || isMenuLoading.value) return;
+  const session = menuEditorSession, requestedUser = authStore.user;
+  const snapshot = JSON.stringify(menuConfigTree.value);
+  const isCurrent = () => session === menuEditorSession && authStore.isLoggedIn && authStore.user === requestedUser;
   isSavingMenu.value = true;
   try {
     await axios.post('/api/system/menu_config/reset');
-    menuConfigTree.value = syncMenuConfig([]); // 传入空数组生成默认树
+    if (!isCurrent()) return;
     menuConfigLoaded.value = true;
     menuConfigError.value = '';
+    if (snapshot !== JSON.stringify(menuConfigTree.value)) {
+      message.info('默认导航已恢复，当前修改尚未保存。');
+      return;
+    }
+    menuConfigTree.value = syncMenuConfig([]); // 传入空数组生成默认树
     message.success('已恢复默认菜单');
 
   } catch (error) {
-    message.error(error.response?.data?.error || '重置菜单配置失败');
+    if (isCurrent()) message.error(error.response?.data?.error || '重置菜单配置失败');
   } finally {
     isSavingMenu.value = false;
   }
@@ -544,9 +568,12 @@ onBeforeUnmount(() => { ++menuEditorSession; clearDragState(); });
       </template>
     </template>
     <template #navbar-center>
-      <VMenu v-if="authStore.isAdmin && taskStatus?.is_running" location="bottom" :close-on-content-click="false">
+      <div v-if="authStore.isAdmin && taskStatus?.is_running" ref="taskCardAnchor" class="running-task-anchor">
+      <Teleport to="body" :disabled="!taskCardFloating">
+      <VMenu location="bottom" :close-on-content-click="false" :open-on-click="!taskCardFloating">
         <template #activator="{ props: taskMenuProps }">
-          <VBtn v-bind="taskMenuProps" variant="tonal" color="default" class="running-task" aria-label="查看当前任务">
+          <VBtn v-bind="taskMenuProps" variant="tonal" color="default" class="running-task" :class="{ 'running-task-floating': taskCardFloating }"
+            :style="taskCardStyle" :tabindex="taskCardFloating ? -1 : 0" :aria-disabled="taskCardFloating || undefined" aria-label="查看当前任务">
             <span class="running-task-content"><strong>{{ taskStatus.current_action }}</strong>
               <VProgressLinear :model-value="taskStatus.progress" :indeterminate="!taskStatus.progress_known" color="primary" rounded height="3" />
             </span>
@@ -566,6 +593,8 @@ onBeforeUnmount(() => { ++menuEditorSession; clearDragState(); });
           </VCardActions>
         </VCard>
       </VMenu>
+      </Teleport>
+      </div>
     </template>
     <template #navbar-actions>
       <VBtn v-if="authStore.isAdmin" icon variant="text" color="default" title="实时日志" aria-label="实时日志" @click="notificationOpen = true">
@@ -623,7 +652,7 @@ onBeforeUnmount(() => { ++menuEditorSession; clearDragState(); });
     <VCard class="notification-dialog-card"><NotificationCenter v-if="notificationOpen" :task="taskStatus" @close="notificationOpen = false" /></VCard>
   </VDialog>
   <ThemeCustomizer v-if="themeCustomizerOpen" @close="themeCustomizerOpen = false"><WallpaperSettings /></ThemeCustomizer>
-  <VDialog v-model="isMenuEditorVisible" max-width="760" scrollable>
+  <VDialog v-model="isMenuEditorVisible" :retain-focus="!feedbackDialogs.length" max-width="760" scrollable>
     <VCard>
       <VCardItem title="自定义导航" subtitle="修改菜单名称、显示状态和顺序，全局生效">
         <template #append><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭导航设置" @click="isMenuEditorVisible = false" /></template>
@@ -701,7 +730,9 @@ onBeforeUnmount(() => { ++menuEditorSession; clearDragState(); });
 .user-profile-summary { background: rgba(var(--v-theme-primary), .05); }
 .user-profile-role { display: block; font-size: 14px; font-weight: 500; color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); }
 .user-profile-name { display: block; font-size: 18px; font-weight: 700; color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); overflow-wrap: anywhere; }
+.running-task-anchor { inline-size: min(240px, 100%); min-inline-size: 0; block-size: 46px; }
 .running-task { inline-size: min(240px, 100%); min-inline-size: 0; block-size: 46px; padding: 8px 12px; border: 1px solid rgba(var(--v-theme-on-surface), .16); border-radius: 12px; background-color: rgb(var(--v-theme-surface)); }
+.running-task-floating { pointer-events: none; }
 .running-task-content { display: grid; gap: 5px; min-inline-size: 0; inline-size: 100%; text-align: center; }
 .running-task-content strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 500; }
 .task-message { margin-block-start: 12px; overflow-wrap: anywhere; }

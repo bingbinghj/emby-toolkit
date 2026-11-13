@@ -143,7 +143,7 @@
                     </template>
                   </SettingCard>
                 </VCol>
-                <VCol cols="12" v-show="settingsSearch.showCard('媒体服务器')">
+                <VCol cols="12" sm="6" lg="4" xl="3" xxl="2" v-show="settingsSearch.showCard('媒体服务器')">
                   <SettingCard class="dashboard-card" title="媒体服务器" subtitle="媒体服务器与媒体库">
                     <VCardText>
                       <div class="media-server-card-grid">
@@ -661,7 +661,7 @@
             </VWindowItem>
             <VWindowItem value="directory" eager>
               <VRow class="mp-aligned-grid settings-card-grid settings-grid">
-                <VCol cols="12" v-show="settingsSearch.showCard('存储')">
+                <VCol cols="12" sm="6" lg="4" xl="3" xxl="2" v-show="settingsSearch.showCard('存储')">
                   <SettingCard class="dashboard-card" title="存储" subtitle="115 授权方式与连接状态">
                     <VCardText>
                       <div class="storage-card-grid">
@@ -1568,7 +1568,7 @@
                 请使用 115 APP 扫描二维码登录
               </VAlert>
               <VAlert v-if="qrcodeStatus === 'success'" type="success" variant="tonal">
-                登录成功！ Cookies 已自动保存
+                登录成功！Token 已自动保存
               </VAlert>
             </div>
             <!-- 过期状态 -->
@@ -2434,6 +2434,7 @@ let unwatchEmbyConfig = null;
 const embyUserIdRegex = /^[a-f0-9]{32}$/i;
 const isCleaningOfflineMedia = ref(false);
 const isTestingAI = ref(false);
+let aiTestRequest = null;
 const isInvalidUserId = computed(() => {
   const id = mediaServerDraft.value?.emby_user_id;
   return Boolean(id?.trim()) && !embyUserIdRegex.test(id);
@@ -2513,15 +2514,25 @@ watch(
 );
 
 const testAI = async () => {
+  if (!componentIsMounted.value || !configModel.value) return;
   if (!configModel.value.ai_api_key) {
     message.warning('请先填写 API Key 再进行测试。');
     return;
   }
 
+  const owner = configModel.value;
+  const connection = () => JSON.stringify([owner.ai_provider, owner.ai_base_url, owner.ai_api_key, owner.ai_model_name, owner.ai_request_timeout]);
+  if (aiTestRequest?.owner === owner && aiTestRequest.connection === connection()) return;
+  aiTestRequest?.controller.abort();
+  const request = { owner, connection: connection(), controller: new AbortController() };
+  aiTestRequest = request;
+  const isCurrent = () => componentIsMounted.value && aiTestRequest === request
+    && owner === configModel.value && request.connection === connection();
+  const payload = JSON.parse(JSON.stringify(owner));
   isTestingAI.value = true;
   try {
-    // 将当前的 configModel 传给后端进行即时测试
-    const response = await axios.post('/api/ai/test', configModel.value);
+    const response = await axios.post('/api/ai/test', payload, { signal: request.controller.signal });
+    if (!isCurrent()) return;
 
     if (response.data.success) {
       // 使用 dialog 弹出详细结果，看起来更专业
@@ -2534,6 +2545,7 @@ const testAI = async () => {
       message.error(`测试失败: ${response.data.message}`);
     }
   } catch (error) {
+    if (!isCurrent()) return;
     const errorMsg = error.response?.data?.message || error.message;
     dialog.error({
       title: 'AI 测试失败',
@@ -2541,7 +2553,10 @@ const testAI = async () => {
       positiveText: '好吧'
     });
   } finally {
-    isTestingAI.value = false;
+    if (aiTestRequest === request) {
+      aiTestRequest = null;
+      isTestingAI.value = false;
+    }
   }
 };
 const openPromptModal = async () => {
@@ -2701,6 +2716,7 @@ const deselectAllForClear = () => tablesToClear.value = [];
 const p115Info = ref(null);
 const loading115Info = ref(false);
 const p115StatusError = ref('');
+let p115StatusRequest = null;
 
 // ★★★ Cookie 扫码获取逻辑 ★★★
 const showCookieModal = ref(false);
@@ -3115,12 +3131,14 @@ const openQrcodeModal = async () => {
 const startPolling = () => {
   stopPolling();
   const requestVersion = openApiQrcodeRequestVersion;
+  let pending = false;
   // 每2秒检查一次二维码状态
   qrcodePolling.value = setInterval(async () => {
-    if (requestVersion !== openApiQrcodeRequestVersion || !showQrcodeModal.value) return;
+    if (requestVersion !== openApiQrcodeRequestVersion || !showQrcodeModal.value || qrcodeStatus.value !== 'waiting' || pending) return;
+    pending = true;
     try {
       const res = await axios.get('/api/p115/qrcode/status');
-      if (requestVersion !== openApiQrcodeRequestVersion || !showQrcodeModal.value) return;
+      if (requestVersion !== openApiQrcodeRequestVersion || !showQrcodeModal.value || qrcodeStatus.value !== 'waiting') return;
       const data = res.data;
 
       if (data.status === 'success') {
@@ -3141,6 +3159,8 @@ const startPolling = () => {
     } catch (e) {
       if (requestVersion !== openApiQrcodeRequestVersion || !showQrcodeModal.value) return;
       console.error('检查二维码状态失败', e);
+    } finally {
+      pending = false;
     }
   }, 2000);
 };
@@ -3244,10 +3264,17 @@ const startWebAuth = () => {
 
 // 检查 115 状态
 const check115Status = async () => {
+    if (!componentIsMounted.value || !configModel.value) return;
+    p115StatusRequest?.controller.abort();
+    const request = { owner: configModel.value, controller: new AbortController() };
+    p115StatusRequest = request;
+    const isCurrent = () => componentIsMounted.value && p115StatusRequest === request
+      && request.owner === configModel.value;
     loading115Info.value = true;
     p115StatusError.value = '';
     try {
-        const res = await axios.get('/api/p115/status');
+        const res = await axios.get('/api/p115/status', { signal: request.controller.signal });
+        if (!isCurrent()) return;
         if (res.data && res.data.data) {
             p115Info.value = res.data.data;
             message.success('115 状态刷新成功！');
@@ -3256,11 +3283,15 @@ const check115Status = async () => {
             p115StatusError.value = '状态响应无效';
         }
     } catch (e) {
+        if (!isCurrent()) return;
         p115Info.value = null;
         p115StatusError.value = '状态读取失败';
         message.error('状态获取失败: ' + (e.response?.data?.message || e.response?.data?.data?.msg || e.message));
     } finally {
-        loading115Info.value = false;
+        if (p115StatusRequest === request) {
+            p115StatusRequest = null;
+            loading115Info.value = false;
+        }
     }
 };
 
@@ -3541,6 +3572,10 @@ onMounted(async () => {
 });
 onUnmounted(() => {
   componentIsMounted.value = false;
+  aiTestRequest?.controller.abort();
+  aiTestRequest = null;
+  p115StatusRequest?.controller.abort();
+  p115StatusRequest = null;
   closePromptModal();
   aiModelsRequestGeneration++;
   isFetchingAIModels.value = false;
@@ -3562,7 +3597,7 @@ onUnmounted(() => {
 
 <style scoped>
 .settings-container { min-width: 0; }
-.storage-card-grid { display:grid; grid-template-columns:minmax(0,360px); gap:12px; }
+.storage-card-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:12px; }
 .storage-dialog :deep(.v-card-text) { min-width:0; }
 .storage-auth-row { display:grid; grid-template-columns:4.5rem minmax(0,1fr); gap:12px; margin-block-end:20px; }
 .storage-auth-row > div { min-width:0; }
@@ -3571,7 +3606,7 @@ onUnmounted(() => {
 .storage-auth-radio :deep(.v-input__control) { flex-direction:row; align-items:flex-start; gap:12px; }
 .storage-auth-radio :deep(.v-input__control > .v-label) { flex:0 0 4.5rem; margin:8px 0 0; white-space:nowrap; }
 .storage-auth-radio :deep(.v-selection-control-group) { flex:1 1 auto; min-width:0; }
-.media-server-card-grid { display:grid; grid-template-columns:minmax(0,360px); gap:12px; }
+.media-server-card-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:12px; }
 .media-server-dialog :deep(.v-card-text) { min-width:0; }
 :is(.media-server-dialog, .storage-dialog) :deep(.app-responsive-input__native input::placeholder) {
   color:rgba(var(--v-theme-on-surface),0.95);

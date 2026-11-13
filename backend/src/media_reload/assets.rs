@@ -1,5 +1,16 @@
 use std::{future::Future, io, path::Path};
-use tokio::fs::{File, OpenOptions};
+use tokio::{
+    fs::{File, OpenOptions},
+    io::AsyncWriteExt,
+};
+
+pub(super) async fn restore_bytes(bytes: &[u8], destination: &Path) -> io::Result<()> {
+    restore_with(destination, |mut output| async move {
+        output.write_all(bytes).await?;
+        output.sync_all().await
+    })
+    .await
+}
 
 pub(super) async fn restore_file(source: &Path, destination: &Path) -> io::Result<()> {
     let mut source = File::open(source).await?;

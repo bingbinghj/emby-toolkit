@@ -16,10 +16,21 @@ const capturesFrames = options => options.enabled && options.quality !== 'css';
 
 async function waitForRenderer(page, options) {
   if (!options.enabled || options.scheme === 'light' || options.quality === 'css') return;
+  let previous;
   await expect.poll(async () => {
     await stepCaptureFrame(page);
     await stepCaptureFrame(page);
-    return page.locator('html').getAttribute('data-glass-renderer-state');
+    const observed = await page.evaluate(() => ({
+      state: document.documentElement.dataset.glassRendererState ?? null,
+      visibility: document.visibilityState, focused: document.hasFocus(),
+      canvases: [...document.querySelectorAll('canvas[data-presentation-space]')]
+        .map(canvas => ({ space: canvas.dataset.presentationSpace, state: canvas.dataset.state })),
+      capture: window.__etkTestFrameCapture?.status(),
+    }));
+    const key = JSON.stringify([observed.state, observed.visibility, observed.focused, observed.canvases]);
+    if (key !== previous) console.log(JSON.stringify({ id: options.id, stage: 'renderer-observation', observed }));
+    previous = key;
+    return observed.state ?? '';
   }, { timeout: 180000 }).toMatch(/ready|fallback/);
 }
 

@@ -70,6 +70,85 @@ async fn image_language_preference_controls_tmdb_requests_with_filesystem_monito
     server.abort();
 }
 
+async fn assert_image_query_cancels(block_initial: bool) {
+    let requested = Arc::new(tokio::sync::Notify::new());
+    let received = requested.clone();
+    let router = Router::new().route(
+        "/movie/1",
+        get(move |Query(query): Query<HashMap<String, String>>| {
+            let received = received.clone();
+            async move {
+                if query.contains_key("include_image_language") != block_initial {
+                    received.notify_one();
+                    axum::response::IntoResponse::into_response((
+                        axum::http::StatusCode::TOO_MANY_REQUESTS,
+                        [("Retry-After", "3600")],
+                    ))
+                } else {
+                    axum::response::IntoResponse::into_response(Json(json!({
+                        "original_language":"ja","images":{"posters":[]}
+                    })))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let directory = tempfile::tempdir().unwrap();
+    let state = state(
+        directory.path(),
+        sqlx::PgPool::connect_lazy("postgres://localhost/unused").unwrap(),
+        json!({"tmdb_api_key":"fixture","tmdb_api_base_url":base}),
+    );
+    let context = JobContext::for_recovery(None).await;
+    let item = json!({"Name":"测试电影","Path":directory.path().join("movie.mkv")});
+    let existing = directory.path().join("poster.jpg");
+    tokio::fs::write(&existing, b"preserve-existing-image")
+        .await
+        .unwrap();
+    let work = state.clone();
+    let job = context.clone();
+    let mut worker = tokio::spawn(async move {
+        crate::images::download_report(&work, "Movie", "1", &item, &json!({}), &job).await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), requested.notified())
+        .await
+        .expect("blocked query must start");
+    context.request_stop();
+    let stopped = tokio::time::timeout(std::time::Duration::from_secs(1), &mut worker).await;
+    worker.abort();
+    server.abort();
+    let error = stopped
+        .expect("image query cancellation must not wait for Retry-After")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.0, axum::http::StatusCode::CONFLICT);
+    assert_eq!(error.1, "任务已取消");
+    // The interrupted query must release the shared secondary slot for subsequent work.
+    let _slot = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        crate::strm::slot(&state, "secondary", None),
+    )
+    .await
+    .expect("cancelled image query must release its slot")
+    .unwrap();
+    assert_eq!(
+        tokio::fs::read(existing).await.unwrap(),
+        b"preserve-existing-image"
+    );
+}
+
+#[tokio::test]
+async fn image_original_language_query_cancels_during_long_retry_after() {
+    assert_image_query_cancels(true).await;
+}
+
+#[tokio::test]
+async fn image_language_strategy_query_cancels_during_long_retry_after() {
+    assert_image_query_cancels(false).await;
+}
+
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL in DATABASE_URL"]
 async fn sha1_lookup_uses_its_own_switch_with_filesystem_monitor_disabled() {

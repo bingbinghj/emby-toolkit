@@ -12,7 +12,7 @@ async function openLogs(page, api) {
   api.setTask(task);
   await page.goto('/dashboard');
   await page.getByRole('button', { name: '实时日志', exact: true }).click();
-  await expect(page.locator('.notification-log .log-record-body').first()).toHaveText(longBody);
+  await expect(page.locator('.notification-log .log-record-message').first()).toHaveText(longBody);
 }
 
 async function assertFullText(page, locator) {
@@ -55,7 +55,7 @@ for (const [name, preference] of [
       expect(liveContrast.contrast).toBeGreaterThanOrEqual(4.5);
       await page.getByRole('tab', { name: '历史日志', exact: true }).click();
       const history = page.locator('.history-log-list .log-record-body').first();
-      await expect(history).toHaveText(longBody);
+      await expect(history.locator('.log-record-message')).toHaveText(longBody);
       await assertFullText(page, history);
       const modules = page.locator('.history-log-list .log-record-module');
       await expect(modules).toHaveText(['emby_toolkit::media_reload', pythonSource]);
@@ -108,11 +108,46 @@ test('paused live following freezes the visible records until returning to newes
   await openLogs(page, api);
   await page.getByRole('button', { name: '暂停日志流', exact: true }).click();
   api.setTask({ ...task, logs: [...task.logs, '[12:31:00] [INFO] 后续日志完整结尾'] });
-  await expect(page.getByRole('button', { name: '有新日志 · 回到最新', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '回到最新', exact: true })).toBeVisible();
   await expect(page.getByText('后续日志完整结尾', { exact: true })).toHaveCount(0);
-  await page.getByRole('button', { name: '有新日志 · 回到最新', exact: true }).click();
+  await page.getByRole('button', { name: '回到最新', exact: true }).click();
   await expect(page.getByText('后续日志完整结尾', { exact: true })).toBeVisible();
 });
+
+for (const width of [390, 1440, 2194]) {
+  test(`MP log prefix and wrapped continuation share the body left edge at ${width}px`, async ({ page, api }) => {
+    await page.setViewportSize({ width, height: 1000 });
+    const message = '第一行正文。' + '完整内容'.repeat(100) + '\n第二行顶格显示';
+    api.setTask({ logs: [`INFO: 2026-11-13 13:19:14,476 sync.rs - ${message}`] });
+    await page.goto('/dashboard');
+    await page.getByRole('button', { name: '实时日志', exact: true }).click();
+    const record = page.locator('.notification-log .log-record').first();
+    await expect(record.locator('.log-record-inline-time')).toHaveText('13:19:14,476');
+    await expect(record.locator('.log-record-module')).toHaveText('sync.rs');
+    await expect(record.locator('.log-record-message')).toHaveText(message);
+    expect(await record.locator('.log-record-body').textContent()).toBe(`13:19:14,476 sync.rs - ${message}`);
+    const geometry = await record.locator('.log-record-body').evaluate(body => {
+      const text = document.createTreeWalker(body.querySelector('.log-record-message'), NodeFilter.SHOW_TEXT,
+        { acceptNode: node => node.textContent.length ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP });
+      const node = text.nextNode();
+      const range = document.createRange();
+      const point = index => { range.setStart(node, index); range.setEnd(node, index + 1); return range.getBoundingClientRect(); };
+      const first = point(0), left = body.getBoundingClientRect().left;
+      const newline = node.textContent.indexOf('\n');
+      const explicit = point(newline + 1);
+      let wrapped;
+      for (let index = 1; index < newline; index++) { const box = point(index); if (box.top > first.top + 2) { wrapped = box; break; } }
+      return { prefixLeft: body.querySelector('.log-record-inline-time').getBoundingClientRect().left - left,
+        firstLeft: first.left - left, explicitLeft: explicit.left - left,
+        wrappedLeft: wrapped?.left - left, hasWrap: !!wrapped };
+    });
+    expect(Math.abs(geometry.prefixLeft)).toBeLessThanOrEqual(1);
+    if (width > 390) expect(geometry.firstLeft).toBeGreaterThan(1);
+    expect(Math.abs(geometry.explicitLeft)).toBeLessThanOrEqual(1);
+    expect(geometry.hasWrap).toBe(true);
+    expect(Math.abs(geometry.wrappedLeft)).toBeLessThanOrEqual(1);
+  });
+}
 
 test('failed history reads expose retry errors and confirmed empty pages replace old cards', async ({ page, api }) => {
   api.respond('GET', '/api/logs/list', ['app.log']);

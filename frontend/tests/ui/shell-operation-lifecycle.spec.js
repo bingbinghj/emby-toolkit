@@ -1,3 +1,4 @@
+import { writeFileSync } from 'node:fs';
 import { test, expect } from './fixtures.js';
 
 const menuPath = '/api/system/menu_config';
@@ -30,6 +31,44 @@ test('navigation keeps edits entered after its submitted snapshot', async ({ pag
   expect(submitted.body.flatMap(item => item.children || [item]).find(item => item.key === 'Dashboard').label).toBe('提交时的名称');
   expect(api.requests.filter(request => request.method === 'POST' && request.path === menuPath)).toHaveLength(1);
 });
+
+for (const outcome of ['success', 'failure']) {
+  test(`a late navigation reset ${outcome} cannot notify a session that has expired`, async ({ page, api }, testInfo) => {
+    const pageErrors = [];
+    page.on('pageerror', error => {
+      pageErrors.push(error.stack || error.message);
+      writeFileSync(testInfo.outputPath('page-errors.log'), pageErrors.join('\n\n'));
+    });
+    const resetPath = `${menuPath}/reset`;
+    let received, release;
+    const started = new Promise(resolve => { received = resolve; });
+    const completion = new Promise(resolve => { release = resolve; });
+    api.respond('POST', resetPath, async () => { received(); return completion; }, outcome === 'success' ? 200 : 500);
+    await page.goto('/dashboard');
+    const menu = await openMenu(page);
+    await menu.getByRole('button', { name: '恢复默认', exact: true }).click();
+    const confirmation = page.locator('.v-dialog.v-overlay--active').filter({ has: page.getByText('恢复默认导航', { exact: true }) });
+    const positive = confirmation.getByRole('button', { name: '恢复默认', exact: true });
+    await confirmation.getByRole('button', { name: '取消', exact: true }).focus();
+    await confirmation.getByRole('button', { name: '取消', exact: true }).press('Tab');
+    await expect(positive).toBeFocused();
+    await positive.press('Tab');
+    await expect(confirmation.getByRole('button', { name: '关闭确认', exact: true })).toBeFocused();
+    await menu.getByLabel('菜单名称', { exact: true }).first().focus();
+    await expect.poll(() => confirmation.evaluate(element => element.contains(document.activeElement))).toBe(true);
+    await positive.click();
+    await started;
+    api.respond('GET', '/api/auth/check_status', { status: 'login_required' });
+    api.respond('GET', '/api/status', { error: '登录会话已失效' }, 403);
+    await expect(page.getByRole('button', { name: 'UI Test 的用户菜单', exact: true })).toHaveCount(0);
+    const finished = page.waitForResponse(response => new URL(response.url()).pathname === resetPath);
+    release(outcome === 'success' ? { message: '旧导航已重置' } : { error: '旧导航重置失败' });
+    await (await finished).finished();
+    await expect(confirmation).toBeHidden();
+    await expect(page.getByText(outcome === 'success' ? '已恢复默认菜单' : '旧导航重置失败', { exact: true })).not.toBeVisible();
+    expect(api.requests.filter(request => request.method === 'POST' && request.path === resetPath)).toHaveLength(1);
+  });
+}
 
 for (const outcome of ['success', 'failure']) {
   test(`old navigation ${outcome} does not affect a reopened unchanged editor`, async ({ page, api }) => {

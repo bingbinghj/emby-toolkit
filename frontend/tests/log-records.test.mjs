@@ -82,3 +82,22 @@ test('legacy time-only live records keep their unknown-precision grouping and or
   assert.deepEqual(groups.map(group => group.lines.length), [2, 1]);
   assert.deepEqual(groups.flatMap(group => group.lines), lines);
 });
+
+test('MP level-first logs preserve the source, milliseconds and multiline message', () => {
+  for (const timestamp of ['2026-11-13 13:19:14,476', '13:19:14,476']) {
+    const raw = `INFO:${timestamp} sync.rs - [同步媒体] 媒体库 21 扫描完成\n下一行顶格显示`;
+    assert.deepEqual(parseLogRecord(raw), { raw, timestamp, level: 'INFO', module: 'sync.rs', message: '[同步媒体] 媒体库 21 扫描完成\n下一行顶格显示' });
+    assert.equal(matchesLogRecord(raw, 'sync.rs', 'info'), true);
+  }
+});
+
+test('MP level-first dates retain their day and exact grouping gap', () => {
+  const lines = [
+    'INFO: 2026-11-12 23:59:59,990 sync.rs - 昨日记录',
+    'INFO: 2026-11-13 00:00:00,010 sync.rs - 今日记录',
+    'INFO: 2026-11-13 00:00:00,090 sync.rs - 同秒记录',
+    'INFO: 2026-11-13 00:00:00,300 sync.rs - 不同组',
+  ];
+  assert.deepEqual(groupLogRecords(lines).map(group => group.lines.length), [1, 2, 1]);
+  assert.deepEqual(groupLogRecords(lines).flatMap(group => group.lines), lines);
+});

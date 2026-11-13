@@ -9,7 +9,7 @@ async function openHistory(page, api, lines = [logLine('已读取的原文件记
   await page.goto('/dashboard');
   await page.getByRole('button', { name: '实时日志', exact: true }).click();
   await page.getByRole('tab', { name: '历史日志', exact: true }).click();
-  await expect(page.locator('.history-log-list .log-record-body').first()).toHaveText('已读取的原文件记录');
+  await expect(page.locator('.history-log-list .log-record-message').first()).toHaveText('已读取的原文件记录');
 }
 
 test('a failed file-list refresh remains visible without reading old content, then retries normally', async ({ page, api }) => {
@@ -19,7 +19,7 @@ test('a failed file-list refresh remains visible without reading old content, th
   api.respond('GET', '/api/logs/view', pageData('列表失败时不应读取此内容'));
   await page.getByRole('button', { name: '刷新历史日志', exact: true }).click();
   await expect(page.getByText('日志文件列表暂不可用', { exact: true })).toBeVisible();
-  await expect(page.locator('.history-log-list .log-record-body')).toHaveText('已读取的原文件记录');
+  await expect(page.locator('.history-log-list .log-record-message')).toHaveText('已读取的原文件记录');
   expect(viewReads(api)).toHaveLength(initialReads);
   await expect(page.getByText('列表失败时不应读取此内容', { exact: true })).toHaveCount(0);
 
@@ -28,7 +28,7 @@ test('a failed file-list refresh remains visible without reading old content, th
     lines: Array.from({ length: 500 }, (_, index) => logLine(index ? `重试后记录 ${index + 1}` : '重试后的日志记录')),
     page: 1, pages: 2, total_lines: 501 });
   await page.getByRole('button', { name: '刷新历史日志', exact: true }).click();
-  await expect(page.locator('.history-log-list .log-record-body').first()).toHaveText('重试后的日志记录');
+  await expect(page.locator('.history-log-list .log-record-message').first()).toHaveText('重试后的日志记录');
   await expect(page.locator('.history-log-list .log-record')).toHaveCount(500);
   await expect(page.locator('.history-pagination')).toBeVisible();
   await expect(page.getByText('日志文件列表暂不可用', { exact: true })).toHaveCount(0);

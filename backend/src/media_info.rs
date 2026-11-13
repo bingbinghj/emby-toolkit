@@ -506,6 +506,20 @@ fn channel_identity(value: &Value) -> String {
     }
 }
 fn language_role(language: &Value, title: &Value, kind: &str) -> String {
+    if kind == "Audio"
+        && let Some((_, role)) = crate::language::audio_title_identity(
+            language.as_str().unwrap_or(""),
+            title.as_str().unwrap_or(""),
+        )
+    {
+        return role;
+    }
+    if kind == "Audio"
+        && let Some(role) =
+            crate::language::audio_language_identity(language.as_str().unwrap_or(""))
+    {
+        return role;
+    }
     let raw = identity_text(language).replace('_', "-");
     match raw.as_str() {
         "chs" | "zh-hans" | "zh-cn" => "chs".into(),
@@ -571,7 +585,22 @@ fn stable_role_matches(stream: &Value, identity: &Value) -> bool {
 }
 fn same_original_title(stream: &Value, identity: &Value) -> bool {
     let title = identity_text(&identity["title"]);
-    !title.is_empty() && title == identity_text(&stream["Title"])
+    if !title.is_empty() && title == identity_text(&stream["Title"]) {
+        return true;
+    }
+    if identity["type"] != "Audio" {
+        return false;
+    }
+    let source = crate::language::audio_title_identity(
+        identity["language"].as_str().unwrap_or(""),
+        identity["title"].as_str().unwrap_or(""),
+    );
+    source.is_some()
+        && source
+            == crate::language::audio_title_identity(
+                stream["Language"].as_str().unwrap_or(""),
+                stream["Title"].as_str().unwrap_or(""),
+            )
 }
 fn track_description(streams: &[Value], index: usize) -> String {
     let stream = &streams[index];

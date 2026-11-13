@@ -44,7 +44,7 @@ function fixture(overrides = {}) {
     async delete(url) { requests.push({ method: 'DELETE', url }); return { data: { success: true } }; },
   };
   const context = vm.createContext({
-    console, FormData, JSON, Set, Map,
+    console, FormData, JSON, Set, Map, AbortController,
     ref: value => ({ value }), reactive: value => value,
     computed: get => ({ get value() { return get(); } }),
     watch: (value, callback) => { watchers.push({ value, callback }); return () => {}; },

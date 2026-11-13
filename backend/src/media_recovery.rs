@@ -17,6 +17,7 @@ struct Record {
     directory: PathBuf,
     kind: &'static str,
     target_ids: Value,
+    target_paths: BTreeMap<String, String>,
     reason: String,
     can_recover: bool,
     json_conflicts: Vec<Value>,
@@ -254,6 +255,7 @@ async fn records(state: &AppState) -> Result<Vec<Record>> {
                         .as_ref()
                         .map(|value| value["target_ids"].clone())
                         .unwrap_or(json!([])),
+                    target_paths: BTreeMap::new(),
                     reason: material
                         .as_ref()
                         .map(|_| "媒体及原配置已验收，备份清理尚未完成，可重试删除".into())
@@ -274,6 +276,7 @@ async fn records(state: &AppState) -> Result<Vec<Record>> {
                         directory,
                         kind: "unknown",
                         target_ids: json!([]),
+                        target_paths: BTreeMap::new(),
                         reason: "恢复目录是符号链接，请核对原备份".into(),
                         can_recover: false,
                         json_conflicts: vec![],
@@ -337,6 +340,10 @@ async fn records(state: &AppState) -> Result<Vec<Record>> {
                     }
                 })
                 .unwrap_or(json!([]));
+            let target_paths = material
+                .as_ref()
+                .map(|value| recovery_target_paths(value, kind, &target_ids))
+                .unwrap_or_default();
             let mut json_conflicts = vec![];
             if can_recover {
                 match crate::media_reload::recovery_json_conflicts(state, &directory).await {
@@ -365,6 +372,7 @@ async fn records(state: &AppState) -> Result<Vec<Record>> {
                 directory,
                 kind,
                 target_ids,
+                target_paths,
                 reason,
                 can_recover,
                 json_conflicts,
@@ -376,11 +384,178 @@ async fn records(state: &AppState) -> Result<Vec<Record>> {
     Ok(records)
 }
 
+fn recovery_target_paths(
+    material: &Value,
+    kind: &str,
+    target_ids: &Value,
+) -> BTreeMap<String, String> {
+    let material = if kind == "pending-scan" {
+        &material["verification"]
+    } else {
+        material
+    };
+    let mut result = BTreeMap::new();
+    for id in target_ids
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        let mut paths = vec![];
+        for target in material["targets"].as_array().into_iter().flatten() {
+            if target["id"] == id {
+                paths.push(target["path"].as_str().unwrap_or(""));
+            }
+        }
+        let observed = &material["observations"][id];
+        if !observed.is_null() {
+            if observed.get("Id").is_some_and(|value| value != id) {
+                continue;
+            }
+            paths.push(observed["Path"].as_str().unwrap_or(""));
+        }
+        if let Some(path) = paths.first()
+            && !path.is_empty()
+            && paths.iter().all(|candidate| candidate == path)
+        {
+            result.insert(id.into(), (*path).into());
+        }
+    }
+    result
+}
+
+async fn scope_item(
+    state: &AppState,
+    cache: &mut BTreeMap<String, Option<Value>>,
+    id: &str,
+) -> Option<Value> {
+    if let Some(item) = cache.get(id) {
+        return item.clone();
+    }
+    let item = crate::media_edit::details(
+        state,
+        id,
+        "Id,Type,Path,ParentId,SeriesId,SeasonId,ExtraType",
+    )
+    .await
+    .ok()
+    .filter(|item| item["Id"] == id);
+    cache.insert(id.into(), item.clone());
+    item
+}
+
+async fn scope_ancestors(
+    state: &AppState,
+    cache: &mut BTreeMap<String, Option<Value>>,
+    item: &Value,
+) -> Option<Vec<String>> {
+    if item["Type"] != "Episode"
+        && item["Type"] != "Season"
+        && !(item["Type"] == "Video" && item["ExtraType"] == "AdditionalPart")
+    {
+        return None;
+    }
+    let id = string(item, "Id");
+    let parent_id = string(item, "ParentId");
+    if parent_id.is_empty() || parent_id == id {
+        return None;
+    }
+    let parent = scope_item(state, cache, &parent_id).await?;
+    if parent["ParentId"] == id {
+        return None;
+    }
+    if item["Type"] == "Episode" {
+        if parent["Type"] != "Season"
+            || item
+                .get("SeasonId")
+                .and_then(Value::as_str)
+                .is_some_and(|season| !season.is_empty() && season != parent_id)
+        {
+            return None;
+        }
+        let series_id = string(&parent, "ParentId");
+        if series_id.is_empty()
+            || series_id == id
+            || series_id == parent_id
+            || [item, &parent].iter().any(|value| {
+                value
+                    .get("SeriesId")
+                    .and_then(Value::as_str)
+                    .is_some_and(|series| !series.is_empty() && series != series_id)
+            })
+        {
+            return None;
+        }
+        let series = scope_item(state, cache, &series_id).await?;
+        return (series["Type"] == "Series"
+            && series["ParentId"] != id
+            && series["ParentId"] != parent_id)
+            .then_some(vec![parent_id, series_id]);
+    }
+    if item["Type"] == "Season" {
+        if item
+            .get("SeriesId")
+            .and_then(Value::as_str)
+            .is_some_and(|series| !series.is_empty() && series != parent_id)
+        {
+            return None;
+        }
+        return (parent["Type"] == "Series").then_some(vec![parent_id]);
+    }
+    (item["Type"] == "Video" && item["ExtraType"] == "AdditionalPart" && parent["Type"] == "Movie")
+        .then_some(vec![parent_id])
+}
+
+fn scope_connection(config: &Value) -> [String; 3] {
+    [
+        string(config, "emby_server_url")
+            .trim_end_matches('/')
+            .into(),
+        string(config, "emby_api_key"),
+        string(config, "emby_user_id"),
+    ]
+}
+
 pub async fn status(State(state): State<AppState>) -> Result<Json<Value>> {
     let records = records(&state).await?;
+    let config = state.config.read().await.clone();
+    let pinned = AppState {
+        config: std::sync::Arc::new(tokio::sync::RwLock::new(config.clone())),
+        ..state.clone()
+    };
+    let mut related = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        let mut cache = BTreeMap::new();
+        let mut related = vec![];
+        for record in &records {
+            let mut ids = record.target_ids.as_array().cloned().unwrap_or_default();
+            for (id, path) in &record.target_paths {
+                if let Some(item) = scope_item(&pinned, &mut cache, id).await
+                    && item["Path"] == path.as_str()
+                    && let Some(ancestors) = scope_ancestors(&pinned, &mut cache, &item).await
+                {
+                    for ancestor in ancestors {
+                        let ancestor = json!(ancestor);
+                        if !ids.contains(&ancestor) {
+                            ids.push(ancestor);
+                        }
+                    }
+                }
+            }
+            ids.sort_by_key(Value::to_string);
+            ids.dedup();
+            related.push(json!(ids));
+        }
+        related
+    })
+    .await
+    .ok();
+    if scope_connection(&config) != scope_connection(&*state.config.read().await) {
+        related = None;
+    }
     Ok(Json(
-        json!({"pending":!records.is_empty(),"records":records.iter().map(|r|json!({
+        json!({"pending":!records.is_empty(),"records":records.iter().enumerate().map(|(index,r)|json!({
         "id":r.id,"directory":r.directory,"target_ids":r.target_ids,"kind":r.kind,
+        "related_item_ids":related.as_ref().and_then(|items|items.get(index)).unwrap_or(&r.target_ids),
         "reason":r.reason,"can_recover":r.can_recover,"json_conflicts":r.json_conflicts,
         "conflict_backup_directories":r.conflict_backup_directories
     })).collect::<Vec<_>>()}),

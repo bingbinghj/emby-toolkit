@@ -12,7 +12,7 @@
       <VTab value="history" prepend-icon="mdi-history">历史日志</VTab>
     </VTabs>
     <div v-show="activeTab === 'logs'" class="notification-live logging-view">
-      <VProgressLinear v-if="following" indeterminate color="primary" :height="1" class="logging-live-progress" aria-label="实时日志正在更新" />
+      <VProgressLinear v-if="!streamPaused" indeterminate color="primary" :height="1" class="logging-live-progress" aria-label="实时日志正在更新" />
       <div class="notification-toolbar logging-toolbar px-3">
         <VBtnToggle v-if="display.mdAndUp.value" v-model="logFilter" mandatory divided density="compact" variant="text" class="logging-level-toggle" selected-class="logging-level-toggle__button--active" aria-label="日志级别">
           <VBtn v-for="option in filterOptions" :key="option.value" :value="option.value" class="logging-level-toggle__button" :class="`logging-level-toggle__button--${option.value}`">{{ option.value === 'all' ? '全部' : option.label }}</VBtn>
@@ -21,15 +21,16 @@
           <template #selection="{ item }"><span class="font-weight-medium">{{ item.title }}</span></template>
         </VSelect>
         <VTextField v-model="keyword" clearable hide-details variant="plain" density="compact" prepend-inner-icon="mdi-magnify" placeholder="搜索日志" aria-label="搜索实时日志" class="notification-search logging-search" />
-        <VBtn variant="flat" color="primary" icon class="logging-stream-action" :aria-label="following ? '暂停日志流' : '继续日志流'" :title="following ? '暂停日志流' : '继续日志流'" @click="following = !following"><VIcon :icon="following ? 'mdi-pause' : 'mdi-play'" /></VBtn>
+        <VBtn variant="flat" color="primary" icon class="logging-stream-action" :aria-label="streamPaused ? '继续日志流' : '暂停日志流'" :title="streamPaused ? '继续日志流' : '暂停日志流'" @click="toggleStream"><VIcon :icon="streamPaused ? 'mdi-play' : 'mdi-pause'" /></VBtn>
       </div>
       <div ref="logRef" class="notification-log logging-shell" role="region" aria-label="实时日志内容" tabindex="0" @scroll="handleScroll">
+        <VAlert v-if="connectionError && !streamPaused" type="error" variant="tonal" role="alert">{{ connectionError }}</VAlert>
         <LogRecord v-for="(group, index) in logGroups" :key="group.key" :lines="group.lines" :keyword="keyword" :stripe="index % 2 ? 'odd' : 'even'" />
         <div v-if="!filteredLogs.length" class="logging-empty"><VIcon :icon="displayedLogs.length ? 'mdi-filter-remove-outline' : 'mdi-console-line'" size="20" /><span>{{ displayedLogs.length ? '没有匹配的数据' : '等待日志输出' }}</span></div>
       </div>
       <footer class="notification-footer">
-        <span>{{ filteredLogs.length }} 条日志{{ following ? '' : ' · 日志流已暂停' }}</span>
-        <VBtn v-if="!following" size="small" color="primary" variant="elevated" prepend-icon="mdi-arrow-down" @click="following = true">{{ hasNewLogs ? '有新日志 · 回到最新' : '回到最新' }}</VBtn>
+        <span>{{ filteredLogs.length }} 条日志{{ streamPaused ? ' · 日志流已暂停' : '' }}</span>
+        <VBtn v-if="!following || streamPaused" size="small" color="primary" variant="elevated" prepend-icon="mdi-arrow-down" :aria-label="hasNewLogs ? '有新日志 · 回到最新' : '回到最新'" @click="enableFollow">{{ newLogCount ? `${newLogCount} 条新日志 · 回到最新` : '回到最新' }}</VBtn>
       </footer>
     </div>
     <LogViewer v-show="activeTab === 'history'" :show="activeTab === 'history'" />
@@ -44,26 +45,30 @@ import { useMessage } from '@/composables/useFeedback';
 import LogViewer from './LogViewer.vue';
 import LogRecord from './LogRecord.vue';
 import { groupLogRecords, matchesLogRecord } from '@/utils/logRecords';
+import { useLogStream } from '@/composables/useLogStream';
 
 const props = defineProps({ task: { type: Object, default: () => ({}) }, standalone: Boolean });
 defineEmits(['close']);
 const display = useDisplay();
 const theme = useTheme();
 const message = useMessage();
+const { logs: latestLogs, paused: streamPaused, error: connectionError, receivedCount, generation, pause, resume } = useLogStream();
 const logFileUrl = '/api/logs/view?filename=app.log';
 const isDarkTheme = computed(() => theme.global.current.value.dark);
 const activeTab = ref('logs'), logRef = ref(null);
-const keyword = ref(''), logFilter = ref('all'), following = ref(true), displayedLogs = ref([]), isDownloading = ref(false);
+const keyword = ref(''), logFilter = ref('all'), following = ref(true), isDownloading = ref(false);
+const displayedLogs = latestLogs;
+const pendingLogCount = ref(0);
 const filterOptions = [{ label: '全部级别', value: 'all' }, { label: 'DEBUG', value: 'debug' }, { label: 'INFO', value: 'info' }, { label: 'WARNING', value: 'warning' }, { label: 'ERROR', value: 'error' }];
-const latestLogs = computed(() => props.task.logs || []);
-const hasNewLogs = computed(() => latestLogs.value.join('\n') !== displayedLogs.value.join('\n'));
+const newLogCount = computed(() => pendingLogCount.value);
+const hasNewLogs = computed(() => newLogCount.value > 0);
 async function downloadLogs() {
   isDownloading.value = true;
   try {
-    const { data } = await axios.get(logFileUrl, { responseType: 'blob' });
+    const { data } = await axios.get('/api/logs/download', { responseType: 'blob' });
     const url = URL.createObjectURL(data), link = document.createElement('a');
     link.href = url;
-    link.download = 'app.log';
+    link.download = 'app-logs.zip';
     link.click();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   } catch (error) {
@@ -76,16 +81,30 @@ const filteredLogs = computed(() => displayedLogs.value.filter(line => matchesLo
 const logGroups = computed(() => groupLogRecords(displayedLogs.value)
   .map(group => ({ ...group, lines: group.lines.filter(line => matchesLogRecord(line, keyword.value, logFilter.value)) }))
   .filter(group => group.lines.length));
-watch([latestLogs, following], () => { if (following.value) displayedLogs.value = [...latestLogs.value]; }, { immediate: true });
-watch([filteredLogs, activeTab, following], async () => {
-  if (activeTab.value === 'logs' && following.value) {
+watch([receivedCount, generation], ([count, connection], [previous, previousConnection]) => {
+  if (connection !== previousConnection) pendingLogCount.value = 0;
+  else if (!following.value) pendingLogCount.value += Math.max(0, count - previous);
+});
+watch([filteredLogs, activeTab, following, streamPaused], async () => {
+  if (activeTab.value === 'logs' && following.value && !streamPaused.value) {
     await nextTick();
-    if (logRef.value) logRef.value.scrollTop = logRef.value.scrollHeight;
+    if (logRef.value && following.value && !streamPaused.value) logRef.value.scrollTop = logRef.value.scrollHeight;
   }
 }, { immediate: true });
 function handleScroll() {
   const el = logRef.value;
-  if (el && el.scrollHeight - el.scrollTop - el.clientHeight > 32) following.value = false;
+  if (!el) return;
+  following.value = el.scrollHeight - el.scrollTop - el.clientHeight <= 32;
+  if (following.value) pendingLogCount.value = 0;
+}
+function enableFollow() {
+  resume();
+  following.value = true;
+  pendingLogCount.value = 0;
+}
+function toggleStream() {
+  if (streamPaused.value) enableFollow();
+  else pause();
 }
 </script>
 

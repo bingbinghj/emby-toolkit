@@ -26,7 +26,7 @@ test('media save retries a temporary result-read failure without submitting the 
   await editor.getByTestId('media-info-save').click();
 
   await expect(page.getByText(result.message, { exact: true })).toBeVisible();
-  await expect(editor).not.toBeVisible();
+  await expect(editor).toBeVisible();
   expect(api.requests.filter(request => request.method === 'POST' && request.path === savePath)).toHaveLength(1);
   expect(api.requests.filter(request => request.method === 'GET' && request.path === resultPath)).toHaveLength(2);
 });

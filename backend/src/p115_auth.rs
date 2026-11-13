@@ -212,6 +212,7 @@ async fn oauth_status(State(state): State<AppState>) -> Result<Json<Value>> {
     }
     if let Err(error) = save_tokens(&state, &patch).await {
         tracing::error!("115 扫码授权成功，但保存 Token 失败：{}", error.1);
+        return Err(error);
     }
     session.verifier.clear();
     let result = json!({"success":true,"status":"success","message":"授权成功！"});

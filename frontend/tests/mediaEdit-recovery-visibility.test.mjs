@@ -41,6 +41,36 @@ test('page and editor independently show recovery for their actual native item I
   assert.equal(f.title(1), '媒体信息需要恢复');
 });
 
+test('verified episode ancestors show the same pending recovery only on the affected series and season', () => {
+  const record = { ...pending('episode-8', ['61838']), related_item_ids: ['61789', '61788'] };
+  for (const id of ['61838', '61789', '61788']) {
+    const f = fixture([record], id);
+    assert.equal(f.visible(0), true);
+    assert.equal(f.context.pageMediaRecoveryRecords.value[0].id, record.id);
+    assert.deepEqual(Array.from(record.target_ids), ['61838']);
+  }
+  for (const id of ['61839', 'other-season', 'other-series', 'unrelated-movie']) {
+    const f = fixture([record], id);
+    assert.equal(f.visible(0), false);
+    assert.equal(f.visible(1), false);
+    assert.equal(f.context.mediaRecoveryBlocked.value, true);
+  }
+});
+
+test('an affected series page can show recovery while its unrelated selected episode editor hides it', () => {
+  const f = fixture([{ ...pending('episode-8', ['61838']), related_item_ids: ['61788', '61789'] }], '61788', '61839');
+  assert.equal(f.visible(0), true);
+  assert.equal(f.visible(1), false);
+});
+
+test('missing or invalid ancestor evidence never expands a direct target recovery', () => {
+  for (const related_item_ids of [undefined, null, '61788', {}, []]) {
+    const f = fixture([{ ...pending('episode-8', ['61838']), related_item_ids }], '61788', '61838');
+    assert.equal(f.visible(0), false);
+    assert.equal(f.visible(1), true);
+  }
+});
+
 test('switching versions hides unrelated recovery and shows matching recovery without another request', () => {
   const f = fixture([pending('version-102', ['102'])]);
   assert.equal(f.visible(1), false);

@@ -40,25 +40,27 @@ test('MP realtime logs group adjacent bursts and keep original groups when filte
   await page.goto('/dashboard');
   await page.getByRole('button', { name: '实时日志', exact: true }).click();
   await expect(page.locator('.notification-log .log-record')).toHaveCount(3);
-  await expect(page.locator('.notification-log .log-record').first().locator('.log-record-body')).toHaveText(['第一条', '第二条']);
+  await expect(page.locator('.notification-log .log-record').first().locator('.log-record-message')).toHaveText(['第一条', '第二条']);
   await page.locator('.logging-level-toggle').getByRole('button', { name: 'INFO', exact: true }).click();
   await expect(page.locator('.notification-log .log-record')).toHaveCount(2);
   await expect(page.locator('.notification-footer > span')).toContainText('3 条日志');
   await page.getByRole('button', { name: '暂停日志流', exact: true }).click();
   api.setTask({ logs: [...records, make('200', 'INFO', '后续记录')] });
-  await expect(page.getByRole('button', { name: '有新日志 · 回到最新', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '回到最新', exact: true })).toBeVisible();
   await expect(page.getByText('后续记录', { exact: true })).toHaveCount(0);
   await page.getByRole('button', { name: '继续日志流', exact: true }).click();
   await expect(page.getByText('后续记录', { exact: true })).toBeVisible();
 });
 
-test('native live dates, rectangular accents and title actions match the requested log layout', async ({ page, api }) => {
+test('native live dates, single and grouped accents and title actions match the requested log layout', async ({ page, api }) => {
   test.setTimeout(90_000);
   await page.setViewportSize({ width: 1440, height: 1000 });
-  api.setTask({ logs: [
+  const initialLines = [
     '2026-11-11 09:56:24,010 - media::source - INFO - 昨日记录',
     '2026-11-12 09:56:24,020 - media::source - INFO - 今日记录',
-  ] });
+    '2026-11-12 09:56:24,030 - media::source - INFO - 今日同组记录',
+  ];
+  api.setTask({ logs: initialLines });
   await page.goto('/dashboard');
   const launcher = page.getByRole('button', { name: '实时日志', exact: true });
   await expect(launcher.locator('svg path')).toHaveAttribute('d', bellPath);
@@ -66,11 +68,11 @@ test('native live dates, rectangular accents and title actions match the request
   await expect(page.locator('.notification-log .log-record-time')).toHaveText(['2026/11/11 09:56:24', '2026/11/12 09:56:24']);
   const heading = page.locator('.notification-heading');
   const fileUrl = '/api/logs/view?filename=app.log';
-  const wholeFile = '2026-11-10 08:00:00,000 - source - INFO - 文件中的较早记录\n完整当前日志\n';
+  const archive = Buffer.from('UEsDBBQAAAAAAIBqbV2KBZfNNQAAADUAAAAHAAAAYXBwLmxvZ0lORk86IDIwMjYtMTEtMTMgMTM6MTk6MTQsNDc2IHN5bmMucnMgLSDlvZPliY3ml6Xlv5cKUEsDBBQAAAAAAIBqbV0OWbflNgAAADYAAAAJAAAAYXBwLmxvZy4xREVCVUc6IDIwMjYtMTEtMTMgMTM6MTk6MTMsNDc2IHN5bmMucnMgLSDova7ovazml6Xlv5cKUEsBAhQDFAAAAAAAgGptXYoFl801AAAANQAAAAcAAAAAAAAAAAAAAIABAAAAAGFwcC5sb2dQSwECFAMUAAAAAACAam1dDlm35TYAAAA2AAAACQAAAAAAAAAAAAAAgAFaAAAAYXBwLmxvZy4xUEsFBgAAAAACAAIAbAAAALcAAAAAAA==', 'base64');
   let failDownload = true;
-  await page.route('**/api/logs/view?filename=app.log', route => failDownload
+  await page.route('**/api/logs/download', route => failDownload
     ? route.fulfill({ status: 503, contentType: 'text/plain; charset=utf-8', body: '日志读取暂不可用' })
-    : route.fulfill({ contentType: 'text/plain; charset=utf-8', body: wholeFile }));
+    : route.fulfill({ contentType: 'application/zip', body: archive }));
   const exportLogs = heading.getByRole('button', { name: '下载实时日志', exact: true });
   await expect(exportLogs).toBeVisible();
   await expect(exportLogs).toHaveText('下载');
@@ -90,14 +92,20 @@ test('native live dates, rectangular accents and title actions match the request
   const resume = page.getByRole('button', { name: '继续日志流', exact: true });
   const pausedColor = await colorOf(resume);
   expect(pausedColor.background).toBe(pausedColor.primary);
+  api.setTask({ logs: [...initialLines, '2026-11-12 09:56:24,040 - media::source - INFO - 恢复后记录'] });
   await resume.click();
-  for (const accent of await page.locator('.notification-log .log-record-accent').all()) {
+  await expect(page.getByText('恢复后记录', { exact: true })).toBeVisible();
+  await expect(page.locator('.notification-log .log-record-accent')).toHaveCount(2);
+  const accents = await page.locator('.notification-log .log-record-accent').all();
+  expect(accents).toHaveLength(2);
+  for (const [index, accent] of accents.entries()) {
     const size = await accent.evaluate(element => {
       const box = element.getBoundingClientRect();
       return { width: box.width, height: box.height, radius: getComputedStyle(element).borderTopLeftRadius };
     });
-    expect(size.height).toBeGreaterThan(size.width);
-    expect(size.radius).toBe('2px');
+    if (index === 0) expect(size.height).toBe(size.width);
+    else expect(size.height).toBeGreaterThan(size.width);
+    expect(parseFloat(size.radius)).toBeGreaterThanOrEqual(size.width / 2);
   }
   await exportLogs.click();
   await expect(page.getByText('下载日志失败，请重试。', { exact: true })).toBeVisible();
@@ -106,8 +114,8 @@ test('native live dates, rectangular accents and title actions match the request
   const download = page.waitForEvent('download');
   await exportLogs.click();
   const downloaded = await download;
-  expect(downloaded.suggestedFilename()).toBe('app.log');
-  expect(await readFile(await downloaded.path(), 'utf8')).toBe(wholeFile);
+  expect(downloaded.suggestedFilename()).toBe('app-logs.zip');
+  expect(await readFile(await downloaded.path())).toEqual(archive);
 });
 
 test('the new window opens the complete log file with the existing administrator session', async ({ page, api, baseURL }) => {
@@ -160,6 +168,39 @@ test('grouped log timestamps keep their milliseconds and remain readable over a 
   for (const reading of await measureReadingContrast(page, [0, 1].map(index => ({ role: `grouped timestamp ${index}`, locator: timestamps.nth(index) })))) {
     expect(reading.contrast).toBeGreaterThanOrEqual(4.5);
   }
+});
+
+test('scrolling up continues receiving logs while the explicit pause button stays active', async ({ page, api }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  api.setTask({ logs: lines });
+  await page.goto('/dashboard');
+  await page.getByRole('button', { name: '实时日志', exact: true }).click();
+  const viewport = page.locator('.notification-log');
+  await expect(viewport.locator('.log-record-message')).toHaveCount(30);
+  await viewport.evaluate(el => { el.scrollTop = 0; el.dispatchEvent(new Event('scroll')); });
+  await expect(page.getByRole('button', { name: '暂停日志流', exact: true })).toBeVisible();
+  await expect(page.locator('.notification-footer > span')).not.toContainText('已暂停');
+  api.setTask({ logs: [...lines, '[12:31:00] [INFO] 向上查看时仍接收的新日志'] });
+  await expect(viewport.locator('.log-record-message')).toHaveCount(31);
+  const latest = page.getByRole('button', { name: '有新日志 · 回到最新', exact: true });
+  await expect(latest).toContainText('1 条新日志');
+  expect(await viewport.evaluate(el => el.scrollTop)).toBe(0);
+  await latest.click();
+  await expect.poll(() => viewport.evaluate(el => el.scrollHeight - el.clientHeight - el.scrollTop)).toBeLessThanOrEqual(1);
+});
+
+test('failed live reads show a connection alert and recover without losing existing logs', async ({ page, api }) => {
+  api.setTask({ logs: ['[12:30:45] [INFO] 连接失败前的完整记录'] });
+  await page.goto('/dashboard');
+  await page.getByRole('button', { name: '实时日志', exact: true }).click();
+  await expect(page.locator('.notification-log .log-record-message')).toHaveText('连接失败前的完整记录');
+  api.respond('GET', '/api/logs/stream', { error: 'fixture network unavailable' }, 503);
+  await api.failLogStream();
+  await expect(page.locator('.notification-log').getByRole('alert')).toContainText('实时日志连接失败，正在重试');
+  await expect(page.locator('.notification-log .log-record-message')).toHaveText('连接失败前的完整记录');
+  api.respond('GET', '/api/logs/stream', { lines: ['[12:30:45] [INFO] 连接失败前的完整记录', '[12:30:46] [INFO] 连接恢复后的新记录'] });
+  await expect(page.locator('.notification-log').getByRole('alert')).toHaveCount(0);
+  await expect(page.locator('.notification-log .log-record-message')).toHaveCount(2);
 });
 
 for (const preference of [{ theme: 'light', primaryColor: '#FFFFFF' }, { theme: 'dark', primaryColor: '#000000' }]) {

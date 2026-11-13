@@ -114,3 +114,30 @@ async fn history_context_recognizes_current_chinese_task_ids_and_preserves_compl
     assert!(lines[1].as_str().unwrap().contains("保留当前文件及备份"));
     assert!(lines[2].as_str().unwrap().contains("[任务结束]"));
 }
+
+#[tokio::test]
+async fn mixed_mp_and_legacy_history_keeps_dates_and_newest_first_search_contexts() {
+    let text = "2026-11-11 23:59:59,000 - emby_toolkit::jobs - INFO - [任务开始] 旧恢复 · 任务ID：old-101\n2026-11-11 23:59:59,100 - emby_toolkit::media - ERROR - 旧 JSON 恢复材料保留 · 任务ID：old-101\n2026-11-11 23:59:59,200 - emby_toolkit::jobs - INFO - [任务结束] 旧恢复 · 任务ID：old-101\nINFO: 2026-11-12 00:00:00,000 jobs.rs - [任务开始] 新恢复 · 任务ID：new-102\nERROR: 2026-11-12 00:00:00,100 media_reload.rs - 新 JSON 恢复材料保留 · 任务ID：new-102\nINFO: 2026-11-12 00:00:00,200 jobs.rs - [任务结束] 新恢复 · 任务ID：new-102\n";
+    let (status, bytes) = request(text, "/api/logs/search?q=JSON").await;
+    assert_eq!(status, StatusCode::OK);
+    let matches: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(matches.as_array().unwrap().len(), 2);
+    assert_eq!(matches[0]["date"], "2026-11-12 00:00:00");
+    assert!(matches[0]["content"].as_str().unwrap().contains("新 JSON"));
+    assert_eq!(matches[1]["date"], "2026-11-11 23:59:59");
+
+    let (status, bytes) = request(text, "/api/logs/search_context?q=JSON").await;
+    assert_eq!(status, StatusCode::OK);
+    let blocks: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(blocks.as_array().unwrap().len(), 2);
+    assert_eq!(blocks[0]["date"], "2026-11-12 00:00:00");
+    assert_eq!(blocks[0]["lines"].as_array().unwrap().len(), 3);
+    assert!(
+        blocks[0]["lines"][0]
+            .as_str()
+            .unwrap()
+            .starts_with("INFO: ")
+    );
+    assert_eq!(blocks[1]["date"], "2026-11-11 23:59:59");
+    assert_eq!(blocks[1]["lines"].as_array().unwrap().len(), 3);
+}

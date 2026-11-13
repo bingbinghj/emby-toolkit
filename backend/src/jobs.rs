@@ -416,6 +416,9 @@ impl JobManager {
         });
         Ok(id)
     }
+    pub(crate) async fn is_shutting_down(&self) -> bool {
+        self.inner.lock().await.shutting_down
+    }
     pub async fn shutdown(&self) {
         loop {
             let finished = self.finished.notified();

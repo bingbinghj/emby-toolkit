@@ -65,6 +65,22 @@ mod native {
         edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("恢复按钮重试标题");
         f.save(json!({"mediainfo":edited}), false).await;
         let recovery = reload_recovery(&f);
+        let material: Value = serde_json::from_slice(
+            &tokio::fs::read(recovery.join("media-reload.json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        for file in material["files"].as_array().unwrap() {
+            use sha2::Digest;
+            let bytes = tokio::fs::read(file["backup"].as_str().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                file["sha256"],
+                json!(format!("{:x}", sha2::Sha256::digest(&bytes)))
+            );
+        }
         let status = recovery_status(&f.native.state).await;
         assert_eq!(status["pending"], true);
         assert_eq!(status["records"][0]["target_ids"], json!(["61616"]));
@@ -105,6 +121,9 @@ mod native {
             serde_json::from_slice(&tokio::fs::read(&marker).await.unwrap()).unwrap();
         for key in ["targets", "observations", "thumbnail_times"] {
             legacy.as_object_mut().unwrap().remove(key);
+        }
+        for file in legacy["files"].as_array_mut().unwrap() {
+            file.as_object_mut().unwrap().remove("sha256");
         }
         tokio::fs::write(&marker, serde_json::to_vec(&legacy).unwrap())
             .await
@@ -251,6 +270,96 @@ mod native {
         edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("原请求恢复标题");
         f.save(json!({"mediainfo":edited}), false).await;
         f
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; recovery POST and image reads are localhost"]
+    async fn editor_recovery_rejects_changed_standalone_jpeg_backup_when_api_still_serves_original_bif()
+     {
+        let f = failed_json_recovery_fixture().await;
+        let recovery = reload_recovery(&f);
+        let marker = recovery.join("media-reload.json");
+        let record: Value =
+            serde_json::from_slice(&tokio::fs::read(&marker).await.unwrap()).unwrap();
+        let original_native = f.native.host.item.lock().await.clone();
+        let chapter = &original_native["Chapters"][0];
+        let image_path = chapter_image(&f.native.host, &original_native, chapter);
+        let original_jpeg = tokio::fs::read(&image_path).await.unwrap();
+        let original_bif = tokio::fs::read(local_bif(&original_native)).await.unwrap();
+        let file = record["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|file| file["path"] == json!(image_path))
+            .unwrap();
+        let backup = PathBuf::from(file["backup"].as_str().unwrap());
+        assert_eq!(tokio::fs::read(&backup).await.unwrap(), original_jpeg);
+        // Another valid JPEG defeats decode-only backup validation. Do not
+        // touch the separately signed API image baseline or original BIF.
+        let mut changed_jpeg = vec![];
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut changed_jpeg, 90)
+            .encode_image(&image::RgbImage::from_pixel(
+                320,
+                180,
+                image::Rgb([2, 3, 4]),
+            ))
+            .unwrap();
+        assert_ne!(changed_jpeg, original_jpeg);
+        tokio::fs::write(&backup, &changed_jpeg).await.unwrap();
+        tokio::fs::remove_file(&image_path).await.unwrap();
+        *f.proxy.protocol_fault.lock().await = "chapter-images-from-native-bif".into();
+        let config = f.native.state.config.read().await.clone();
+        let api_image = f
+            .native
+            .state
+            .http
+            .get(format!(
+                "{}/Items/61616/Images/Chapter/0",
+                string(&config, "emby_server_url")
+            ))
+            .header("X-Emby-Token", string(&config, "emby_api_key"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert_eq!(api_image.as_ref(), original_jpeg.as_slice());
+        let status = recovery_status(&f.native.state).await;
+        let result = recover_from_editor(
+            &f.native.state,
+            status["records"][0]["id"].as_str().unwrap(),
+        )
+        .await;
+        let restored_jpeg = tokio::fs::read(&image_path).await.ok();
+        let after_bif = tokio::fs::read(local_bif(&original_native)).await.unwrap();
+        let backup_kept = backup.is_file();
+        let pending = recovery_status(&f.native.state).await["pending"].clone();
+        f.close().await;
+        println!(
+            "standalone JPEG backup integrity: {}",
+            json!({
+                "state":result["state"], "pending":pending, "backup_kept":backup_kept,
+                "changed_backup_was_restored":restored_jpeg.as_deref()==Some(changed_jpeg.as_slice()),
+                "original_bif_unchanged":after_bif==original_bif,
+            })
+        );
+        assert_eq!(
+            result["state"], "failed",
+            "modified original resource backups must never be accepted as the original: {result}"
+        );
+        assert!(
+            backup_kept,
+            "failed backup validation must retain recovery materials"
+        );
+        assert_eq!(pending, true);
+        assert!(
+            restored_jpeg.is_none(),
+            "reject changed backup before restoring its bytes"
+        );
+        assert_eq!(after_bif, original_bif);
     }
 
     async fn change_current_recovery_json(f: &ThumbnailFixture, title: &str) -> Vec<u8> {
@@ -1205,6 +1314,82 @@ mod native {
         }
     }
 
+    async fn assert_late_standalone_resource(delete: bool) {
+        let (f, edited) = file_marker_fixture().await;
+        let before = f.native.host.item.lock().await.clone();
+        let original = tokio::fs::read(chapter_image(
+            &f.native.host,
+            &before,
+            &before["Chapters"][0],
+        ))
+        .await
+        .unwrap();
+        let path =
+            item_metadata_directory(&f.native.host, &before).join("chapters/1794194610_0.jpg");
+        tokio::fs::write(&path, &original).await.unwrap();
+        let bif = tokio::fs::read(local_bif(&before)).await.unwrap();
+        *f.proxy.protocol_fault.lock().await = if delete {
+            "file-image-readback-deletes-standalone"
+        } else {
+            "file-image-readback-changes-standalone"
+        }
+        .into();
+        let result = f.save(json!({"mediainfo":edited.clone()}), false).await;
+        let mutated = f.proxy.late_image_mutated.load(Ordering::SeqCst);
+        let current = tokio::fs::read(&path).await.ok();
+        let live = f.native.host.item.lock().await.clone();
+        let after_bif = tokio::fs::read(local_bif(&live)).await.unwrap();
+        let pending = recovery_status(&f.native.state).await["pending"].clone();
+        let kept = if delete {
+            false
+        } else {
+            reload_recovery(&f).is_dir()
+        };
+        let settings_restored = *f.native.host.settings.lock().await == f.proxy.original_settings;
+        f.close_with_legacy(true).await;
+        assert!(
+            mutated,
+            "the independent resource mutation must occur during actual image readback"
+        );
+        assert_eq!(after_bif, bif);
+        assert_eq!(
+            live["MediaStreams"][1]["Title"],
+            edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"]
+        );
+        if delete {
+            assert_eq!(
+                result["result"]["metadata_refresh"]["state"], "verified",
+                "{result}"
+            );
+            assert_eq!(current.as_deref(), Some(original.as_slice()));
+            assert_eq!(pending, false);
+            assert!(settings_restored);
+        } else {
+            let mut changed = original;
+            changed.extend_from_slice(b"fixture late user image");
+            assert_eq!(
+                result["result"]["metadata_refresh"]["state"], "failed",
+                "{result}"
+            );
+            assert_eq!(current.as_deref(), Some(changed.as_slice()));
+            assert_eq!(pending, true);
+            assert!(kept);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn file_marker_save_restores_standalone_jpeg_deleted_during_native_image_readback() {
+        assert_late_standalone_resource(true).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn file_marker_save_keeps_different_standalone_jpeg_created_during_native_image_readback()
+    {
+        assert_late_standalone_resource(false).await;
+    }
+
     #[tokio::test]
     #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
     async fn file_marker_save_rejects_unverified_control_before_any_native_write() {
@@ -1394,7 +1579,10 @@ mod native {
         tokio::fs::write(&backup, tampered).await.unwrap();
         let rejected = recover_from_editor(&f.native.state, id).await;
         assert_eq!(rejected["state"], "failed", "{rejected}");
-        assert!(rejected.to_string().contains("BIF"), "{rejected}");
+        assert_eq!(rejected["result_status"], 409, "{rejected}");
+        let message = rejected["message"].as_str().unwrap();
+        assert!(message.contains("校验值不一致"), "{rejected}");
+        assert!(message.contains(unused.to_str().unwrap()), "{rejected}");
         assert_eq!(tokio::fs::read(&unused).await.unwrap(), empty);
         tokio::fs::write(&backup, &empty).await.unwrap();
         let mut legacy = record.clone();
@@ -1509,6 +1697,7 @@ mod native {
         identity_json_mutation: Arc<Mutex<Option<IdentityJsonMutation>>>,
         identity_json_mutated: Arc<AtomicBool>,
         post_noop_identity_reads: Arc<AtomicUsize>,
+        late_image_mutated: Arc<AtomicBool>,
     }
 
     impl Proxy {
@@ -1609,6 +1798,22 @@ mod native {
                 {
                     if item["Id"] == id {
                         apply_pro_bundle(&self.host, item, &info[0]).await;
+                        if self.protocol_fault.lock().await.as_str()
+                            == "chapter-images-from-native-bif"
+                        {
+                            // Emby can expose original cached/BIF images even
+                            // when the standalone chapter JPEG is missing.
+                            let frames = native_bif_frames(item).unwrap();
+                            for chapter in item["Chapters"].as_array_mut().unwrap() {
+                                if frames.iter().any(|(millis, _)| {
+                                    millis.checked_mul(10_000).is_some_and(|ticks| {
+                                        ticks >= chapter["StartPositionTicks"].as_u64().unwrap()
+                                    })
+                                }) {
+                                    chapter["ImageTag"] = json!("old-thumbnail");
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -1866,13 +2071,37 @@ mod native {
                     return StatusCode::NOT_FOUND.into_response();
                 }
                 proxy.cached_image_reads.fetch_add(1, Ordering::SeqCst);
-                if proxy.file_import_enabled.load(Ordering::SeqCst)
+                let fault = proxy.protocol_fault.lock().await.clone();
+                if fault.starts_with("file-image-readback-")
                     && proxy
                         .file_imports
                         .lock()
                         .await
                         .iter()
                         .any(|(imported, _)| imported == id)
+                    && !proxy.late_image_mutated.swap(true, Ordering::SeqCst)
+                {
+                    // Native Restore can serve the original BIF while its
+                    // earlier independent timestamp JPEG disappears or changes.
+                    let standalone = item_metadata_directory(&proxy.host, &item)
+                        .join("chapters/1794194610_0.jpg");
+                    if fault == "file-image-readback-deletes-standalone" {
+                        tokio::fs::remove_file(standalone).await.unwrap();
+                    } else {
+                        let mut changed = tokio::fs::read(&standalone).await.unwrap();
+                        changed.extend_from_slice(b"fixture late user image");
+                        image::load_from_memory(&changed).unwrap();
+                        tokio::fs::write(standalone, changed).await.unwrap();
+                    }
+                }
+                if proxy.protocol_fault.lock().await.as_str() == "chapter-images-from-native-bif"
+                    || proxy.file_import_enabled.load(Ordering::SeqCst)
+                        && proxy
+                            .file_imports
+                            .lock()
+                            .await
+                            .iter()
+                            .any(|(imported, _)| imported == id)
                 {
                     let ticks = chapter["StartPositionTicks"].as_u64().unwrap();
                     return match native_bif_frames(&item).and_then(|frames| {
@@ -2251,6 +2480,32 @@ mod native {
                             .await
                             .unwrap();
                         }
+                        if fault == "sync-native-hmi-noop-resource-backup-change" {
+                            let path = chapter_image(&proxy.host, &target, &target["Chapters"][0]);
+                            let mut changed = tokio::fs::read(&path).await.unwrap();
+                            changed.extend_from_slice(b"fixture concurrent mutation");
+                            image::load_from_memory(&changed).unwrap();
+                            let marker = std::fs::read_dir(
+                                proxy.host.directory.join("app/backups/media-info-reload"),
+                            )
+                            .unwrap()
+                            .map(|entry| entry.unwrap().path().join("media-reload.json"))
+                            .find(|path| path.is_file())
+                            .unwrap();
+                            let record: Value =
+                                serde_json::from_slice(&tokio::fs::read(marker).await.unwrap())
+                                    .unwrap();
+                            let original = record["files"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .find(|file| file["path"] == json!(path))
+                                .unwrap();
+                            tokio::fs::write(original["backup"].as_str().unwrap(), &changed)
+                                .await
+                                .unwrap();
+                            tokio::fs::write(path, changed).await.unwrap();
+                        }
                         return Json(exported).into_response();
                     }
                     if fault == "sync-native-hmi-noop-then-failed" {
@@ -2541,6 +2796,7 @@ mod native {
                 identity_json_mutation: Arc::default(),
                 identity_json_mutated: Arc::default(),
                 post_noop_identity_reads: Arc::default(),
+                late_image_mutated: Arc::default(),
             };
             let app = Router::new()
                 .fallback(self::proxy)
@@ -2863,6 +3119,54 @@ mod native {
         assert_eq!(
             result["result"]["video_thumbnails"]["extraction"]["verified"], 2,
             "{result}"
+        );
+        f.close().await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn manual_save_returns_normalized_json_for_a_following_default_only_edit() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        let mut draft = f.native.original.clone();
+        let position = draft[0]["MediaSourceInfo"]["MediaStreams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|stream| stream["Type"] == "Subtitle" && stream["Language"] == "chi")
+            .unwrap();
+        draft[0]["MediaSourceInfo"]["MediaStreams"][position]["Title"] = json!("繁体字幕");
+        let first = f.save(json!({"mediainfo":draft}), false).await;
+        assert_eq!(
+            first["result"]["metadata_refresh"]["state"], "verified",
+            "{first}"
+        );
+        let mut saved = first["result"]["saved_mediainfo"].clone();
+        assert!(
+            saved.is_array(),
+            "successful save must return its actual JSON"
+        );
+        assert_eq!(
+            saved[0]["MediaSourceInfo"]["MediaStreams"][position]["Language"],
+            "cht"
+        );
+        let path = f.native.directory.path().join("61616-mediainfo.json");
+        let stored: Value = serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(saved, stored);
+        saved[0]["MediaSourceInfo"]["MediaStreams"][position]["IsDefault"] = json!(false);
+        let second = f.save(json!({"mediainfo":saved}), false).await;
+        assert_eq!(
+            second["result"]["metadata_refresh"]["state"], "verified",
+            "{second}"
+        );
+        let stored: Value = serde_json::from_slice(&tokio::fs::read(path).await.unwrap()).unwrap();
+        assert_eq!(second["result"]["saved_mediainfo"], stored);
+        assert_eq!(
+            stored[0]["MediaSourceInfo"]["MediaStreams"][position]["Language"],
+            "cht"
+        );
+        assert_eq!(
+            stored[0]["MediaSourceInfo"]["MediaStreams"][position]["IsDefault"],
+            false
         );
         f.close().await;
     }
@@ -4005,6 +4309,39 @@ mod native {
         assert_eq!(f.proxy.video_reads.load(Ordering::SeqCst), 0);
         assert_eq!(f.native.host.starts.load(Ordering::SeqCst), 0);
         f.close_with_legacy(true).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+    async fn native_noop_reimport_refuses_changed_original_backup_before_clear() {
+        let f = ThumbnailFixture::with_flag(Some(false)).await;
+        f.native.host.item.lock().await["RunTimeTicks"] =
+            f.native.original[0]["MediaSourceInfo"]["RunTimeTicks"].clone();
+        let before = f.native.host.item.lock().await.clone();
+        let path = chapter_image(&f.native.host, &before, &before["Chapters"][0]);
+        let mut changed = tokio::fs::read(&path).await.unwrap();
+        changed.extend_from_slice(b"fixture concurrent mutation");
+        image::load_from_memory(&changed).unwrap();
+        *f.proxy.protocol_fault.lock().await = "sync-native-hmi-noop-resource-backup-change".into();
+        let mut edited = f.native.original.clone();
+        edited[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("校验原备份后再清理");
+        let outcome = f.save(json!({"mediainfo":edited}), false).await;
+        let clears = f.native.host.clears.load(Ordering::SeqCst);
+        let current = tokio::fs::read(&path).await.ok();
+        let kept = reload_recovery(&f).join("media-reload.json").is_file();
+        let pending = recovery_status(&f.native.state).await["pending"].clone();
+        f.close_with_legacy(true).await;
+        assert_ne!(
+            outcome["result"]["metadata_refresh"]["state"], "verified",
+            "{outcome}"
+        );
+        assert_eq!(
+            clears, 0,
+            "matching changed resource and backup must not bypass the recorded original hash: {outcome}"
+        );
+        assert_eq!(current.as_deref(), Some(changed.as_slice()));
+        assert!(kept);
+        assert_eq!(pending, true);
     }
 
     #[tokio::test]

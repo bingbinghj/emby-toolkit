@@ -107,7 +107,8 @@ test('episode credits completion preserves audio and actor drafts and only adds 
   await expect(audio).toHaveValue('音轨新草稿');
   await expect(page.getByTestId('media-info-save')).toBeEnabled();
   await page.getByTestId('media-info-save').click();
-  await expect(page.getByRole('button', { name: '关闭媒体信息编辑器', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '关闭媒体信息编辑器', exact: true })).toBeVisible();
+  await expect(audio).toHaveValue('音轨新草稿');
   const request = api.requests.find(request => request.method === 'POST' && request.path === '/api/media_info/edit/101');
   expect(request.body.mediainfo[0].Chapters).toEqual([intro, chapter]);
   expect(request.body.mediainfo[0].MediaSourceInfo.MediaStreams.find(stream => stream.Type === 'Audio').Title).toBe('音轨新草稿');

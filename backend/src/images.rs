@@ -193,9 +193,13 @@ pub async fn download_with_overwrite_report(
     }
     let config = state.config.read().await.clone();
     let endpoint = format!("/{}/{id}", if kind == "Movie" { "movie" } else { "tv" });
-    let base = tmdb::get(state, &endpoint, &[("append_to_response", "".into())])
-        .await
-        .unwrap_or_default();
+    context.checkpoint().await?;
+    let query = [("append_to_response", "".into())];
+    let base = tokio::select! {
+        biased;
+        _ = context.cancelled() => { context.checkpoint().await?; unreachable!() },
+        result = tmdb::get(state, &endpoint, &query) => result.unwrap_or_default(),
+    };
     let original = base["original_language"].as_str().unwrap_or("en");
     let mut data = None;
     let mut query_succeeded = false;
@@ -208,25 +212,26 @@ pub async fn download_with_overwrite_report(
             .unwrap_or("zh")
             == "zh",
     ) {
+        context.checkpoint().await?;
         tracing::debug!("图片语言策略查询：《{media_name}》，TMDb {id}，语言 {languages}");
-        match tmdb::get(
-            state,
-            &endpoint,
-            &[
-                (
-                    "append_to_response",
-                    if kind == "Movie" {
-                        "images"
-                    } else {
-                        "images,seasons"
-                    }
-                    .into(),
-                ),
-                ("include_image_language", languages),
-            ],
-        )
-        .await
-        {
+        let query = [
+            (
+                "append_to_response",
+                if kind == "Movie" {
+                    "images"
+                } else {
+                    "images,seasons"
+                }
+                .into(),
+            ),
+            ("include_image_language", languages),
+        ];
+        let response = tokio::select! {
+            biased;
+            _ = context.cancelled() => { context.checkpoint().await?; unreachable!() },
+            result = tmdb::get(state, &endpoint, &query) => result,
+        };
+        match response {
             Ok(response) => {
                 query_succeeded = true;
                 if !list(&response["images"]["posters"]).is_empty() {

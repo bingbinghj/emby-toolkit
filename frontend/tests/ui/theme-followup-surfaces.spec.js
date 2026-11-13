@@ -139,7 +139,7 @@ for (const [index, options] of cases.entries()) {
         await page.getByRole('button', { name: '实时日志', exact: true }).click();
         await settle(page, options);
         const live = page.locator('.notification-log .log-record').first();
-        await expect(live.locator('.log-record-body')).toHaveText(liveBody);
+        await expect(live.locator('.log-record-message')).toHaveText(liveBody);
         await record(page, captureId, 'live-logs', userRendering, [
           { role: 'live log body', locator: live.locator('.log-record-body') },
           { role: 'live log time', locator: live.locator('.log-record-time') },
@@ -148,7 +148,7 @@ for (const [index, options] of cases.entries()) {
         await page.getByRole('tab', { name: '历史日志', exact: true }).click();
         await settle(page, options);
         const history = page.locator('.history-log-list .log-record').first();
-        await expect(history.locator('.log-record-body')).toHaveText(historyBody);
+        await expect(history.locator('.log-record-message')).toHaveText(historyBody);
         await record(page, captureId, 'history-logs', userRendering, [
           { role: 'history log body', locator: history.locator('.log-record-body') },
           { role: 'history log time', locator: history.locator('.log-record-time') },

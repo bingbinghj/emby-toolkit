@@ -126,6 +126,7 @@ test('navigating to another media closes the previous URL prompt', () => {
   f.context.closeMediaInfoEditor = () => {};
   f.context.debouncedSearchActors = { cancel() {} };
   f.context.loadMediaRecovery = () => {};
+  f.context.mediaRecoveryError = { value: '旧媒体恢复错误' };
   f.context.route = { params: { itemId: '101' } };
   let change;
   f.context.watch = (getter, callback) => { change = callback; };
@@ -133,6 +134,7 @@ test('navigating to another media closes the previous URL prompt', () => {
   vm.runInContext(page.slice(start, page.indexOf('\n});', start) + 5), f.context);
   change('200');
   assert.equal(f.context.showUrlPrompt.value, false);
+  assert.equal(f.context.mediaRecoveryError.value, '');
 });
 
 const operations = [

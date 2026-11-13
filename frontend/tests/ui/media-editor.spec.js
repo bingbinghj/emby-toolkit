@@ -94,12 +94,12 @@ test('late actor translation preserves edits made while its request is running',
   await expect(page.getByRole('button', { name: '一键翻译', exact: true })).toBeEnabled();
 });
 
-test('confirmed media save closes the editor after receiving its result', async ({ page }) => {
+test('confirmed media save retains the editor after receiving its result', async ({ page }) => {
   await page.goto('/edit-media/101');
   await expectSaveAtRight(page.getByRole('button', { name: '保存', exact: true }));
   await page.getByTestId('media-info-open').click();
   await expectSaveAtRight(page.getByTestId('media-info-save'));
   await page.getByTestId('media-info-save').click();
-  await expect(page.getByRole('button', { name: '关闭媒体信息编辑器', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '关闭媒体信息编辑器', exact: true })).toBeVisible();
   await expect(page.getByText('媒体信息已更新', { exact: true })).toBeVisible();
 });

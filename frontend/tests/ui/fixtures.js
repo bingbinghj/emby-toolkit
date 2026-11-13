@@ -41,7 +41,8 @@ const tasks = [{ key: 'clear-mediainfo-cache', name: '清理媒体信息缓存',
 export const test = base.extend({
   authState: ['logged_in', { option: true }],
   admin: [true, { option: true }],
-  api: [async ({ page, authState, admin }, use) => {
+  realLogStream: [false, { option: true }],
+  api: [async ({ page, authState, admin, realLogStream }, use) => {
     const goto = page.goto.bind(page);
     page.goto = (url, options = {}) => goto(url, { waitUntil: 'domcontentloaded', ...options });
     const reload = page.reload.bind(page);
@@ -59,6 +60,40 @@ export const test = base.extend({
     respond('POST', '/api/config', request => { Object.assign(storedConfig, request.body); return { message: '配置已保存', saved_fields: request.body }; });
     respond('POST', '/api/config/rename_preview', { movie: '浏览器验证电影 (2026)/浏览器验证电影.mkv', tv: '浏览器验证剧集 (2026)/Season 01/浏览器验证剧集.S01E01.mkv', movie_sample: { id: '101', title: '浏览器验证电影' }, tv_sample: { id: 'episode-102', title: '浏览器验证剧集', season_episode: 'S02E09' }, errors: {} });
     respond('GET', '/api/status', () => currentTask);
+    respond('GET', '/api/logs/stream', () => ({ lines: currentTask.logs || [] }));
+    if (!realLogStream) await page.addInitScript(() => {
+      window.__etkLogStreams = [];
+      window.EventSource = class {
+        constructor(url) {
+          this.url = url; this.closed = false; this.readyState = 0; this.previous = [];
+          window.__etkLogStreams.push(this);
+          setTimeout(() => this.connect(), 0);
+        }
+        async connect() {
+          if (this.closed) return;
+          try {
+            const response = await fetch(this.url);
+            if (!response.ok) throw new Error('fixture stream unavailable');
+            const { lines } = await response.json();
+            if (this.closed) return;
+            this.readyState = 1; this.previous = []; this.onopen?.({}); this.receive(lines);
+          } catch { this.fail(); }
+        }
+        receive(lines) {
+          if (this.closed || this.readyState !== 1) return;
+          let overlap = Math.min(this.previous.length, lines.length);
+          while (overlap && !this.previous.slice(-overlap).every((line, index) => line === lines[index])) overlap--;
+          const incoming = lines.slice(overlap); this.previous = [...lines];
+          for (const line of incoming) this.onmessage?.({ data: line });
+        }
+        fail() {
+          if (this.closed) return;
+          this.readyState = 0; this.onerror?.({});
+          clearTimeout(this.retry); this.retry = setTimeout(() => this.connect(), 3000);
+        }
+        close() { this.closed = true; this.readyState = 2; clearTimeout(this.retry); }
+      };
+    });
     respond('GET', '/api/system/menu_config', () => menu);
     respond('POST', '/api/system/menu_config', request => { menu = clone(request.body); return { message: '导航已保存' }; });
     respond('POST', '/api/system/menu_config/reset', () => { menu = []; return { message: '导航已重置' }; });
@@ -142,6 +177,7 @@ export const test = base.extend({
       try { body = source.postDataJSON(); } catch { body = source.postData(); }
       const request = { method: source.method(), path: url.pathname, query: Object.fromEntries(url.searchParams), body };
       requests.push(request);
+      if (realLogStream && request.path === '/api/logs/stream') { await route.continue(); return; }
       const handler = handlers.get(key(request.method, request.path));
       if (!handler) {
         unexpected.push(`${request.method} ${request.path}`);
@@ -155,7 +191,11 @@ export const test = base.extend({
     const api = {
       respond, requests, unexpected,
       setAuth: status => { auth = status; },
-      setTask: task => { currentTask = clone(task); },
+      setTask: task => {
+        currentTask = clone(task);
+        if (!realLogStream) void page.evaluate(lines => window.__etkLogStreams?.forEach(stream => stream.receive(lines)), currentTask.logs || []).catch(() => {});
+      },
+      failLogStream: () => page.evaluate(() => window.__etkLogStreams?.forEach(stream => stream.fail())),
       defer(method, path) {
         let release, received;
         const started = new Promise(resolve => { received = resolve; });

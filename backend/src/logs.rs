@@ -6,17 +6,19 @@ use axum::{
     Json, Router,
     extract::{Query, State},
     http::{StatusCode, header},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Response, Sse, sse::Event},
     routing::get,
 };
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
     fs::{File, OpenOptions},
-    io::Write,
+    io::{SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Arc, LazyLock, Mutex},
+    time::Duration,
 };
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing_subscriber::{
     fmt::{FmtContext, FormatEvent, FormatFields, MakeWriter, format::Writer},
     registry::LookupSpan,
@@ -139,11 +141,15 @@ where
         } else {
             metadata.level().as_str()
         };
+        let source = metadata
+            .file()
+            .and_then(|file| Path::new(file).file_name())
+            .and_then(|file| file.to_str())
+            .unwrap_or(metadata.target());
         write!(
             writer,
-            "{} - {} - {level} - ",
+            "{level}: {} {source} - ",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S,%3f"),
-            metadata.target()
         )?;
         let body = redact(&fields.body());
         if *metadata.level() <= tracing::Level::INFO
@@ -252,11 +258,24 @@ impl LogStore {
     }
 }
 fn frontend_entry(text: &str) -> Option<String> {
-    let parts: Vec<_> = text.trim_end().splitn(4, " - ").collect();
-    if parts.len() != 4 || !matches!(parts[2], "INFO" | "WARNING" | "ERROR" | "CRITICAL") {
+    if !matches!(
+        log_level(text),
+        Some("INFO" | "WARNING" | "ERROR" | "CRITICAL")
+    ) {
         return None;
     }
     Some(text.trim_end().to_string())
+}
+fn log_level(text: &str) -> Option<&str> {
+    if let Some((level, _)) = text.split_once(':')
+        && matches!(
+            level,
+            "TRACE" | "DEBUG" | "INFO" | "WARNING" | "ERROR" | "CRITICAL"
+        )
+    {
+        return Some(level);
+    }
+    text.split(" - ").nth(2)
 }
 #[derive(Clone)]
 pub struct LogWriter(pub Arc<LogStore>);
@@ -286,7 +305,7 @@ impl Drop for LogGuard {
     fn drop(&mut self) {
         if !self.buffer.is_empty() {
             let redacted = redact(&String::from_utf8_lossy(&self.buffer));
-            if redacted.split(" - ").nth(2) != Some("TRACE")
+            if log_level(&redacted) != Some("TRACE")
                 && self.store.append(redacted.as_bytes()).is_err()
             {
                 let _ = std::io::stderr().write_all(b"ETK: unable to write log file\n");
@@ -302,6 +321,240 @@ pub fn router() -> Router<AppState> {
         .route("/api/logs/view", get(view))
         .route("/api/logs/search", get(search))
         .route("/api/logs/search_context", get(context))
+        .route("/api/logs/stream", get(stream))
+        .route("/api/logs/download", get(download))
+}
+async fn checked_path(root: &Path, name: &str) -> Result<PathBuf> {
+    let path = tokio::fs::canonicalize(root.join(name))
+        .await
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                ApiError(StatusCode::NOT_FOUND, "日志文件未找到".into())
+            } else {
+                error.into()
+            }
+        })?;
+    if !path.starts_with(root) {
+        return Err(ApiError(StatusCode::FORBIDDEN, "日志路径超出范围".into()));
+    }
+    Ok(path)
+}
+
+// Hold the open inode so a rotation cannot discard its unread tail.
+struct LogTail {
+    root: PathBuf,
+    file: tokio::fs::File,
+    offset: u64,
+    anchor: Vec<u8>,
+    pending: Vec<u8>,
+    initial: Option<String>,
+    failed: bool,
+}
+impl LogTail {
+    async fn open(root: PathBuf) -> Result<Self> {
+        let mut file = tokio::fs::File::open(checked_path(&root, "app.log").await?).await?;
+        let length = file.metadata().await?.len();
+        let start = length.saturating_sub(100 * 1024);
+        file.seek(SeekFrom::Start(start)).await?;
+        let mut bytes = Vec::new();
+        (&mut file)
+            .take(length - start)
+            .read_to_end(&mut bytes)
+            .await?;
+        let offset = start + bytes.len() as u64;
+        let complete = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |i| i + 1);
+        let pending = bytes[complete..].to_vec();
+        let first = if start > 0 {
+            bytes[..complete]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(complete, |i| i + 1)
+        } else {
+            0
+        };
+        let lines = bytes[first..complete]
+            .split_inclusive(|byte| *byte == b'\n')
+            .collect::<Vec<_>>();
+        let initial = if lines.is_empty() {
+            None
+        } else {
+            Some(
+                String::from_utf8_lossy(&lines[lines.len().saturating_sub(50)..].concat())
+                    .strip_suffix('\n')
+                    .unwrap_or("")
+                    .to_string(),
+            )
+        };
+        let mut tail = Self {
+            root,
+            file,
+            offset,
+            anchor: Vec::new(),
+            pending,
+            initial,
+            failed: false,
+        };
+        tail.save_anchor().await?;
+        Ok(tail)
+    }
+    async fn read_anchor(&mut self) -> std::io::Result<Vec<u8>> {
+        let start = self.offset.saturating_sub(64);
+        self.file.seek(SeekFrom::Start(start)).await?;
+        let mut bytes = Vec::new();
+        (&mut self.file)
+            .take(self.offset - start)
+            .read_to_end(&mut bytes)
+            .await?;
+        self.file.seek(SeekFrom::Start(self.offset)).await?;
+        Ok(bytes)
+    }
+    async fn save_anchor(&mut self) -> std::io::Result<()> {
+        self.anchor = self.read_anchor().await?;
+        Ok(())
+    }
+    async fn next(&mut self) -> Result<Option<String>> {
+        let metadata = self.file.metadata().await?;
+        if metadata.len() < self.offset || self.read_anchor().await? != self.anchor {
+            self.offset = 0;
+            self.pending.clear();
+            self.file.seek(SeekFrom::Start(0)).await?;
+        }
+        let before = self.pending.len();
+        (&mut self.file)
+            .take(1024 * 1024)
+            .read_to_end(&mut self.pending)
+            .await?;
+        self.offset += (self.pending.len() - before) as u64;
+        self.save_anchor().await?;
+        if let Some(end) = self.pending.iter().rposition(|byte| *byte == b'\n') {
+            let bytes = self.pending.drain(..=end).collect::<Vec<_>>();
+            return Ok(Some(
+                String::from_utf8_lossy(&bytes[..bytes.len() - 1]).to_string(),
+            ));
+        }
+        let path = match checked_path(&self.root, "app.log").await {
+            Ok(path) => path,
+            Err(ApiError(StatusCode::NOT_FOUND, _)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let current = tokio::fs::metadata(&path).await?;
+        if !same_file(&metadata, &current) && self.file.metadata().await?.len() == self.offset {
+            let remainder = std::mem::take(&mut self.pending);
+            self.file = tokio::fs::File::open(path).await?;
+            self.offset = 0;
+            self.anchor.clear();
+            if !remainder.is_empty() {
+                return Ok(Some(String::from_utf8_lossy(&remainder).to_string()));
+            }
+        }
+        Ok(None)
+    }
+}
+fn same_file(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        left.dev() == right.dev() && left.ino() == right.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        left.created().ok() == right.created().ok()
+    }
+}
+async fn stream(State(state): State<AppState>) -> Result<Response> {
+    let jobs = state.jobs.clone();
+    if jobs.is_shutting_down().await {
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "服务正在关闭，不能打开日志流".into(),
+        ));
+    }
+    let root = tokio::fs::canonicalize(state.data_dir.join("logs")).await?;
+    let tail = LogTail::open(root).await?;
+    let events = futures_util::stream::unfold((tail, jobs), |(mut tail, jobs)| async move {
+        if tail.failed || jobs.is_shutting_down().await {
+            return None;
+        }
+        if let Some(text) = tail.initial.take() {
+            return Some((
+                Ok::<_, std::io::Error>(Event::default().data(text)),
+                (tail, jobs),
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if jobs.is_shutting_down().await {
+            return None;
+        }
+        let event = match tail.next().await {
+            Ok(Some(text)) => Ok(Event::default().data(text)),
+            Ok(None) => Ok(Event::default().comment("keepalive")),
+            Err(_) => {
+                tail.failed = true;
+                Err(std::io::Error::other("日志流读取失败"))
+            }
+        };
+        Some((event, (tail, jobs)))
+    });
+    Ok((
+        [
+            (header::CACHE_CONTROL, "no-store"),
+            (header::HeaderName::from_static("x-accel-buffering"), "no"),
+        ],
+        Sse::new(events),
+    )
+        .into_response())
+}
+async fn download(State(state): State<AppState>) -> Result<Response> {
+    let root = tokio::fs::canonicalize(state.data_dir.join("logs")).await?;
+    let primary = checked_path(&root, "app.log").await?;
+    let mut selected = vec![("app.log".to_string(), primary)];
+    let mut backups = Vec::new();
+    for name in files(&state).await? {
+        if name
+            .strip_prefix("app.log.")
+            .is_some_and(|index| index.parse::<u64>().is_ok())
+        {
+            let path = checked_path(&root, &name).await?;
+            let modified = tokio::fs::metadata(&path).await?.modified()?;
+            backups.push((name, path, modified));
+        }
+    }
+    backups.sort_by_key(|entry| std::cmp::Reverse(entry.2));
+    selected.extend(
+        backups
+            .into_iter()
+            .take(9)
+            .map(|(name, path, _)| (name, path)),
+    );
+    let stem = format!("app-logs-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+    let directory = stem.clone();
+    let bytes = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
+        let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for (name, path) in selected {
+            archive.start_file(format!("{directory}/{name}"), options)?;
+            std::io::copy(&mut File::open(path)?, &mut archive)?;
+        }
+        Ok(archive.finish()?.into_inner())
+    })
+    .await
+    .map_err(|_| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "日志归档失败".into()))??;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{stem}.zip\""),
+            ),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
@@ -576,7 +829,11 @@ fn push_task_context(blocks: &mut Vec<Value>, file: &str, lines: Vec<String>, qu
     }
 }
 fn timestamp(line: &str) -> Option<&str> {
-    static TIMESTAMP: LazyLock<regex::Regex> =
-        LazyLock::new(|| regex::Regex::new(r"^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}").unwrap());
-    TIMESTAMP.find(line).map(|matched| matched.as_str())
+    static TIMESTAMP: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"^(?:(?:TRACE|DEBUG|INFO|WARNING|ERROR|CRITICAL):\s*)?(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2})").unwrap()
+    });
+    TIMESTAMP
+        .captures(line)?
+        .get(1)
+        .map(|matched| matched.as_str())
 }

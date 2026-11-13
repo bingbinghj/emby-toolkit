@@ -698,11 +698,19 @@ pub(crate) async fn recover_record(
         if ids.is_empty() || !ids.is_subset(&owners) {
             return Err(conflict("原资源恢复记录缺少有效所属媒体"));
         }
+        let saved = Snapshot {
+            path: path.clone(),
+            backup,
+            owners: ids.clone(),
+            sha256: snapshot_hash(&file)?,
+        };
+        // Validate every recorded original before writing any formal JSON or
+        // resource. Reuse these bytes for the existing BIF/JPEG validation.
+        let bytes = snapshot_bytes(&saved).await?;
         if path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("bif"))
         {
-            let bytes = tokio::fs::read(&backup).await?;
             if file["unused_bif_sha256"].is_null() {
                 let frames = recovery_bif_times(&bytes)?.as_array().unwrap().len();
                 for id in &ids {
@@ -732,8 +740,7 @@ pub(crate) async fn recover_record(
                 )
             })
         {
-            image::load_from_memory(&tokio::fs::read(&backup).await?)
-                .map_err(|_| conflict("原有章节图片恢复备份无效"))?;
+            image::load_from_memory(&bytes).map_err(|_| conflict("原有章节图片恢复备份无效"))?;
             for id in &ids {
                 if record["observations"][id].is_null() {
                     let target = targets.iter().find(|target| target.id == *id).unwrap();
@@ -742,14 +749,7 @@ pub(crate) async fn recover_record(
                 }
             }
         }
-        files.insert(
-            path.clone(),
-            Snapshot {
-                path,
-                backup,
-                owners: ids,
-            },
-        );
+        files.insert(path, saved);
     }
     // A generated bridge is also original recovery evidence, not a fresh
     // snapshot of the currently missing pictures.
@@ -768,7 +768,13 @@ pub(crate) async fn recover_record(
         {
             return Err(conflict("BIF 桥接位置与当前媒体文件不一致"));
         }
-        let bytes = tokio::fs::read(&backup).await?;
+        let saved = Snapshot {
+            path: path.clone(),
+            backup,
+            owners: BTreeSet::from([id.clone()]),
+            sha256: snapshot_hash(&bridge)?,
+        };
+        let bytes = snapshot_bytes(&saved).await?;
         let frames = recovery_bif_times(&bytes)?.as_array().unwrap().len();
         let evidence = native_bifs.entry(id.clone()).or_default();
         if !evidence.iter().any(|original| original.path == path) {
@@ -778,11 +784,7 @@ pub(crate) async fn recover_record(
                 frames,
             });
         }
-        files.entry(path.clone()).or_insert(Snapshot {
-            path,
-            backup,
-            owners: BTreeSet::from([id]),
-        });
+        files.entry(path).or_insert(saved);
     }
     let mut before = BTreeMap::new();
     for target in &targets {
@@ -858,6 +860,7 @@ pub(crate) async fn recover_record(
             &chapter_images,
         )
         .await?;
+        restore_files(&resources, &owners).await?;
         verify_restored_resources(&resources, &owners).await?;
         for target in &targets {
             if let Some((complete, full)) = audio_complete.get(&target.id) {
@@ -1025,6 +1028,32 @@ struct Snapshot {
     path: PathBuf,
     backup: PathBuf,
     owners: BTreeSet<String>,
+    sha256: Option<String>,
+}
+
+fn snapshot_hash(record: &Value) -> Result<Option<String>> {
+    match record.get("sha256") {
+        Some(Value::String(value)) => Ok(Some(value.clone())),
+        None | Some(Value::Null) => Ok(None),
+        _ => Err(conflict("原资源恢复备份校验值无效，已保留全部恢复材料")),
+    }
+}
+
+async fn snapshot_bytes(saved: &Snapshot) -> Result<Vec<u8>> {
+    let bytes = tokio::fs::read(&saved.backup).await?;
+    // Old recovery records did not store hashes; preserve their existing
+    // compatibility checks without inventing an original checksum.
+    if saved
+        .sha256
+        .as_ref()
+        .is_some_and(|expected| expected != &format!("{:x}", Sha256::digest(&bytes)))
+    {
+        return Err(conflict(format!(
+            "原资源恢复备份与原记录校验值不一致，已保留全部恢复材料：{}",
+            saved.path.display()
+        )));
+    }
+    Ok(bytes)
 }
 
 async fn snapshot_file(
@@ -1052,12 +1081,14 @@ async fn snapshot_file(
     let backup = recovery.join(format!("asset-{}", files.len()));
     tokio::fs::copy(&path, &backup).await?;
     tokio::fs::File::open(&backup).await?.sync_all().await?;
+    let sha256 = format!("{:x}", Sha256::digest(tokio::fs::read(&backup).await?));
     files.insert(
         path.clone(),
         Snapshot {
             path,
             backup,
             owners: BTreeSet::from([owner.into()]),
+            sha256: Some(sha256),
         },
     );
     Ok(())
@@ -1169,6 +1200,7 @@ async fn restore_files(files: &BTreeMap<PathBuf, Snapshot>, ids: &BTreeSet<Strin
     {
         let restored = async {
             check_ancestors(&saved.path).await?;
+            let original = snapshot_bytes(saved).await?;
             if tokio::fs::symlink_metadata(&saved.path)
                 .await
                 .is_ok_and(|metadata| metadata.file_type().is_symlink())
@@ -1176,7 +1208,7 @@ async fn restore_files(files: &BTreeMap<PathBuf, Snapshot>, ids: &BTreeSet<Strin
                 return Err(conflict("恢复路径在重载期间变为符号链接，已保留备份"));
             }
             if tokio::fs::try_exists(&saved.path).await? {
-                if tokio::fs::read(&saved.path).await? != tokio::fs::read(&saved.backup).await? {
+                if tokio::fs::read(&saved.path).await? != original {
                     return Err(conflict(format!(
                         "恢复资源在重载期间被修改，保留新文件及备份：{}",
                         saved.path.display()
@@ -1185,7 +1217,7 @@ async fn restore_files(files: &BTreeMap<PathBuf, Snapshot>, ids: &BTreeSet<Strin
                 return Ok(());
             }
             tokio::fs::create_dir_all(saved.path.parent().unwrap()).await?;
-            assets::restore_file(&saved.backup, &saved.path).await?;
+            assets::restore_bytes(&original, &saved.path).await?;
             Ok::<_, ApiError>(())
         }
         .await;
@@ -1209,14 +1241,30 @@ async fn verify_restored_resources(
         .filter(|saved| !saved.owners.is_disjoint(ids))
     {
         check_ancestors(&saved.path).await?;
-        if !tokio::fs::symlink_metadata(&saved.path)
-            .await
-            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
-            || tokio::fs::read(&saved.path).await? != tokio::fs::read(&saved.backup).await?
-        {
+        let original = snapshot_bytes(saved).await?;
+        let metadata = match tokio::fs::symlink_metadata(&saved.path).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(conflict(format!(
+                    "原有图片资源最终验收时文件缺失，保留恢复备份：{}",
+                    saved.path.display()
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
             return Err(conflict(format!(
-                "原有图片资源最终验收未一致，保留当前文件及备份：{}",
+                "原有图片资源最终验收不是普通文件，保留当前路径及备份：{}",
+                saved.path.display()
+            )));
+        }
+        let current = tokio::fs::read(&saved.path).await?;
+        if current != original {
+            return Err(conflict(format!(
+                "原有图片资源最终验收字节未一致，保留当前文件及备份：{}（原 SHA256：{:x}；当前 SHA256：{:x}）",
                 saved.path.display(),
+                Sha256::digest(&original),
+                Sha256::digest(&current),
             )));
         }
     }
@@ -1346,8 +1394,10 @@ async fn json_unchanged(
     }
     let current = tokio::fs::read(path).await?;
     let original_path = tokio::fs::canonicalize(path).await?;
-    let original = files.get(&original_path);
-    let original = tokio::fs::read(original.map(|f| f.backup.as_path()).unwrap_or(backup)).await?;
+    let original = match files.get(&original_path) {
+        Some(saved) => snapshot_bytes(saved).await?,
+        None => tokio::fs::read(backup).await?,
+    };
     if path
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
@@ -2496,7 +2546,7 @@ pub(crate) async fn reload(
     }
     for saved in files.values() {
         writable_parent(&saved.path).await?;
-        if tokio::fs::read(&saved.path).await? != tokio::fs::read(&saved.backup).await? {
+        if tokio::fs::read(&saved.path).await? != snapshot_bytes(saved).await? {
             return Err(conflict("目标恢复资源在准备期间变化，未提交媒体信息同步"));
         }
     }
@@ -2508,10 +2558,11 @@ pub(crate) async fn reload(
         "observations":observations,
         "thumbnail_times":thumbnails,
         "chapter_images":chapter_images,
-        "files":files.values().map(|f|json!({"path":f.path,"backup":f.backup,"owner_ids":f.owners,"unused_bif_sha256":unused_bifs.get(&f.path)})).collect::<Vec<_>>(),
+        "files":files.values().map(|f|json!({"path":f.path,"backup":f.backup,"owner_ids":f.owners,"sha256":f.sha256,"unused_bif_sha256":unused_bifs.get(&f.path)})).collect::<Vec<_>>(),
         "json":json_files.iter().map(|(id,path,backup)|json!({"item_id":id,"path":path,"backup":backup})).collect::<Vec<_>>(),
         "audio_complete":audio_json.iter().map(|(id,path,import,complete)|json!({"item_id":id,"path":path,"import":import,"complete":complete})).collect::<Vec<_>>(),
-        "bridges":bridges.iter().map(|(id,b)|json!({"item_id":id,"source":b.source,"destination":b.destination})).collect::<Vec<_>>()
+        "bridges":bridges.iter().map(|(id,b)|json!({"item_id":id,"source":b.source,"destination":b.destination,
+            "sha256":format!("{:x}", Sha256::digest(&native_bifs[id].last().unwrap().bytes))})).collect::<Vec<_>>()
     })).unwrap()).await?;
     tokio::fs::File::open(&marker).await?.sync_all().await?;
     tokio::fs::File::open(recovery).await?.sync_all().await?;
@@ -2655,7 +2706,7 @@ pub(crate) async fn reload(
                             writable_parent(&resource.path).await?;
                             if !tokio::fs::symlink_metadata(&resource.path).await?.is_file()
                                 || tokio::fs::read(&resource.path).await?
-                                    != tokio::fs::read(&resource.backup).await?
+                                    != snapshot_bytes(resource).await?
                             {
                                 return Err(conflict(
                                     "恢复资源在重导入准备期间变化，未清理媒体信息",
@@ -2754,6 +2805,9 @@ pub(crate) async fn reload(
                 &native_bifs,
                 &chapter_images,
             ).await?;
+            // Native BIF restore may remove standalone images before its
+            // chapters converge. Restore missing originals after that readback.
+            restore_files(&resource_files, &synchronized).await?;
             verify_restored_resources(&resource_files, &synchronized).await
         }.await;
         let verified_ok = verified.is_ok();

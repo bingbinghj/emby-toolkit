@@ -26,7 +26,7 @@ function fixture({ get = async () => ({ data: { pending: false, records: [] } })
     isCheckingMediaRecovery: { value: false }, isRecoveringMediaInfo: { value: false },
     isConfirmingMediaRecovery: { value: false }, isSavingMediaInfo: { value: false },
     mediaRecoveryLoadSequence: 0, mediaRecoverySession: 0, mediaRecoveryDialog: null,
-    currentEditMediaId: { value: '101' }, mediaInfoLoadSequence: 1,
+    itemId: { value: '101' }, currentEditMediaId: { value: '101' }, mediaInfoLoadSequence: 1,
     mediaInfoData: { value: draft }, mediaInfoLoadedSnapshot: JSON.stringify(draft),
     mediaInfoSaveFeedback: { value: null }, showMediaInfoEditor: { value: true },
     mediaOperationFeedback: { value: null },
@@ -38,7 +38,7 @@ function fixture({ get = async () => ({ data: { pending: false, records: [] } })
     message: Object.fromEntries(['success', 'warning', 'error'].map(type => [type, text => messages.push({ type, text })])),
     dialog: { warning: options => { dialogs.push(options); return { destroy() { options.onClose?.(); } }; } },
   });
-  vm.runInContext(['mediaOperationDetails', 'loadMediaRecovery', 'recoveryConflictValue', 'recoveryJsonConflictHashes', 'recoverMediaInfo', 'confirmMediaRecovery'].map(functionSource).join('\n') + '\nthis.load = loadMediaRecovery; this.recover = recoverMediaInfo; this.confirm = confirmMediaRecovery;', context);
+  vm.runInContext(['mediaOperationDetails', 'mediaRecoveryRecordsFor', 'loadMediaRecovery', 'recoveryConflictValue', 'recoveryJsonConflictHashes', 'recoverMediaInfo', 'confirmMediaRecovery'].map(functionSource).join('\n') + '\nthis.load = loadMediaRecovery; this.recover = recoverMediaInfo; this.confirm = confirmMediaRecovery;', context);
   return { context, requests, messages, reloads, dialogs };
 }
 
@@ -81,6 +81,27 @@ test('successful task unlocks saving only after status confirms no pending recor
   assert.equal(f.context.mediaRecoveryState.value.pending, false);
   assert.deepEqual(f.reloads, ['101']);
   assert.equal(f.messages.at(-1).type, 'success');
+});
+
+test('an unrelated pending record does not replace the current verified recovery with a global warning', async () => {
+  const unrelated = { ...record, id: 'other-media', target_ids: ['102'] };
+  const f = fixture({ get: async () => ({ data: { pending: true, records: [unrelated] } }),
+    post: async () => ({ data: { ...result, pending: true } }) });
+  await f.context.recover(record);
+  assert.equal(f.context.mediaRecoveryState.value.pending, true);
+  assert.deepEqual(f.reloads, ['101']);
+  assert.equal(f.messages.some(message => /仍有其他待恢复/.test(message.text)), false);
+});
+
+test('another affected episode still warns its series page after the current episode recovery', async () => {
+  const remaining = { ...record, id: 'other-episode', target_ids: ['102'], related_item_ids: ['series'] };
+  const f = fixture({ get: async () => ({ data: { pending: true, records: [remaining] } }),
+    post: async () => ({ data: { ...result, pending: true } }) });
+  f.context.itemId.value = 'series';
+  await f.context.recover(record);
+  assert.equal(f.context.mediaRecoveryState.value.pending, true);
+  assert.deepEqual(f.reloads, []);
+  assert.equal(f.messages.some(message => /仍有其他待恢复/.test(message.text)), true);
 });
 
 test('other pending records retain the restriction after one record is restored', async () => {

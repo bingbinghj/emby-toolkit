@@ -357,6 +357,7 @@ async fn final_resource_verification_refuses_changed_file_without_overwriting_it
             path: path.clone(),
             backup: backup.clone(),
             owners: owners.clone(),
+            sha256: Some(format!("{:x}", Sha256::digest(b"original image"))),
         },
     )]);
     verify_restored_resources(&files, &owners).await.unwrap();

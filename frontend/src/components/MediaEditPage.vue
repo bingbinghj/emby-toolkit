@@ -244,7 +244,7 @@
           <VAlert v-if="mediaInfoSaveFeedback" :type="mediaInfoSaveFeedback.type" :title="mediaInfoSaveFeedback.message" variant="tonal" class="mb-4">
             <div class="media-info-feedback"><div v-for="(detail, index) in mediaInfoSaveFeedback.details" :key="index">{{ detail }}</div></div>
           </VAlert>
-          <p class="text-body-2 text-medium-emphasis mb-4">保存后会回读验收媒体信息；未通过时保留编辑器并显示具体原因。</p>
+          <p class="text-body-2 text-medium-emphasis mb-4">保存期间可在顶栏查看进度；完成后保留当前编辑器和已保存内容。未通过验收时会显示具体原因。</p>
           <div v-if="mediaInfoVersionOptions.length === 1 && mediaInfoSingleVersionFileName" class="mb-4"><label class="text-caption text-medium-emphasis">媒体文件</label><div class="media-info-single-file-name" :title="mediaInfoSingleVersionFileName">{{ mediaInfoSingleVersionFileName }}</div></div>
           <div v-if="mediaInfoVersionOptions.length > 1" class="media-info-version-toolbar mb-4">
             <div class="media-info-version-controls">
@@ -617,7 +617,8 @@ const mediaInfoSaveFeedback = ref(null);
 const mediaRecoveryState = ref({ pending: false, records: [] });
 const mediaRecoveryRecordsFor = (mediaId) => {
   const id = String(mediaId || '').trim();
-  return id ? mediaRecoveryState.value.records.filter(record => record.target_ids?.some(target => String(target) === id)) : [];
+  return id ? mediaRecoveryState.value.records.filter(record => [record.target_ids, record.related_item_ids]
+    .some(targets => Array.isArray(targets) && targets.some(target => String(target) === id))) : [];
 };
 const pageMediaRecoveryRecords = computed(() => mediaRecoveryRecordsFor(itemId.value));
 const editorMediaRecoveryRecords = computed(() => mediaRecoveryRecordsFor(currentEditMediaId.value));
@@ -775,7 +776,7 @@ const recoverMediaInfo = async (record, currentJsonHashes = null) => {
     }
     if (Number(data.warnings) > 0 && !warnings.length) warnings.push(data.message || `恢复已验收，备份收尾尚未完成：${record.directory}`);
     if (warnings.length) mediaOperationFeedback.value = { type: 'warning', message: '恢复已通过验收，仍有收尾提醒', details: warnings };
-    if (mediaRecoveryState.value.pending) {
+    if (mediaRecoveryRecordsFor(itemId.value).length || mediaRecoveryRecordsFor(currentEditMediaId.value).length) {
       message.warning('本条记录已恢复，仍有其他待恢复记录，请继续处理');
       if (warnings.length && sequence === mediaInfoLoadSequence) mediaInfoSaveFeedback.value = mediaOperationFeedback.value;
       return;
@@ -835,6 +836,7 @@ const confirmMediaRecovery = (record) => {
 
 // ★ 新增：剧集分集选择相关状态
 const showEpisodeSelector = ref(false);
+let episodeSelectorLoadSequence = 0;
 const isFetchingEpisodes = ref(false);
 const episodesList = ref([]);
 const selectedEpisodeIds = ref([]);
@@ -1291,20 +1293,27 @@ const subtitleLanguageOptions = ref([]);
 // ★ 新增：点击编辑按钮的分流逻辑
 const handleMediaInfoButtonClick = async () => {
   if (['Series', 'Season'].includes(itemDetails.value.item_type)) {
+    const sequence = ++episodeSelectorLoadSequence;
+    const pageSequence = mediaDetailsLoadSequence;
+    const targetId = String(itemId.value || '');
+    const isCurrentRequest = () => sequence === episodeSelectorLoadSequence
+      && pageSequence === mediaDetailsLoadSequence && targetId === String(itemId.value || '');
     // 如果是剧集或季，先拉取分集列表并打开选择框
     showEpisodeSelector.value = true;
     isFetchingEpisodes.value = true;
     clearSelectedEpisodes();
     try {
-      const res = await axios.get(`/api/media_info/series/${itemId.value}/episodes`);
+      const res = await axios.get(`/api/media_info/series/${targetId}/episodes`);
+      if (!isCurrentRequest() || !showEpisodeSelector.value) return;
       episodesList.value = res.data;
       selectedSeasonNumber.value = episodeSeasonGroups.value[0]?.season_number ?? null;
       selectedBatchVersionIndex.value = null;
     } catch (e) {
+      if (!isCurrentRequest() || !showEpisodeSelector.value) return;
       message.error(e.response?.data?.error || "获取分集列表失败");
       showEpisodeSelector.value = false;
     } finally {
-      isFetchingEpisodes.value = false;
+      if (isCurrentRequest()) isFetchingEpisodes.value = false;
     }
   } else {
     // 如果是电影，直接打开编辑器
@@ -1728,8 +1737,45 @@ const saveMediaInfo = async () => {
       details.push(`Emby 刷新尚未通过验收${metadata.failed_ids?.length ? `（${metadata.failed_ids.join('、')}）` : ''}`);
     }
     if (Number(thumbnails.failed) > 0) details.push(thumbnails.reason || thumbnails.message || '视频缩略图处理未完成');
-    if (draftSnapshot !== JSON.stringify(mediaInfoData.value)) details.push('保存期间草稿已修改，已保留新草稿，请确认后重新保存');
+    const draftUnchanged = draftSnapshot === JSON.stringify(mediaInfoData.value);
+    if (!draftUnchanged) details.push('保存期间草稿已修改，已保留新草稿，请确认后重新保存');
     if (Number(res.data.warnings) > 0 && !details.length) details.push(res.data.message || '部分处理未完成，请检查任务结果');
+    const sourceVerified = res.data.media_info_saved === true
+      && Array.isArray(res.data.saved_item_ids) && res.data.saved_item_ids.map(String).includes(targetId)
+      && ['verified', 'completed'].includes(metadata.state)
+      && Array.isArray(metadata.verified_ids) && metadata.verified_ids.map(String).includes(targetId)
+      && !(metadata.failed_ids || []).map(String).includes(targetId)
+      && ![...(res.data.failures || []), ...(metadata.failures || [])].some(failure => !failure?.item_id || String(failure.item_id) === targetId)
+      && !skippedReports.some(report => String(report.item_id) === targetId);
+    const savedInfo = res.data.saved_mediainfo;
+    const currentInfo = Array.isArray(mediaInfoData.value) ? mediaInfoData.value : [mediaInfoData.value];
+    const streamsFor = entry => (entry?.MediaSourceInfo || entry)?.MediaStreams;
+    const canonicalMatches = Array.isArray(savedInfo) && savedInfo.length === currentInfo.length
+      && savedInfo.every((entry, index) => {
+        const updated = streamsFor(entry), current = streamsFor(currentInfo[index]);
+        return Array.isArray(updated) && Array.isArray(current) && updated.length === current.length
+          && updated.every((stream, position) => stream && typeof stream === 'object' && !Array.isArray(stream)
+            && current[position] && stream.Type === current[position].Type && stream.Index === current[position].Index);
+      });
+    if (sourceVerified && savedInfo != null && !canonicalMatches) details.push('保存结果与当前轨道不一致，已保留当前草稿，请重新读取媒体信息');
+    if (sourceVerified && draftUnchanged && canonicalMatches) {
+      const selections = { ...mediaInfoLanguageSelections.value };
+      savedInfo.forEach((entry, index) => {
+        const updated = streamsFor(entry), current = streamsFor(currentInfo[index]);
+        updated.forEach((savedStream, position) => {
+          const stream = current[position], languageChanged = stream.Language !== savedStream.Language;
+          for (const field of Object.keys(stream)) if (!Object.hasOwn(savedStream, field)) delete stream[field];
+          Object.assign(stream, savedStream);
+          updated[position] = stream;
+          if (languageChanged && ['Audio', 'Subtitle'].includes(stream.Type)) {
+            ensureMediaInfoLanguageOption(stream);
+            selections[getMediaInfoStreamSelectionKey(stream)] = resolveInitialMediaInfoLanguageSelection(stream);
+          }
+        });
+      });
+      mediaInfoData.value = savedInfo;
+      mediaInfoLanguageSelections.value = selections;
+    }
     if (details.length) {
       mediaInfoSaveFeedback.value = {
         type: 'warning', message: '保存有提醒，请检查处理结果', details: mediaOperationDetails(details),
@@ -1738,7 +1784,13 @@ const saveMediaInfo = async () => {
       loadMediaRecovery();
     } else {
       message.success(res.data.message || "媒体信息已更新！");
-      closeMediaInfoEditor();
+    }
+    if (draftUnchanged && (!details.length || sourceVerified) && (savedInfo == null || !sourceVerified || canonicalMatches)) {
+      mediaInfoLoadedSnapshot = JSON.stringify(mediaInfoData.value);
+      const snapshots = createMediaStreamSnapshots(mediaStreams.value);
+      mediaInfoStreamSnapshotMap = new WeakMap(mediaStreams.value.map((stream, index) => [stream, snapshots[index]]));
+      deletedMediaStreamSnapshots.value = [];
+      mediaInfoLanguageUndoStack.length = 0;
     }
   } catch (e) {
     if (!isCurrentEditor()) return;
@@ -1855,12 +1907,20 @@ const clearHardcodedSubtitle = () => {
 const showTmdbSelector = ref(false);
 const isFetchingTmdbImages = ref(false);
 const tmdbImagesCache = ref(null); // 缓存拉取到的所有图片
+let tmdbImagesLoadSequence = 0;
 const currentTmdbImages = ref([]); // 当前展示的图片列表
 const currentTmdbImageLabel = ref('');
 const currentTmdbImageAspect = ref('2/3');
 
 // 打开 TMDb 选图框
 const openTmdbSelector = async (type, tmdbKey) => {
+  const sequence = ++tmdbImagesLoadSequence;
+  const pageSequence = mediaDetailsLoadSequence;
+  const targetId = String(itemId.value || '');
+  const ownsRequest = () => sequence === tmdbImagesLoadSequence
+    && pageSequence === mediaDetailsLoadSequence && targetId === String(itemId.value || '')
+    && type === currentEditImageType.value;
+  const isCurrentSelector = () => ownsRequest() && showTmdbSelector.value;
   currentEditImageType.value = type;
 
   // 设置 UI 标题和比例
@@ -1869,24 +1929,27 @@ const openTmdbSelector = async (type, tmdbKey) => {
   currentTmdbImageAspect.value = imgConfig.aspect;
 
   showTmdbSelector.value = true;
+  isFetchingTmdbImages.value = false;
 
   // 如果还没拉取过，去后端拉取
   if (!tmdbImagesCache.value) {
     isFetchingTmdbImages.value = true;
     try {
-      const res = await axios.get(`/api/tmdb_images/${itemId.value}`);
+      const res = await axios.get(`/api/tmdb_images/${targetId}`);
+      if (!isCurrentSelector()) return;
       tmdbImagesCache.value = res.data;
     } catch (error) {
+      if (!isCurrentSelector()) return;
       message.error("获取 TMDb 图片失败");
       showTmdbSelector.value = false;
-      isFetchingTmdbImages.value = false;
       return;
+    } finally {
+      if (ownsRequest()) isFetchingTmdbImages.value = false;
     }
-    isFetchingTmdbImages.value = false;
   }
 
   // 根据类型展示对应的图片列表
-  currentTmdbImages.value = tmdbImagesCache.value[tmdbKey] || [];
+  if (isCurrentSelector()) currentTmdbImages.value = tmdbImagesCache.value[tmdbKey] || [];
 };
 
 // 选中 TMDb 图片并提交
@@ -2117,6 +2180,7 @@ watch(() => route.params.itemId, (value) => {
   imagePreview.value = null;
   tmdbImagesCache.value = null;
   mediaOperationFeedback.value = null;
+  mediaRecoveryError.value = '';
   creditsExtractionFeedback.value = null;
   debouncedSearchActors.cancel();
   itemId.value = targetId;

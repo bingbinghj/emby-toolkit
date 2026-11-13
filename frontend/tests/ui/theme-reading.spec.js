@@ -39,7 +39,7 @@ for (const [appearance, quality] of [['clear', 'css'], ['tinted', 'css'], ['fros
       else await expect.poll(async () => {
         await stepCaptureFrame(page);
         await stepCaptureFrame(page);
-        return page.locator('html').getAttribute('data-glass-renderer-state');
+        return (await page.locator('html').getAttribute('data-glass-renderer-state')) ?? '';
       }, { timeout: 180000 }).toMatch(/ready|fallback/);
       const rendering = await page.evaluate(() => ({ state: document.documentElement.dataset.glassRendererState ?? 'css',
         contexts: window.__readingGlassContexts, dynamics: document.documentElement.dataset.glassDynamicsMode,

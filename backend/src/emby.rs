@@ -103,10 +103,10 @@ async fn send_with_retries(
     retries: u32,
 ) -> std::result::Result<Response, reqwest::Error> {
     static REQUESTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(10);
-    let permit = REQUESTS.acquire().await.expect("Emby 请求槽位不会关闭");
     let retryable = request.try_clone();
     let mut next = request;
     for attempt in 0..=retries {
+        let permit = REQUESTS.acquire().await.expect("Emby 请求槽位不会关闭");
         let response = next.send().await;
         let retry = match &response {
             Ok(response) => {
@@ -136,6 +136,7 @@ async fn send_with_retries(
             });
         tracing::warn!("Emby 请求暂时失败，准备重试 {}/{}。", attempt + 1, retries);
         drop(response);
+        drop(permit);
         tokio::time::sleep(delay).await;
         next = retryable
             .as_ref()

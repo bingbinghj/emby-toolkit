@@ -3,6 +3,9 @@ use super::*;
 #[path = "webhook_metadata_control_tests.rs"]
 mod metadata_control;
 
+#[path = "webhook_retry_cleanup_tests.rs"]
+mod retry_cleanup;
+
 struct Fixture {
     admin: sqlx::PgPool,
     schema: String,

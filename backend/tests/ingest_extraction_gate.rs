@@ -1408,29 +1408,50 @@ async fn recursive_ingest_refresh_protects_old_episode_outside_the_selected_inge
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
 async fn disabled_title_ingest_refuses_empty_live_chapters_with_nonempty_formal_backup_before_refresh()
  {
-    let fixture = Fixture::new(&["complete"], false, false).await;
-    fixture.configure_series_chain().await;
-    fixture.state.save_config(&json!({"auto_extract_credits_on_ingest":false,"auto_extract_video_thumbnails_on_ingest":false})).await.unwrap();
-    fixture.host.items.lock().await.get_mut("101").unwrap()["Chapters"] = json!([]);
-    let sidecar = std::path::Path::new(fixture.files[0].as_str().unwrap())
-        .with_file_name("101-mediainfo.json");
-    let original_json = std::fs::read(&sidecar).unwrap();
-    let parsed: Value = serde_json::from_slice(&original_json).unwrap();
-    assert_eq!(parsed[0]["Chapters"].as_array().unwrap().len(), 2);
-    let job = fixture.run_series(false).await;
-    let refreshes = fixture.host.refresh_attempts.lock().await.clone();
-    let starts = fixture.host.native_starts.lock().await.clone();
-    assert_eq!(
-        job["state"], "failed",
-        "empty native chapters cannot certify that the backup may be discarded: {job}"
-    );
-    assert!(
-        refreshes.is_empty(),
-        "must refuse before a recursive refresh can overwrite the formal backup: {refreshes:?}"
-    );
-    assert!(starts.is_empty());
-    assert_eq!(std::fs::read(sidecar).unwrap(), original_json);
-    fixture.close().await;
+    for custom_root in [false, true] {
+        let fixture = Fixture::new(&["complete"], false, false).await;
+        fixture.configure_series_chain().await;
+        fixture.state.save_config(&json!({"auto_extract_intro_fingerprint_on_ingest":false,"auto_extract_credits_on_ingest":false,"auto_extract_video_thumbnails_on_ingest":false})).await.unwrap();
+        fixture.host.items.lock().await.get_mut("101").unwrap()["Chapters"] = json!([]);
+        let mut sidecar = std::path::Path::new(fixture.files[0].as_str().unwrap())
+            .with_file_name("101-mediainfo.json");
+        let original_json = std::fs::read(&sidecar).unwrap();
+        let parsed: Value = serde_json::from_slice(&original_json).unwrap();
+        assert_eq!(parsed[0]["Chapters"].as_array().unwrap().len(), 2);
+        if custom_root {
+            let root = fixture._directory.path().join("custom-json-root");
+            let native_parent = std::path::Path::new(fixture.files[0].as_str().unwrap())
+                .parent()
+                .unwrap();
+            // PRO makes the native absolute containing directory relative to its
+            // filesystem root before joining MediaInfoJsonRootFolder.
+            let formal = root
+                .join(native_parent.strip_prefix("/").unwrap())
+                .join("101-mediainfo.json");
+            std::fs::create_dir_all(formal.parent().unwrap()).unwrap();
+            std::fs::rename(&sidecar, &formal).unwrap();
+            assert!(
+                !sidecar.exists(),
+                "default candidates must contain no chapter backup"
+            );
+            fixture.host.configuration.lock().await["MediaInfoJsonRootFolder"] = json!(root);
+            sidecar = formal;
+        }
+        let job = fixture.run_series(false).await;
+        let refreshes = fixture.host.refresh_attempts.lock().await.clone();
+        let starts = fixture.host.native_starts.lock().await.clone();
+        assert_eq!(
+            job["state"], "failed",
+            "custom_root={custom_root}: empty native chapters cannot certify that the backup may be discarded: {job}"
+        );
+        assert!(
+            refreshes.is_empty(),
+            "must refuse before a recursive refresh can overwrite the formal backup: {refreshes:?}"
+        );
+        assert!(starts.is_empty());
+        assert_eq!(std::fs::read(sidecar).unwrap(), original_json);
+        fixture.close().await;
+    }
 }
 
 #[tokio::test]

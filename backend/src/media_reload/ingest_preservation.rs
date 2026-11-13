@@ -135,7 +135,7 @@ impl Guard {
                 .await?;
         }
         for saved in self.files.values() {
-            if tokio::fs::read(&saved.path).await? != tokio::fs::read(&saved.backup).await? {
+            if tokio::fs::read(&saved.path).await? != snapshot_bytes(saved).await? {
                 return Err(conflict("原资源在入库刷新准备期间变化，备份已保留"));
             }
         }
@@ -178,7 +178,7 @@ impl Guard {
         {
             check_ancestors(&saved.path).await?;
             if !tokio::fs::symlink_metadata(&saved.path).await?.is_file()
-                || tokio::fs::read(&saved.path).await? != tokio::fs::read(&saved.backup).await?
+                || tokio::fs::read(&saved.path).await? != snapshot_bytes(saved).await?
             {
                 return Err(conflict(
                     "入库刷新后原章节图片或 BIF 文件发生变化，全部恢复材料已保留",
@@ -217,6 +217,7 @@ pub(crate) async fn capture(
     let mut json_files = vec![];
     let mut unused_bifs = BTreeMap::new();
     let mut inventory = None;
+    let mut json_settings = None;
     for member in members {
         context.checkpoint().await?;
         let id = string(&member, "Id");
@@ -256,14 +257,23 @@ pub(crate) async fn capture(
             // formal chapter backup, including when title filling is disabled.
             let config = state.config.read().await.clone();
             let source = crate::media_paths::strm_target(&target.path).await;
-            for path in crate::media_paths::info_candidates(
+            let mut candidates = crate::media_paths::info_candidates(
                 &target.path,
                 &string(&config, "local_strm_root"),
                 &string(&config, "cd2_media_root"),
                 "",
             )
-            .await
-            {
+            .await;
+            // This is a read-only preparation phase: read the native JSON
+            // location once, including PRO's custom absolute-root mapping.
+            if json_settings.is_none() {
+                json_settings = Some(crate::strm::config(state).await?);
+            }
+            let formal = json_path(&target, json_settings.as_ref().unwrap())?;
+            if !candidates.contains(&formal) {
+                candidates.push(formal);
+            }
+            for path in candidates {
                 if let Ok(bytes) = tokio::fs::read(path).await
                     && let Ok(info) = serde_json::from_slice::<Value>(&bytes)
                     && media_info::recoverable(&info)
@@ -365,7 +375,7 @@ pub(crate) async fn capture(
         let record = json!({"target_ids":guard.targets.iter().map(|target| &target.id).collect::<Vec<_>>(),
             "targets":guard.targets.iter().map(|target|json!({"id":target.id,"path":target.path,"source":target.source,"sha":target.sha,"asset":target.asset})).collect::<Vec<_>>(),
             "observations":guard.observations,"chapter_images":guard.images,"json":json_files,
-            "files":guard.files.values().map(|saved|json!({"path":saved.path,"backup":saved.backup,"owner_ids":saved.owners,"unused_bif_sha256":unused_bifs.get(&saved.path)})).collect::<Vec<_>>()});
+            "files":guard.files.values().map(|saved|json!({"path":saved.path,"backup":saved.backup,"owner_ids":saved.owners,"sha256":saved.sha256,"unused_bif_sha256":unused_bifs.get(&saved.path)})).collect::<Vec<_>>()});
         let stage = material.join("media-reload.json");
         write_recovery_file(&stage, &serde_json::to_vec(&record).unwrap()).await?;
         guard.record = Some(stage);

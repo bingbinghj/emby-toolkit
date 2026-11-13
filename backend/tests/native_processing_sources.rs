@@ -135,6 +135,14 @@ async fn audio_scan_processes_each_legacy_native_version_without_modifying_files
     };
     let mock = Router::new()
         .route(
+            "/web/ConfigurationPages",
+            get(|| async { Json(json!([{"Name":"MediaInfoExtractPageView","Href":"/UI/View?PageId=fixture:MediaInfoExtractPageView"}])) }),
+        )
+        .route(
+            "/UI/View",
+            get(|| async { Json(json!({"EditObjectContainer":{"Object":{"ExclusiveControlFeatures":"","MediaInfoJsonRootFolder":""}}})) }),
+        )
+        .route(
             "/emby/Users/admin/Views",
             get(|| async { Json(json!({"Items":[{"Id":"library"}]})) }),
         )

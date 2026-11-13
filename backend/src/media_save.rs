@@ -1217,10 +1217,14 @@ async fn save_inner(
             Some("verified") => "媒体信息 JSON 已保存，Emby 媒体流、标题和章节已通过回读验收",
             _ => "媒体信息 JSON 已保存，Emby 刷新或回读尚未确认，请查看提醒",
         };
+        let saved_mediainfo = restore
+            .get(id)
+            .filter(|_| saved.iter().any(|saved_id| saved_id == id))
+            .map(|item| &item.info);
         return Ok((
             if failures.is_empty() { 200 } else { 207 },
             json!({
-                "message":message,"saved_item_ids":saved,"media_info_saved":true,
+                "message":message,"saved_item_ids":saved,"media_info_saved":true,"saved_mediainfo":saved_mediainfo,
                 "failures":failures,"batch_reports":reports,"warnings":warnings,"warning_details":warning_details,
                 "metadata_refresh":metadata_refresh,
                 "video_thumbnails":video_thumbnails
@@ -1494,7 +1498,7 @@ async fn save_inner(
     );
     Ok((
         if failures.is_empty() { 200 } else { 207 },
-        json!({"message":format!("媒体信息已更新，已恢复 {} 个版本 JSON，Emby 媒体流、标题和章节已通过回读验收",restore.len()),"failures":failures,"batch_reports":reports,"warnings":skipped_tracks,"warning_details":[],"metadata_refresh":{"state":"not_requested","requested_ids":[],"failed_ids":[]},"video_thumbnails":{"state":"not_requested"}}),
+        json!({"message":format!("媒体信息已更新，已恢复 {} 个版本 JSON，Emby 媒体流、标题和章节已通过回读验收",restore.len()),"saved_mediainfo":restore.get(id).map(|item| &item.info),"failures":failures,"batch_reports":reports,"warnings":skipped_tracks,"warning_details":[],"metadata_refresh":{"state":"not_requested","requested_ids":[],"failed_ids":[]},"video_thumbnails":{"state":"not_requested"}}),
     ))
 }
 

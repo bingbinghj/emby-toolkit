@@ -45,6 +45,7 @@ bollard = "0.21.1"
 ttf-parser = "0.25"
 tar = "0.4"
 notify = "8"
+zip = { version = "6", default-features = false, features = ["deflate-flate2"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

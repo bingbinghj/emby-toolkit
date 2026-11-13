@@ -1,11 +1,12 @@
 export function parseLogRecord(value) {
   const raw = String(value ?? '');
+  const mp = raw.match(/^(TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|CRITICAL):\s*((?:\d{4}-\d{2}-\d{2}\s)?\d{2}:\d{2}:\d{2}(?:[,\.]\d+)?)\s+([^\s]+)\s+-\s+([\s\S]*)$/);
   const full = raw.match(/^(\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}(?:[,\.]\d+)?)\s-\s(.+?)\s-\s(TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|CRITICAL)\s-\s([\s\S]*)$/);
   const live = raw.match(/^\[(\d{2}:\d{2}:\d{2})\]\s\[(TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|CRITICAL)\]\s([\s\S]*)$/);
-  const timestamp = full?.[1] || live?.[1] || '';
-  const level = (full?.[3] || live?.[2] || 'PLAIN').replace(/^WARN$/, 'WARNING');
-  const message = full?.[4] ?? live?.[3] ?? raw;
-  return { raw, timestamp, level, module: full?.[2] || '', message };
+  const timestamp = mp?.[2] || full?.[1] || live?.[1] || '';
+  const level = (mp?.[1] || full?.[3] || live?.[2] || 'PLAIN').replace(/^WARN$/, 'WARNING');
+  const message = mp?.[4] ?? full?.[4] ?? live?.[3] ?? raw;
+  return { raw, timestamp, level, module: mp?.[3] || full?.[2] || '', message };
 }
 
 export function matchesLogRecord(value, keyword = '', level = 'all') {

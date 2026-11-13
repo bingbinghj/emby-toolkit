@@ -386,7 +386,7 @@ fn display_title(cleaned: &str, hits: &[(usize, usize, Value)], label: &str) -> 
         .join(" ")
 }
 
-fn short_dubbing_title(cleaned: &str, mappings: &Value) -> Option<&'static str> {
+fn short_dubbing_title(cleaned: &str, mappings: &Value, language: &str) -> Option<&'static str> {
     let source = cleaned
         .split_once('（')
         .filter(|(label, _)| lookup(label, mappings).is_some())
@@ -398,8 +398,79 @@ fn short_dubbing_title(cleaned: &str, mappings: &Value) -> Option<&'static str> 
         "福建文艺" => Some("福建文艺国语"),
         "dvd粤" => Some("DVD粤语"),
         "tvb粤" => Some("TVB粤语"),
+        "日" if lookup(language, mappings).is_some_and(|entry| code(&entry) == "jpn") => {
+            Some("日语")
+        }
         _ => None,
     }
+}
+
+pub(crate) fn audio_language_identity(language: &str) -> Option<String> {
+    let raw = token(language);
+    match raw.as_str() {
+        "zh-cn" | "zh-hans" => return Some("chs".into()),
+        "zh-tw" | "zh-hant" => return Some("cht".into()),
+        _ => {}
+    }
+    if raw.contains('-') {
+        return Some(raw);
+    }
+    let raw = raw.as_str();
+    match raw {
+        "" | "und" | "xx" => return None,
+        "no" => return Some("nor".into()),
+        "tl" => return Some("tgl".into()),
+        "ho" => return Some("hmo".into()),
+        "sc" => return Some("srd".into()),
+        "sh" => return Some("hbs".into()),
+        _ => {}
+    }
+    let bibliographic = [
+        "alb", "arm", "baq", "bur", "chi", "cze", "dut", "fre", "geo", "ger", "gre", "ice", "mac",
+        "mao", "may", "per", "rum", "slo", "tib", "wel", "zho",
+    ]
+    .contains(&raw);
+    if raw.len() == 3 && !bibliographic {
+        return Some(raw.into());
+    }
+    let entry = ISO.get(raw)?;
+    if !bibliographic
+        && (raw.len() != 2
+            || !entry["aliases"]
+                .as_array()?
+                .iter()
+                .take(2)
+                .any(|alias| alias == raw))
+    {
+        return None;
+    }
+    Some(code(entry))
+}
+
+pub(crate) fn audio_title_identity(language: &str, title: &str) -> Option<(String, String)> {
+    let mappings = Value::Null;
+    let mut cleaned = title.trim().to_string();
+    while TECHNICAL_PREFIX.is_match(&cleaned) {
+        cleaned = TECHNICAL_PREFIX.replace(&cleaned, "").trim().to_string();
+    }
+    let title = short_dubbing_title(&cleaned, &mappings, language).unwrap_or(&cleaned);
+    let (title, role) = match title.to_ascii_lowercase().as_str() {
+        "dvd粤语" => ("DVD粤语".into(), "yue".into()),
+        "tvb粤语" => ("TVB粤语".into(), "yue".into()),
+        "台配国语" | "东和兴国语" | "福建文艺国语" => (title.into(), "chi".into()),
+        _ => {
+            let entry = lookup(title, &mappings)?;
+            let role = code(&entry);
+            if matches!(role.as_str(), "und" | "xx" | "zxx" | "mis" | "mul") {
+                return None;
+            }
+            (title_for("Audio", &entry), role)
+        }
+    };
+    let raw = audio_language_identity(language).unwrap_or_else(|| token(language));
+    let legacy_cantonese = matches!(title.as_str(), "DVD粤语" | "TVB粤语")
+        && matches!(token(language).as_str(), "chi" | "zho" | "zh" | "ace");
+    (raw == role || legacy_cantonese).then_some((title, role))
 }
 
 fn mandarin_source(cleaned: &str) -> Option<String> {
@@ -508,7 +579,7 @@ pub fn fill(info: &Value, mappings: &Value, skip_chinese: bool) -> (Value, Value
             cleaned = TECHNICAL_PREFIX.replace(&cleaned, "").trim().to_string();
         }
         if kind == "Audio"
-            && let Some(title) = short_dubbing_title(&cleaned, mappings)
+            && let Some(title) = short_dubbing_title(&cleaned, mappings, &raw)
         {
             cleaned = title.into();
         }
