@@ -244,3 +244,120 @@ async fn native_start_accepted_without_current_complete_logs_is_not_verified() {
     assert_eq!(starts, 1, "a log failure must not replay the start");
     assert_eq!(result["state"], "failed", "{result}");
 }
+
+async fn cancelled_thumbnail_retry_after(stops_native: bool) -> Value {
+    let native = Arc::new(RwLock::new(
+        json!({"Id":"extract","Key":"VideoThumbnailExtractTask","State":"Idle","LastExecutionResult":{"StartTimeUtc":"old","Status":"Completed"}}),
+    ));
+    let tasks = native.clone();
+    let writes = native.clone();
+    let cleanup = native.clone();
+    let stops = Arc::new(AtomicUsize::new(0));
+    let stopped = stops.clone();
+    let (submitted, mut started) = tokio::sync::mpsc::unbounded_channel();
+    let app = Router::new()
+        .route("/ScheduledTasks", get(move || {
+            let tasks = tasks.clone();
+            async move { Json(json!([tasks.read().await.clone()])) }
+        }))
+        .route("/System/Logs/embyserver.txt/Lines", get(|| async {
+            Json(json!({"Items":["2026-11-12 00:00:00.000 Info App: previous native execution"]}))
+        }))
+        .route("/ScheduledTasks/Running/extract", post(move || {
+            let writes = writes.clone();
+            let submitted = submitted.clone();
+            async move {
+                writes.write().await["State"] = json!("Running");
+                submitted.send(()).unwrap();
+                StatusCode::NO_CONTENT
+            }
+        }).delete(move || {
+            let cleanup = cleanup.clone();
+            stopped.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if stops_native {
+                    cleanup.write().await["State"] = json!("Idle");
+                }
+                (StatusCode::SERVICE_UNAVAILABLE, [("Retry-After", "3600")])
+            }
+        }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let directory = tempfile::tempdir().unwrap();
+    let state = state(directory.path(), &base);
+    let work = state.clone();
+    let id = state
+        .jobs
+        .submit("缩略图停止预算验收", move |context| async move {
+            let mut trace = ExtractionLog::default();
+            run_with_trace(
+                &work,
+                Duration::from_millis(150),
+                5,
+                50,
+                None,
+                &context,
+                &mut trace,
+            )
+            .await?;
+            Ok(json!({"message":"已结束"}))
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), started.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    state.jobs.control(Some(&id), "stop").await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let result = state.jobs.result(&id).await.unwrap();
+            if result["is_running"] == false {
+                break result;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    server.abort();
+    let result = result.expect("Retry-After must not extend the native stop deadline");
+    assert_eq!(
+        stops.load(Ordering::SeqCst),
+        1,
+        "stop submission must not be replayed"
+    );
+    assert_eq!(result["state"], "cancelled", "{result}");
+    result
+}
+
+#[tokio::test]
+async fn native_stop_lost_response_is_verified_without_retry_after_wait() {
+    let result = cancelled_thumbnail_retry_after(true).await;
+    assert!(
+        !result["message"]
+            .as_str()
+            .unwrap()
+            .contains("未确认神医缩略图任务结束"),
+        "{result}"
+    );
+}
+
+#[tokio::test]
+async fn native_stop_retry_after_cannot_exceed_deadline_or_claim_idle() {
+    let result = cancelled_thumbnail_retry_after(false).await;
+    assert!(
+        result["message"]
+            .as_str()
+            .unwrap()
+            .contains("未确认神医缩略图任务结束"),
+        "{result}"
+    );
+    assert!(
+        result["message"]
+            .as_str()
+            .unwrap()
+            .contains("保留兼容编码器和文件"),
+        "{result}"
+    );
+}

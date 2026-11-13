@@ -935,9 +935,16 @@ mod native {
             item["MediaStreams"] = info[0]["MediaSourceInfo"]["MediaStreams"].clone();
             item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
         }
+        clear_audio_fixture_chapter_history(&f, &mut info).await;
         info[0]["MediaSourceInfo"]["MediaStreams"][0]["Title"] = json!("恢复音乐轨道");
         *f.proxy.protocol_fault.lock().await = "sync-failed".into();
-        f.save(json!({"mediainfo":info.clone()}), false).await;
+        let failed = f.save(json!({"mediainfo":info.clone()}), false).await;
+        assert_eq!(
+            failed["result"]["metadata_refresh"]["state"], "failed",
+            "{failed}"
+        );
+        assert_eq!(failed["result"]["media_info_saved"], true, "{failed}");
+        assert_eq!(f.proxy.sync_bodies.lock().await.len(), 1, "{failed}");
         let recovery = reload_recovery(&f);
         assert!(recovery.join("complete-audio-61616.json").is_file());
         *f.proxy.protocol_fault.lock().await = String::new();
@@ -2946,10 +2953,26 @@ mod native {
         assert_audio_cover_preserved(false).await;
     }
 
+    async fn clear_audio_fixture_chapter_history(f: &ThumbnailFixture, info: &mut Value) {
+        info[0]["Chapters"] = json!([]);
+        let item = f.native.host.item.lock().await;
+        assert_eq!(item["Type"], "Audio");
+        assert_eq!(item["Chapters"], json!([]));
+        let path = info_path(&item);
+        drop(item);
+        let mut original: Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        original[0]["Chapters"] = json!([]);
+        tokio::fs::write(path, serde_json::to_vec(&original).unwrap())
+            .await
+            .unwrap();
+    }
+
     async fn assert_audio_cover_preserved(has_primary: bool) {
         use base64::Engine;
         let f = ThumbnailFixture::with_flag(Some(false)).await;
         let mut info = f.native.original.clone();
+        info[0]["Chapters"] = json!([]);
         info[0]["MediaSourceInfo"]["MediaStreams"]
             .as_array_mut()
             .unwrap()
@@ -2988,8 +3011,29 @@ mod native {
         let cover = item_metadata_directory(&f.native.host, &before).join("primary.jpg");
         if has_primary {
             tokio::fs::write(&cover, &new_bytes).await.unwrap();
+            let mismatch = f.save(json!({"mediainfo":info.clone()}), false).await;
+            println!(
+                "audio fixture chapter conflict: {}",
+                json!({
+                    "state":mismatch["state"],"result_status":mismatch["result_status"],
+                    "message":emby_toolkit::logs::redact(mismatch["message"].as_str().unwrap_or("")),
+                })
+            );
+            assert_eq!(mismatch["result_status"], 409, "{mismatch}");
+            assert!(
+                mismatch["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("备份仍有章节"),
+                "{mismatch}"
+            );
         }
+        clear_audio_fixture_chapter_history(&f, &mut info).await;
         let result = f.save(json!({"mediainfo":info.clone()}), false).await;
+        assert_eq!(
+            result["result"]["metadata_refresh"]["state"], "verified",
+            "{result}"
+        );
         let live = f.native.host.item.lock().await.clone();
         let actual_cover = std::fs::read(&cover).ok();
         let imported = f.proxy.sync_inputs.lock().await[0].1.clone();
@@ -5258,12 +5302,14 @@ mod native {
                 item["MediaStreams"] = info[0]["MediaSourceInfo"]["MediaStreams"].clone();
                 item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
             }
+            clear_audio_fixture_chapter_history(&f, &mut info).await;
             let before = f.native.host.item.lock().await.clone();
             info[0]["MediaSourceInfo"]["MediaStreams"][0]["Title"] = json!("新音轨标题");
             if !acknowledged {
                 *f.proxy.protocol_fault.lock().await = "sync-no-content".into();
             }
             let result = f.save(json!({"mediainfo":info.clone()}), false).await;
+            assert_eq!(result["result_status"], 200, "{result}");
             let live = f.native.host.item.lock().await.clone();
             let saved: Value =
                 serde_json::from_slice(&tokio::fs::read(info_path(&live)).await.unwrap()).unwrap();

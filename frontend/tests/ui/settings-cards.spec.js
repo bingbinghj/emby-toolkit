@@ -14,13 +14,13 @@ async function openStorage(page) {
 }
 
 const allFields = {
-  system: ['delay_between_items_sec', 'media_info_retry_interval', 'media_info_retry_attempts', 'max_actors_to_process', 'max_episode_actors_to_process', 'extract_thumb', 'actor_role_add_prefix', 'remove_actors_without_avatars', 'keyword_to_tags', 'studio_to_chinese', 'emby_server_url', 'emby_api_key', 'emby_webhook_secret', 'emby_webhook_ingest_enabled', 'emby_user_id', 'emby_admin_user', 'emby_admin_pass', 'emby_api_timeout', 'ai_provider', 'ai_api_key', 'ai_model_name', 'ai_base_url', 'ai_request_timeout', 'ai_max_retries', 'ai_translation_batch_size', 'ai_translation_mode', 'log_rotation_size_mb', 'log_rotation_backup_count'],
+  system: ['delay_between_items_sec', 'media_info_retry_interval', 'media_info_retry_attempts', 'media_edit_skip_track_differences_on_select_all', 'max_actors_to_process', 'max_episode_actors_to_process', 'extract_thumb', 'actor_role_add_prefix', 'remove_actors_without_avatars', 'keyword_to_tags', 'studio_to_chinese', 'emby_server_url', 'emby_api_key', 'emby_webhook_secret', 'emby_webhook_ingest_enabled', 'emby_user_id', 'emby_admin_user', 'emby_admin_pass', 'emby_api_timeout', 'ai_provider', 'ai_api_key', 'ai_model_name', 'ai_base_url', 'ai_request_timeout', 'ai_max_retries', 'ai_translation_batch_size', 'ai_translation_mode', 'log_rotation_size_mb', 'log_rotation_backup_count'],
   directory: ['p115_auth_method', 'p115_app_id', 'p115_api_priority', 'p115_request_interval', 'emby_metadata_path', 'local_strm_root', 'cd2_media_root', 'p115_fingerprint_media_root_path', 'p115_generate_mediainfo', 'p115_enable_sync_delete', 'monitor_sha1_pc_search'],
   rule: ['monitor_enabled', 'monitor_paths', 'monitor_exclude_dirs', 'monitor_exclude_refresh_delay', 'monitor_extensions', 'tmdb_image_language_preference', 'auto_repair_truehd_core_on_ingest', 'auto_fill_language_titles_on_ingest', 'auto_extract_intro_fingerprint_on_ingest', 'auto_extract_credits_on_ingest', 'auto_extract_video_thumbnails_on_ingest', 'extract_video_thumbnails_after_save', 'movie_rename_format', 'tv_rename_format'],
   search: ['tmdb_api_key', 'tmdb_api_base_url', 'douban_enable_online_api', 'api_douban_default_cooldown_seconds', 'douban_cookie'],
 };
 
-test('all 58 active settings fields are reachable through the four MP settings tabs', async ({ page, api }) => {
+test('all 59 active settings fields are reachable through the four MP settings tabs', async ({ page, api }) => {
   test.setTimeout(60_000);
   const configuration = JSON.parse(readFileSync(new URL('./config.json', import.meta.url)));
   configuration.ai_provider = 'openai';
@@ -52,7 +52,7 @@ test('all 58 active settings fields are reachable through the four MP settings t
       reached.push(field);
     }
   }
-  expect(new Set(reached).size).toBe(58);
+  expect(new Set(reached).size).toBe(59);
   expect(api.requests.filter(request => request.method === 'POST' && request.path === '/api/config')).toEqual([]);
 });
 

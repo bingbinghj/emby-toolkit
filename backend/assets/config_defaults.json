@@ -60,6 +60,7 @@
   "studio_to_chinese": false,
   "media_info_retry_interval": 15,
   "media_info_retry_attempts": 3,
+  "media_edit_skip_track_differences_on_select_all": false,
   "auto_repair_truehd_core_on_ingest": false,
   "auto_fill_language_titles_on_ingest": false,
   "auto_extract_intro_fingerprint_on_ingest": false,

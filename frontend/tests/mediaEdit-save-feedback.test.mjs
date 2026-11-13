@@ -78,7 +78,20 @@ test('skipped tracks keep their detailed episode warning', async () => {
   assert.equal(f.context.showMediaInfoEditor.value, true);
   assert.match(f.context.episodesList.value[0].track_difference, /轨道范围不唯一/);
   assert.match(f.context.mediaInfoSaveFeedback.value.details[0], /101.*轨道范围不唯一/);
+  assert.equal(f.context.episodesList.value[0].track_status, undefined);
 });
+
+for (const status of ['normal', 'unavailable', 'inconsistent']) {
+  test(`an ambiguous skipped patch preserves the episode's actual track classification: ${status}`, async () => {
+    const f = fixture(async () => ({ data: { batch_reports: [{ item_id: '101', skipped: [
+      { type: 'Audio', ordinal: 2, reason: '轨道范围不唯一' },
+    ] }] } }));
+    f.context.episodesList.value[0].track_status = status;
+    await f.context.save();
+    assert.equal(f.context.episodesList.value[0].track_status, status);
+    assert.match(f.context.episodesList.value[0].track_difference, /轨道范围不唯一/);
+  });
+}
 
 test('duplicate upstream failures have no empty identifier or repeated save prefix', async () => {
   const f = await save({

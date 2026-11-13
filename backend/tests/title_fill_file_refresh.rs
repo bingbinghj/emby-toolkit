@@ -102,6 +102,31 @@ fn chapter_bif(ticks: u64) -> Vec<u8> {
     bytes.extend(jpeg);
     bytes
 }
+fn bif_chapter_image(bytes: &[u8], ticks: u64) -> Option<Vec<u8>> {
+    let word = |offset| {
+        bytes
+            .get(offset..offset + 4)
+            .and_then(|value| <[u8; 4]>::try_from(value).ok())
+            .map(u32::from_le_bytes)
+    };
+    if bytes.get(..8) != Some(&b"\x89BIF\r\n\x1a\n"[..]) {
+        return None;
+    }
+    let scale = u64::from_le_bytes(bytes.get(16..24)?.try_into().ok()?);
+    let count = usize::try_from(word(12)?).ok()?;
+    if scale == 0 || count > 100_000 {
+        return None;
+    }
+    for frame in 0..count {
+        if u64::from(word(64 + frame * 8)?).checked_mul(scale)? != ticks.div_ceil(10_000) {
+            continue;
+        }
+        let start = usize::try_from(word(68 + frame * 8)?).ok()?;
+        let end = usize::try_from(word(76 + frame * 8)?).ok()?;
+        return bytes.get(start..end).map(<[u8]>::to_vec);
+    }
+    None
+}
 fn bif_thumbnails(path: &Path) -> Vec<Value> {
     let Some(bytes) = std::fs::read(path).ok() else {
         return vec![];
@@ -253,11 +278,72 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
             return Json(json!([{"Id":"63c322b7-a371-41a3-b11f-04f8418b37d8","Name":"Strm Assistant PRO","Version":"3.0.0.57"}])).into_response();
         }
         if path == "/swagger.json" {
-            return Json(
+            let mut swagger =
                 serde_json::from_str::<Value>(include_str!("fixtures/pro_sync_contract.json"))
-                    .unwrap(),
-            )
+                    .unwrap();
+            swagger["paths"]["/Items/{Id}/Refresh"] = json!({"post":{"parameters":[
+                {"name":"Id","in":"path","type":"string"},
+                {"name":"MetadataRefreshMode","in":"query","type":"string"},
+                {"name":"ImageRefreshMode","in":"query","type":"string"},
+                {"name":"ReplaceAllMetadata","in":"query","type":"boolean"},
+                {"name":"ReplaceAllImages","in":"query","type":"boolean"}
+            ]}});
+            return Json(swagger).into_response();
+        }
+        if path == "/Users/user" {
+            return Json(json!({"Id":"user","Policy":{"IsAdministrator":true,
+                "MaxParentalRating":null,"BlockUnratedItems":[],"BlockedTags":[],
+                "IsTagBlockingModeInclusive":false,"AllowTagOrRating":false}}))
             .into_response();
+        }
+        if let Some(id) = path
+            .strip_prefix("/Videos/")
+            .and_then(|path| path.strip_suffix("/AdditionalParts"))
+        {
+            return if h.items.lock().await.contains_key(id) {
+                Json(json!({"Items":[],"TotalRecordCount":0})).into_response()
+            } else {
+                StatusCode::NOT_FOUND.into_response()
+            };
+        }
+        if let Some(id) = path
+            .strip_prefix("/Videos/")
+            .and_then(|path| path.strip_suffix("/index.bif"))
+        {
+            return match std::fs::read(h.root.join(format!("{id}-320-10.bif"))) {
+                Ok(bytes) if h.items.lock().await.contains_key(id) => bytes.into_response(),
+                _ => StatusCode::NOT_FOUND.into_response(),
+            };
+        }
+        if let Some((id, index)) = path
+            .strip_prefix("/Items/")
+            .and_then(|path| path.split_once("/Images/Chapter/"))
+        {
+            let Some(index) = index.parse::<u64>().ok() else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            let items = h.items.lock().await;
+            let chapter = items
+                .get(id)
+                .and_then(|item| item["Chapters"].as_array())
+                .and_then(|chapters| {
+                    chapters.iter().enumerate().find_map(|(ordinal, chapter)| {
+                        (chapter["ChapterIndex"].as_u64().unwrap_or(ordinal as u64) == index
+                            && chapter["ImageTag"]
+                                .as_str()
+                                .is_some_and(|tag| !tag.is_empty()))
+                        .then_some(chapter)
+                    })
+                });
+            let ticks = chapter.and_then(|chapter| chapter["StartPositionTicks"].as_u64());
+            return match ticks.and_then(|ticks| {
+                std::fs::read(h.root.join(format!("{id}-320-10.bif")))
+                    .ok()
+                    .and_then(|bytes| bif_chapter_image(&bytes, ticks))
+            }) {
+                Some(bytes) => ([("Content-Type", "image/jpeg")], bytes).into_response(),
+                None => StatusCode::NOT_FOUND.into_response(),
+            };
         }
         if path.starts_with("/Users/user/Items/") && path.ends_with("/SpecialFeatures") {
             return Json(json!([])).into_response();
@@ -387,6 +473,11 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
                                 ids.split(',').any(|id| native_item_id_matches(item, id))
                             })
                             || query.get("Path").is_some_and(|p| item["Path"] == *p)
+                    })
+                    .filter(|item| {
+                        query.get("IncludeItemTypes").is_none_or(|types| {
+                            types.split(',').any(|kind| item["Type"] == kind.trim())
+                        })
                     })
                     .cloned()
                     .map(api_item)

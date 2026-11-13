@@ -466,6 +466,14 @@ async fn config_save(
     if value.as_object().is_none_or(|object| object.is_empty()) {
         return Err(ApiError::bad("请求体中未包含配置数据"));
     }
+    if value
+        .get("media_edit_skip_track_differences_on_select_all")
+        .is_some_and(|enabled| !enabled.is_boolean())
+    {
+        return Err(ApiError::bad(
+            "编辑全选跳过缺轨或额外轨媒体的开关必须是布尔值",
+        ));
+    }
     if value.get("emby_user_id").is_some() {
         let user = string(&value, "emby_user_id").trim().to_string();
         if user.is_empty() {

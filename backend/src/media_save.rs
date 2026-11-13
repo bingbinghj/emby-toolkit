@@ -1075,28 +1075,25 @@ async fn save_inner(
     }
     if file_refresh {
         let context = context.ok_or_else(|| ApiError::bad("保存任务上下文缺失"))?;
+        let mut file_targets = vec![];
         for (id, item) in &restore {
             crate::media_reload::ensure_single_bundle(&item.info)?;
-            crate::media_reload::preflight_file_import(
-                state,
-                &SavedTarget {
-                    id: id.clone(),
-                    path: item.path.clone(),
-                    source: item.source.clone(),
-                    sha: item.target.sha.clone(),
-                    asset: (!item.target.kind.is_empty()).then(|| item.target.asset.clone()),
-                    info: item.info.clone(),
-                    refresh_required: true,
-                },
-                context,
-            )
-            .await?;
+            file_targets.push(SavedTarget {
+                id: id.clone(),
+                path: item.path.clone(),
+                source: item.source.clone(),
+                sha: item.target.sha.clone(),
+                asset: (!item.target.kind.is_empty()).then(|| item.target.asset.clone()),
+                info: item.info.clone(),
+                refresh_required: true,
+            });
             if let Ok(bytes) = tokio::fs::read(&item.final_path).await
                 && let Ok(original) = serde_json::from_slice::<Value>(&bytes)
             {
                 crate::media_reload::ensure_single_bundle(&original)?;
             }
         }
+        crate::media_reload::preflight_file_imports(state, &file_targets, context).await?;
         let staged = stage_all(state, &mut restore, &order).await;
         if let Err(error) = staged {
             cleanup_stages(&restore).await;

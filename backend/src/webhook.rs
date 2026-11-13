@@ -2120,17 +2120,55 @@ async fn finalize_inner(
             "入库最终元数据刷新开始：Emby {id}，名称 {}",
             string(refresh_item, "Name")
         );
-        let result = if guarded {
-            crate::emby::finalize_refresh_guarded(
+        let protection = crate::media_reload::ingest_preservation::capture(
+            state,
+            refresh_item,
+            context,
+            refresh_guard.1,
+        )
+        .await?;
+        let refresh = || async {
+            protection.check(state, context).await?;
+            // Publish after entering the existing settings guard, whose entry
+            // correctly refuses unresolved recovery records from earlier work.
+            protection.publish().await?;
+            if guarded || protection.protected() {
+                crate::emby::finalize_refresh_guarded(
+                    state,
+                    refresh_item,
+                    context,
+                    refresh_guard.0,
+                    refresh_guard.1,
+                )
+                .await?;
+            } else {
+                crate::emby::finalize_refresh(state, refresh_item, context).await?;
+            }
+            if protection.protected() {
+                // A completion log establishes that native refresh ended; it
+                // does not establish that the original resources survived.
+                refresh_guard
+                    .0
+                    .store(false, std::sync::atomic::Ordering::Release);
+                let finishing = crate::jobs::JobContext::for_recovery(Some(context)).await;
+                protection.verify(state, &finishing).await?;
+                refresh_guard
+                    .0
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
+            Ok::<_, ApiError>(())
+        };
+        let result = if protection.protected() && !guarded {
+            crate::strm::with_settings_guarded(
                 state,
-                refresh_item,
-                context,
+                "restore_media_info",
+                refresh,
                 refresh_guard.0,
                 refresh_guard.1,
             )
             .await
         } else {
-            crate::emby::finalize_refresh(state, refresh_item, context).await
+            refresh().await
         };
         result.inspect_err(|error| {
             tracing::error!(
@@ -2218,6 +2256,7 @@ async fn finalize_inner(
         }
     } else {
         final_refresh(false).await?;
+        let _ = tokio::fs::remove_dir_all(&recovery).await;
         json!({"completed":false,"skipped":true,"reason":"入库语言标题填充未启用"})
     };
     let mut warning_details = vec![];

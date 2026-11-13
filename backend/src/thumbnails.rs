@@ -372,15 +372,12 @@ async fn run_with_trace(
     let outcome = async {
         while tokio::time::Instant::now() < deadline {
             if context.is_cancelled() && !stopped {
-                api(
-                    state,
-                    Method::DELETE,
-                    &format!("ScheduledTasks/Running/{id}"),
-                    &[],
-                )
-                .await?;
                 stopped = true;
                 deadline = deadline.min(tokio::time::Instant::now() + Duration::from_secs(90));
+                crate::emby::stop_scheduled(state, &id, deadline)
+                    .await
+                    .map_err(|_| native_stop_error())?;
+                return Err(config_error("神医提取已停止"));
             }
             let poll = async {
                 current = task(state).await?;
@@ -453,43 +450,19 @@ async fn run_with_trace(
         Err(ApiError::bad("等待神医提取结束超时，请检查Emby任务状态"))
     }
     .await;
-    if outcome.is_err() && !stopped && observed_start {
-        let _ = api(
-            state,
-            Method::DELETE,
-            &format!("ScheduledTasks/Running/{id}"),
-            &[],
-        )
-        .await;
-    }
-    if outcome.is_err() {
-        wait_native_idle(state, &id).await?;
+    if outcome.is_err() && !stopped {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+        if observed_start {
+            crate::emby::stop_scheduled(state, &id, deadline).await
+        } else {
+            crate::emby::wait_scheduled_idle(state, &id, deadline).await
+        }
+        .map_err(|_| native_stop_error())?;
     }
     outcome
 }
-async fn wait_native_idle(state: &AppState, id: &str) -> Result<()> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
-    loop {
-        let result =
-            tokio::time::timeout_at(deadline, api(state, Method::GET, "ScheduledTasks", &[])).await;
-        if let Ok(Ok(tasks)) = result
-            && list(&tasks)
-                .iter()
-                .any(|task| task["Id"] == id && task["State"] == "Idle")
-        {
-            return Ok(());
-        }
-        if tokio::time::Instant::now() >= deadline {
-            return Err(config_error(
-                "未确认神医缩略图任务结束，保留兼容编码器和文件，请检查原生任务状态",
-            ));
-        }
-        tokio::time::sleep(
-            Duration::from_secs(2)
-                .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
-        )
-        .await;
-    }
+fn native_stop_error() -> ApiError {
+    config_error("未确认神医缩略图任务结束，保留兼容编码器和文件，请检查原生任务状态")
 }
 async fn item(state: &AppState, id: &str) -> Result<Value> {
     let data = api(

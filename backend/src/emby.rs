@@ -527,6 +527,10 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
             ),
         )
         .await;
+    let mut submitted = false;
+    let mut accepted_start = false;
+    let mut observed_start = false;
+    let outcome = async {
     let mut start_error = None;
     if !running {
         checkpoint_deadline(context, &mut deadline).await?;
@@ -534,15 +538,20 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
             return Err(timeout());
         }
         let path = format!("ScheduledTasks/Running/{id}");
-        let submission = tokio::select! {
-            _ = context.cancelled() => return context.checkpoint().await,
-            result = tokio::time::timeout_at(deadline, state.emby_once(Method::POST, &path, &[], None)) => result,
-        };
-        checkpoint_deadline(context, &mut deadline).await?;
+        // Resolve this one submission before cancellation cleanup: dropping an
+        // accepted POST could leave it starting after we declare the task idle.
+        submitted = true;
+        let submission = tokio::time::timeout_at(
+            deadline,
+            state.emby_once(Method::POST, &path, &[], None),
+        ).await;
         match submission.map_err(|_| timeout())? {
-            Ok(_) => tracing::info!(
+            Ok(_) => {
+                accepted_start = true;
+                tracing::info!(
                 "[Emby计划任务] {task_name}（任务ID：{id}）启动请求已接收，等待本次执行结果"
-            ),
+                );
+            }
             Err(error) => {
                 tracing::warn!(
                     "[Emby计划任务] {task_name}（任务ID：{id}）启动请求未正常返回，仅回读实际执行，不重复提交：{}",
@@ -581,6 +590,9 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
             .as_array()
             .and_then(|tasks| tasks.iter().find(|t| t["Id"] == id))
             .ok_or_else(|| ApiError::bad("等待期间 Emby 任务消失"))?;
+        observed_start |= matches!(task["State"].as_str(), Some("Running" | "Cancelling"))
+            || (!task["LastExecutionResult"]["StartTimeUtc"].is_null()
+                && task["LastExecutionResult"]["StartTimeUtc"] != previous);
         if task["State"] == "Idle"
             && task["LastExecutionResult"]["StartTimeUtc"] == previous
             && let Some(error) = &start_error
@@ -626,6 +638,89 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
         }
     }
     Err(timeout())
+    }.await;
+    if submitted && context.is_cancelled() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+        if !accepted_start && !observed_start {
+            let tasks = tokio::time::timeout_at(
+                deadline,
+                state.emby(Method::GET, "ScheduledTasks", &[], None),
+            )
+            .await
+            .map_err(|_| ApiError::bad("取消后未确认本次原生任务启动，未停止其他任务"))??;
+            let task = tasks
+                .as_array()
+                .and_then(|tasks| tasks.iter().find(|task| task["Id"] == id));
+            match task {
+                Some(task) if task["State"] == "Idle" => return outcome,
+                Some(task) if matches!(task["State"].as_str(), Some("Running" | "Cancelling")) => {}
+                _ => {
+                    return Err(ApiError::bad(
+                        "取消后未确认本次原生任务启动，未停止其他任务",
+                    ));
+                }
+            }
+        }
+        stop_scheduled(state, &id, deadline).await?;
+    }
+    outcome
+}
+
+pub(crate) async fn stop_scheduled(
+    state: &AppState,
+    id: &str,
+    deadline: tokio::time::Instant,
+) -> Result<()> {
+    let stopped = tokio::time::timeout_at(
+        deadline,
+        state.emby_once(
+            Method::DELETE,
+            &format!("ScheduledTasks/Running/{id}"),
+            &[],
+            None,
+        ),
+    )
+    .await;
+    if !matches!(stopped, Ok(Ok(_))) {
+        tracing::warn!(
+            task_id = id,
+            "原生任务停止请求未正常返回，按实际空闲回读确认，不重放停止请求"
+        );
+    }
+    wait_scheduled_idle(state, id, deadline).await
+}
+
+pub(crate) async fn wait_scheduled_idle(
+    state: &AppState,
+    id: &str,
+    deadline: tokio::time::Instant,
+) -> Result<()> {
+    loop {
+        let tasks = tokio::time::timeout_at(
+            deadline,
+            state.emby(Method::GET, "ScheduledTasks", &[], None),
+        )
+        .await;
+        if let Ok(Ok(tasks)) = tasks
+            && tasks.as_array().is_some_and(|tasks| {
+                tasks
+                    .iter()
+                    .any(|task| task["Id"] == id && task["State"] == "Idle")
+            })
+        {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(ApiError::bad(format!(
+                "未确认 Emby 原生任务结束（任务ID：{id}），请检查计划任务状态"
+            )));
+        }
+        tokio::time::sleep(
+            Duration::from_secs(2)
+                .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+        )
+        .await;
+    }
 }
 pub async fn library_for_path(state: &AppState, path: &str) -> Result<Option<Value>> {
     let folders = state

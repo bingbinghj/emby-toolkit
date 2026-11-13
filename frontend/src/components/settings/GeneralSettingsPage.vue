@@ -53,6 +53,14 @@
                           </span>
                         </div>
                       </div>
+                      <div class="settings-field" data-field="media_edit_skip_track_differences_on_select_all">
+                        <VSwitch v-model="configModel.media_edit_skip_track_differences_on_select_all" label="编辑全选时跳过缺轨或额外轨媒体"></VSwitch>
+                        <div class="settings-hint">
+                          <span class="text-medium-emphasis">
+                            编辑媒体信息时，点击全选或选择此版本会跳过同一季、同一版本中音轨数量不同的视频；仍可单独勾选。默认关闭。
+                          </span>
+                        </div>
+                      </div>
                       <div class="settings-field" data-field="max_actors_to_process">
                         <VTextField type="number"
                           v-model.number="configModel.max_actors_to_process"
@@ -3259,7 +3267,7 @@ const check115Status = async () => {
 // 辅助函数：获取规则摘要
 
 const cardFields = {
-  basic: ['delay_between_items_sec', 'media_info_retry_interval', 'media_info_retry_attempts', 'max_actors_to_process', 'max_episode_actors_to_process', 'extract_thumb', 'actor_role_add_prefix', 'remove_actors_without_avatars', 'keyword_to_tags', 'studio_to_chinese'],
+  basic: ['delay_between_items_sec', 'media_info_retry_interval', 'media_info_retry_attempts', 'media_edit_skip_track_differences_on_select_all', 'max_actors_to_process', 'max_episode_actors_to_process', 'extract_thumb', 'actor_role_add_prefix', 'remove_actors_without_avatars', 'keyword_to_tags', 'studio_to_chinese'],
   monitor: ['monitor_enabled', 'monitor_paths', 'monitor_exclude_dirs', 'monitor_exclude_refresh_delay', 'monitor_extensions'],
   sources: ['tmdb_api_key', 'tmdb_api_base_url', 'douban_enable_online_api', 'api_douban_default_cooldown_seconds', 'douban_cookie'],
   p115Account: storageConfigFields,

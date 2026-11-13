@@ -64,6 +64,61 @@ fn preserve_linked_version_rejects_ambiguous_native_sources_without_changing_bac
 }
 
 #[test]
+fn recovery_chapters_refuses_empty_live_chapters_when_formal_backup_is_nonempty() {
+    let backup = json!({"MediaSourceInfo":{"Chapters":[]},"Chapters":[
+        {"Name":"普通章节","StartPositionTicks":0,"MarkerType":"Chapter"},
+        {"Name":"片头","StartPositionTicks":1889303482_u64,"MarkerType":"IntroStart"},
+        {"Name":"片尾","StartPositionTicks":2911691541_u64,"MarkerType":"IntroEnd"}
+    ]});
+    let before = backup.clone();
+    let live = json!({"Id":"102","Type":"Episode","MediaStreams":[
+        {"Type":"Video","Index":0},{"Type":"Audio","Index":1}
+    ],"Chapters":[]});
+    let error = recovery_chapters(&backup, &live, &["/media/movie.mkv"]).unwrap_err();
+    assert_eq!(error.0, axum::http::StatusCode::CONFLICT);
+    assert!(error.1.contains("备份仍有章节"), "{}", error.1);
+    assert_eq!(backup, before);
+}
+
+#[test]
+fn recovery_chapters_keeps_backup_after_empty_native_media_info() {
+    let backup = json!({"Chapters":[
+        {"Name":"原章节","StartPositionTicks":123456789_u64,"MarkerType":"IntroStart"}
+    ]});
+    let live = json!({"Id":"102","MediaStreams":[],"Chapters":[]});
+    assert_eq!(
+        recovery_chapters(&backup, &live, &["/media/movie.mkv"]).unwrap(),
+        backup["Chapters"]
+    );
+}
+
+#[test]
+fn recovery_chapters_allows_empty_live_chapters_with_an_empty_backup() {
+    let backup = json!({"Chapters":[]});
+    for live in [
+        json!({"Id":"102","Type":"Episode","MediaStreams":[{"Type":"Video"}],"Chapters":[]}),
+        json!({"Id":"102","Type":"Audio","MediaStreams":[{"Type":"Audio"}]}),
+    ] {
+        assert_eq!(
+            recovery_chapters(&backup, &live, &["/media/movie.mkv"]).unwrap(),
+            json!([])
+        );
+    }
+}
+
+#[test]
+fn recovery_chapters_keeps_nonempty_native_chapters_authoritative() {
+    let backup = json!({"Chapters":[{"Name":"旧章节","StartPositionTicks":0}]});
+    let live = json!({"Id":"102","MediaStreams":[{"Type":"Video"}],"Chapters":[
+        {"Name":"当前章节","StartPositionTicks":2911691541_u64,"MarkerType":"IntroEnd","ImageTag":"native"}
+    ]});
+    assert_eq!(
+        recovery_chapters(&backup, &live, &["/media/movie.mkv"]).unwrap(),
+        clean_chapters(&live["Chapters"]).unwrap()
+    );
+}
+
+#[test]
 fn matching_sources_with_the_same_explicit_owner_are_ambiguous() {
     let item = item(vec![
         source("source-a", Some("102"), "/media/movie.mkv"),

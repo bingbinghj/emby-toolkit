@@ -4,6 +4,25 @@ const card = (page, title) => page.locator('.setting-card').filter({ has: page.g
 const writes = api => api.requests.filter(request => request.method === 'POST' && request.path === '/api/config');
 const mediaServerDialog = page => page.locator('.v-dialog.v-overlay--active').filter({ has: page.getByRole('button', { name: '关闭媒体服务器配置', exact: true }) });
 
+test('media editing select-all skip switch defaults off and saves both boolean values', async ({ page, api }) => {
+  await page.goto('/setting?tab=system');
+  const basic = card(page, '基础设置');
+  const option = basic.getByRole('checkbox', { name: '编辑全选时跳过缺轨或额外轨媒体', exact: true });
+  await expect(option).not.toBeChecked();
+  await expect(basic).toContainText('仍可单独勾选。默认关闭。');
+  await option.check();
+  await basic.getByRole('button', { name: '保存基础设置', exact: true }).click();
+  await expect.poll(() => writes(api).length).toBe(1);
+  expect(writes(api)[0].body.media_edit_skip_track_differences_on_select_all).toBe(true);
+  expect(writes(api)[0].body).not.toHaveProperty('ai_model_name');
+  await page.reload();
+  await expect(option).toBeChecked();
+  await option.uncheck();
+  await basic.getByRole('button', { name: '保存基础设置', exact: true }).click();
+  await expect.poll(() => writes(api).length).toBe(2);
+  expect(writes(api)[1].body.media_edit_skip_track_differences_on_select_all).toBe(false);
+});
+
 test('media server omits external playback URL and uses an icon plus filled primary save action', async ({ page, api }) => {
   await page.goto('/setting?tab=system');
   await expect(page.locator('[data-field="emby_public_url"]')).toHaveCount(0);

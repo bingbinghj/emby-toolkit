@@ -111,7 +111,7 @@ async fn audio_scan_processes_each_legacy_native_version_without_modifying_files
         tokio::fs::write(&path, &playback).await.unwrap();
         let streams = json!([{"Type":"Video","Codec":"hevc"},{"Type":"Audio","Codec":"aac"}]);
         let source = json!({"Id":format!("mediasource_{id}"),"Path":playback,"Size":1000,"MediaStreams":streams});
-        items.insert(id.into(), json!({"Id":id,"Name":id,"Type":"Movie","Path":path,"Size":1000,"PartCount":1,"MediaStreams":streams}));
+        items.insert(id.into(), json!({"Id":id,"Name":id,"Type":"Movie","Path":path,"Size":1000,"PartCount":1,"Chapters":[],"MediaStreams":streams}));
         assets.push(json!({"emby_item_id":id,"path":path,"size_bytes":1000}));
         sources.push(source.clone());
         let info = json!([{"MediaSourceInfo":{"Path":playback,"Size":1000,"Container":"mkv","RunTimeTicks":600000000_u64,"MediaStreams":streams},"Chapters":[]}]);
@@ -164,6 +164,10 @@ async fn audio_scan_processes_each_legacy_native_version_without_modifying_files
             get(|| async {
                 Json(json!([{"Id":"scan","Name":"Scan media library","State":"Idle"}]))
             }),
+        )
+        .route(
+            "/Items/{id}/ThumbnailSet",
+            get(|| async { Json(json!({"Thumbnails":[]})) }),
         )
         .route(
             "/Items/{id}/Refresh",

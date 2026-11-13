@@ -13,6 +13,9 @@ use axum::{
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+#[cfg(test)]
+mod tests;
+
 pub fn router() -> Router<AppState> {
     Router::new().route("/api/media_info/series/{id}/episodes", get(get_episodes))
 }
@@ -265,6 +268,17 @@ fn describe(track: &Value) -> String {
             .unwrap_or("<空>")
     )
 }
+fn matching_audio(left: &[Value], right: &[Value]) -> usize {
+    let mut remaining = right.to_vec();
+    let mut matched = 0;
+    for track in left {
+        if let Some(index) = remaining.iter().position(|candidate| candidate == track) {
+            remaining.remove(index);
+            matched += 1;
+        }
+    }
+    matched
+}
 pub fn annotate(items: &mut [Value]) {
     let mut groups = BTreeMap::<(i64, i64), Vec<usize>>::new();
     for (i, item) in items.iter().enumerate() {
@@ -277,7 +291,7 @@ pub fn annotate(items: &mut [Value]) {
             .push(i);
     }
     for positions in groups.values() {
-        let mut counts = Vec::<(usize, usize, Value)>::new();
+        let mut counts = Vec::<(usize, Vec<Value>)>::new();
         for i in positions {
             let value = items[*i]
                 .as_object_mut()
@@ -290,19 +304,18 @@ pub fn annotate(items: &mut [Value]) {
                 continue;
             }
             let count = value["audio"].as_array().map(Vec::len).unwrap_or(0);
-            if let Some((_, total, old)) = counts.iter_mut().find(|(n, _, _)| *n == count) {
-                *total += 1;
-                *old = value.clone();
+            if let Some((_, references)) = counts.iter_mut().find(|(n, _)| *n == count) {
+                references.push(value.clone());
             } else {
-                counts.push((count, 1, value.clone()));
+                counts.push((count, vec![value.clone()]));
             }
             items[*i]["track_structure"] = value;
         }
         let baseline = counts
             .iter()
             .enumerate()
-            .max_by_key(|(i, (_, count, _))| (*count, std::cmp::Reverse(*i)))
-            .map(|(_, (_, _, s))| s.clone());
+            .max_by_key(|(i, (_, references))| (references.len(), std::cmp::Reverse(*i)))
+            .map(|(_, (_, references))| references);
         for i in positions {
             let structure = items[*i]
                 .as_object_mut()
@@ -312,14 +325,34 @@ pub fn annotate(items: &mut [Value]) {
             if structure.is_null() {
                 continue;
             }
-            let expected = baseline.as_ref().unwrap();
-            let before = expected["audio"].as_array().unwrap();
+            let references = baseline.unwrap();
+            let before = references[0]["audio"].as_array().unwrap();
             let after = structure["audio"].as_array().unwrap();
             if before.len() == after.len() {
                 items[*i]["track_status"] = json!("consistent");
                 items[*i]["track_difference"] = json!("");
             } else {
                 items[*i]["track_status"] = json!("inconsistent");
+                let (matched, before) = references
+                    .iter()
+                    .map(|reference| {
+                        let audio = reference["audio"].as_array().unwrap();
+                        (matching_audio(audio, after), audio)
+                    })
+                    .max_by_key(|(matched, _)| *matched)
+                    .unwrap();
+                if references.iter().any(|reference| {
+                    let audio = reference["audio"].as_array().unwrap();
+                    matching_audio(audio, after) == matched
+                        && matching_audio(audio, before) != before.len()
+                }) {
+                    items[*i]["track_difference"] = json!(format!(
+                        "音轨数量 {}→{}（参考轨道结构不一致，无法可靠定位增减音轨）",
+                        before.len(),
+                        after.len()
+                    ));
+                    continue;
+                }
                 let missing = after.len() < before.len();
                 let (larger, smaller) = if missing {
                     (before, after)
@@ -327,20 +360,47 @@ pub fn annotate(items: &mut [Value]) {
                     (after, before)
                 };
                 let mut remaining = smaller.clone();
-                let mut difference = vec![];
+                let mut difference = Vec::<(usize, &Value, usize)>::new();
                 for (index, track) in larger.iter().enumerate() {
                     if let Some(i) = remaining.iter().position(|s| s == track) {
                         remaining.remove(i);
+                    } else if let Some((_, _, count)) = difference
+                        .iter_mut()
+                        .find(|(_, candidate, _)| *candidate == track)
+                    {
+                        *count += 1;
                     } else {
-                        difference.push(format!("音轨{} {}", index + 1, describe(track)));
+                        difference.push((index + 1, track, 1));
                     }
                 }
+                let difference = difference
+                    .iter()
+                    .map(|(index, track, count)| {
+                        if larger
+                            .iter()
+                            .filter(|candidate| *candidate == *track)
+                            .count()
+                            > 1
+                        {
+                            format!(
+                                "同属性音轨{}{count}条 {}（具体序号无法唯一定位）",
+                                if missing { "少" } else { "多" },
+                                describe(track)
+                            )
+                        } else {
+                            format!(
+                                "{} 音轨{index} {}",
+                                if missing { "缺少" } else { "多出" },
+                                describe(track)
+                            )
+                        }
+                    })
+                    .collect::<Vec<_>>();
                 items[*i]["track_difference"] = json!(if remaining.is_empty() {
                     format!(
-                        "音轨数量 {}→{}（{} {}）",
+                        "音轨数量 {}→{}（{}）",
                         before.len(),
                         after.len(),
-                        if missing { "缺少" } else { "多出" },
                         difference.join("、")
                     )
                 } else {

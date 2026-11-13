@@ -130,8 +130,8 @@
               <div class="episode-selector-summary">{{ itemDetails.item_type === 'Series' ? '当前季' : '本季' }} {{ visibleSeasonEpisodes.length }} 个视频，已选 {{ selectedEpisodeIds.length }} 个。</div>
               <div class="d-flex flex-wrap align-center ga-2">
                 <VSelect v-if="currentSeasonHasMultipleVersions" v-model="selectedBatchVersionIndex" :items="batchVersionOptions" item-title="label" item-value="value" label="选择版本" density="compact" class="batch-version-select" />
-                <VBtn v-if="currentSeasonHasMultipleVersions" size="small" variant="tonal" :disabled="selectedBatchVersionIndex === null" @click="selectEpisodesByVersion">选择此版本</VBtn>
-                <VBtn size="small" variant="tonal" @click="selectAllEpisodes">全选</VBtn><VBtn size="small" variant="tonal" @click="clearSelectedEpisodes">清空</VBtn>
+                <VBtn v-if="currentSeasonHasMultipleVersions" size="small" variant="tonal" :disabled="loadingConfig || selectedBatchVersionIndex === null" @click="selectEpisodesByVersion">选择此版本</VBtn>
+                <VBtn size="small" variant="tonal" :disabled="loadingConfig" @click="selectAllEpisodes">全选</VBtn><VBtn size="small" variant="tonal" @click="clearSelectedEpisodes">清空</VBtn>
               </div>
             </div>
             <section v-if="selectedSeasonGroup" class="episode-season-block">
@@ -332,6 +332,7 @@ import { debounce } from 'lodash-es';
 import { textColorForBackground } from '../theme.js';
 import { useTheme } from 'vuetify';
 import { useTaskStatus } from '../composables/useTaskStatus.js';
+import { useConfig } from '../composables/useConfig.js';
 import {
   buildMediaInfoLanguageOptions,
   filterMediaInfoLanguageOption,
@@ -351,6 +352,7 @@ const message = useMessage();
 const dialog = useDialog();
 const theme = useTheme();
 const { isBackgroundTaskRunning } = useTaskStatus();
+const { configModel, loadingConfig } = useConfig();
 const imagePreview = ref(null);
 const previewMediaImage = (url, title) => {
   if (url) imagePreview.value = { url, title };
@@ -1251,20 +1253,30 @@ const handleSeasonChange = (seasonNumber) => {
   clearSelectedEpisodes();
 };
 
-const selectAllEpisodes = () => {
-  selectedEpisodeIds.value = visibleSeasonEpisodes.value
+const selectEpisodeBatch = (episodes) => {
+  if (loadingConfig.value) return;
+  const skippedIds = new Set();
+  selectedEpisodeIds.value = episodes
+    .filter(ep => {
+      const skip = configModel.value?.media_edit_skip_track_differences_on_select_all === true
+        && ep.track_status === 'inconsistent';
+      const id = String(ep.emby_id || '').trim();
+      if (skip && id) skippedIds.add(id);
+      return !skip;
+    })
     .map(ep => String(ep.emby_id || '').trim())
     .filter(Boolean);
   applyToSelectedEpisodes.value = selectedEpisodeIds.value.length > 0;
+  if (skippedIds.size) message.info(`已跳过 ${skippedIds.size} 个缺轨或额外轨媒体，可单独勾选。`);
 };
+
+const selectAllEpisodes = () => selectEpisodeBatch(visibleSeasonEpisodes.value);
 
 const selectEpisodesByVersion = () => {
   if (selectedBatchVersionIndex.value === null) return;
-  selectedEpisodeIds.value = visibleSeasonEpisodes.value
+  selectEpisodeBatch(visibleSeasonEpisodes.value
     .filter(ep => Number(ep.version_index || 1) === Number(selectedBatchVersionIndex.value))
-    .map(ep => String(ep.emby_id || '').trim())
-    .filter(Boolean);
-  applyToSelectedEpisodes.value = selectedEpisodeIds.value.length > 0;
+  );
 };
 
 const clearSelectedEpisodes = () => {
@@ -1698,7 +1710,6 @@ const saveMediaInfo = async () => {
         });
         return {
           ...ep,
-          track_status: 'inconsistent',
           track_difference: `本次批量保存跳过 ${reasons.join('；')}`
         };
       });

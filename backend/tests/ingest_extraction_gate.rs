@@ -6,10 +6,10 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use emby_toolkit::{AppState, db, webhook};
+use emby_toolkit::{AppState, db, media_recovery, webhook};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -18,6 +18,8 @@ use std::{
 };
 use tokio::sync::Mutex;
 use tower::ServiceExt;
+
+type ChapterImages = Arc<Mutex<BTreeMap<(String, u64), Vec<u8>>>>;
 
 #[derive(Clone, Default)]
 struct Host {
@@ -33,6 +35,12 @@ struct Host {
     info_runs: Arc<Mutex<u64>>,
     logs: Arc<Mutex<Vec<String>>>,
     configuration: Arc<Mutex<Value>>,
+    clear_chapters_on_final_refresh: Arc<AtomicBool>,
+    other_chapter_loss_target: Arc<Mutex<Option<String>>>,
+    chapter_images: ChapterImages,
+    bifs: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
+    resource_fault: Arc<Mutex<String>>,
+    cover: Arc<Mutex<Option<std::path::PathBuf>>>,
 }
 async fn details(
     State(host): State<Host>,
@@ -68,7 +76,10 @@ async fn details(
         ]
         .iter()
         .all(|expected| fields.split(',').any(|field| field == *expected))
-    }) && host.title_failures.lock().await.contains(&id)
+    }) && !query
+        .get("Fields")
+        .is_some_and(|fields| fields.split(',').any(|field| field == "Guid"))
+        && host.title_failures.lock().await.contains(&id)
     {
         return StatusCode::FORBIDDEN.into_response();
     }
@@ -87,10 +98,14 @@ async fn items(
         .await
         .values()
         .filter(|item| {
-            query.get("Path").is_some_and(|path| item["Path"] == *path)
-                || query
-                    .get("Ids")
-                    .is_some_and(|ids| ids.split(',').any(|id| item["Id"] == id))
+            (!query.contains_key("Path")
+                && !query.contains_key("Ids")
+                && !query.contains_key("ParentId"))
+                || query.get("Path").is_some_and(|path| item["Path"] == *path)
+                || query.get("Ids").is_some_and(|ids| {
+                    ids.split(',')
+                        .any(|id| item["Id"] == id || item["Guid"] == id)
+                })
                 || query.get("ParentId").is_some_and(|parent| {
                     item["ParentId"] == *parent || item["SeriesId"] == *parent
                 })
@@ -121,6 +136,40 @@ async fn refresh(
         return StatusCode::BAD_REQUEST;
     }
     if host.chain_enabled.load(Ordering::SeqCst) && id == "301" {
+        if mode == "FullRefresh" && host.clear_chapters_on_final_refresh.load(Ordering::SeqCst) {
+            host.items.lock().await.get_mut("101").unwrap()["Chapters"] = json!([]);
+        }
+        if mode == "FullRefresh"
+            && let Some(target) = host.other_chapter_loss_target.lock().await.as_ref()
+        {
+            host.items.lock().await.get_mut(target).unwrap()["Chapters"] = json!([]);
+        }
+        if mode == "FullRefresh" {
+            match host.resource_fault.lock().await.as_str() {
+                "jpeg" => {
+                    host.chapter_images
+                        .lock()
+                        .await
+                        .insert(("101".into(), 0), jpeg([0, 0, 255]));
+                }
+                "bif" => {
+                    host.bifs
+                        .lock()
+                        .await
+                        .insert("101".into(), bif(&jpeg([0, 0, 255])));
+                }
+                "new-cover-and-chapter-loss" => {
+                    let mut items = host.items.lock().await;
+                    let episode = items.get_mut("101").unwrap();
+                    episode["Name"] = json!("新的分集标题");
+                    episode["Overview"] = json!("最终刷新后的新简介");
+                    episode["Chapters"] = json!([]);
+                    std::fs::write(host.cover.lock().await.as_ref().unwrap(), jpeg([0, 0, 255]))
+                        .unwrap();
+                }
+                _ => {}
+            }
+        }
         host.stage_order.lock().await.push(
             if mode == "FullRefresh" {
                 "metadata-refresh"
@@ -130,10 +179,53 @@ async fn refresh(
             .into(),
         );
     }
+    if mode == "Default" && query.contains_key("ReplaceThumbnailImages") {
+        let mut items = host.items.lock().await;
+        let item = items.get_mut(&id).unwrap();
+        let path = std::path::Path::new(item["Path"].as_str().unwrap())
+            .with_file_name(format!("{id}-mediainfo.json"));
+        let info: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        item["MediaStreams"] = info[0]["MediaSourceInfo"]["MediaStreams"].clone();
+        item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
+        item["Chapters"] = info[0]["Chapters"].clone();
+        for (index, chapter) in item["Chapters"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .enumerate()
+        {
+            chapter["ChapterIndex"] = json!(index);
+            if host
+                .chapter_images
+                .lock()
+                .await
+                .contains_key(&(id.clone(), index as u64))
+            {
+                chapter["ImageTag"] = json!("original-same-tag");
+            }
+        }
+    }
     host.logs.lock().await.extend([
         format!("Info fixture: RefreshItem Start: {id} metadata"),
         format!("Info fixture: RefreshItem Complete: {id} metadata"),
     ]);
+    StatusCode::NO_CONTENT
+}
+async fn clear(State(host): State<Host>, Path(id): Path<String>) -> StatusCode {
+    let mut items = host.items.lock().await;
+    let item = items.get_mut(&id).unwrap();
+    let path = std::path::Path::new(item["Path"].as_str().unwrap());
+    std::fs::remove_file(path.with_file_name(format!("{id}-mediainfo.json"))).unwrap();
+    let bif = path.with_file_name(format!("{id}-320-4.bif"));
+    if bif.exists() {
+        std::fs::remove_file(bif).unwrap();
+    }
+    if let Some(cover) = host.cover.lock().await.as_ref() {
+        std::fs::remove_dir_all(cover.parent().unwrap()).unwrap();
+    }
+    item["MediaStreams"] = json!([]);
+    item["MediaSources"][0]["MediaStreams"] = json!([]);
+    item["Chapters"] = json!([]);
     StatusCode::NO_CONTENT
 }
 async fn logs(
@@ -156,6 +248,46 @@ async fn config_save(State(host): State<Host>, Json(body): Json<Value>) -> Json<
     *host.configuration.lock().await =
         serde_json::from_str(body["Data"].as_str().unwrap()).unwrap();
     Json(json!({}))
+}
+
+fn jpeg(color: [u8; 3]) -> Vec<u8> {
+    let image = image::RgbImage::from_pixel(4, 4, image::Rgb(color));
+    let mut bytes = vec![];
+    image::codecs::jpeg::JpegEncoder::new(&mut bytes)
+        .encode_image(&image)
+        .unwrap();
+    bytes
+}
+
+fn bif(jpeg: &[u8]) -> Vec<u8> {
+    let times = [0_u32, 20, 30, 75];
+    let mut bytes = vec![0; 64];
+    bytes[..8].copy_from_slice(b"\x89BIF\r\n\x1a\n");
+    bytes[12..16].copy_from_slice(&(times.len() as u32).to_le_bytes());
+    bytes[16..24].copy_from_slice(&1000_u64.to_le_bytes());
+    let mut offset = 64 + (times.len() + 1) * 8;
+    for time in times {
+        bytes.extend(time.to_le_bytes());
+        bytes.extend((offset as u32).to_le_bytes());
+        offset += jpeg.len();
+    }
+    bytes.extend(u32::MAX.to_le_bytes());
+    bytes.extend((offset as u32).to_le_bytes());
+    for _ in times {
+        bytes.extend(jpeg);
+    }
+    bytes
+}
+
+fn pro_swagger_with_file_refresh() -> Value {
+    let mut contract: Value =
+        serde_json::from_str(include_str!("fixtures/pro_sync_contract.json")).unwrap();
+    contract["paths"]["/Items/{Id}/Refresh"] = json!({"post":{"parameters":[
+        {"name":"Id","in":"path"},{"name":"MetadataRefreshMode","in":"query"},
+        {"name":"ImageRefreshMode","in":"query"},{"name":"ReplaceAllMetadata","in":"query"},
+        {"name":"ReplaceAllImages","in":"query"}
+    ]}});
+    contract
 }
 async fn tasks(State(host): State<Host>) -> Json<Value> {
     let mut tasks = json!([
@@ -264,7 +396,7 @@ impl Fixture {
             if *mode == "refresh_failed" {
                 host.refresh_failures.lock().await.push(id.clone());
             }
-            let item = json!({"Id":id,"Type":"Movie","Name":format!("电影{id}"),"Path":path,"PartCount":1,"Size":1000,"Chapters":[],"ProviderIds":{"Tmdb":id},"People":[],"Genres":[],"MediaStreams":streams,"MediaSources":[{"Id":format!("mediasource_{id}"),"ItemId":id,"Path":playback,"Size":1000,"Container":"mkv","MediaStreams":streams}]});
+            let item = json!({"Id":id,"Type":"Movie","PresentationUniqueKey":format!("key-{id}"),"Name":format!("电影{id}"),"Path":path,"PartCount":1,"Size":1000,"Chapters":[],"ProviderIds":{"Tmdb":id},"People":[],"Genres":[],"MediaStreams":streams,"MediaSources":[{"Id":format!("mediasource_{id}"),"ItemId":id,"Path":playback,"Size":1000,"Container":"mkv","MediaStreams":streams}]});
             host.items.lock().await.insert(id.clone(), item);
             let info = json!([{"MediaSourceInfo":{"Path":playback,"Size":1000,"Container":"mkv","RunTimeTicks":600000000_u64,"MediaStreams":streams},"Chapters":[]}]);
             std::fs::write(
@@ -279,8 +411,17 @@ impl Fixture {
         let location = directory.path().to_string_lossy().into_owned();
         let router = Router::new()
             .route("/Users/user/Items/{id}", get(details))
+            .route("/Users/user", get(|| async { Json(json!({"Id":"user","Policy":{"IsAdministrator":true,"MaxParentalRating":null,"BlockUnratedItems":[],"BlockedTags":[],"IsTagBlockingModeInclusive":false,"AllowTagOrRating":false}})) }))
+            .route("/Videos/{id}/AdditionalParts", get(|| async { Json(json!({"Items":[],"TotalRecordCount":0})) }))
+            .route("/Users/user/Items/{id}/SpecialFeatures", get(|| async { Json(json!([])) }))
+            .route("/Items/{id}/ThumbnailSet", get(|State(host): State<Host>, Path(id): Path<String>| async move { Json(json!({"Thumbnails":if host.bifs.lock().await.contains_key(&id) {vec![json!({"PositionTicks":0})]} else {vec![]}})) }))
+            .route("/Items/{id}/Images/Chapter/{index}", get(|State(host): State<Host>, Path((id,index)):Path<(String,u64)>| async move { host.chapter_images.lock().await.get(&(id,index)).cloned().unwrap_or_default() }))
+            .route("/Videos/{id}/index.bif", get(|State(host):State<Host>, Path(id):Path<String>| async move { host.bifs.lock().await.get(&id).cloned().unwrap_or_default() }))
             .route("/Items", get(items))
             .route("/Items/{id}/Refresh", post(refresh))
+            .route("/Items/{id}/ClearMediaInfo", post(clear))
+            .route("/Plugins", get(|| async { Json(json!([{"Id":"63c322b7-a371-41a3-b11f-04f8418b37d8","Name":"Strm Assistant PRO","Version":"3.0.0.57"}])) }))
+            .route("/swagger.json", get(|| async { Json(pro_swagger_with_file_refresh()) }))
             .route("/Items/{id}/Ancestors", get(|| async { Json(json!([])) }))
             .route("/Library/VirtualFolders", get(move || { let location = location.clone(); async move { Json(json!([{"ItemId":"library","Guid":"fixture","Locations":[location]}])) } }))
             .route("/ScheduledTasks", get(tasks))
@@ -370,6 +511,51 @@ impl Fixture {
             .unwrap();
         self.state.save_config(&json!({"auto_fill_language_titles_on_ingest":false,"auto_extract_intro_fingerprint_on_ingest":true,"auto_extract_credits_on_ingest":true,"auto_extract_video_thumbnails_on_ingest":true,"emby_webhook_ingest_enabled":false})).await.unwrap();
         self.host.chain_enabled.store(true, Ordering::SeqCst);
+    }
+
+    async fn configure_original_chapter_images(&self) -> (Vec<u8>, Vec<u8>) {
+        let root = self._directory.path().join("metadata");
+        let guid = uuid::Uuid::new_v4().simple().to_string();
+        let directory = root
+            .join("library")
+            .join(&guid[..2])
+            .join(&guid)
+            .join("chapters");
+        std::fs::create_dir_all(&directory).unwrap();
+        let original_jpeg = jpeg([255, 0, 0]);
+        let original_bif = bif(&original_jpeg);
+        let mut native = self.host.items.lock().await;
+        let episode = native.get_mut("101").unwrap();
+        episode["Guid"] = json!(guid);
+        let chapters = episode["Chapters"].as_array_mut().unwrap();
+        chapters.push(
+            json!({"Name":"普通章节","MarkerType":"Chapter","StartPositionTicks":300_000_000_u64}),
+        );
+        chapters.sort_by_key(|chapter| chapter["StartPositionTicks"].as_u64().unwrap());
+        for (index, chapter) in chapters.iter_mut().enumerate() {
+            chapter["ImageTag"] = json!("original-same-tag");
+            chapter["ChapterIndex"] = json!(index);
+            self.host
+                .chapter_images
+                .lock()
+                .await
+                .insert(("101".into(), index as u64), original_jpeg.clone());
+            std::fs::write(directory.join(format!("{index}.jpg")), &original_jpeg).unwrap();
+        }
+        drop(native);
+        let local_bif =
+            std::path::Path::new(self.files[0].as_str().unwrap()).with_file_name("101-320-4.bif");
+        std::fs::write(local_bif, &original_bif).unwrap();
+        self.host
+            .bifs
+            .lock()
+            .await
+            .insert("101".into(), original_bif.clone());
+        self.state
+            .save_config(&json!({"emby_metadata_path":root}))
+            .await
+            .unwrap();
+        (original_jpeg, original_bif)
     }
 
     async fn run_series(&self, moviepilot: bool) -> Value {
@@ -788,6 +974,59 @@ async fn disabled_titles_still_allow_actual_series_refresh_then_intro_credits_an
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn both_ingest_entries_reject_chapter_loss_after_final_refresh_before_automatic_extraction() {
+    for moviepilot in [false, true] {
+        let fixture = Fixture::new(&["complete"], false, false).await;
+        fixture.configure_series_chain().await;
+        fixture
+            .state
+            .save_config(&json!({
+                "auto_extract_credits_on_ingest":false,
+                "auto_extract_video_thumbnails_on_ingest":false
+            }))
+            .await
+            .unwrap();
+        let original = fixture.host.items.lock().await["101"]["Chapters"].clone();
+        assert!(original.as_array().unwrap().len() >= 3);
+        fixture
+            .host
+            .clear_chapters_on_final_refresh
+            .store(true, Ordering::SeqCst);
+        let job = fixture.run_series(moviepilot).await;
+        let native_starts = fixture.host.native_starts.lock().await.clone();
+        let recovery = media_recovery::status(State(fixture.state.clone()))
+            .await
+            .unwrap()
+            .0;
+        fixture.close().await;
+        let finalization = if moviepilot {
+            &job["result"]["finalizations"][0]["report"]
+        } else {
+            &job["result"]["finalization"]
+        };
+        assert_ne!(
+            finalization["metadata_refresh"]["completed"], true,
+            "a completion log cannot certify preserved chapters: moviepilot={moviepilot}: {job}"
+        );
+        assert!(
+            native_starts.is_empty(),
+            "chapter loss must block subsequent native extraction: moviepilot={moviepilot}: {native_starts:?}"
+        );
+        assert_eq!(recovery["pending"], true, "{recovery}");
+        assert_eq!(
+            recovery["records"][0]["target_ids"],
+            json!(["101"]),
+            "{recovery}"
+        );
+        assert_eq!(
+            recovery["records"][0]["can_recover"], true,
+            "usable recovery materials must remain: {recovery}"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
 async fn moviepilot_requires_every_eligible_group_and_unrelated_cover_warnings_do_not_block_extraction()
  {
     for modes in [["complete", "pending"], ["pending", "complete"]] {
@@ -1028,4 +1267,273 @@ async fn moviepilot_history_uses_the_completed_work_when_ingest_switch_changes_b
             );
         }
     }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all resource requests stay localhost"]
+async fn both_ingest_entries_preserve_jpeg_bif_bytes_and_reject_same_tag_or_same_index_changes() {
+    for moviepilot in [false, true] {
+        for fault in ["", "jpeg", "bif"] {
+            let fixture = Fixture::new(&["complete"], false, false).await;
+            fixture.configure_series_chain().await;
+            fixture.state.save_config(&json!({"auto_extract_intro_fingerprint_on_ingest":false,"auto_extract_credits_on_ingest":false,"auto_extract_video_thumbnails_on_ingest":false})).await.unwrap();
+            let (original_jpeg, original_bif) = fixture.configure_original_chapter_images().await;
+            let original_chapters = fixture.host.items.lock().await["101"]["Chapters"].clone();
+            let original_settings = fixture.host.configuration.lock().await.clone();
+            *fixture.host.resource_fault.lock().await = fault.into();
+            let job = fixture.run_series(moviepilot).await;
+            let finalization = if moviepilot {
+                &job["result"]["finalizations"][0]["report"]
+            } else {
+                &job["result"]["finalization"]
+            };
+            assert_eq!(
+                fixture.host.items.lock().await["101"]["Chapters"],
+                original_chapters,
+                "identical ImageTags must not conceal changed bytes"
+            );
+            let recovery = media_recovery::status(State(fixture.state.clone()))
+                .await
+                .unwrap()
+                .0;
+            if fault.is_empty() {
+                assert_eq!(
+                    finalization["metadata_refresh"]["completed"], true,
+                    "moviepilot={moviepilot}: {job}"
+                );
+                assert_eq!(
+                    recovery["pending"], false,
+                    "verified materials must be cleaned: {recovery}"
+                );
+                assert_eq!(*fixture.host.configuration.lock().await, original_settings);
+                assert!(
+                    fixture
+                        .host
+                        .chapter_images
+                        .lock()
+                        .await
+                        .values()
+                        .all(|bytes| bytes == &original_jpeg)
+                );
+                assert_eq!(fixture.host.bifs.lock().await["101"], original_bif);
+            } else {
+                assert_ne!(
+                    finalization["metadata_refresh"]["completed"], true,
+                    "fault={fault}: moviepilot={moviepilot}: {job}"
+                );
+                assert_eq!(recovery["pending"], true, "{recovery}");
+                assert_eq!(recovery["records"][0]["can_recover"], true, "{recovery}");
+                let directory =
+                    std::path::Path::new(recovery["records"][0]["directory"].as_str().unwrap());
+                let record: Value = serde_json::from_slice(
+                    &std::fs::read(directory.join("media-reload.json")).unwrap(),
+                )
+                .unwrap();
+                let images = record["chapter_images"]["101"].as_array().unwrap();
+                assert_eq!(images.len(), 4);
+                for image in images {
+                    assert_eq!(
+                        std::fs::read(image["backup"].as_str().unwrap()).unwrap(),
+                        original_jpeg
+                    );
+                }
+                assert!(
+                    record["files"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|file| file["path"].as_str().unwrap().ends_with(".bif")
+                            && std::fs::read(file["backup"].as_str().unwrap()).unwrap()
+                                == original_bif)
+                );
+            }
+            assert!(fixture.host.native_starts.lock().await.is_empty());
+            fixture.close().await;
+        }
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn recursive_ingest_refresh_protects_old_episode_outside_the_selected_ingest_ids() {
+    let fixture = Fixture::new(&["complete", "complete"], false, false).await;
+    fixture.configure_series_chain().await;
+    fixture.state.save_config(&json!({"auto_extract_intro_fingerprint_on_ingest":false,"auto_extract_credits_on_ingest":false,"auto_extract_video_thumbnails_on_ingest":false})).await.unwrap();
+    let old_chapters = json!([{"Name":"旧集普通章","MarkerType":"Chapter","StartPositionTicks":0},{"Name":"旧集片尾","MarkerType":"CreditsStart","StartPositionTicks":750_000_000_u64}]);
+    let old_path = fixture.files[1].as_str().unwrap();
+    {
+        let mut items = fixture.host.items.lock().await;
+        let old = items.get_mut("102").unwrap();
+        old["Type"] = json!("Episode");
+        old["SeriesId"] = json!("301");
+        old["ParentId"] = json!("302");
+        old["ParentIndexNumber"] = json!(1);
+        old["IndexNumber"] = json!(2);
+        old["Chapters"] = old_chapters.clone();
+    }
+    sqlx::query("INSERT INTO media_metadata(tmdb_id,item_type,title,parent_series_tmdb_id,season_number,episode_number,in_library,emby_item_ids_json,asset_details_json) VALUES('1021','Episode','旧集','101',1,2,true,$1,$2)")
+        .bind(json!(["102"])).bind(json!([{"emby_item_id":"102","path":old_path,"size_bytes":1000}])).execute(&fixture.state.db).await.unwrap();
+    *fixture.host.other_chapter_loss_target.lock().await = Some("102".into());
+    let job = fixture.run_series(false).await;
+    let recovery = media_recovery::status(State(fixture.state.clone()))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(
+        job["state"], "failed",
+        "only 101 was selected, but recursive refresh touched old 102: {job}"
+    );
+    assert_eq!(
+        fixture.host.items.lock().await["102"]["Chapters"],
+        json!([]),
+        "the fixture must really reach native refresh"
+    );
+    let mut protected_ids = recovery["records"][0]["target_ids"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap())
+        .collect::<Vec<_>>();
+    protected_ids.sort();
+    assert_eq!(
+        protected_ids,
+        vec!["101", "102"],
+        "all old resources in recursive scope must have recovery records: {recovery}"
+    );
+    assert_eq!(recovery["records"][0]["can_recover"], true, "{recovery}");
+    fixture.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn disabled_title_ingest_refuses_empty_live_chapters_with_nonempty_formal_backup_before_refresh()
+ {
+    let fixture = Fixture::new(&["complete"], false, false).await;
+    fixture.configure_series_chain().await;
+    fixture.state.save_config(&json!({"auto_extract_credits_on_ingest":false,"auto_extract_video_thumbnails_on_ingest":false})).await.unwrap();
+    fixture.host.items.lock().await.get_mut("101").unwrap()["Chapters"] = json!([]);
+    let sidecar = std::path::Path::new(fixture.files[0].as_str().unwrap())
+        .with_file_name("101-mediainfo.json");
+    let original_json = std::fs::read(&sidecar).unwrap();
+    let parsed: Value = serde_json::from_slice(&original_json).unwrap();
+    assert_eq!(parsed[0]["Chapters"].as_array().unwrap().len(), 2);
+    let job = fixture.run_series(false).await;
+    let refreshes = fixture.host.refresh_attempts.lock().await.clone();
+    let starts = fixture.host.native_starts.lock().await.clone();
+    assert_eq!(
+        job["state"], "failed",
+        "empty native chapters cannot certify that the backup may be discarded: {job}"
+    );
+    assert!(
+        refreshes.is_empty(),
+        "must refuse before a recursive refresh can overwrite the formal backup: {refreshes:?}"
+    );
+    assert!(starts.is_empty());
+    assert_eq!(std::fs::read(sidecar).unwrap(), original_json);
+    fixture.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; real recovery POST and Emby remain localhost"]
+async fn ingest_recovery_post_restores_original_chapter_resources_and_keeps_final_metadata_and_new_cover()
+ {
+    let fixture = Fixture::new(&["complete"], false, false).await;
+    fixture.configure_series_chain().await;
+    fixture.state.save_config(&json!({"auto_extract_intro_fingerprint_on_ingest":false,"auto_extract_credits_on_ingest":false,"auto_extract_video_thumbnails_on_ingest":false})).await.unwrap();
+    let (original_jpeg, original_bif) = fixture.configure_original_chapter_images().await;
+    let chapters = fixture.host.items.lock().await["101"]["Chapters"].clone();
+    let guid = fixture.host.items.lock().await["101"]["Guid"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let cover = fixture
+        ._directory
+        .path()
+        .join("metadata/library")
+        .join(&guid[..2])
+        .join(guid)
+        .join("poster.jpg");
+    std::fs::write(&cover, &original_jpeg).unwrap();
+    *fixture.host.cover.lock().await = Some(cover.clone());
+    fixture.host.configuration.lock().await["ExclusiveExtract"] = json!(true);
+    fixture.host.configuration.lock().await["IsModSupported"] = json!(true);
+    let original_settings = fixture.host.configuration.lock().await.clone();
+    *fixture.host.resource_fault.lock().await = "new-cover-and-chapter-loss".into();
+    let failed = fixture.run_series(false).await;
+    assert_eq!(
+        failed["state"], "failed",
+        "the native final refresh must really lose chapters: {failed}"
+    );
+    assert_eq!(
+        fixture.host.items.lock().await["101"]["Name"],
+        "新的分集标题"
+    );
+    assert_eq!(std::fs::read(&cover).unwrap(), jpeg([0, 0, 255]));
+    *fixture.host.resource_fault.lock().await = String::new();
+    let pending = media_recovery::status(State(fixture.state.clone()))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(pending["records"][0]["can_recover"], true, "{pending}");
+    let recovery_id = pending["records"][0]["id"].as_str().unwrap();
+    let response = emby_toolkit::media_edit::router()
+        .with_state(fixture.state.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/media_info/recovery")
+                .header("Content-Type", "application/json")
+                .body(Body::from(json!({"recovery_id":recovery_id}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let receipt: Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), 100_000)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let task = receipt["task_id"].as_str().unwrap();
+    let recovered = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let job = fixture.state.jobs.result(task).await.unwrap();
+            if job["is_running"] == false {
+                break job;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        recovered["state"], "completed",
+        "actual recovery must keep a legitimate new cover: {recovered}"
+    );
+    assert_eq!(recovered["result"]["pending"], false, "{recovered}");
+    let native = fixture.host.items.lock().await["101"].clone();
+    assert_eq!(native["Chapters"], chapters);
+    assert_eq!(native["Name"], "新的分集标题");
+    assert_eq!(native["Overview"], "最终刷新后的新简介");
+    assert_eq!(std::fs::read(cover).unwrap(), jpeg([0, 0, 255]));
+    assert_eq!(fixture.host.bifs.lock().await["101"], original_bif);
+    assert!(
+        fixture
+            .host
+            .chapter_images
+            .lock()
+            .await
+            .values()
+            .all(|bytes| bytes == &original_jpeg)
+    );
+    assert_eq!(*fixture.host.configuration.lock().await, original_settings);
+    assert_eq!(
+        media_recovery::status(State(fixture.state.clone()))
+            .await
+            .unwrap()
+            .0["pending"],
+        false
+    );
+    fixture.close().await;
 }

@@ -138,6 +138,16 @@ pub(crate) fn recovery_chapters(info: &Value, item: &Value, paths: &[&str]) -> R
             &object(info).ok_or_else(|| ApiError::bad("媒体信息备份无效"))?["Chapters"],
         );
     }
+    if object(info).is_some_and(|root| {
+        root["Chapters"]
+            .as_array()
+            .is_some_and(|chapters| !chapters.is_empty())
+    }) {
+        return Err(ApiError(
+            axum::http::StatusCode::CONFLICT,
+            "当前章节为空或无效，但媒体信息备份仍有章节或片头片尾标记，已停止保存".into(),
+        ));
+    }
     if item["Type"] == "Audio" && item["Chapters"].is_null() {
         return Ok(serde_json::json!([]));
     }

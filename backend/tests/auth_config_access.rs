@@ -123,6 +123,32 @@ impl Fixture {
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL in DATABASE_URL; Emby is localhost"]
+async fn media_edit_select_all_skip_option_defaults_off_and_requires_boolean() {
+    let f = Fixture::new().await;
+    let recovery = f.cookie(false, true);
+    let key = "media_edit_skip_track_differences_on_select_all";
+    assert_eq!(f.state.config.read().await[key], false);
+    for enabled in [true, false] {
+        let (status, _, result) = f
+            .request("/api/config", &recovery, Some(json!({key: enabled})))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(result["saved_fields"][key], enabled);
+        f.state.reload_config().await.unwrap();
+        assert_eq!(f.state.config.read().await[key], enabled);
+    }
+    for invalid in [json!("true"), json!(1), Value::Null] {
+        let (status, _, result) = f
+            .request("/api/config", &recovery, Some(json!({key: invalid})))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{result}");
+        assert_eq!(f.state.config.read().await[key], false);
+    }
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL in DATABASE_URL; Emby is localhost"]
 async fn login_remember_preference_controls_cookie_and_survives_status_recheck() {
     let f = Fixture::new().await;
     for remember in [false, true] {

@@ -38,6 +38,19 @@
     "route": "general"
   },
   {
+    "field": "media_edit_skip_track_differences_on_select_all",
+    "label": "编辑全选时跳过缺轨或额外轨媒体",
+    "card": "基础设置",
+    "category": "system",
+    "keywords": [
+      "编辑全选时跳过缺轨或额外轨媒体",
+      "基础设置",
+      "媒体处理与语言显示",
+      "编辑媒体信息时，点击全选或选择此版本会跳过同一季、同一版本中音轨数量不同的视频；仍可单独勾选。默认关闭。"
+    ],
+    "route": "general"
+  },
+  {
     "field": "max_actors_to_process",
     "label": "最大主要演员数",
     "card": "基础设置",

@@ -255,3 +255,139 @@ async fn an_unconfirmed_start_cannot_reuse_old_success_or_submit_again() {
         "{result}"
     );
 }
+
+async fn cancelled_intro(initially_running: bool, delayed_response: bool, lost_response: bool) {
+    let mut initial = task(
+        if initially_running { "Running" } else { "Idle" },
+        "old",
+        json!("Completed"),
+    );
+    initial["Key"] = json!("IntroFingerprintExtractTask");
+    let native = Arc::new(std::sync::Mutex::new(initial));
+    let starts = Arc::new(AtomicUsize::new(0));
+    let stops = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let (events, mut observed) = tokio::sync::mpsc::unbounded_channel();
+    let reads = native.clone();
+    let writes = native.clone();
+    let cleanup = native.clone();
+    let submitted = starts.clone();
+    let stopped = stops.clone();
+    let read_events = events.clone();
+    let response = release.clone();
+    let app = Router::new()
+        .route(
+            "/ScheduledTasks",
+            get(move || {
+                let task = reads.lock().unwrap().clone();
+                if task["State"] == "Running" {
+                    let _ = read_events.send("running");
+                }
+                async move { Json(json!([task])) }
+            }),
+        )
+        .route(
+            "/ScheduledTasks/Running/extract",
+            post(move || {
+                submitted.fetch_add(1, Ordering::SeqCst);
+                writes.lock().unwrap()["State"] = json!("Running");
+                let response = response.clone();
+                let _ = events.send("submitted");
+                async move {
+                    if delayed_response {
+                        response.notified().await;
+                    }
+                    if lost_response {
+                        StatusCode::SERVICE_UNAVAILABLE
+                    } else {
+                        StatusCode::NO_CONTENT
+                    }
+                }
+            })
+            .delete(move || {
+                stopped.fetch_add(1, Ordering::SeqCst);
+                cleanup.lock().unwrap()["State"] = json!("Cancelling");
+                let cleanup = cleanup.clone();
+                async move {
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        let mut task = cleanup.lock().unwrap();
+                        task["State"] = json!("Idle");
+                        task["LastExecutionResult"] =
+                            json!({"StartTimeUtc":"this-run","Status":"Aborted"});
+                    });
+                    StatusCode::NO_CONTENT
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let directory = tempfile::tempdir().unwrap();
+    let state = state(directory.path(), &base);
+    let work = state.clone();
+    let id = state
+        .jobs
+        .submit("停止片头声纹验收", move |context| async move {
+            emby::scheduled(&work, "IntroFingerprintExtractTask", &context).await?;
+            Ok(json!({"message":"已结束"}))
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while observed.recv().await.unwrap()
+            != if delayed_response {
+                "submitted"
+            } else {
+                "running"
+            }
+        {}
+    })
+    .await
+    .expect("the intended native execution must be observed");
+    state.jobs.control(Some(&id), "stop").await.unwrap();
+    if delayed_response {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let still_running = state.jobs.result(&id).await.unwrap()["is_running"] == true;
+        release.notify_one();
+        assert!(
+            still_running,
+            "an accepted start must be resolved before releasing its native task"
+        );
+    }
+    let result = finish(&state, &id).await;
+    server.abort();
+    assert_eq!(result["state"], "cancelled", "{result}");
+    assert_eq!(
+        starts.load(Ordering::SeqCst),
+        usize::from(!initially_running)
+    );
+    assert_eq!(
+        stops.load(Ordering::SeqCst),
+        usize::from(!initially_running)
+    );
+    assert_eq!(
+        native.lock().unwrap()["State"],
+        if initially_running { "Running" } else { "Idle" }
+    );
+}
+
+#[tokio::test]
+async fn cancelled_owned_intro_waits_for_native_idle() {
+    cancelled_intro(false, false, false).await;
+}
+
+#[tokio::test]
+async fn cancelled_existing_intro_is_not_stopped() {
+    cancelled_intro(true, false, false).await;
+}
+
+#[tokio::test]
+async fn cancellation_during_intro_start_waits_for_accepted_response() {
+    cancelled_intro(false, true, false).await;
+}
+
+#[tokio::test]
+async fn cancelled_owned_intro_with_lost_start_response_is_stopped_once() {
+    cancelled_intro(false, false, true).await;
+}

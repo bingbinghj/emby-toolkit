@@ -21,6 +21,10 @@ use std::{
 };
 use tokio::io::AsyncWriteExt;
 
+mod assets;
+pub(crate) mod chapter_images;
+pub(crate) mod ingest_preservation;
+
 const METADATA_FIELDS: &[&str] = &[
     "Name",
     "Overview",
@@ -653,6 +657,7 @@ pub(crate) async fn recover_record(
         .iter()
         .map(|target| target.id.clone())
         .collect::<BTreeSet<_>>();
+    let chapter_images = chapter_images::load(recovery, &record, &owners).await?;
     let mut files = BTreeMap::new();
     let mut thumbnails = BTreeMap::new();
     let mut native_bifs = BTreeMap::<String, Vec<BifEvidence>>::new();
@@ -850,8 +855,10 @@ pub(crate) async fn recover_record(
             &before,
             &thumbnails,
             &native_bifs,
+            &chapter_images,
         )
         .await?;
+        verify_restored_resources(&resources, &owners).await?;
         for target in &targets {
             if let Some((complete, full)) = audio_complete.get(&target.id) {
                 let (path, import) = &requested[&target.id];
@@ -1178,14 +1185,7 @@ async fn restore_files(files: &BTreeMap<PathBuf, Snapshot>, ids: &BTreeSet<Strin
                 return Ok(());
             }
             tokio::fs::create_dir_all(saved.path.parent().unwrap()).await?;
-            let mut source = tokio::fs::File::open(&saved.backup).await?;
-            let mut destination = tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&saved.path)
-                .await?;
-            tokio::io::copy(&mut source, &mut destination).await?;
-            destination.sync_all().await?;
+            assets::restore_file(&saved.backup, &saved.path).await?;
             Ok::<_, ApiError>(())
         }
         .await;
@@ -1198,6 +1198,29 @@ async fn restore_files(files: &BTreeMap<PathBuf, Snapshot>, ids: &BTreeSet<Strin
     } else {
         Err(conflict(failures.join("；")))
     }
+}
+
+async fn verify_restored_resources(
+    files: &BTreeMap<PathBuf, Snapshot>,
+    ids: &BTreeSet<String>,
+) -> Result<()> {
+    for saved in files
+        .values()
+        .filter(|saved| !saved.owners.is_disjoint(ids))
+    {
+        check_ancestors(&saved.path).await?;
+        if !tokio::fs::symlink_metadata(&saved.path)
+            .await
+            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+            || tokio::fs::read(&saved.path).await? != tokio::fs::read(&saved.backup).await?
+        {
+            return Err(conflict(format!(
+                "原有图片资源最终验收未一致，保留当前文件及备份：{}",
+                saved.path.display(),
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn json_path(target: &SavedTarget, settings: &Value) -> Result<PathBuf> {
@@ -1489,6 +1512,16 @@ pub(crate) async fn preflight_file_import(
     target: &SavedTarget,
     context: &JobContext,
 ) -> Result<()> {
+    preflight_file_import_prepared(state, target, context, &mut None).await
+}
+
+async fn preflight_file_import_prepared(
+    state: &AppState,
+    target: &SavedTarget,
+    context: &JobContext,
+    inventory: &mut Option<ClearScopeInventory>,
+) -> Result<()> {
+    context.checkpoint().await?;
     ensure_json_streams_unfiltered(&target.info, &target.id)?;
     if !needs_file_import(&target.info, &Value::Null) {
         return Ok(());
@@ -1497,7 +1530,23 @@ pub(crate) async fn preflight_file_import(
     ensure_file_import_supported(state, &settings, &target.id, false).await?;
     let live = identity_details(state, target).await?;
     ensure_target_reload_supported(target, &live)?;
-    ensure_single_clear_scope(state, target, &live, context).await
+    ensure_single_clear_scope_prepared(state, target, &live, context, inventory).await
+}
+
+pub(crate) async fn preflight_file_imports(
+    state: &AppState,
+    targets: &[SavedTarget],
+    context: &JobContext,
+) -> Result<()> {
+    if let [target] = targets {
+        return preflight_file_import(state, target, context).await;
+    }
+    // This snapshot belongs only to this read-only preparation batch.
+    let mut inventory = None;
+    for target in targets {
+        preflight_file_import_prepared(state, target, context, &mut inventory).await?;
+    }
+    Ok(())
 }
 
 async fn refresh_from_file(
@@ -1668,25 +1717,47 @@ async fn sync_one(
     Ok(restored)
 }
 
-async fn ensure_single_clear_scope(
-    state: &AppState,
-    target: &SavedTarget,
-    live: &Value,
-    context: &JobContext,
-) -> Result<()> {
-    let refuse = || conflict("神医未导入编辑值，关联清理范围不是唯一当前媒体，未清理任何项目");
-    let key = string(live, "PresentationUniqueKey");
-    if key.is_empty()
-        || !matches!(live["Type"].as_str(), Some("Movie" | "Episode"))
-        || !string(live, "ExtraType").is_empty()
-        || live["PartCount"].as_u64() != Some(1)
-    {
-        return Err(refuse());
+struct ClearScopeInventory {
+    items: Vec<Value>,
+    connection: [String; 3],
+}
+
+async fn scope_connection(state: &AppState) -> [String; 3] {
+    let config = state.config.read().await;
+    [
+        string(&config, "emby_server_url")
+            .trim_end_matches('/')
+            .into(),
+        string(&config, "emby_api_key"),
+        string(&config, "emby_user_id"),
+    ]
+}
+
+impl ClearScopeInventory {
+    async fn check_connection(&self, state: &AppState) -> Result<()> {
+        if self.connection != scope_connection(state).await {
+            return Err(conflict(
+                "Emby 连接或用户身份在范围核对期间变化，未提交媒体信息恢复",
+            ));
+        }
+        Ok(())
     }
+}
+
+async fn clear_scope_inventory(
+    state: &AppState,
+    context: &JobContext,
+) -> Result<ClearScopeInventory> {
+    // Pin every page to one connection, including a transient A -> B -> A
+    // config change while the complete inventory is being read.
+    let mut inventory_state = state.clone();
+    inventory_state.config =
+        std::sync::Arc::new(tokio::sync::RwLock::new(state.config.read().await.clone()));
+    let connection = scope_connection(&inventory_state).await;
     // The public Items API has no PresentationUniqueKey query parameter.
     // Read an unfiltered, complete native inventory before trusting uniqueness.
     let items = crate::emby::query_items(
-        state,
+        &inventory_state,
         &[
             ("Recursive", "true".into()),
             (
@@ -1701,6 +1772,48 @@ async fn ensure_single_clear_scope(
         context,
     )
     .await?;
+    let inventory = ClearScopeInventory { items, connection };
+    inventory.check_connection(state).await?;
+    Ok(inventory)
+}
+
+pub(crate) async fn ensure_single_clear_scope(
+    state: &AppState,
+    target: &SavedTarget,
+    live: &Value,
+    context: &JobContext,
+) -> Result<()> {
+    // Native Clear and Refresh always use a new inventory; never reuse a
+    // preparation snapshot across a native write.
+    ensure_single_clear_scope_prepared(state, target, live, context, &mut None).await
+}
+
+async fn ensure_single_clear_scope_prepared(
+    state: &AppState,
+    target: &SavedTarget,
+    live: &Value,
+    context: &JobContext,
+    inventory: &mut Option<ClearScopeInventory>,
+) -> Result<()> {
+    context.checkpoint().await?;
+    let refuse = || conflict("神医未导入编辑值，关联清理范围不是唯一当前媒体，未清理任何项目");
+    let key = string(live, "PresentationUniqueKey");
+    if key.is_empty()
+        || live["Id"] != target.id
+        || live["Path"] != target.path
+        || !Path::new(&target.path).is_absolute()
+        || !matches!(live["Type"].as_str(), Some("Movie" | "Episode"))
+        || !string(live, "ExtraType").is_empty()
+        || live["PartCount"].as_u64() != Some(1)
+    {
+        return Err(refuse());
+    }
+    if inventory.is_none() {
+        *inventory = Some(clear_scope_inventory(state, context).await?);
+    }
+    let inventory = inventory.as_ref().unwrap();
+    inventory.check_connection(state).await?;
+    let items = &inventory.items;
     if items
         .iter()
         .any(|item| string(item, "PresentationUniqueKey").is_empty())
@@ -1767,23 +1880,15 @@ async fn ensure_single_clear_scope(
     if !extras.as_array().is_some_and(Vec::is_empty) {
         return Err(refuse());
     }
+    inventory.check_connection(state).await?;
     Ok(())
 }
 
 async fn restore_bridge(bridge: &crate::chapter_bif::Bridge) -> Result<()> {
     check_ancestors(&bridge.destination).await?;
     let bytes = tokio::fs::read(&bridge.source).await?;
-    match tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&bridge.destination)
-        .await
-    {
-        Ok(mut file) => {
-            file.write_all(&bytes).await?;
-            file.sync_all().await?;
-            Ok(())
-        }
+    match assets::restore_file(&bridge.source, &bridge.destination).await {
+        Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
             if tokio::fs::read(&bridge.destination).await? == bytes {
                 Ok(())
@@ -1889,6 +1994,7 @@ async fn verify_reloaded(
     before: &BTreeMap<String, Value>,
     thumbnails: &BTreeMap<String, Value>,
     native_bifs: &BTreeMap<String, Vec<BifEvidence>>,
+    chapter_images: &chapter_images::EvidenceMap,
 ) -> Result<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut pending = targets
@@ -1984,6 +2090,17 @@ async fn verify_reloaded(
                     reasons.push(difference);
                 }
             }
+            if let Some(evidence) = chapter_images.get(&target.id) {
+                let difference = tokio::time::timeout_at(
+                    deadline,
+                    chapter_images::difference(state, &target.id, &live, evidence),
+                )
+                .await
+                .map_err(|_| conflict("原有章节图片回读超时，恢复备份已保留"))??;
+                if let Some(difference) = difference {
+                    reasons.push(difference);
+                }
+            }
             if reasons.is_empty() {
                 pending.remove(&target.id);
             } else {
@@ -2020,6 +2137,87 @@ async fn verify_reloaded(
     Ok(())
 }
 
+async fn verify_unchanged_resources(
+    state: &AppState,
+    target: &SavedTarget,
+    live: &Value,
+    context: &JobContext,
+) -> Result<()> {
+    if live["Type"] == "Audio" {
+        return Ok(());
+    }
+    context.checkpoint().await?;
+    let verification = async {
+        let images = chapter_images::capture(state, &target.id, live, None).await?;
+        let path = Path::new(&target.path);
+        let parent = path
+            .parent()
+            .ok_or_else(|| conflict("媒体路径没有父目录"))?;
+        let prefix = path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase();
+        let mut entries = match tokio::fs::read_dir(parent).await {
+            Ok(entries) => Some(entries),
+            // No-op saves previously required no local media mount. Continue
+            // API image verification when this containing folder is unavailable.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                None
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let mut bifs = vec![];
+        while let Some(entry) = match &mut entries {
+            Some(entries) => entries.next_entry().await?,
+            None => None,
+        } {
+            let name = entry.file_name().to_string_lossy().to_lowercase();
+            if !name.ends_with(".bif") || !name.starts_with(&prefix) {
+                continue;
+            }
+            check_ancestors(&entry.path()).await?;
+            if !entry.file_type().await?.is_file() {
+                return Err(conflict("原有 BIF 资源不是普通文件，未提交媒体信息恢复"));
+            }
+            let bytes = tokio::fs::read(entry.path()).await?;
+            let frames = recovery_bif_times(&bytes)?.as_array().unwrap().len();
+            bifs.push(BifEvidence {
+                path: entry.path(),
+                bytes,
+                frames,
+            });
+        }
+        let current = identity_details(state, target).await?;
+        if !differences(target, &current).is_empty() {
+            return Err(conflict(
+                "无变化保存的媒体流或章节在图片验收期间变化，未提交媒体信息恢复",
+            ));
+        }
+        if let Some(reason) =
+            chapter_images::difference(state, &target.id, &current, &images).await?
+        {
+            return Err(conflict(reason));
+        }
+        if !bifs.is_empty()
+            && let Some(reason) = native_bif_difference(state, &target.id, &bifs).await?
+        {
+            return Err(conflict(reason));
+        }
+        Ok(())
+    };
+    tokio::select! {
+        _ = context.cancelled() => { context.checkpoint().await?; unreachable!() },
+        result = tokio::time::timeout(Duration::from_secs(30), verification) =>
+            result.map_err(|_| conflict("无变化保存的图片验收超时，原资源已保留"))?,
+    }
+}
+
 pub(crate) async fn reload(
     state: &AppState,
     targets: &[SavedTarget],
@@ -2040,6 +2238,8 @@ pub(crate) async fn reload(
             }
             observations.insert(target.id.clone(), observed);
             affected.push(target);
+        } else {
+            verify_unchanged_resources(state, target, &live, context).await?;
         }
     }
     if affected.is_empty() {
@@ -2057,12 +2257,22 @@ pub(crate) async fn reload(
     if let Some(id) = file_imports.first() {
         ensure_file_import_supported(state, &settings, id, true).await?;
     }
+    let mut inventory = None;
     for target in affected
         .iter()
         .filter(|target| file_imports.contains(&target.id))
     {
-        ensure_single_clear_scope(state, target, &observations[&target.id], context).await?;
+        ensure_single_clear_scope_prepared(
+            state,
+            target,
+            &observations[&target.id],
+            context,
+            &mut inventory,
+        )
+        .await?;
     }
+    // Do not retain this read-only snapshot for the per-target native writes.
+    drop(inventory);
     let mut thumbnails = BTreeMap::new();
     for target in affected
         .iter()
@@ -2121,6 +2331,7 @@ pub(crate) async fn reload(
     let mut formal_paths = BTreeSet::new();
     let mut audio_json = vec![];
     let mut bridges = vec![];
+    let mut chapter_images = chapter_images::EvidenceMap::new();
     for target in &affected {
         context.checkpoint().await?;
         let live = &observations[&target.id];
@@ -2139,6 +2350,13 @@ pub(crate) async fn reload(
                 ));
             }
             snapshot_directory(directory, recovery, &mut files, &target.id).await?;
+            chapter_images.insert(
+                target.id.clone(),
+                tokio::select! {
+                    _=context.cancelled()=>{context.checkpoint().await?;unreachable!()},
+                    result=chapter_images::capture(state,&target.id,live,Some(recovery))=>result?,
+                },
+            );
             let bridge = tokio::select! {
                 _=context.cancelled()=>{context.checkpoint().await?;unreachable!()},
                 result=crate::chapter_bif::prepare(state,target,live,directory,recovery)=>result?,
@@ -2289,6 +2507,7 @@ pub(crate) async fn reload(
         "targets":affected.iter().map(|t|json!({"id":t.id,"path":t.path,"source":t.source,"sha":t.sha,"asset":t.asset})).collect::<Vec<_>>(),
         "observations":observations,
         "thumbnail_times":thumbnails,
+        "chapter_images":chapter_images,
         "files":files.values().map(|f|json!({"path":f.path,"backup":f.backup,"owner_ids":f.owners,"unused_bif_sha256":unused_bifs.get(&f.path)})).collect::<Vec<_>>(),
         "json":json_files.iter().map(|(id,path,backup)|json!({"item_id":id,"path":path,"backup":backup})).collect::<Vec<_>>(),
         "audio_complete":audio_json.iter().map(|(id,path,import,complete)|json!({"item_id":id,"path":path,"import":import,"complete":complete})).collect::<Vec<_>>(),
@@ -2525,15 +2744,18 @@ pub(crate) async fn reload(
         if let Err(error) = restore_files(&resource_files, &synchronized).await {
             failures.push(error.1);
         }
-        let verified = verify_reloaded(
-            state,
-            &ready,
-            &recovery_context,
-            &observations,
-            &thumbnails,
-            &native_bifs,
-        )
-        .await;
+        let verified = async {
+            verify_reloaded(
+                state,
+                &ready,
+                &recovery_context,
+                &observations,
+                &thumbnails,
+                &native_bifs,
+                &chapter_images,
+            ).await?;
+            verify_restored_resources(&resource_files, &synchronized).await
+        }.await;
         let verified_ok = verified.is_ok();
         if let Err(error) = verified {
             failures.push(error.1);
@@ -2623,6 +2845,12 @@ pub(crate) async fn reload(
     }
     outcome
 }
+
+#[cfg(test)]
+mod scope_tests;
+
+#[cfg(test)]
+mod chapter_images_tests;
 
 #[cfg(test)]
 mod file_import_control_tests {

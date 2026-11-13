@@ -20,6 +20,7 @@ function fixture(overrides = {}) {
     delay_between_items_sec: 0.5, media_info_retry_interval: 30, media_info_retry_attempts: 3,
     subtitle_chinese_default_language: 'chs', min_score_for_review: 6, max_actors_to_process: 40,
     max_episode_actors_to_process: 5, extract_thumb: true, actor_role_add_prefix: true,
+    media_edit_skip_track_differences_on_select_all: false,
     remove_actors_without_avatars: false, keyword_to_tags: true, studio_to_chinese: true,
     monitor_paths: ['/media/a'], local_strm_root: '/media', p115_app_id: 'fixture',
   };
