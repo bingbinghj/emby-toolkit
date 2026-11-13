@@ -213,7 +213,7 @@
       </VCard>
     </VDialog>
 
-    <VDialog :model-value="showMediaInfoEditor" :retain-focus="!isConfirmingMediaRecovery" max-width="1100" scrollable @update:model-value="value => { if (!value) closeMediaInfoEditor(); }">
+    <VDialog :model-value="showMediaInfoEditor" :eager="mediaInfoEditorBooted" :retain-focus="!isConfirmingMediaRecovery" max-width="1100" scrollable @update:model-value="value => { if (!value) closeMediaInfoEditor(); }">
       <VCard>
         <VCardTitle class="d-flex align-center"><span class="flex-grow-1">编辑媒体信息 (音轨/字幕)</span><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭媒体信息编辑器" @click="closeMediaInfoEditor" /></VCardTitle>
         <VCardText>
@@ -278,7 +278,7 @@
                   <td><VChip :color="stream.Type === 'Audio' ? 'info' : 'success'" size="small">{{ stream.Type === 'Audio' ? '音轨' : '字幕' }} {{ getStreamTypeOrdinal(stream) }}</VChip><div class="stream-technical-label">{{ getStreamTechnicalLabel(stream) }}</div></td>
                   <td>{{ stream.Type === 'Audio' ? formatAudioBitRate(stream) : '-' }}</td>
                   <td><VTextField v-model="stream.Title" density="compact" placeholder="无标题" :aria-label="`${getMediaInfoStreamDeleteLabel(stream)}当前标题`" :disabled="isSavingMediaInfo || isRepairingTruehdCore" autocomplete="off" spellcheck="false" :mobile-layout="false" /></td>
-                  <td><div title="双击将当前语言填入标题" @dblclick.stop.prevent="handleLanguageDoubleClick(stream)"><VAutocomplete :ref="instance => setMediaInfoLanguageSelectRef(getMediaInfoStreamRowKey(stream), instance)" :model-value="getMediaInfoLanguageSelection(stream)" :items="stream.Type === 'Audio' ? audioLanguageOptions : subtitleLanguageOptions" item-title="label" item-value="value" :custom-filter="mediaInfoLanguageFilter" placeholder="输入语言名称或代码" clearable density="compact" :mobile-layout="false" :aria-label="`${getMediaInfoStreamDeleteLabel(stream)}修正语言`" :disabled="isSavingMediaInfo || isRepairingTruehdCore || isFillingMediaInfoTitles" @update:model-value="value => handleLanguageChange(stream, value)" /></div></td>
+                  <td><div title="双击将当前语言填入标题" @dblclick.stop.prevent="handleLanguageDoubleClick(stream)"><VAutocomplete :ref="instance => setMediaInfoLanguageSelectRef(getMediaInfoStreamRowKey(stream), instance)" :model-value="getMediaInfoLanguageSelection(stream)" :search="showMediaInfoEditor ? undefined : ''" :items="stream.Type === 'Audio' ? audioLanguageOptions : subtitleLanguageOptions" item-title="label" item-value="value" :custom-filter="mediaInfoLanguageFilter" placeholder="输入语言名称或代码" clearable density="compact" :mobile-layout="false" :aria-label="`${getMediaInfoStreamDeleteLabel(stream)}修正语言`" :disabled="isSavingMediaInfo || isRepairingTruehdCore || isFillingMediaInfoTitles" @update:model-value="value => handleLanguageChange(stream, value)" /></div></td>
                   <td class="text-center"><VCheckboxBtn v-model="stream.IsDefault" :aria-label="`${getMediaInfoStreamDeleteLabel(stream)}默认轨道`" :disabled="isSavingMediaInfo || isRepairingTruehdCore" @update:model-value="value => handleDefaultChange(stream, value)" /></td>
                   <td class="text-center"><VBtn icon="mdi-delete-outline" variant="text" color="error" size="small" :disabled="isSavingMediaInfo || isRepairingTruehdCore" :aria-label="`删除${getMediaInfoStreamDeleteLabel(stream)}`" @click="confirmMediaAction('删除轨道', `确认从当前编辑草稿中删除“${getMediaInfoStreamDeleteLabel(stream)}”吗？只有保存后才会生效。`, () => removeMediaInfoStream(stream))" /></td>
                 </tr>
@@ -563,6 +563,7 @@ const replaceEpisodeImages = async () => {
 // ★★★ 媒体信息 (MediaInfo) 编辑相关状态与逻辑 ★★★
 // =========================================================
 const showMediaInfoEditor = ref(false);
+const mediaInfoEditorBooted = ref(false);
 const isSavingMediaInfo = ref(false);
 const isFillingMediaInfoTitles = ref(false);
 const isDeletingMediaVersion = ref(false);
@@ -649,7 +650,10 @@ const mediaInfoLanguageUndoStack = [];
 const closeMediaInfoEditor = () => {
   ++mediaInfoLoadSequence;
   showMediaInfoEditor.value = false;
-  mediaInfoLanguageSelectRefs.clear();
+  for (const instance of mediaInfoLanguageSelectRefs.values()) {
+    instance.menu = false;
+    instance.blur?.();
+  }
 };
 
 const mergeCreditsChapter = (info, chapter) => {
@@ -1363,15 +1367,17 @@ const ensureMediaInfoLanguageOption = (stream) => {
   console.info(`[媒体信息编辑] 已通过 ISO 639 加入语言选项: ${language} -> ${label}`);
 };
 
-const fetchLanguageMapping = async () => {
-  try {
-    const res = await axios.get('/api/mappings/config/language_mapping');
+let mediaInfoLanguageMappingPromise = null;
+const fetchLanguageMapping = () => {
+  if (mediaInfoLanguageMappingPromise) return mediaInfoLanguageMappingPromise;
+  mediaInfoLanguageMappingPromise = axios.get('/api/mappings/config/language_mapping').then(res => {
     const rawData = Array.isArray(res.data) ? res.data : [];
     audioLanguageOptions.value = buildMediaInfoLanguageOptions(rawData);
     subtitleLanguageOptions.value = buildMediaInfoLanguageOptions(rawData, true);
-  } catch (e) {
+  }).catch(e => {
     console.error("获取语言映射失败", e);
-  }
+  }).finally(() => { mediaInfoLanguageMappingPromise = null; });
+  return mediaInfoLanguageMappingPromise;
 };
 const stripChineseScriptParenthetical = (value) => String(value || '')
   .replace(/\s*[（(]\s*(?:简体|繁体|簡體|繁體|简中|繁中)(?:中文|字)?\s*[）)]/gi, '')
@@ -1542,16 +1548,14 @@ const openMediaInfoEditor = async (targetId) => {
   mediaInfoSaveFeedback.value = null;
   loadMediaRecovery();
 
-  // 检查其中一个数组是否为空即可
-  if (audioLanguageOptions.value.length === 0) {
-    await fetchLanguageMapping();
-  }
-  if (sequence !== mediaInfoLoadSequence) return;
-
   const loadingMsg = message.loading("正在读取底层媒体指纹...", { duration: 0 });
   try {
-    const res = await axios.get(`/api/media_info/edit/${targetId}`);
+    const [res] = await Promise.all([
+      axios.get(`/api/media_info/edit/${targetId}`),
+      audioLanguageOptions.value.length === 0 ? fetchLanguageMapping() : Promise.resolve(),
+    ]);
     if (sequence !== mediaInfoLoadSequence) return;
+    mediaInfoLanguageSelectRefs.clear();
     currentEditMediaId.value = String(targetId);
     mediaInfoContext.value = {
       sha1: res.data.sha1,
@@ -1595,6 +1599,7 @@ const openMediaInfoEditor = async (targetId) => {
     mediaInfoLanguageUndoStack.length = 0;
 
     mediaInfoLoadedSnapshot = JSON.stringify(mediaInfoData.value);
+    mediaInfoEditorBooted.value = true;
     showMediaInfoEditor.value = true;
   } catch (e) {
     if (sequence === mediaInfoLoadSequence) {
@@ -2208,6 +2213,7 @@ onBeforeUnmount(() => {
   ++mediaDetailsLoadSequence;
   window.removeEventListener('keydown', handleMediaInfoUndoShortcut);
   closeMediaInfoEditor();
+  mediaInfoLanguageSelectRefs.clear();
   debouncedSearchActors.cancel();
 });
 

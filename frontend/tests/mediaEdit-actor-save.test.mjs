@@ -57,7 +57,7 @@ function fixture(post = async () => ({ data: {} })) {
     watch: (getter, callback) => watchers.push({ getter, callback }),
     onBeforeUnmount: callback => unmounts.push(callback),
     mediaDetailsLoadSequence: 1, window: { removeEventListener() {} },
-    handleMediaInfoUndoShortcut() {}, closeMediaInfoEditor() {}, debouncedSearchActors: { cancel() {} },
+    handleMediaInfoUndoShortcut() {}, closeMediaInfoEditor() {}, mediaInfoLanguageSelectRefs: new Map(), debouncedSearchActors: { cancel() {} },
   });
   vm.runInContext([
     functionSource('invalidateActorSaveSession'), functionSource('handleSaveChanges'),
