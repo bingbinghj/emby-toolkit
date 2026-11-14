@@ -6,7 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use emby_toolkit::{AppState, db, media_recovery, webhook};
+use emby_toolkit::{AppState, db, media_recovery, p115, webhook};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -19,7 +19,101 @@ use std::{
 use tokio::sync::Mutex;
 use tower::ServiceExt;
 
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
+async fn moviepilot_real_attempts_finish_only_failed_target_and_exclude_new_noop_and_unvisited_history()
+ {
+    let mut fixture = Fixture::new(&["complete", "complete"], false, false).await;
+    fixture.configure_cloud_wash().await;
+    let identity = fixture
+        .cloud_version("10001", &"A".repeat(40), "h264")
+        .await;
+    let mut first = fixture.cloud_event(identity, "initial-before-history-scope");
+    first["files"] = json!([fixture.files[0]]);
+    let first_result = fixture.run_moviepilot_event(first).await;
+    assert_eq!(first_result["state"], "completed", "{first_result}");
+    let original_json = std::fs::read(fixture.sidecar_path()).unwrap();
+    let original_native = fixture.host.items.lock().await["101"].clone();
+    let original_imports = fixture.host.file_imports.lock().await.len();
+    std::fs::write(fixture.files[1].as_str().unwrap(), "/cd2/102.mkv").unwrap();
+    fixture.host.items.lock().await.get_mut("102").unwrap()["MediaSources"][0]["Path"] =
+        json!("/cd2/102.mkv");
+    let unvisited = std::path::Path::new(fixture.files[0].as_str().unwrap())
+        .parent()
+        .unwrap()
+        .join("unvisited.strm");
+    std::fs::write(&unvisited, "/cd2/unvisited.mkv").unwrap();
+    let mut event = json!({"source":"moviepilot","media_type":"movie","tmdb_id":"101",
+        "files":[fixture.files[0],fixture.files[1],unvisited],"batch_key":"history-scope-real-attempts"});
+    let history_ids =
+        emby_toolkit::media_organize_history::begin_moviepilot(&fixture.state, &event)
+            .await
+            .unwrap();
+    assert_eq!(history_ids.len(), 3);
+    event["history_ids"] = json!(history_ids);
+    let work = fixture.state.clone();
+    let task = fixture
+        .state
+        .jobs
+        .submit("MoviePilot真实尝试范围", move |context| async move {
+            let result = Box::pin(webhook::process_moviepilot(&work, &event, &context)).await;
+            emby_toolkit::media_organize_history::finish_moviepilot(
+                &work, &event, &context, &result,
+            )
+            .await?;
+            result
+        })
+        .await
+        .unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let result = fixture.state.jobs.result(&task).await.unwrap();
+            if result["is_running"] == false {
+                break result;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(outcome["state"], "failed", "{outcome}");
+    let remaining: Vec<Value> =
+        sqlx::query_scalar("SELECT to_jsonb(h) FROM media_organize_history h WHERE id=ANY($1)")
+            .bind(&history_ids)
+            .fetch_all(&fixture.state.db)
+            .await
+            .unwrap();
+    assert_eq!(remaining.len(), 1, "{remaining:?}");
+    assert_eq!(remaining[0]["item_id"], "102");
+    assert_eq!(remaining[0]["status"], "failed");
+    assert_eq!(
+        std::fs::read(fixture.sidecar_path()).unwrap(),
+        original_json
+    );
+    assert_eq!(fixture.host.items.lock().await["101"], original_native);
+    assert_eq!(
+        fixture.host.file_imports.lock().await.len(),
+        original_imports
+    );
+    fixture.close().await;
+}
+
 type ChapterImages = Arc<Mutex<BTreeMap<(String, u64), Vec<u8>>>>;
+
+fn import_fixture_info(item: &mut Value, info: &Value) {
+    let mut source = info[0]["MediaSourceInfo"].clone();
+    for field in ["Id", "ItemId", "Path"] {
+        source[field] = item["MediaSources"][0][field].clone();
+    }
+    item["MediaSources"][0] = source;
+    item["MediaStreams"] = info[0]["MediaSourceInfo"]["MediaStreams"].clone();
+    item["Chapters"] = info[0]["Chapters"].clone();
+    for field in ["Size", "RunTimeTicks"] {
+        if let Some(value) = info[0]["MediaSourceInfo"].get(field) {
+            item[field] = value.clone();
+        }
+    }
+}
 
 #[derive(Clone, Default)]
 struct Host {
@@ -27,6 +121,7 @@ struct Host {
     title_failures: Arc<Mutex<Vec<String>>>,
     refresh_failures: Arc<Mutex<Vec<String>>>,
     refresh_attempts: Arc<Mutex<Vec<(String, String)>>>,
+    refresh_queries: Arc<Mutex<Vec<(String, HashMap<String, String>)>>>,
     native_starts: Arc<Mutex<Vec<String>>>,
     chain_enabled: Arc<AtomicBool>,
     stage_order: Arc<Mutex<Vec<String>>>,
@@ -41,6 +136,97 @@ struct Host {
     bifs: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
     resource_fault: Arc<Mutex<String>>,
     cover: Arc<Mutex<Option<std::path::PathBuf>>>,
+    cloud_files: Arc<Mutex<Vec<Value>>>,
+    cloud_file_reads: Arc<AtomicUsize>,
+    cloud_swap_after_read: Arc<Mutex<Option<(usize, Value)>>>,
+    cloud_swap_after_import: Arc<Mutex<Option<Value>>>,
+    cloud_unavailable: Arc<AtomicBool>,
+    file_imports: Arc<Mutex<Vec<String>>>,
+    skip_file_import: Arc<AtomicBool>,
+    native_generated_info: Arc<Mutex<HashMap<String, Value>>>,
+    probe_downloads: Arc<AtomicUsize>,
+    deleted_chapter_images: Arc<Mutex<Vec<(String, u64)>>>,
+    chapter_image_paths: Arc<Mutex<BTreeMap<(String, u64), std::path::PathBuf>>>,
+    generated_intro_end: Arc<AtomicUsize>,
+    wash_bif_paths: Arc<Mutex<HashMap<String, std::path::PathBuf>>>,
+    corrupt_size_on_native_start: Arc<AtomicBool>,
+}
+
+async fn denied_probe_download(State(host): State<Host>) -> StatusCode {
+    host.probe_downloads.fetch_add(1, Ordering::SeqCst);
+    StatusCode::BAD_REQUEST
+}
+
+async fn delete_chapter_image(
+    State(host): State<Host>,
+    Path((id, index)): Path<(String, u64)>,
+) -> StatusCode {
+    host.deleted_chapter_images
+        .lock()
+        .await
+        .push((id.clone(), index));
+    host.chapter_images
+        .lock()
+        .await
+        .remove(&(id.clone(), index));
+    if let Some(path) = host
+        .chapter_image_paths
+        .lock()
+        .await
+        .remove(&(id.clone(), index))
+    {
+        std::fs::remove_file(path).unwrap();
+    }
+    if let Some(item) = host.items.lock().await.get_mut(&id)
+        && let Some(chapter) = item["Chapters"]
+            .as_array_mut()
+            .and_then(|chapters| chapters.get_mut(index as usize))
+    {
+        chapter.as_object_mut().unwrap().remove("ImageTag");
+    }
+    StatusCode::NO_CONTENT
+}
+
+async fn cloud_files(
+    State(host): State<Host>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Json<Value> {
+    if host.cloud_unavailable.load(Ordering::SeqCst) {
+        return Json(json!({"state":false,"errno":20018}));
+    }
+    let files = match query.get("cid").map(String::as_str) {
+        Some("0") => vec![json!({"cid":"9","name":"媒体库","fc":"0"})],
+        Some("9") => {
+            let read = host.cloud_file_reads.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut swap = host.cloud_swap_after_read.lock().await;
+            if swap.as_ref().is_some_and(|(target, _)| *target == read) {
+                let (_, replacement) = swap.take().unwrap();
+                *host.cloud_files.lock().await = vec![replacement];
+            }
+            host.cloud_files.lock().await.clone()
+        }
+        _ => vec![],
+    };
+    Json(json!({"state":true,"count":files.len(),"data":files}))
+}
+
+async fn cloud_file(
+    State(host): State<Host>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Json<Value> {
+    let file = host
+        .cloud_files
+        .lock()
+        .await
+        .iter()
+        .find(|file| query.get("file_id").is_some_and(|id| file["id"] == *id))
+        .cloned();
+    match file {
+        Some(file) if !host.cloud_unavailable.load(Ordering::SeqCst) => {
+            Json(json!({"state":true,"data":file}))
+        }
+        _ => Json(json!({"state":false,"errno":20018})),
+    }
 }
 async fn details(
     State(host): State<Host>,
@@ -124,6 +310,7 @@ async fn refresh(
     Path(id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> StatusCode {
+    host.refresh_queries.lock().await.push((id.clone(), query.clone()));
     let mode = query
         .get("MetadataRefreshMode")
         .cloned()
@@ -140,6 +327,7 @@ async fn refresh(
             host.items.lock().await.get_mut("101").unwrap()["Chapters"] = json!([]);
         }
         if mode == "FullRefresh"
+            && query.get("Recursive").is_some_and(|value| value == "true")
             && let Some(target) = host.other_chapter_loss_target.lock().await.as_ref()
         {
             host.items.lock().await.get_mut(target).unwrap()["Chapters"] = json!([]);
@@ -180,14 +368,20 @@ async fn refresh(
         );
     }
     if mode == "Default" && query.contains_key("ReplaceThumbnailImages") {
+        host.file_imports.lock().await.push(id.clone());
+        if host.skip_file_import.load(Ordering::SeqCst) {
+            host.logs.lock().await.extend([
+                format!("Info fixture: RefreshItem Start: {id} metadata"),
+                format!("Info fixture: RefreshItem Complete: {id} metadata"),
+            ]);
+            return StatusCode::NO_CONTENT;
+        }
         let mut items = host.items.lock().await;
         let item = items.get_mut(&id).unwrap();
         let path = std::path::Path::new(item["Path"].as_str().unwrap())
             .with_file_name(format!("{id}-mediainfo.json"));
         let info: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        item["MediaStreams"] = info[0]["MediaSourceInfo"]["MediaStreams"].clone();
-        item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
-        item["Chapters"] = info[0]["Chapters"].clone();
+        import_fixture_info(item, &info);
         for (index, chapter) in item["Chapters"]
             .as_array_mut()
             .unwrap()
@@ -203,6 +397,18 @@ async fn refresh(
             {
                 chapter["ImageTag"] = json!("original-same-tag");
             }
+        }
+        if let Some(replacement) = host.cloud_swap_after_import.lock().await.take() {
+            *host.cloud_files.lock().await = vec![replacement];
+        }
+        if host
+            .wash_bif_paths
+            .lock()
+            .await
+            .get(&id)
+            .is_some_and(|path| !path.exists())
+        {
+            host.bifs.lock().await.remove(&id);
         }
     }
     host.logs.lock().await.extend([
@@ -302,11 +508,37 @@ async fn tasks(State(host): State<Host>) -> Json<Value> {
 async fn start(State(host): State<Host>, Path(id): Path<String>) -> StatusCode {
     if id == "info" {
         *host.info_runs.lock().await += 1;
+        for (native_id, info) in host.native_generated_info.lock().await.iter() {
+            let mut items = host.items.lock().await;
+            let path = std::path::Path::new(items[native_id]["Path"].as_str().unwrap())
+                .with_file_name(format!("{native_id}-mediainfo.json"));
+            import_fixture_info(items.get_mut(native_id).unwrap(), info);
+            std::fs::write(path, serde_json::to_vec(info).unwrap()).unwrap();
+        }
         return StatusCode::NO_CONTENT;
     }
     host.native_starts.lock().await.push(id.clone());
+    if host.corrupt_size_on_native_start.load(Ordering::SeqCst)
+        && matches!(id.as_str(), "intro" | "thumb")
+    {
+        let mut items = host.items.lock().await;
+        let item = items.get_mut("101").unwrap();
+        item["Size"] = json!(2000);
+        item["MediaSources"][0]["Size"] = json!(2000);
+    }
     if host.chain_enabled.load(Ordering::SeqCst) && id == "intro" {
         *host.intro_runs.lock().await += 1;
+        let end = host.generated_intro_end.load(Ordering::SeqCst);
+        if end > 0 {
+            for chapter in host.items.lock().await.get_mut("101").unwrap()["Chapters"]
+                .as_array_mut()
+                .unwrap()
+            {
+                if chapter["MarkerType"] == "IntroEnd" {
+                    chapter["StartPositionTicks"] = json!(end);
+                }
+            }
+        }
         host.stage_order.lock().await.push("intro".into());
         host.logs.lock().await.extend([
             "Info fixture: IntroFingerprintExtract - Scheduled Task Execute".into(),
@@ -355,8 +587,7 @@ impl Fixture {
             .connect(&url)
             .await
             .unwrap();
-        let directory =
-            tempfile::tempdir_in("/root/emby-toolkit-nov12-followup3-verification").unwrap();
+        let directory = tempfile::tempdir().unwrap();
         let state = AppState::new(pool, directory.path().join("app"))
             .await
             .unwrap();
@@ -376,7 +607,9 @@ impl Fixture {
             let root = directory.path().join(&id);
             std::fs::create_dir_all(&root).unwrap();
             let path = root.join(format!("{id}.strm"));
-            let playback = format!("/cd2/{id}.mkv");
+            let playback = directory.path().join(format!("{id}.mkv"));
+            std::fs::write(&playback, vec![0_u8; 1000]).unwrap();
+            let playback = playback.to_string_lossy().into_owned();
             std::fs::write(&path, &playback).unwrap();
             std::fs::write(root.join("poster.jpg"), "existing").unwrap();
             let mut streams = vec![
@@ -410,12 +643,16 @@ impl Fixture {
         }
         let location = directory.path().to_string_lossy().into_owned();
         let router = Router::new()
+            .route("/files", get(cloud_files))
+            .route("/files/file", get(cloud_file))
+            .route("/app/chrome/downurl", post(denied_probe_download))
+            .route("/open/ufile/downurl", get(denied_probe_download).post(denied_probe_download))
             .route("/Users/user/Items/{id}", get(details))
             .route("/Users/user", get(|| async { Json(json!({"Id":"user","Policy":{"IsAdministrator":true,"MaxParentalRating":null,"BlockUnratedItems":[],"BlockedTags":[],"IsTagBlockingModeInclusive":false,"AllowTagOrRating":false}})) }))
             .route("/Videos/{id}/AdditionalParts", get(|| async { Json(json!({"Items":[],"TotalRecordCount":0})) }))
             .route("/Users/user/Items/{id}/SpecialFeatures", get(|| async { Json(json!([])) }))
             .route("/Items/{id}/ThumbnailSet", get(|State(host): State<Host>, Path(id): Path<String>| async move { Json(json!({"Thumbnails":if host.bifs.lock().await.contains_key(&id) {vec![json!({"PositionTicks":0})]} else {vec![]}})) }))
-            .route("/Items/{id}/Images/Chapter/{index}", get(|State(host): State<Host>, Path((id,index)):Path<(String,u64)>| async move { host.chapter_images.lock().await.get(&(id,index)).cloned().unwrap_or_default() }))
+            .route("/Items/{id}/Images/Chapter/{index}", get(|State(host): State<Host>, Path((id,index)):Path<(String,u64)>| async move { host.chapter_images.lock().await.get(&(id,index)).cloned().unwrap_or_default() }).delete(delete_chapter_image))
             .route("/Videos/{id}/index.bif", get(|State(host):State<Host>, Path(id):Path<String>| async move { host.bifs.lock().await.get(&id).cloned().unwrap_or_default() }))
             .route("/Items", get(items))
             .route("/Items/{id}/Refresh", post(refresh))
@@ -558,7 +795,24 @@ impl Fixture {
         (original_jpeg, original_bif)
     }
 
+    async fn wait_for_job(&self, id: &str) -> Value {
+        tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                let result = self.state.jobs.result(id).await.unwrap();
+                if result["is_running"] == false {
+                    return result;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+
     async fn run_series(&self, moviepilot: bool) -> Value {
+        if moviepilot {
+            self.stage_initial_native_sidecars().await;
+        }
         let work = self.state.clone();
         let event = if moviepilot {
             json!({"files":self.files,"tmdb_id":"","batch_key":"ordered-series"})
@@ -590,6 +844,9 @@ impl Fixture {
         .unwrap()
     }
     async fn run(&self, moviepilot: bool) -> Value {
+        if moviepilot {
+            self.stage_initial_native_sidecars().await;
+        }
         let work = self.state.clone();
         let event = if moviepilot {
             json!({"files":self.files,"tmdb_id":"","batch_key":"fixture"})
@@ -620,7 +877,174 @@ impl Fixture {
         .await
         .unwrap()
     }
+    async fn run_moviepilot_event(&self, event: Value) -> Value {
+        let work = self.state.clone();
+        let id = self
+            .state
+            .jobs
+            .submit("MoviePilot 洗版身份验证", move |context| async move {
+                webhook::process_moviepilot(&work, &event, &context).await
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let job = self.state.jobs.result(&id).await.unwrap();
+                if job["is_running"] == false {
+                    return job;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap()
+    }
+    async fn stage_initial_native_sidecars(&self) {
+        let mut generated = self.host.native_generated_info.lock().await;
+        for file in &self.files {
+            let path = std::path::Path::new(file.as_str().unwrap());
+            let id = path.file_stem().unwrap().to_string_lossy().into_owned();
+            if generated.contains_key(&id) {
+                continue;
+            }
+            let sidecar = path.with_file_name(format!("{id}-mediainfo.json"));
+            if let Ok(bytes) = std::fs::read(&sidecar) {
+                let mut info: Value = serde_json::from_slice(&bytes).unwrap();
+                info[0]["Chapters"] = self.host.items.lock().await[&id]["Chapters"].clone();
+                generated.insert(id, info);
+                std::fs::remove_file(sidecar).unwrap();
+            }
+        }
+    }
+    async fn configure_cloud_wash(&mut self) {
+        self.host.configuration.lock().await["ExclusiveExtract"] = json!(true);
+        self.host.configuration.lock().await["IsModSupported"] = json!(true);
+        let base = self.state.config.read().await["emby_server_url"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        self.state.p115 = Arc::new(p115::Service::with_endpoints(p115::Endpoints {
+            qrcode: base.clone(),
+            passport: base.clone(),
+            openapi: base.clone(),
+            webapi: base.clone(),
+            profile: base,
+        }));
+        db::save_setting(
+            &self.state.db,
+            "p115_auth_tokens",
+            &json!({"cookie":"UID=1_A1_fixture; CID=fixture; SEID=fixture"}),
+        )
+        .await
+        .unwrap();
+        self.state
+            .save_config(&json!({
+                "monitor_sha1_pc_search":true,"cd2_media_root":"/cd2",
+                "p115_fingerprint_media_root_cid":"9","p115_api_priority":"cookie",
+                "auto_extract_intro_fingerprint_on_ingest":false,
+                "auto_extract_credits_on_ingest":false,
+                "auto_extract_video_thumbnails_on_ingest":false
+            }))
+            .await
+            .unwrap();
+        let source = "/cd2/101.mkv";
+        std::fs::write(self.files[0].as_str().unwrap(), source).unwrap();
+        let mut items = self.host.items.lock().await;
+        items.get_mut("101").unwrap()["MediaSources"][0]["Path"] = json!(source);
+        drop(items);
+        let path = self.sidecar_path();
+        let mut info: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        info[0]["MediaSourceInfo"]["Path"] = json!(source);
+        std::fs::write(path, serde_json::to_vec(&info).unwrap()).unwrap();
+    }
+    fn sidecar_path(&self) -> std::path::PathBuf {
+        std::path::Path::new(self.files[0].as_str().unwrap()).with_file_name("101-mediainfo.json")
+    }
+    async fn cloud_version(&self, fid: &str, sha: &str, codec: &str) -> Value {
+        let raw = json!({
+            "format":{"format_name":"matroska,webm","size":"1000","duration":"60"},
+            "streams":[
+                {"index":0,"codec_type":"video","codec_name":codec,"width":if codec=="hevc" {3840} else {1920},"height":if codec=="hevc" {2160} else {1080},"pix_fmt":"yuv420p"},
+                {"index":1,"codec_type":"audio","codec_name":"aac","channels":2,"sample_rate":"48000","tags":{"language":if codec=="hevc" {"eng"} else {"jpn"},"title":if codec=="hevc" {"新版英语"} else {"旧版日语"}},"disposition":{"default":1}}
+            ],
+            "chapters":[{"start_time":"1.25","tags":{"title":if codec=="hevc" {"新版章节"} else {"旧版章节"}}}]
+        });
+        sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,raw_ffprobe_json) VALUES($1,$2) ON CONFLICT(sha1) DO UPDATE SET raw_ffprobe_json=EXCLUDED.raw_ffprobe_json")
+            .bind(sha).bind(raw).execute(&self.state.db).await.unwrap();
+        *self.host.cloud_files.lock().await = vec![json!({
+            "id":fid,"parent_id":"9","name":"101.mkv","pick_code":fid,
+            "sha1":sha,"size":1000,"fc":"1"
+        })];
+        json!({"path":self.files[0],"storage":"115网盘Plus","cloud_path":"/媒体库/101.mkv",
+            "fileid":fid,"pickcode":fid,"sha1":sha,"size":1000})
+    }
+    fn cloud_event(&self, identity: Value, batch: &str) -> Value {
+        json!({"source":"moviepilot","files":self.files,"tmdb_id":"101",
+            "batch_key":batch,"file_identities":[identity]})
+    }
+    async fn wash_previews(
+        &self,
+        id: &str,
+    ) -> (std::path::PathBuf, std::path::PathBuf, Vec<u8>, Vec<u8>) {
+        let guid = uuid::Uuid::new_v4().simple().to_string();
+        let jpeg_path = self
+            ._directory
+            .path()
+            .join("metadata/library")
+            .join(&guid[..2])
+            .join(&guid)
+            .join("chapters/0.jpg");
+        std::fs::create_dir_all(jpeg_path.parent().unwrap()).unwrap();
+        let bytes = jpeg([255, 0, 0]);
+        let bif_bytes = bif(&bytes);
+        std::fs::write(&jpeg_path, &bytes).unwrap();
+        let mut items = self.host.items.lock().await;
+        let item = items.get_mut(id).unwrap();
+        item["Guid"] = json!(guid);
+        if item["Chapters"].as_array().is_none_or(Vec::is_empty) {
+            item["Chapters"] = json!([{ "Name":"旧版章节图", "MarkerType":"Chapter", "StartPositionTicks":0, "ChapterIndex":0 }]);
+        }
+        item["Chapters"][0]["ImageTag"] = json!("old-media-preview");
+        item["Chapters"][0]["ChapterIndex"] = json!(0);
+        let path = std::path::Path::new(item["Path"].as_str().unwrap());
+        let bif_path = path.with_file_name(format!(
+            "{}-320-4.bif",
+            path.file_stem().unwrap().to_string_lossy()
+        ));
+        std::fs::write(&bif_path, &bif_bytes).unwrap();
+        drop(items);
+        self.host
+            .chapter_images
+            .lock()
+            .await
+            .insert((id.into(), 0), bytes.clone());
+        self.host
+            .chapter_image_paths
+            .lock()
+            .await
+            .insert((id.into(), 0), jpeg_path.clone());
+        self.host
+            .bifs
+            .lock()
+            .await
+            .insert(id.into(), bif_bytes.clone());
+        self.host
+            .wash_bif_paths
+            .lock()
+            .await
+            .insert(id.into(), bif_path.clone());
+        self.state
+            .save_config(&json!({"emby_metadata_path":self._directory.path().join("metadata")}))
+            .await
+            .unwrap();
+        (jpeg_path, bif_path, bytes, bif_bytes)
+    }
     async fn close(self) {
+        assert_eq!(
+            self.host.probe_downloads.load(Ordering::SeqCst),
+            0,
+            "these cloud identity fixtures have current-SHA raw data; no download/probe fallback is expected"
+        );
         self.state.jobs.shutdown().await;
         self.server.abort();
         self.state.db.close().await;
@@ -636,6 +1060,888 @@ struct TelegramCapture {
     messages: Arc<Mutex<Vec<Value>>>,
     server: tokio::task::JoinHandle<()>,
 }
+
+async fn known_moviepilot_versions(fixture: &Fixture, old_path: &str, old_online: bool) {
+    fixture
+        .state
+        .save_config(&json!({
+            "auto_extract_intro_fingerprint_on_ingest":false,
+            "auto_extract_credits_on_ingest":false,
+            "auto_extract_video_thumbnails_on_ingest":false
+        }))
+        .await
+        .unwrap();
+    let other_path = fixture._directory.path().join("other-library/101.strm");
+    let original = fixture.host.items.lock().await["101"].clone();
+    for (id, path) in [
+        ("900", old_path.to_string()),
+        ("901", other_path.to_string_lossy().into_owned()),
+    ] {
+        if id == "900" && !old_online {
+            continue;
+        }
+        let media_path = std::path::Path::new(&path);
+        std::fs::create_dir_all(media_path.parent().unwrap()).unwrap();
+        let physical = fixture._directory.path().join(format!("version-{id}.mkv"));
+        let size = if id == "900" { 800 } else { 900 };
+        std::fs::write(&physical, vec![0_u8; size]).unwrap();
+        std::fs::write(media_path, physical.to_string_lossy().as_bytes()).unwrap();
+        let mut item = original.clone();
+        item["Id"] = json!(id);
+        item["Path"] = json!(path);
+        item["Size"] = json!(size);
+        item["PresentationUniqueKey"] = json!(format!("key-{id}"));
+        item["MediaSources"][0]["Id"] = json!(format!("mediasource_{id}"));
+        item["MediaSources"][0]["ItemId"] = json!(id);
+        item["MediaSources"][0]["Path"] = json!(physical);
+        item["MediaSources"][0]["Size"] = json!(size);
+        item["MediaStreams"][0]["Codec"] = json!(if id == "900" { "h264" } else { "av1" });
+        item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
+        let info = json!([{"MediaSourceInfo":item["MediaSources"][0],"Chapters":[]}]);
+        std::fs::write(
+            media_path.with_file_name("101-mediainfo.json"),
+            serde_json::to_vec(&info).unwrap(),
+        )
+        .unwrap();
+        fixture.host.items.lock().await.insert(id.into(), item);
+    }
+    sqlx::query("UPDATE media_metadata SET in_library=true,emby_item_ids_json=$1,asset_details_json=$2,file_pickcode_json=$3,file_sha1_json=$4 WHERE tmdb_id='101' AND item_type='Movie'")
+        .bind(json!(["900","901"]))
+        .bind(json!([
+            {"emby_item_id":"900","path":old_path,"size_bytes":800,"video_codec":"h264","fingerprint_pending":false,"fingerprint_revision":7},
+            {"emby_item_id":"901","path":other_path,"size_bytes":900,"video_codec":"av1","fingerprint_pending":false,"fingerprint_revision":9}
+        ]))
+        .bind(json!(["old-pc","other-pc"]))
+        .bind(json!(["old-sha","other-sha"]))
+        .execute(&fixture.state.db)
+        .await
+        .unwrap();
+}
+
+async fn moviepilot_version_row(fixture: &Fixture) -> Value {
+    sqlx::query_scalar(
+        "SELECT to_jsonb(m) FROM media_metadata m WHERE tmdb_id='101' AND item_type='Movie'",
+    )
+    .fetch_one(&fixture.state.db)
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn moviepilot_same_filename_in_another_path_is_new_and_keeps_online_versions() {
+    let mut fixture = Fixture::new(&["complete"], false, false).await;
+    let old_path = fixture._directory.path().join("old-library/101.strm");
+    known_moviepilot_versions(&fixture, &old_path.to_string_lossy(), true).await;
+    fixture.configure_cloud_wash().await;
+    let identity = fixture
+        .cloud_version("10001", &"A".repeat(40), "hevc")
+        .await;
+    let before = moviepilot_version_row(&fixture).await;
+    let mut event = fixture.cloud_event(identity, "same-name-new-path");
+    let job = fixture.run_moviepilot_event(event.clone()).await;
+    let row = moviepilot_version_row(&fixture).await;
+    let info_runs = fixture.host.file_imports.lock().await.len();
+    let native_runs = *fixture.host.info_runs.lock().await;
+    event["batch_key"] = json!("same-file-another-notification");
+    let duplicate = fixture.run_moviepilot_event(event).await;
+    let duplicate_info_runs = fixture.host.file_imports.lock().await.len();
+    let duplicate_native_runs = *fixture.host.info_runs.lock().await;
+    let new_path = fixture.files[0].clone();
+    fixture.close().await;
+
+    assert_eq!(
+        job["result"]["updated"], 1,
+        "the new file must be enhanced and bound: {job}"
+    );
+    assert_eq!(
+        info_runs, 1,
+        "same filename in a different path is a new media file: {job}"
+    );
+    assert_eq!(row["emby_item_ids_json"], json!(["101", "900", "901"]));
+    assert_eq!(row["asset_details_json"][0]["path"], new_path);
+    assert_eq!(row["asset_details_json"][0]["video_codec"], "hevc");
+    for (index, original_index) in [(1, 0), (2, 1)] {
+        for field in ["asset_details_json", "file_pickcode_json", "file_sha1_json"] {
+            assert_eq!(
+                row[field][index], before[field][original_index],
+                "online versions must retain their complete slots: {row}"
+            );
+        }
+    }
+    assert_eq!(
+        duplicate["result"]["updated"], 0,
+        "a completed unchanged file must stay idempotent: {duplicate}"
+    );
+    assert_eq!(
+        duplicate_info_runs, info_runs,
+        "duplicate notification must not rerun media extraction"
+    );
+    assert_eq!(
+        duplicate_native_runs, native_runs,
+        "duplicate notification cannot run a library-wide extraction"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn moviepilot_same_path_with_new_emby_id_reextracts_and_unbinds_only_offline_old_version() {
+    let mut fixture = Fixture::new(&["complete"], false, false).await;
+    let path = fixture.files[0].as_str().unwrap().to_string();
+    known_moviepilot_versions(&fixture, &path, false).await;
+    fixture.configure_cloud_wash().await;
+    let identity = fixture
+        .cloud_version("10001", &"A".repeat(40), "hevc")
+        .await;
+    let before = moviepilot_version_row(&fixture).await;
+    let job = fixture
+        .run_moviepilot_event(fixture.cloud_event(identity, "same-path-replaced-id"))
+        .await;
+    let row = moviepilot_version_row(&fixture).await;
+    let info_runs = fixture.host.file_imports.lock().await.len();
+    fixture.close().await;
+
+    assert_eq!(
+        job["result"]["updated"], 1,
+        "the replacement native ID must enter the full ingest flow: {job}"
+    );
+    assert_eq!(
+        info_runs, 1,
+        "the replacement must not reuse the old identity solely by path: {job}"
+    );
+    assert_eq!(row["emby_item_ids_json"], json!(["101", "901"]));
+    assert_eq!(row["asset_details_json"][0]["path"], path);
+    assert_eq!(row["asset_details_json"][0]["video_codec"], "hevc");
+    for field in ["asset_details_json", "file_pickcode_json", "file_sha1_json"] {
+        assert_eq!(
+            row[field][1], before[field][1],
+            "only the confirmed offline old ID can be removed: {row}"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
+async fn moviepilot_fuse_same_path_id_and_size_rebuilds_new_content_and_keeps_other_versions() {
+    let mut fixture = Fixture::new(&["complete"], false, false).await;
+    let old_path = fixture._directory.path().join("old-library/101.strm");
+    known_moviepilot_versions(&fixture, &old_path.to_string_lossy(), true).await;
+    fixture.configure_cloud_wash().await;
+    let old_identity = fixture
+        .cloud_version("10001", &"A".repeat(40), "h264")
+        .await;
+    let first = fixture
+        .run_moviepilot_event(fixture.cloud_event(old_identity.clone(), "initial-fuse"))
+        .await;
+    assert_eq!(first["result"]["updated"], 1, "{first}");
+    let before = moviepilot_version_row(&fixture).await;
+    let strm_before = std::fs::read(fixture.files[0].as_str().unwrap()).unwrap();
+    let old_info: Value =
+        serde_json::from_slice(&std::fs::read(fixture.sidecar_path()).unwrap()).unwrap();
+    assert_eq!(
+        old_info[0]["MediaSourceInfo"]["MediaStreams"][0]["Codec"],
+        "h264"
+    );
+    let new_identity = fixture
+        .cloud_version("10002", &"B".repeat(40), "hevc")
+        .await;
+    let wash = fixture
+        .run_moviepilot_event(fixture.cloud_event(new_identity.clone(), "fuse-wash"))
+        .await;
+    let row = moviepilot_version_row(&fixture).await;
+    let info: Value =
+        serde_json::from_slice(&std::fs::read(fixture.sidecar_path()).unwrap()).unwrap();
+    let native = fixture.host.items.lock().await["101"].clone();
+    let imports = fixture.host.file_imports.lock().await.clone();
+    let native_runs = *fixture.host.info_runs.lock().await;
+    let mut duplicate = fixture.cloud_event(new_identity, "another-uuid-same-fuse-file");
+    let duplicate_job = fixture.run_moviepilot_event(duplicate.clone()).await;
+    let duplicate_imports = fixture.host.file_imports.lock().await.clone();
+    let duplicate_native_runs = *fixture.host.info_runs.lock().await;
+    duplicate["file_identities"] = json!([old_identity]);
+    duplicate["batch_key"] = json!("delayed-old-fuse-event");
+    let stale = fixture.run_moviepilot_event(duplicate).await;
+    let after_stale = moviepilot_version_row(&fixture).await;
+    let after_stale_info = std::fs::read(fixture.sidecar_path()).unwrap();
+    let strm_after = std::fs::read(fixture.files[0].as_str().unwrap()).unwrap();
+    fixture.close().await;
+
+    assert_eq!(wash["result"]["updated"], 1, "{wash}");
+    assert_eq!(
+        strm_after, strm_before,
+        "the FUSE STRM bytes deliberately did not change"
+    );
+    assert_eq!(row["emby_item_ids_json"], before["emby_item_ids_json"]);
+    assert_eq!(row["file_sha1_json"][0], "B".repeat(40));
+    assert_eq!(row["file_pickcode_json"][0], "10002");
+    assert_eq!(
+        info[0]["MediaSourceInfo"]["MediaStreams"][0]["Codec"],
+        "hevc"
+    );
+    assert_eq!(info[0]["MediaSourceInfo"]["MediaStreams"][0]["Width"], 3840);
+    assert_eq!(
+        native["MediaStreams"],
+        info[0]["MediaSourceInfo"]["MediaStreams"]
+    );
+    assert_eq!(
+        emby_toolkit::media_info::signature(&native["Chapters"]).unwrap(),
+        emby_toolkit::media_info::signature(&info[0]["Chapters"]).unwrap()
+    );
+    assert_eq!(native["Chapters"][0]["Name"], "新版章节");
+    for field in ["asset_details_json", "file_pickcode_json", "file_sha1_json"] {
+        for index in [1, 2] {
+            assert_eq!(
+                row[field][index], before[field][index],
+                "other online slots must survive: {field}"
+            );
+        }
+    }
+    assert!(
+        imports.iter().all(|id| id == "101"),
+        "only the replacement may be imported: {imports:?}"
+    );
+    assert_eq!(duplicate_job["result"]["updated"], 0, "{duplicate_job}");
+    assert_eq!(
+        duplicate_imports, imports,
+        "a new notification UUID cannot repeat extraction/import"
+    );
+    assert_eq!(
+        duplicate_native_runs, native_runs,
+        "a duplicate cannot rerun full-library media extraction"
+    );
+    assert!(
+        stale["state"] == "failed" || stale["result"]["updated"] == 0,
+        "{stale}"
+    );
+    for field in ["asset_details_json", "file_pickcode_json", "file_sha1_json"] {
+        assert_eq!(
+            after_stale[field], row[field],
+            "a delayed old manifest cannot bind old content"
+        );
+    }
+    assert_eq!(
+        serde_json::from_slice::<Value>(&after_stale_info).unwrap(),
+        info
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
+async fn moviepilot_legacy_fuse_event_checks_current_cloud_content_without_manifest() {
+    let mut fixture = Fixture::new(&["complete"], false, false).await;
+    fixture.configure_cloud_wash().await;
+    fixture
+        .cloud_version("10001", &"A".repeat(40), "h264")
+        .await;
+    let mut event = json!({"source":"moviepilot","files":fixture.files,"tmdb_id":"101","batch_key":"legacy-initial"});
+    let first = fixture.run_moviepilot_event(event.clone()).await;
+    assert_eq!(first["result"]["updated"], 1, "{first}");
+    fixture
+        .cloud_version("10002", &"B".repeat(40), "hevc")
+        .await;
+    event["batch_key"] = json!("legacy-replacement");
+    let replacement = fixture.run_moviepilot_event(event.clone()).await;
+    let row = moviepilot_version_row(&fixture).await;
+    let info: Value =
+        serde_json::from_slice(&std::fs::read(fixture.sidecar_path()).unwrap()).unwrap();
+    let native = fixture.host.items.lock().await["101"].clone();
+    let imports = fixture.host.file_imports.lock().await.len();
+    let native_runs = *fixture.host.info_runs.lock().await;
+    event["batch_key"] = json!("legacy-duplicate-new-uuid");
+    let duplicate = fixture.run_moviepilot_event(event).await;
+    let final_imports = fixture.host.file_imports.lock().await.len();
+    let final_native_runs = *fixture.host.info_runs.lock().await;
+    fixture.close().await;
+    assert_eq!(replacement["result"]["updated"], 1, "{replacement}");
+    assert_eq!(row["file_sha1_json"][0], "B".repeat(40));
+    assert_eq!(row["asset_details_json"][0]["video_codec"], "hevc");
+    assert_eq!(
+        info[0]["MediaSourceInfo"]["MediaStreams"][0]["Codec"],
+        "hevc"
+    );
+    assert_eq!(info[0]["MediaSourceInfo"]["MediaStreams"][0]["Width"], 3840);
+    assert_eq!(
+        native["MediaStreams"],
+        info[0]["MediaSourceInfo"]["MediaStreams"]
+    );
+    assert_eq!(
+        emby_toolkit::media_info::signature(&native["Chapters"]).unwrap(),
+        emby_toolkit::media_info::signature(&info[0]["Chapters"]).unwrap()
+    );
+    assert_eq!(duplicate["result"]["updated"], 0, "{duplicate}");
+    assert_eq!(final_imports, imports);
+    assert_eq!(final_native_runs, native_runs);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
+async fn moviepilot_cloud_identity_failure_keeps_old_json_and_can_retry() {
+    let mut fixture = Fixture::new(&["complete"], false, false).await;
+    fixture.configure_cloud_wash().await;
+    let identity = fixture
+        .cloud_version("10001", &"A".repeat(40), "hevc")
+        .await;
+    let before = moviepilot_version_row(&fixture).await;
+    let old_json = std::fs::read(fixture.sidecar_path()).unwrap();
+    fixture.host.cloud_unavailable.store(true, Ordering::SeqCst);
+    let failed = fixture
+        .run_moviepilot_event(fixture.cloud_event(identity.clone(), "cloud-unavailable"))
+        .await;
+    let failed_row = moviepilot_version_row(&fixture).await;
+    let failed_json = std::fs::read(fixture.sidecar_path()).unwrap();
+    let failed_imports = fixture.host.file_imports.lock().await.len();
+    fixture
+        .host
+        .cloud_unavailable
+        .store(false, Ordering::SeqCst);
+    let retried = fixture
+        .run_moviepilot_event(fixture.cloud_event(identity, "cloud-available-retry"))
+        .await;
+    fixture.close().await;
+    assert_eq!(failed["state"], "failed", "{failed}");
+    for field in ["asset_details_json", "file_pickcode_json", "file_sha1_json"] {
+        assert_eq!(failed_row[field], before[field]);
+    }
+    assert_eq!(failed_json, old_json);
+    assert_eq!(failed_imports, 0);
+    assert_eq!(retried["result"]["updated"], 1, "{retried}");
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
+async fn moviepilot_cloud_replacement_during_import_never_marks_old_content_completed() {
+    let mut fixture = Fixture::new(&["complete"], false, false).await;
+    fixture.configure_cloud_wash().await;
+    let first_identity = fixture
+        .cloud_version("10001", &"A".repeat(40), "h264")
+        .await;
+    let first = fixture
+        .run_moviepilot_event(fixture.cloud_event(first_identity, "before-race"))
+        .await;
+    assert_eq!(first["result"]["updated"], 1, "{first}");
+    let latest_identity = fixture.cloud_version("10003", &"C".repeat(40), "av1").await;
+    let latest_file = fixture.host.cloud_files.lock().await[0].clone();
+    let stale_identity = fixture
+        .cloud_version("10002", &"B".repeat(40), "hevc")
+        .await;
+    *fixture.host.cloud_swap_after_import.lock().await = Some(latest_file);
+    let raced = fixture
+        .run_moviepilot_event(fixture.cloud_event(stale_identity, "replace-during-import"))
+        .await;
+    let failed_row = moviepilot_version_row(&fixture).await;
+    let swap_consumed = fixture.host.cloud_swap_after_import.lock().await.is_none();
+    let retry = fixture
+        .run_moviepilot_event(fixture.cloud_event(latest_identity.clone(), "latest-after-race"))
+        .await;
+    let row = moviepilot_version_row(&fixture).await;
+    let imports = fixture.host.file_imports.lock().await.len();
+    let duplicate = fixture
+        .run_moviepilot_event(fixture.cloud_event(latest_identity, "latest-repeat"))
+        .await;
+    let final_imports = fixture.host.file_imports.lock().await.len();
+    fixture.close().await;
+    assert_eq!(
+        raced["state"], "failed",
+        "file changed after native import: {raced}"
+    );
+    assert!(
+        swap_consumed,
+        "the fixture must actually replace the cloud file during import"
+    );
+    assert_ne!(
+        failed_row["asset_details_json"][0]["moviepilot_ingest_identity"]["entity"]["sha1"],
+        "B".repeat(40),
+        "the raced B revision cannot be stamped complete before retry"
+    );
+    assert_eq!(
+        retry["result"]["updated"], 1,
+        "the actual current file must remain retryable: {retry}"
+    );
+    assert_eq!(row["file_sha1_json"][0], "C".repeat(40));
+    assert_eq!(row["asset_details_json"][0]["video_codec"], "av1");
+    assert_eq!(duplicate["result"]["updated"], 0, "{duplicate}");
+    assert_eq!(final_imports, imports);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
+async fn moviepilot_cloud_replacement_before_publish_keeps_formal_json_unchanged() {
+    let mut fixture = Fixture::new(&["complete"], false, false).await;
+    fixture.configure_cloud_wash().await;
+    let initial = fixture
+        .cloud_version("10001", &"A".repeat(40), "h264")
+        .await;
+    let first = fixture
+        .run_moviepilot_event(fixture.cloud_event(initial, "before-publish-race"))
+        .await;
+    assert_eq!(first["result"]["updated"], 1, "{first}");
+    let old_json = std::fs::read(fixture.sidecar_path()).unwrap();
+    let latest_identity = fixture.cloud_version("10003", &"C".repeat(40), "av1").await;
+    let latest_file = fixture.host.cloud_files.lock().await[0].clone();
+    let replacement = fixture
+        .cloud_version("10002", &"B".repeat(40), "hevc")
+        .await;
+    let next_verification = fixture.host.cloud_file_reads.load(Ordering::SeqCst) + 2;
+    *fixture.host.cloud_swap_after_read.lock().await = Some((next_verification, latest_file));
+    let raced = fixture
+        .run_moviepilot_event(fixture.cloud_event(replacement, "replace-before-publish"))
+        .await;
+    let swap_consumed = fixture.host.cloud_swap_after_read.lock().await.is_none();
+    let after_race_json = std::fs::read(fixture.sidecar_path()).unwrap();
+    let retry = fixture
+        .run_moviepilot_event(fixture.cloud_event(latest_identity, "current-after-publish-race"))
+        .await;
+    fixture.close().await;
+    assert_eq!(raced["state"], "failed", "{raced}");
+    assert!(
+        swap_consumed,
+        "the fixture must replace the cloud identity at the fresh pre-publication check"
+    );
+    assert_eq!(
+        after_race_json, old_json,
+        "a pre-publication identity change cannot publish stale JSON"
+    );
+    assert_eq!(retry["result"]["updated"], 1, "{retry}");
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
+async fn moviepilot_same_codec_and_titles_require_new_dimensions_and_bitrate_readback() {
+    let mut fixture = Fixture::new(&["complete"], false, false).await;
+    let old_path = fixture._directory.path().join("old-library/101.strm");
+    known_moviepilot_versions(&fixture, &old_path.to_string_lossy(), true).await;
+    fixture.configure_cloud_wash().await;
+    let initial = fixture
+        .cloud_version("10001", &"A".repeat(40), "hevc")
+        .await;
+    let first = fixture
+        .run_moviepilot_event(fixture.cloud_event(initial, "before-dimensions-wash"))
+        .await;
+    assert_eq!(first["result"]["updated"], 1, "{first}");
+    let before = moviepilot_version_row(&fixture).await;
+    let replacement = fixture
+        .cloud_version("10002", &"B".repeat(40), "hevc")
+        .await;
+    let mut raw: Value =
+        sqlx::query_scalar("SELECT raw_ffprobe_json FROM p115_mediainfo_cache WHERE sha1=$1")
+            .bind("B".repeat(40))
+            .fetch_one(&fixture.state.db)
+            .await
+            .unwrap();
+    raw["streams"][0]["width"] = json!(1920);
+    raw["streams"][0]["height"] = json!(1080);
+    raw["streams"][0]["bit_rate"] = json!("2000000");
+    sqlx::query("UPDATE p115_mediainfo_cache SET raw_ffprobe_json=$1 WHERE sha1=$2")
+        .bind(raw)
+        .bind("B".repeat(40))
+        .execute(&fixture.state.db)
+        .await
+        .unwrap();
+    fixture.host.skip_file_import.store(true, Ordering::SeqCst);
+    let imports_before = fixture.host.file_imports.lock().await.len();
+    let failed = fixture
+        .run_moviepilot_event(fixture.cloud_event(replacement, "unchanged-technical-readback"))
+        .await;
+    let after = moviepilot_version_row(&fixture).await;
+    let native = fixture.host.items.lock().await["101"].clone();
+    let imports_after = fixture.host.file_imports.lock().await.len();
+    let editor = emby_toolkit::media_edit::router()
+        .with_state(fixture.state.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/media_info/edit/101")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let recovery = media_recovery::status(State(fixture.state.clone()))
+        .await
+        .unwrap()
+        .0;
+    fixture.close().await;
+    assert_eq!(
+        failed["state"], "failed",
+        "HTTP success and matching codec/title cannot hide stale dimensions: {failed}"
+    );
+    assert_eq!(native["MediaStreams"][0]["Codec"], "hevc");
+    assert_eq!(native["MediaStreams"][0]["Width"], 3840);
+    assert_eq!(
+        editor.status(),
+        StatusCode::CONFLICT,
+        "an old editor cannot read pending replacement JSON"
+    );
+    assert_eq!(
+        after["file_sha1_json"][0], before["file_sha1_json"][0],
+        "unverified new streams cannot replace the previous verified SHA slot"
+    );
+    let pending = recovery["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|record| record["kind"] == "wash-pending")
+        .collect::<Vec<_>>();
+    assert!(
+        !pending.is_empty(),
+        "the actual replacement needs a scoped pending notice: {recovery}"
+    );
+    assert!(
+        pending
+            .iter()
+            .all(|record| record["target_ids"] == json!(["101"])
+                && !record["related_item_ids"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("901"))),
+        "pending notices cannot include another online version: {recovery}"
+    );
+    assert_eq!(
+        imports_after,
+        imports_before + 1,
+        "the failed job must reach the attempted file import and readback"
+    );
+    assert!(
+        failed["result"]["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("回读"),
+        "failure must come from native readback: {failed}"
+    );
+    assert_eq!(
+        after["asset_details_json"][0]["moviepilot_ingest_identity"],
+        before["asset_details_json"][0]["moviepilot_ingest_identity"]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
+async fn moviepilot_empty_new_chapters_rejects_old_native_intro_markers() {
+    let mut fixture = Fixture::new(&["complete"], false, false).await;
+    fixture.configure_cloud_wash().await;
+    let initial = fixture
+        .cloud_version("10001", &"A".repeat(40), "h264")
+        .await;
+    let first = fixture
+        .run_moviepilot_event(fixture.cloud_event(initial, "before-empty-chapter-wash"))
+        .await;
+    assert_eq!(first["result"]["updated"], 1, "{first}");
+    let before = moviepilot_version_row(&fixture).await;
+    fixture.host.items.lock().await.get_mut("101").unwrap()["Chapters"] = json!([
+        {"Name":"旧版片头","MarkerType":"IntroStart","StartPositionTicks":0},
+        {"Name":"旧版片头结束","MarkerType":"IntroEnd","StartPositionTicks":20_000_000}
+    ]);
+    let replacement = fixture
+        .cloud_version("10002", &"B".repeat(40), "h264")
+        .await;
+    sqlx::query("UPDATE p115_mediainfo_cache SET raw_ffprobe_json=jsonb_set(raw_ffprobe_json,'{chapters}','[]'::jsonb) WHERE sha1=$1")
+        .bind("B".repeat(40)).execute(&fixture.state.db).await.unwrap();
+    fixture.host.skip_file_import.store(true, Ordering::SeqCst);
+    let imports_before = fixture.host.file_imports.lock().await.len();
+    let failed = fixture
+        .run_moviepilot_event(fixture.cloud_event(replacement, "old-intro-readback"))
+        .await;
+    let after = moviepilot_version_row(&fixture).await;
+    let imports_after = fixture.host.file_imports.lock().await.len();
+    fixture.close().await;
+    assert_eq!(
+        failed["state"], "failed",
+        "new empty chapters must not accept stale native intro markers: {failed}"
+    );
+    assert_eq!(
+        imports_after,
+        imports_before + 1,
+        "the failed job must reach the attempted file import and readback"
+    );
+    assert!(
+        failed["result"]["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("回读"),
+        "failure must come from native chapter readback: {failed}"
+    );
+    assert_eq!(
+        after["asset_details_json"][0]["moviepilot_ingest_identity"],
+        before["asset_details_json"][0]["moviepilot_ingest_identity"]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
+async fn moviepilot_unbound_existing_sidecar_is_rebuilt_from_current_cloud_content() {
+    let mut fixture = Fixture::new(&["complete"], false, false).await;
+    fixture.configure_cloud_wash().await;
+    let old_info: Value =
+        serde_json::from_slice(&std::fs::read(fixture.sidecar_path()).unwrap()).unwrap();
+    assert_eq!(
+        old_info[0]["MediaSourceInfo"]["MediaStreams"][0]["Codec"],
+        "hevc"
+    );
+    let before = moviepilot_version_row(&fixture).await;
+    assert_eq!(before["in_library"], false);
+    let current = fixture
+        .cloud_version("10001", &"A".repeat(40), "h264")
+        .await;
+    let job = fixture
+        .run_moviepilot_event(fixture.cloud_event(current, "unbound-old-sidecar"))
+        .await;
+    let info: Value =
+        serde_json::from_slice(&std::fs::read(fixture.sidecar_path()).unwrap()).unwrap();
+    let native = fixture.host.items.lock().await["101"].clone();
+    let imports = fixture.host.file_imports.lock().await.clone();
+    fixture.close().await;
+    assert_eq!(job["result"]["updated"], 1, "{job}");
+    assert_eq!(imports, vec!["101"]);
+    assert_eq!(
+        info[0]["MediaSourceInfo"]["MediaStreams"][0]["Codec"],
+        "h264"
+    );
+    assert_ne!(
+        info[0]["MediaSourceInfo"]["MediaStreams"],
+        old_info[0]["MediaSourceInfo"]["MediaStreams"]
+    );
+    assert_eq!(
+        native["MediaStreams"],
+        info[0]["MediaSourceInfo"]["MediaStreams"]
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
+async fn moviepilot_changed_sha_retires_only_its_old_previews_and_keeps_backup_bytes() {
+    let mut fixture = Fixture::new(&["complete"], false, false).await;
+    let old_path = fixture._directory.path().join("old-library/101.strm");
+    known_moviepilot_versions(&fixture, &old_path.to_string_lossy(), true).await;
+    fixture.configure_cloud_wash().await;
+    let initial = fixture
+        .cloud_version("10001", &"A".repeat(40), "h264")
+        .await;
+    let first = fixture
+        .run_moviepilot_event(fixture.cloud_event(initial, "before-preview-wash"))
+        .await;
+    assert_eq!(first["result"]["updated"], 1, "{first}");
+    let (old_jpeg, old_bif, jpeg_bytes, bif_bytes) = fixture.wash_previews("101").await;
+    let (other_jpeg, other_bif, other_jpeg_bytes, other_bif_bytes) =
+        fixture.wash_previews("901").await;
+    let replacement = fixture
+        .cloud_version("10002", &"B".repeat(40), "hevc")
+        .await;
+    let job = fixture
+        .run_moviepilot_event(fixture.cloud_event(replacement, "replace-with-new-previews"))
+        .await;
+    let deleted = fixture.host.deleted_chapter_images.lock().await.clone();
+    let native = fixture.host.items.lock().await["101"].clone();
+    let old_files_gone = !old_jpeg.exists() && !old_bif.exists();
+    let other_files = (
+        std::fs::read(other_jpeg).unwrap(),
+        std::fs::read(other_bif).unwrap(),
+    );
+    let backups = fixture.state.data_dir.join("backups/media-info-wash");
+    let mut backed_up_jpeg = false;
+    let mut backed_up_bif = false;
+    for directory in std::fs::read_dir(backups).unwrap() {
+        for file in std::fs::read_dir(directory.unwrap().path()).unwrap() {
+            let file = file.unwrap();
+            if file.file_type().unwrap().is_file() {
+                let bytes = std::fs::read(file.path()).unwrap();
+                backed_up_jpeg |= bytes == jpeg_bytes;
+                backed_up_bif |= bytes == bif_bytes;
+            }
+        }
+    }
+    fixture.close().await;
+    assert_eq!(job["result"]["updated"], 1, "{job}");
+    assert_eq!(deleted, vec![("101".into(), 0)]);
+    assert!(
+        old_files_gone,
+        "old byte-content previews cannot remain attached to new media"
+    );
+    assert!(
+        backed_up_jpeg && backed_up_bif,
+        "both original preview byte streams need recoverable backups"
+    );
+    assert_eq!(
+        other_files,
+        (other_jpeg_bytes, other_bif_bytes),
+        "another online version's previews must remain untouched"
+    );
+    assert!(
+        native["Chapters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|chapter| chapter["ImageTag"].is_null()),
+        "new chapters must not reuse old picture tags"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
+async fn moviepilot_same_sha_new_file_id_keeps_previews_without_probe_or_native_import() {
+    let mut fixture = Fixture::new(&["complete"], false, false).await;
+    fixture.configure_cloud_wash().await;
+    let initial = fixture
+        .cloud_version("10001", &"A".repeat(40), "h264")
+        .await;
+    let first = fixture
+        .run_moviepilot_event(fixture.cloud_event(initial, "before-same-bytes-copy"))
+        .await;
+    assert_eq!(first["result"]["updated"], 1, "{first}");
+    let (jpeg_path, bif_path, jpeg_bytes, bif_bytes) = fixture.wash_previews("101").await;
+    let imports_before = fixture.host.file_imports.lock().await.len();
+    let scheduled_before = *fixture.host.info_runs.lock().await;
+    let copied = fixture
+        .cloud_version("10002", &"A".repeat(40), "h264")
+        .await;
+    let job = fixture
+        .run_moviepilot_event(fixture.cloud_event(copied, "same-sha-new-cloud-id"))
+        .await;
+    let row = moviepilot_version_row(&fixture).await;
+    let imports_after = fixture.host.file_imports.lock().await.len();
+    let scheduled_after = *fixture.host.info_runs.lock().await;
+    let deleted = fixture.host.deleted_chapter_images.lock().await.clone();
+    let preview_bytes = (
+        std::fs::read(jpeg_path).unwrap(),
+        std::fs::read(bif_path).unwrap(),
+    );
+    fixture.close().await;
+    assert_eq!(
+        job["result"]["updated"], 1,
+        "changed physical file ID still needs binding update: {job}"
+    );
+    assert_eq!(row["file_pickcode_json"][0], "10002");
+    assert_eq!(row["file_sha1_json"][0], "A".repeat(40));
+    assert_eq!(
+        imports_after, imports_before,
+        "verified same SHA bytes can reuse imported media information"
+    );
+    assert_eq!(scheduled_after, scheduled_before);
+    assert!(
+        deleted.is_empty(),
+        "same byte content cannot invalidate its chapter previews"
+    );
+    assert_eq!(preview_bytes, (jpeg_bytes, bif_bytes));
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
+async fn moviepilot_repeated_series_notification_keeps_derived_markers_without_reextracting() {
+    let fixture = Fixture::new(&["complete"], false, false).await;
+    fixture.configure_series_chain().await;
+    fixture
+        .state
+        .save_config(&json!({"auto_extract_video_thumbnails_on_ingest":false}))
+        .await
+        .unwrap();
+    fixture
+        .host
+        .generated_intro_end
+        .store(220_000_000, Ordering::SeqCst);
+    let first = fixture.run_series(true).await;
+    assert_eq!(first["state"], "completed", "{first}");
+    let before = std::fs::read(fixture.sidecar_path()).unwrap();
+    let info: Value = serde_json::from_slice(&before).unwrap();
+    assert!(
+        info[0]["Chapters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|chapter| chapter["MarkerType"] == "IntroEnd"
+                && chapter["StartPositionTicks"] == 220_000_000)
+    );
+    assert!(
+        info[0]["Chapters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|chapter| chapter["MarkerType"] == "CreditsStart")
+    );
+    let info_runs = *fixture.host.info_runs.lock().await;
+    let native_starts = fixture.host.native_starts.lock().await.clone();
+    let file_imports = fixture.host.file_imports.lock().await.clone();
+    let duplicate = fixture.run_moviepilot_event(json!({
+        "source":"moviepilot","files":fixture.files,"tmdb_id":"101","batch_key":"series-repeat-new-uuid"
+    })).await;
+    let after = std::fs::read(fixture.sidecar_path()).unwrap();
+    let final_info_runs = *fixture.host.info_runs.lock().await;
+    let final_native_starts = fixture.host.native_starts.lock().await.clone();
+    let final_file_imports = fixture.host.file_imports.lock().await.clone();
+    fixture.close().await;
+    assert_eq!(duplicate["result"]["updated"], 0, "{duplicate}");
+    assert_eq!(final_info_runs, info_runs);
+    assert_eq!(
+        final_native_starts, native_starts,
+        "already generated intro/credits cannot restart on another scrape event"
+    );
+    assert_eq!(final_file_imports, file_imports);
+    assert_eq!(
+        after, before,
+        "the completed current marker JSON must remain exact on duplicate notification"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
+async fn moviepilot_initial_native_json_must_match_actual_local_file_size() {
+    let fixture = Fixture::new(&["complete"], false, false).await;
+    fixture
+        .state
+        .save_config(&json!({
+            "auto_extract_intro_fingerprint_on_ingest":false,
+            "auto_extract_credits_on_ingest":false,
+            "auto_extract_video_thumbnails_on_ingest":false
+        }))
+        .await
+        .unwrap();
+    let source = fixture.host.items.lock().await["101"]["MediaSources"][0]["Path"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    std::fs::write(source, vec![0_u8; 2000]).unwrap();
+    let job = fixture.run(true).await;
+    let row = moviepilot_version_row(&fixture).await;
+    let info_runs = *fixture.host.info_runs.lock().await;
+    fixture.close().await;
+    assert_eq!(
+        info_runs, 1,
+        "the stale result must come from this completed native extraction task"
+    );
+    assert_eq!(
+        job["state"], "failed",
+        "native JSON and native metadata agreeing on old size1000 cannot prove actual size2000: {job}"
+    );
+    assert!(
+        row["asset_details_json"][0]["moviepilot_ingest_identity"].is_null(),
+        "the actual mismatched file cannot receive a completed identity"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn moviepilot_native_cloud_path_never_writes_a_media_sidecar() {
+    let mut fixture = Fixture::new(&["complete"], false, false).await;
+    let directory = fixture._directory.path().join("115");
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("101.mkv");
+    std::fs::write(&path, vec![0_u8; 1000]).unwrap();
+    let before = std::fs::read(&path).unwrap();
+    fixture.files = vec![json!(path)];
+    fixture.host.items.lock().await.get_mut("101").unwrap()["Path"] = json!(path);
+    let job = fixture.run_moviepilot_event(json!({
+        "source":"moviepilot","files":fixture.files,"tmdb_id":"101","batch_key":"cloud-native-path"
+    })).await;
+    let writes = fixture.host.file_imports.lock().await.clone();
+    let native_runs = *fixture.host.info_runs.lock().await;
+    let sidecar_exists = directory.join("101-mediainfo.json").exists();
+    let after = std::fs::read(&path).unwrap();
+    fixture.close().await;
+    assert_eq!(job["state"], "failed", "{job}");
+    assert!(job.to_string().contains("原生路径位于云端源目录"), "{job}");
+    assert!(!sidecar_exists);
+    assert_eq!(after, before);
+    assert!(writes.is_empty());
+    assert_eq!(native_runs, 0);
+}
+
 impl TelegramCapture {
     async fn attach(fixture: &mut Fixture) -> Self {
         let messages = Arc::new(Mutex::new(Vec::<Value>::new()));
@@ -701,6 +2007,227 @@ fn message_text(message: &Value) -> &str {
         .as_str()
         .or_else(|| message["caption"].as_str())
         .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby and Telegram are localhost"]
+async fn moviepilot_final_readback_failure_after_native_extraction_never_sends_success() {
+    for kind in ["Series", "Movie"] {
+        let mut fixture = Fixture::new(&["complete"], false, false).await;
+        if kind == "Series" {
+            fixture.configure_series_chain().await;
+        }
+        fixture
+            .state
+            .save_config(&json!({
+                "auto_extract_intro_fingerprint_on_ingest":kind == "Series",
+                "auto_extract_credits_on_ingest":false,
+                "auto_extract_video_thumbnails_on_ingest":kind == "Movie"
+            }))
+            .await
+            .unwrap();
+        let telegram = TelegramCapture::attach(&mut fixture).await;
+        fixture
+            .host
+            .corrupt_size_on_native_start
+            .store(true, Ordering::SeqCst);
+        let job = if kind == "Series" {
+            fixture.run_series(true).await
+        } else {
+            fixture.run(true).await
+        };
+        let starts = fixture.host.native_starts.lock().await.clone();
+        let expected_native = if kind == "Series" { "intro" } else { "thumb" };
+        let assets: Value = sqlx::query_scalar("SELECT asset_details_json FROM media_metadata WHERE item_type=$1 AND emby_item_ids_json @> $2::jsonb")
+            .bind(if kind == "Series" { "Episode" } else { "Movie" })
+            .bind(json!(["101"]))
+            .fetch_one(&fixture.state.db).await.unwrap();
+        let messages = telegram.finish().await;
+        fixture.close().await;
+        assert!(
+            starts.contains(&expected_native.to_string()),
+            "{kind}: the fault must occur after native extraction starts: {job}"
+        );
+        assert_eq!(job["state"], "failed", "{kind}: {job}");
+        assert!(
+            job.to_string().contains("收尾后当前媒体流尚未完整验收"),
+            "{kind}: failure must be the final media readback, not an earlier gate: {job}"
+        );
+        assert!(
+            assets[0]["moviepilot_ingest_identity"].is_null(),
+            "{kind}: {assets}"
+        );
+        assert!(
+            messages.is_empty(),
+            "{kind}: failed final readback cannot send a success notification: {messages:?}"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
+async fn moviepilot_restart_after_business_completion_keeps_task_id_and_does_not_reimport() {
+    let mut fixture = Fixture::new(&["complete"], false, false).await;
+    fixture.configure_cloud_wash().await;
+    let identity = fixture
+        .cloud_version("10001", &"A".repeat(40), "hevc")
+        .await;
+    let event = fixture.cloud_event(identity, "restart-after-completion");
+    let payload = json!({"event":event});
+    let ready = Arc::new(tokio::sync::Notify::new());
+    let signal = ready.clone();
+    let work = fixture.state.clone();
+    let task = fixture
+        .state
+        .jobs
+        .submit_persistent(
+            "入库完成点后的重启",
+            emby_toolkit::jobs::JobSpec::new("webhook", payload),
+            move |context| async move {
+                let report = webhook::process_moviepilot(&work, &event, &context).await?;
+                context.complete("test_business_finished", &report).await?;
+                signal.notify_one();
+                context.cancelled().await;
+                context.checkpoint().await?;
+                Ok(report)
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(120), ready.notified())
+        .await
+        .unwrap();
+    let imports_before = fixture.host.file_imports.lock().await.clone();
+    let native_before = fixture.host.native_starts.lock().await.clone();
+    let json_before = std::fs::read(fixture.sidecar_path()).unwrap();
+    fixture.state.jobs.shutdown().await;
+    fixture.state.jobs = Arc::new(
+        emby_toolkit::jobs::JobManager::open(fixture.state.db.clone())
+            .await
+            .unwrap(),
+    );
+    fixture
+        .state
+        .jobs
+        .resume_pending(
+            fixture.state.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let result = fixture.state.jobs.result(&task).await.unwrap();
+    let imports_after = fixture.host.file_imports.lock().await.clone();
+    let native_after = fixture.host.native_starts.lock().await.clone();
+    let json_after = std::fs::read(fixture.sidecar_path()).unwrap();
+    let registered: Vec<String> = sqlx::query_scalar("SELECT id FROM durable_jobs")
+        .fetch_all(&fixture.state.db)
+        .await
+        .unwrap();
+    fixture.close().await;
+    assert_eq!(result["state"], "completed", "{result}");
+    assert_eq!(result["task_id"], task);
+    assert_eq!(registered, vec![task]);
+    assert_eq!(result["result"]["updated"], 1, "{result}");
+    assert_eq!(imports_after, imports_before);
+    assert_eq!(native_after, native_before);
+    assert_eq!(json_after, json_before);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
+async fn awaiting_moviepilot_history_resumes_only_its_prepared_episode_after_restart() {
+    let mut fixture = Fixture::new(&["complete"], false, false).await;
+    fixture.configure_series_chain().await;
+    fixture
+        .state
+        .save_config(&json!({"emby_webhook_ingest_enabled":true,
+        "auto_extract_intro_fingerprint_on_ingest":false,"auto_extract_credits_on_ingest":false,
+        "auto_extract_video_thumbnails_on_ingest":false}))
+        .await
+        .unwrap();
+    fixture.stage_initial_native_sidecars().await;
+    let mut event = json!({"source":"moviepilot","files":fixture.files,"tmdb_id":"",
+        "batch_key":"awaiting-native-restart","media_type":"tv","episode_group":""});
+    let history = emby_toolkit::media_organize_history::begin_moviepilot(&fixture.state, &event)
+        .await
+        .unwrap();
+    event["history_ids"] = json!(history);
+    let work = fixture.state.clone();
+    let payload = json!({"event":event});
+    let task = fixture
+        .state
+        .jobs
+        .submit_persistent_response(
+            "预增强待回流",
+            emby_toolkit::jobs::JobSpec::new("webhook", payload.clone()),
+            move |context| async move {
+                let result = webhook::process_moviepilot(&work, &payload["event"], &context).await;
+                emby_toolkit::media_organize_history::finish(&work, &payload["event"], &result)
+                    .await?;
+                Ok((200, result?))
+            },
+        )
+        .await
+        .unwrap();
+    fixture.wait_for_job(&task).await;
+    let info_runs_before = *fixture.host.info_runs.lock().await;
+    let state_before: Vec<String> =
+        sqlx::query_scalar("SELECT status FROM media_organize_history WHERE id=ANY($1)")
+            .bind(&history)
+            .fetch_all(&fixture.state.db)
+            .await
+            .unwrap();
+    fixture.state.jobs.shutdown().await;
+    fixture
+        .state
+        .save_config(&json!({"emby_webhook_ingest_enabled":false}))
+        .await
+        .unwrap();
+    let restarted = AppState::new(fixture.state.db.clone(), fixture.state.data_dir.clone())
+        .await
+        .unwrap();
+    fixture.state = restarted;
+    webhook::resume_pending(&fixture.state).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(120),async {
+        loop {
+            let remaining:i64=sqlx::query_scalar("SELECT COUNT(*) FROM media_organize_history WHERE id=ANY($1) AND status='processing'")
+                .bind(&history).fetch_one(&fixture.state.db).await.unwrap();
+            if remaining==0 { break; }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }).await.unwrap();
+    let current = fixture.state.jobs.status().await;
+    if let Some(id) = current["task_id"].as_str() {
+        fixture.wait_for_job(id).await;
+    }
+    let statuses: Vec<String> =
+        sqlx::query_scalar("SELECT status FROM media_organize_history WHERE id=ANY($1)")
+            .bind(&history)
+            .fetch_all(&fixture.state.db)
+            .await
+            .unwrap();
+    let info_runs_after = *fixture.host.info_runs.lock().await;
+    let stages = fixture.host.stage_order.lock().await.clone();
+    fixture.close().await;
+    assert!(!state_before.is_empty());
+    assert!(state_before.iter().all(|status| status == "processing"));
+    assert!(
+        statuses
+            .iter()
+            .all(|status| status == "success" || status == "warning"),
+        "{statuses:?}"
+    );
+    assert_eq!(
+        info_runs_after, info_runs_before,
+        "prepared media must not extract again"
+    );
+    assert_eq!(
+        stages
+            .iter()
+            .filter(|stage| stage.as_str() == "metadata-refresh")
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -1068,6 +2595,7 @@ async fn moviepilot_requires_every_eligible_group_and_unrelated_cover_warnings_d
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
 async fn moviepilot_webhook_retries_failed_finalization_without_reextracting_known_media() {
     async fn post_and_wait(fixture: &Fixture, body: &Value) -> Value {
+        fixture.stage_initial_native_sidecars().await;
         let previous_task = fixture.state.jobs.status().await["task_id"].clone();
         let response = webhook::router()
             .with_state(fixture.state.clone())
@@ -1198,6 +2726,7 @@ async fn moviepilot_webhook_retries_failed_finalization_without_reextracting_kno
 async fn moviepilot_history_uses_the_completed_work_when_ingest_switch_changes_before_finish() {
     for awaiting_emby in [false, true] {
         let fixture = Fixture::new(&["complete"], false, false).await;
+        fixture.stage_initial_native_sidecars().await;
         fixture
             .state
             .save_config(&json!({
@@ -1374,33 +2903,46 @@ async fn recursive_ingest_refresh_protects_old_episode_outside_the_selected_inge
     sqlx::query("INSERT INTO media_metadata(tmdb_id,item_type,title,parent_series_tmdb_id,season_number,episode_number,in_library,emby_item_ids_json,asset_details_json) VALUES('1021','Episode','旧集','101',1,2,true,$1,$2)")
         .bind(json!(["102"])).bind(json!([{"emby_item_id":"102","path":old_path,"size_bytes":1000}])).execute(&fixture.state.db).await.unwrap();
     *fixture.host.other_chapter_loss_target.lock().await = Some("102".into());
+    let old_native = fixture.host.items.lock().await["102"].clone();
+    let old_files = [
+        std::path::PathBuf::from(old_path),
+        std::path::Path::new(old_path).with_extension("nfo"),
+        std::path::Path::new(old_path).with_file_name("102-mediainfo.json"),
+        std::path::Path::new(old_path).with_file_name("102-320-10.bif"),
+        std::path::Path::new(old_path).with_file_name("102-thumb.jpg"),
+    ];
+    // Existing media JSON/STRM and unrelated sidecars must all remain exact.
+    for (path, contents) in old_files.iter().skip(1).zip([
+        b"<episodedetails><title>original old-episode</title></episodedetails>".to_vec(),
+        b"original old-episode JSON".to_vec(),
+        bif(&jpeg([255, 0, 0])),
+        jpeg([255, 0, 0]),
+    ]) {
+        if !path.exists() { std::fs::write(path, contents).unwrap(); }
+    }
+    let original_files = old_files.iter().map(|path| std::fs::read(path).unwrap()).collect::<Vec<_>>();
     let job = fixture.run_series(false).await;
     let recovery = media_recovery::status(State(fixture.state.clone()))
         .await
         .unwrap()
         .0;
     assert_eq!(
-        job["state"], "failed",
-        "only 101 was selected, but recursive refresh touched old 102: {job}"
+        job["state"], "completed",
+        "only 101 and its parent metadata may be refreshed: {job}"
     );
-    assert_eq!(
-        fixture.host.items.lock().await["102"]["Chapters"],
-        json!([]),
-        "the fixture must really reach native refresh"
-    );
-    let mut protected_ids = recovery["records"][0]["target_ids"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|id| id.as_str().unwrap())
-        .collect::<Vec<_>>();
-    protected_ids.sort();
-    assert_eq!(
-        protected_ids,
-        vec!["101", "102"],
-        "all old resources in recursive scope must have recovery records: {recovery}"
-    );
-    assert_eq!(recovery["records"][0]["can_recover"], true, "{recovery}");
+    assert_eq!(fixture.host.items.lock().await["102"], old_native);
+    for (path, original) in old_files.iter().zip(original_files) {
+        assert_eq!(std::fs::read(path).unwrap(), original, "unselected sidecar {}", path.display());
+    }
+    let refreshes = fixture.host.refresh_queries.lock().await;
+    assert!(!refreshes.iter().any(|(id, _)| id == "102"));
+    let full = refreshes.iter().filter(|(_, query)| query.get("MetadataRefreshMode").is_some_and(|mode| mode == "FullRefresh")).collect::<Vec<_>>();
+    assert_eq!(full.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), vec!["101", "302", "301"]);
+    assert!(full.iter().all(|(_, query)| query.get("Recursive").is_some_and(|value| value == "false")));
+    drop(refreshes);
+    assert_eq!(recovery["pending"], false, "{recovery}");
+    assert!(recovery["records"].as_array().unwrap().is_empty());
+    assert!(fixture.host.native_starts.lock().await.is_empty());
     fixture.close().await;
 }
 

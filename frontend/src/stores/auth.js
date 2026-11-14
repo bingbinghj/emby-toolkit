@@ -3,6 +3,7 @@ import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
 import axios from 'axios';
 import { invalidateConfigCache } from '../composables/useConfig.js';
+import { resetFeedbackDialogs } from '../composables/feedbackDialogs.js';
 
 export const useAuthStore = defineStore('auth', () => {
   const isLoggedIn = ref(false);
@@ -63,7 +64,9 @@ export const useAuthStore = defineStore('auth', () => {
       systemStatus.value = status;
 
       if (status === 'logged_in') {
-        if (!isLoggedIn.value || user.value?.id !== response.data.user?.id) {
+        if (!isLoggedIn.value || user.value?.id !== response.data.user?.id
+          || Boolean(user.value?.is_admin) !== Boolean(response.data.user?.is_admin)) {
+          resetFeedbackDialogs();
           accountInfo.value = null;
           invalidateConfigCache();
         }
@@ -71,6 +74,7 @@ export const useAuthStore = defineStore('auth', () => {
         remember.value = response.data.remember ?? true;
         user.value = response.data.user || {};
       } else {
+        resetFeedbackDialogs();
         isLoggedIn.value = false;
         remember.value = false;
         user.value = {};
@@ -85,6 +89,7 @@ export const useAuthStore = defineStore('auth', () => {
     } catch (error) {
       if (!current()) return systemStatus.value;
       if (ownedProbe) return systemStatus.value;
+      resetFeedbackDialogs();
       isLoggedIn.value = false;
       remember.value = false;
       user.value = {};
@@ -96,6 +101,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function login(credentials) {
     const revision = ++authRevision;
+    resetFeedbackDialogs();
     authController?.abort();
     const controller = new AbortController();
     authController = controller;
@@ -129,6 +135,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function logout() {
     const revision = ++authRevision;
+    resetFeedbackDialogs();
     authController?.abort();
     const controller = new AbortController();
     authController = controller;

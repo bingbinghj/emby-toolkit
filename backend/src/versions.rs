@@ -2,6 +2,7 @@ use crate::{
     AppState,
     error::{ApiError, Result},
     identity,
+    jobs::JobContext,
     media_edit::list,
     state::string,
 };
@@ -108,7 +109,19 @@ pub async fn lock(
     Ok(())
 }
 pub async fn unbind(state: &AppState, removed: &[String]) -> Result<u64> {
+    unbind_with_checkpoint(state, removed, None).await
+}
+pub(crate) async fn unbind_with_checkpoint(
+    state: &AppState,
+    removed: &[String],
+    context: Option<&JobContext>,
+) -> Result<u64> {
     if removed.is_empty() {
+        if let Some(context) = context {
+            context
+                .complete("sync-unbind", &json!({"offline":0}))
+                .await?;
+        }
         return Ok(0);
     }
     let mut transaction = state.db.begin().await?;
@@ -155,6 +168,11 @@ pub async fn unbind(state: &AppState, removed: &[String]) -> Result<u64> {
         sqlx::query(&format!("DELETE FROM {table} WHERE item_id=ANY($1)"))
             .bind(&removed)
             .execute(&mut *transaction)
+            .await?;
+    }
+    if let Some(context) = context {
+        context
+            .complete_in_tx(&mut transaction, "sync-unbind", &json!({"offline":count}))
             .await?;
     }
     transaction.commit().await?;

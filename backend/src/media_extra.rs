@@ -37,7 +37,7 @@ async fn submit_preview(
     let work = state.clone();
     let task = state
         .jobs
-        .submit("处理演员表", move |context| async move {
+        .submit_persistent("处理演员表", crate::jobs::JobSpec::new("media_extra", json!({"operation":"preview","id":id})), move |context| async move {
             preview_cast(&work, &id, &context).await
         })
         .await?;
@@ -53,7 +53,7 @@ async fn submit_images(
     let work = state.clone();
     let task = state
         .jobs
-        .submit_response("替换剧集图", move |context| async move {
+        .submit_persistent_response("替换剧集图", crate::jobs::JobSpec::new("media_extra", json!({"operation":"images","id":id})), move |context| async move {
             replace_images(&work, &id, &context).await
         })
         .await?;
@@ -61,6 +61,57 @@ async fn submit_images(
         StatusCode::ACCEPTED,
         Json(json!({"task_id":task,"message":"替换剧集图任务已提交"})),
     ))
+}
+pub(crate) async fn execute_persisted(state: &AppState, payload: &Value, context: &JobContext) -> Result<(u16, Value)> {
+    let id = string(payload, "id");
+    match payload["operation"].as_str() {
+        Some("preview") => Ok((200, preview_cast(state, &id, context).await?)),
+        Some("images") => replace_images(state, &id, context).await,
+        Some("delete") => Ok((200, delete_version(state, &id, context, &[1,2,4,8,15].map(Duration::from_secs)).await?)),
+        _ => Err(ApiError::bad("未知的媒体处理操作")),
+    }
+}
+pub(crate) async fn resume_cleanup(state: &AppState, context: &JobContext) -> Result<()> {
+    if context.completed("capture-finished").await?.is_none() {
+        if let Some(plan) = context.plan("capture-plan").await?.filter(|plan| !plan.is_null()) {
+            if let Some(request) = context.plan("capture-request").await? {
+                if context.is_terminal_cleanup() && request["accepted"] != true && context.completed("capture-refreshed").await?.is_none() {
+                    resume_capture_before_request(state,context,&plan).await?;
+                } else {
+                    resume_capture_after_request(state,&string(&plan,"id"),context,&plan).await?;
+                }
+            } else { resume_capture_before_request(state,context,&plan).await?; }
+        }
+    }
+    if context.completed("version-delete-finished").await?.is_some() { return Ok(()); }
+    if let Some(plan) = context.plan("version-delete").await?.filter(|plan| !plan.is_null()) {
+        if context.plan("version-native-requested").await?.is_some() && !context.is_terminal_cleanup() {
+            resume_version_delete(state, context, &plan, &[1,2,4,8,15].map(Duration::from_secs)).await?;
+        } else {
+            let versions: Vec<String> = serde_json::from_value(plan["versions"].clone()).map_err(|_|ApiError::bad("删除任务原版本组无效"))?;
+            let snapshot: LocalSnapshot = serde_json::from_value(plan["snapshot"].clone()).map_err(|_|ApiError::bad("删除任务原快照无效"))?;
+            let local_deleted = context.completed("version-local-deleted").await?.is_some();
+            let mut source_deleted = context.plan("version-cloud-requested").await?.is_some();
+            for fid in list(&plan["fids"]) {
+                source_deleted &= context.completed(&format!("version-cloud-deleted:{}",fid.as_str().unwrap_or(""))).await?.is_some();
+            }
+            source_deleted |= local_deleted;
+            snapshot.restore_inner(!source_deleted,true).await?;
+            let present = crate::versions::existing(state,&versions).await?;
+            if present.len()>1 {
+                let survivors = versions.iter().filter(|id|present.contains(*id)).cloned().collect::<Vec<_>>();
+                regroup(state,&survivors).await?;
+            }
+            let recovery = PathBuf::from(string(&plan,"recovery"));
+            if tokio::fs::try_exists(recovery.join("original-settings.json")).await? {
+                let original = crate::media_recovery::read_json(&recovery.join("original-settings.json")).await?;
+                let applied = crate::strm::recovery_applied_settings(&recovery,&original).await?;
+                crate::strm::finish_media_recovery(state,&original,applied.as_ref(),|| async { Ok(()) }).await?;
+            }
+            if !context.is_terminal_cleanup() { context.save_plan("version-delete", &Value::Null).await?; }
+        }
+    }
+    Ok(())
 }
 pub async fn preview_cast(state: &AppState, id: &str, context: &JobContext) -> Result<Value> {
     context.checkpoint().await?;
@@ -371,6 +422,7 @@ async fn save_recovery(root: &FsPath, snapshots: &BTreeMap<PathBuf, Vec<u8>>) ->
         .await?;
     Ok(())
 }
+#[derive(serde::Deserialize)]
 struct CapturePictures {
     local: BTreeMap<PathBuf, PathBuf>,
     primary: BTreeMap<String, (PathBuf, String, Value)>,
@@ -448,7 +500,13 @@ async fn restore_capture_pictures(state: &AppState, backup: &CapturePictures) ->
         }
         if !string(&live["ImageTags"], "Primary").is_empty() {
             if live["ImageTags"]["Primary"] != original["ImageTags"]["Primary"] {
-                return Err(ApiError::bad("恢复前已出现新的剧集图，原图备份仍保留"));
+                let response = crate::emby::send(state.http.get(format!("{}/Items/{id}/Images/Primary",string(&config,"emby_server_url").trim_end_matches('/')))
+                    .header("X-Emby-Token",string(&config,"emby_api_key"))).await?.error_for_status()?;
+                let current = response.bytes().await?;
+                let original = tokio::fs::read(source).await?;
+                let same = image::load_from_memory(&current).ok().zip(image::load_from_memory(&original).ok())
+                    .is_some_and(|(current,original)| current.to_rgba8()==original.to_rgba8());
+                if !same { return Err(ApiError::bad("恢复前已出现新的剧集图，原图备份仍保留")); }
             }
             continue;
         }
@@ -490,17 +548,33 @@ pub async fn replace_images(
     context: &JobContext,
 ) -> Result<(u16, Value)> {
     context.checkpoint().await?;
+    if let Some(saved) = context.completed("capture-finished").await? {
+        return Ok((saved["status"].as_u64().unwrap_or(200) as u16,saved["result"].clone()));
+    }
+    if let Some(plan) = context.plan("capture-plan").await?.filter(|plan| !plan.is_null()) {
+        if context.plan("capture-request").await?.is_some() {
+            return resume_capture_after_request(state,id,context,&plan).await;
+        }
+        resume_capture_before_request(state,context,&plan).await?;
+    }
     let item = details(
         state,
         id,
-        "Id,Type,Name,ParentId,SeriesId,Path,ImageTags,Chapters",
+        "Id,Type,Name,ParentId,SeriesId,Path,ImageTags,Chapters,DateLastRefreshed",
     )
     .await?;
     let kind = string(&item, "Type");
     if !matches!(kind.as_str(), "Series" | "Season" | "Episode") {
         return Err(ApiError::bad("只有电视剧、季度或单集可以替换剧集图"));
     }
-    let mut episodes = if kind == "Episode" {
+    let mut episodes = if let Some(scope) = context.plan("capture-scope").await? {
+        let mut episodes = vec![];
+        for id in list(&scope) {
+            let id = id.as_str().ok_or_else(||ApiError::bad("截图任务范围无效"))?;
+            episodes.push(details(state,id,"Id,Name,Type,ParentId,SeriesId,Path,ImageTags,Chapters").await?);
+        }
+        episodes
+    } else if kind == "Episode" {
         vec![item.clone()]
     } else {
         crate::emby::query_items(
@@ -519,6 +593,7 @@ pub async fn replace_images(
         .await?
     };
     crate::media_order::sort_items(state, &mut episodes).await?;
+    context.save_plan("capture-scope", &json!(episodes.iter().map(|episode|string(episode,"Id")).collect::<Vec<_>>())).await?;
     if episodes.is_empty() {
         return Err(ApiError(
             StatusCode::NOT_FOUND,
@@ -584,6 +659,9 @@ pub async fn replace_images(
         let mut found = false;
         for path in &target.candidates {
             if let Some(path) = configured_file(state, path.to_str().unwrap_or("")).await {
+                if crate::media_save::protected(&*state.config.read().await,path.to_str().unwrap_or("")) {
+                    return Err(ApiError::bad("截图保护JSON位于115源目录，未开始截图"));
+                }
                 let previous: Value = serde_json::from_slice(&tokio::fs::read(&path).await?)
                     .map_err(|_| ApiError::bad("截图前媒体信息 JSON 无效，未开始截图"))?;
                 if !crate::media_info::recoverable(&previous) {
@@ -659,6 +737,7 @@ pub async fn replace_images(
         .join(format!("capture-{}", uuid::Uuid::new_v4()));
     save_recovery(&recovery, &snapshots).await?;
     let picture_backups = capture_picture_backups(state, &episodes, &recovery).await?;
+    context.save_plan("capture-plan", &json!({"id":id,"item":item,"episodes":episodes,"recovery":recovery,"snapshot_paths":snapshots.keys().collect::<Vec<_>>(),"restore_targets":restore_targets,"states":states})).await?;
     let confirmed = AtomicBool::new(true);
     let outcome = crate::strm::with_settings_guarded(state, "capture", || async {
         let captured = async {
@@ -707,6 +786,7 @@ pub async fn replace_images(
         tokio::fs::write(recovery.join("image-capture.json"), serde_json::to_vec(&json!({"item_id":id,"snapshot_ids":restore_targets.keys().collect::<Vec<_>>()})).unwrap()).await?;
         crate::emby::prepare_refresh_guard(Some((&confirmed, &recovery)), id, Some(position)).await?;
         started = true;
+        context.save_plan("capture-request", &json!({"position":position,"before":item["DateLastRefreshed"],"accepted":false})).await?;
         state
             .emby(
                 Method::POST,
@@ -723,6 +803,7 @@ pub async fn replace_images(
                 None,
             )
             .await?;
+        context.save_plan("capture-request", &json!({"position":position,"before":item["DateLastRefreshed"],"accepted":true})).await?;
         let capture = crate::strm::config(state).await?;
         let per_episode = (capture["MediaInfoExtractionTimeoutMs"]
             .as_u64()
@@ -768,6 +849,7 @@ pub async fn replace_images(
                 .await;
             if trace.feed(id, &lines)? {
                 complete = true;
+                context.complete("capture-refreshed", &json!(true)).await?;
                 confirmed.store(true, Ordering::Release);
                 tokio::fs::remove_file(recovery.join("image-capture.json")).await?;
                 break;
@@ -807,6 +889,11 @@ pub async fn replace_images(
         captured
     }, &confirmed, &recovery)
     .await;
+    if outcome.is_err() && !started && confirmed.load(Ordering::Acquire) {
+        let plan = context.plan("capture-plan").await?
+            .ok_or_else(|| ApiError::bad("截图提交前恢复计划缺失，原备份仍保留"))?;
+        resume_capture_before_request(state, context, &plan).await?;
+    }
     if started && !complete {
         let reason = outcome
             .as_ref()
@@ -823,7 +910,7 @@ pub async fn replace_images(
         ));
     }
     if complete {
-        let restoring = JobContext::for_recovery(Some(context)).await;
+        let restoring = context.scoped("capture-restore").for_resume_cleanup().await;
         context
             .activity(
                 "恢复媒体信息",
@@ -874,18 +961,126 @@ pub async fn replace_images(
             ));
         }
     }
-    if confirmed.load(Ordering::Acquire)
-        && !outcome
-            .as_ref()
-            .is_err_and(|error| error.0 == StatusCode::CONFLICT)
-    {
-        tokio::fs::remove_dir_all(&recovery).await?;
-    }
     outcome?;
-    Ok((
-        if failures.is_empty() { 200 } else { 207 },
-        json!({"message":format!("剧集图处理完成：已生成 {}/{} 集，失败 {} 项",generated,episodes.len(),failures.len()),"submitted_count":if started{episodes.len()}else{0},"episode_count":episodes.len(),"deleted_count":deleted,"missing_count":missing,"refreshed_count":generated,"failures":failures}),
-    ))
+    let result = json!({"message":format!("剧集图处理完成：已生成 {}/{} 集，失败 {} 项",generated,episodes.len(),failures.len()),"submitted_count":if started{episodes.len()}else{0},"episode_count":episodes.len(),"deleted_count":deleted,"missing_count":missing,"refreshed_count":generated,"failures":failures});
+    let status = if failures.is_empty() {200} else {207};
+    context.complete("capture-finished", &json!({"status":status,"result":result})).await?;
+    if confirmed.load(Ordering::Acquire) { tokio::fs::remove_dir_all(&recovery).await?; }
+    Ok((status,result))
+}
+
+fn capture_recovery(state: &AppState, plan: &Value) -> Result<PathBuf> {
+    let recovery = PathBuf::from(string(plan,"recovery"));
+    if recovery.parent() != Some(state.data_dir.join("backups/media-info-reload").as_path())
+        || !recovery.file_name().is_some_and(|name|name.to_string_lossy().starts_with("capture-")) {
+        return Err(ApiError::bad("截图恢复目录不在原任务范围内"));
+    }
+    Ok(recovery)
+}
+async fn restore_capture_settings(state: &AppState, recovery: &FsPath) -> Result<()> {
+    if tokio::fs::try_exists(recovery.join("original-settings.json")).await? {
+        let original = crate::media_recovery::read_json(&recovery.join("original-settings.json")).await?;
+        let applied = crate::strm::recovery_applied_settings(recovery,&original).await?;
+        crate::strm::finish_media_recovery(state,&original,applied.as_ref(),||async{Ok(())}).await?;
+    }
+    for name in ["image-capture.json","pending-scan.json"] {
+        match tokio::fs::remove_file(recovery.join(name)).await {
+            Ok(())=>(),Err(error) if error.kind()==std::io::ErrorKind::NotFound=>(),Err(error)=>return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+async fn resume_capture_before_request(state: &AppState, context: &JobContext, plan: &Value) -> Result<()> {
+    let recovery = capture_recovery(state,plan)?;
+    let pictures: CapturePictures = serde_json::from_slice(&tokio::fs::read(recovery.join("image-backups.json")).await?)
+        .map_err(|_|ApiError::bad("原截图图片恢复记录无效"))?;
+    restore_capture_pictures(state,&pictures).await?;
+    restore_capture_settings(state,&recovery).await?;
+    context.save_plan("capture-plan", &Value::Null).await?;
+    tokio::fs::remove_dir_all(recovery).await?;
+    Ok(())
+}
+async fn resume_capture_after_request(state: &AppState, id: &str, context: &JobContext, plan: &Value) -> Result<(u16,Value)> {
+    if plan["id"] != id { return Err(ApiError::bad("截图恢复媒体与原任务不一致")); }
+    let recovery = capture_recovery(state,plan)?;
+    let targets: BTreeMap<String,crate::media_save::SavedTarget> = serde_json::from_value(plan["restore_targets"].clone())
+        .map_err(|_|ApiError::bad("截图原媒体保护目标无效"))?;
+    for target in targets.values() { crate::media_save::saved_details(state,target).await?; }
+    let request = context.plan("capture-request").await?.ok_or_else(||ApiError::bad("截图原刷新请求记录缺失"))?;
+    let position = request["position"].as_u64().ok_or_else(||ApiError::bad("截图原刷新日志位置无效"))?;
+    if context.completed("capture-refreshed").await?.is_none() {
+        let live = details(state,id,"Id,Type,Path,DateLastRefreshed").await?;
+        if live["Id"] != id || live["Type"] != plan["item"]["Type"] || live["Path"] != plan["item"]["Path"] {
+            return Err(ApiError::bad("截图恢复顶层媒体身份变化"));
+        }
+        if request["accepted"] != true {
+            let original = crate::media_recovery::read_json(&recovery.join("original-settings.json")).await?;
+            let applied = crate::strm::recovery_applied_settings(&recovery,&original).await?.ok_or_else(||ApiError::bad("截图临时配置记录缺失"))?;
+            let current = crate::strm::config(state).await?;
+            if applied.as_object().unwrap().iter().any(|(key,value)| current[key] != *value) {
+                return Err(ApiError::bad("截图中断后的临时配置已变化，未重放刷新"));
+            }
+            state.emby(Method::POST,&format!("Items/{id}/Refresh"),&[
+                ("Recursive",(live["Type"]!="Episode").to_string()),("MetadataRefreshMode","FullRefresh".into()),
+                ("ImageRefreshMode","FullRefresh".into()),("ReplaceAllMetadata","true".into()),("ReplaceAllImages","true".into()),
+                ("ReplaceThumbnailImages","false".into()),("ReplaceIntroMarkers","false".into()),
+            ],None).await?;
+        }
+        let capture = crate::strm::config(state).await?;
+        let count = list(&plan["episodes"]).len() as u64;
+        let per_episode = (capture["MediaInfoExtractionTimeoutMs"].as_u64().unwrap_or(60000)/1000
+            * capture["MaxExtractions"].as_u64().unwrap_or(2)+30).max(180);
+        let deadline = tokio::time::Instant::now()+Duration::from_secs((count*per_episode).max(600));
+        let mut trace = RefreshTrace::new(position);
+        loop {
+            let lines = tokio::time::timeout_at(deadline,state.emby(Method::GET,"System/Logs/embyserver.txt/Lines",&[("Limit","500".into())],None))
+                .await.map_err(|_|ApiError::bad("截图原刷新完成日志等待超时"))??;
+            if trace.feed(id,&lines)? { break; }
+            if !string(&request,"before").is_empty() {
+                let refreshed = details(state,id,"DateLastRefreshed").await?;
+                if !string(&refreshed,"DateLastRefreshed").is_empty() && refreshed["DateLastRefreshed"] != request["before"] {
+                    crate::emby::idle(state,context).await?;
+                    break;
+                }
+            }
+            context.activity("恢复截图任务","等待重启前已提交的截图刷新实际结束").await;
+            tokio::time::sleep(Duration::from_secs(1).min(deadline.saturating_duration_since(tokio::time::Instant::now()))).await;
+            if tokio::time::Instant::now()>=deadline { return Err(ApiError::bad("尚未确认截图原刷新结束，原快照继续保留")); }
+        }
+        context.complete("capture-refreshed",&json!(true)).await?;
+    }
+    restore_capture_settings(state,&recovery).await?;
+    let states: BTreeMap<PathBuf,Option<SystemTime>> = serde_json::from_value(plan["states"].clone()).map_err(|_|ApiError::bad("原截图文件状态无效"))?;
+    let episodes = list(&plan["episodes"]);
+    let mut generated = changed(&states).await;
+    if states.is_empty() {
+        generated = 0;
+        for episode in &episodes {
+            let live = details(state,&string(episode,"Id"),"Id,Path,ImageTags").await?;
+            if live["Id"] != episode["Id"] || live["Path"] != episode["Path"] { return Err(ApiError::bad("截图分集身份变化")); }
+            generated += usize::from(!string(&live["ImageTags"],"Primary").is_empty());
+        }
+    }
+    let restoring = context.scoped("capture-restore").for_resume_cleanup().await;
+    let metadata = crate::media_save::refresh_saved(state,&restoring,||async {
+        for target in targets.values() { crate::media_save::saved_details(state,target).await?; }
+        let config = state.config.read().await.clone();
+        for (index,path) in list(&plan["snapshot_paths"]).iter().enumerate() {
+            let path = PathBuf::from(path.as_str().ok_or_else(||ApiError::bad("截图原JSON路径无效"))?);
+            if crate::media_save::protected(&config,path.to_str().unwrap_or("")) { return Err(ApiError::bad("截图恢复JSON路径位于115源目录")); }
+            crate::media_save::commit_json_stage(&recovery.join(format!("{index}.json")),&path).await?;
+        }
+        for target in targets.values() { crate::media_save::cache_saved(state,target.sha.as_deref(),&target.info).await?; }
+        Ok(targets.values().cloned().collect::<Vec<_>>())
+    }).await?;
+    if metadata["state"] != "verified" { return Err(ApiError::bad("截图原媒体信息尚未通过恢复验收，原快照保留")); }
+    let mut failures = list(&metadata["warning_details"]);
+    if generated<episodes.len() { failures.push(json!(format!("仍有 {} 集未生成新截图",episodes.len()-generated))); }
+    let status = if failures.is_empty(){200}else{207};
+    let result = json!({"message":format!("剧集图处理完成：已生成 {}/{} 集，失败 {} 项",generated,episodes.len(),failures.len()),"submitted_count":episodes.len(),"episode_count":episodes.len(),"refreshed_count":generated,"failures":failures,"metadata_refresh":metadata});
+    context.complete("capture-finished",&json!({"status":status,"result":result})).await?;
+    tokio::fs::remove_dir_all(recovery).await?;
+    Ok((status,result))
 }
 
 async fn submit_delete(
@@ -895,7 +1090,7 @@ async fn submit_delete(
     let work = state.clone();
     let task = state
         .jobs
-        .submit("删除媒体版本", move |context| async move {
+        .submit_persistent("删除媒体版本", crate::jobs::JobSpec::new("media_extra", json!({"operation":"delete","id":id})), move |context| async move {
             delete_version(
                 &work,
                 &id,
@@ -910,6 +1105,7 @@ async fn submit_delete(
         Json(json!({"task_id":task,"message":"删除媒体版本任务已提交"})),
     ))
 }
+#[derive(serde::Serialize, serde::Deserialize)]
 struct DeleteResource {
     target: media_edit::Target,
     local: PathBuf,
@@ -1586,6 +1782,122 @@ async fn regroup(state: &AppState, ids: &[String]) -> Result<()> {
     }
     Ok(())
 }
+async fn resumed_delete_steps(
+    state: &AppState, context: &JobContext, plan: &Value,
+    snapshot: &LocalSnapshot, resources: &[DeleteResource],
+    versions: &[String], remaining: &[String], recovery: &FsPath,
+    protection_delays: &[Duration],
+) -> Result<Value> {
+    let id = string(plan,"id");
+    let present = crate::versions::existing(state, versions).await?;
+    if remaining.iter().any(|id| !present.contains(id)) {
+        return Err(ApiError::bad("删除任务的保留版本已变化，停止自动恢复"));
+    }
+    if present.contains(&id) && context.completed("version-native-deleted").await?.is_none() {
+        verify_delete_resources(state, resources, remaining).await?;
+        let live = details(state,&id,"Id,Path,MediaSources").await?;
+        if list(&live["MediaSources"]).len()>1 {
+            state.emby(Method::POST,&format!("Videos/{id}/AlternateSources/Delete"),&[],None).await?;
+        }
+        state.webhooks.mark_manual_delete(versions).await;
+        context.save_plan("version-native-requested", &json!(true)).await?;
+        state.emby(Method::DELETE,&format!("Items/{id}"),&[],None).await?;
+        context.complete("version-native-deleted", &json!(true)).await?;
+    }
+    if crate::versions::existing(state,&[id.clone()]).await?.contains(&id) {
+        return Err(ApiError::bad("Emby尚未确认原版本删除，未继续删除源文件"));
+    }
+    for resource in resources {
+        let response = state.emby(Method::GET,"Items",&[("Path",resource.target.path.clone()),("Recursive","true".into()),("Fields","Id,Path".into())],None).await?;
+        let items = response["Items"].as_array().ok_or_else(||ApiError::bad("无法确认删除路径是否出现新媒体"))?;
+        if items.iter().any(|item| item["Path"] == resource.target.path) {
+            return Err(ApiError::bad("原删除路径已出现新媒体，已保留当前源文件"));
+        }
+    }
+    for resource in resources {
+        if resource.fid.is_empty() { continue; }
+        let checkpoint = format!("version-cloud-deleted:{}",resource.fid);
+        if context.completed(&checkpoint).await?.is_some() { continue; }
+        let raw = crate::p115::file_info_response(state,resource.fid.parse().map_err(|_|ApiError::bad("原删除文件ID无效"))?).await?;
+        if !crate::p115::missing(&raw) {
+            if !crate::p115::success(&raw) { return Err(ApiError::bad("原云文件身份未确认，已停止删除")); }
+            let file = raw["data"].as_array().and_then(|data|data.first()).unwrap_or(&raw["data"]);
+            if crate::revalidation::is_directory(file) { return Err(ApiError::bad("原删除文件变为目录，未执行删除")); }
+            let file = crate::revalidation::normalized(file);
+            let expected_pc = resource.target.pc.clone().or_else(||crate::fingerprints::pickcode(&resource.source));
+            if resource.target.sha.as_ref().is_some_and(|sha| !string(&file,"sha1").eq_ignore_ascii_case(sha))
+                || expected_pc.as_ref().is_some_and(|pc| !same_pickcode(Some(pc),Some(&string(&file,"pick_code")))) {
+                return Err(ApiError::bad("原删除云文件身份在中断后变化，未删除新文件"));
+            }
+            crate::identity::verify(&resource.target.asset,&json!({"Size":file["size"]}))?;
+            context.save_plan("version-cloud-requested",&json!(true)).await?;
+            crate::p115::delete_files(state,&[resource.fid.clone()]).await?;
+        }
+        context.complete(&checkpoint,&json!(true)).await?;
+    }
+    if context.completed("version-local-deleted").await?.is_none() {
+        for path in &snapshot.targets {
+            if tokio::fs::try_exists(path).await? {
+                if crate::media_rename::local_identity(path).await? != plan["local_identities"][path.to_string_lossy().as_ref()] {
+                    return Err(ApiError::bad("原删除路径已被替换，保留当前本地文件"));
+                }
+            }
+        }
+        snapshot.restore_inner(false,true).await?;
+        context.complete("version-local-deleted",&json!(true)).await?;
+    }
+    if context.completed("version-delete-unbound").await?.is_none() {
+        let fids = list(&plan["fids"]).iter().filter_map(|id|id.as_str().map(str::to_string)).collect::<Vec<_>>();
+        if !fids.is_empty() { sqlx::query("DELETE FROM p115_filesystem_cache WHERE id=ANY($1)").bind(&fids).execute(&state.db).await?; }
+        crate::versions::unbind(state,&[id.clone()]).await?;
+        context.complete("version-delete-unbound",&json!(true)).await?;
+    }
+    let mut warning_details = vec![];
+    if let Err(error) = regroup(state,remaining).await { warning_details.push(format!("剩余版本重新合并失败：{}",error.1)); }
+    if context.completed("version-delete-scanned").await?.is_none() {
+        let position = log_position(state).await?;
+        atomic_write(&recovery.join("pending-scan.json"),&serde_json::to_vec(&json!({"position":position,"ids":null})).unwrap()).await?;
+        let paths = snapshot.targets.iter().map(|path|path.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        let submitted = crate::media_save::refresh_with_ids(state,&paths).await?;
+        atomic_write(&recovery.join("pending-scan.json"),&serde_json::to_vec(&json!({"position":position,"ids":submitted})).unwrap()).await?;
+        wait_delete_scan(state,&submitted,position,snapshot,context,protection_delays).await?;
+        context.complete("version-delete-scanned",&json!(true)).await?;
+    }
+    Ok(json!({"message":"指定媒体版本已删除，115、STRM、媒体信息和Emby已刷新","deleted_item_id":id,"remaining_item_id":remaining.first(),"warnings":warning_details.len(),"warning_details":warning_details}))
+}
+async fn resume_version_delete(state: &AppState, context: &JobContext, plan: &Value, protection_delays: &[Duration]) -> Result<Value> {
+    let resources: Vec<DeleteResource> = serde_json::from_value(plan["resources"].clone()).map_err(|_|ApiError::bad("删除任务原资源计划无效"))?;
+    let snapshot: LocalSnapshot = serde_json::from_value(plan["snapshot"].clone()).map_err(|_|ApiError::bad("删除任务原快照计划无效"))?;
+    let versions: Vec<String> = serde_json::from_value(plan["versions"].clone()).map_err(|_|ApiError::bad("删除任务版本计划无效"))?;
+    let remaining: Vec<String> = serde_json::from_value(plan["remaining"].clone()).map_err(|_|ApiError::bad("删除任务保留版本计划无效"))?;
+    let recovery = PathBuf::from(string(plan,"recovery"));
+    if snapshot.stage.parent() != Some(state.data_dir.as_path()) || recovery.parent() != Some(state.data_dir.join("rename-recovery").as_path())
+        || !snapshot.stage.file_name().is_some_and(|name|name.to_string_lossy().starts_with("version-delete-")) {
+        return Err(ApiError::bad("删除任务快照目录越界"));
+    }
+    let mut report = None;
+    if tokio::fs::try_exists(recovery.join("original-settings.json")).await? {
+        let original = crate::media_recovery::read_json(&recovery.join("original-settings.json")).await?;
+        let applied = crate::strm::recovery_applied_settings(&recovery,&original).await?;
+        crate::strm::finish_media_recovery(state,&original,applied.as_ref(),|| async {
+            report = Some(resumed_delete_steps(state,context,plan,&snapshot,&resources,&versions,&remaining,&recovery,protection_delays).await?);
+            Ok(())
+        }).await?;
+    } else {
+        let confirmed = AtomicBool::new(true);
+        report = Some(crate::strm::with_settings_guarded(state,"ignore_file_change",|| async {
+            let result = resumed_delete_steps(state,context,plan,&snapshot,&resources,&versions,&remaining,&recovery,protection_delays).await;
+            confirmed.store(result.is_ok(),Ordering::Release);
+            result
+        },&confirmed,&recovery).await?);
+    }
+    let report = report.ok_or_else(||ApiError::bad("删除任务恢复结果缺失"))?;
+    context.complete("version-delete-finished",&report).await?;
+    let _ = tokio::fs::remove_dir_all(snapshot.stage).await;
+    let _ = tokio::fs::remove_dir_all(recovery).await;
+    Ok(report)
+}
+
 pub async fn delete_version(
     state: &AppState,
     id: &str,
@@ -1593,6 +1905,10 @@ pub async fn delete_version(
     protection_delays: &[Duration],
 ) -> Result<Value> {
     context.checkpoint().await?;
+    if let Some(result) = context.completed("version-delete-finished").await? { return Ok(result); }
+    if let Some(plan) = context.plan("version-delete").await?.filter(|plan| !plan.is_null()) {
+        return resume_version_delete(state, context, &plan, protection_delays).await;
+    }
     let target = media_edit::target(state, id).await?;
     if target.asset["fingerprint_pending"] == true {
         return Err(ApiError(
@@ -1688,23 +2004,35 @@ pub async fn delete_version(
     let mut committed = false;
     let mut recovery_failed = false;
     let mut warning_details = vec![];
+    let mut local_identities = json!({});
+    for path in &snapshot.targets { local_identities[path.to_string_lossy().as_ref()] = crate::media_rename::local_identity(path).await?; }
+    context.save_plan("version-delete", &json!({"id":id,"versions":versions,"remaining":remaining,"resources":resources,"snapshot":snapshot,"recovery":recovery,"fids":fids,"local_identities":local_identities})).await?;
     let outcome=crate::strm::with_settings_guarded(state,"ignore_file_change",|| async {
         let result = std::panic::AssertUnwindSafe(async {
         context.checkpoint().await?;
         verify_delete_resources(state, &resources, &remaining).await?;
         state.emby(Method::POST,&format!("Videos/{}/AlternateSources/Delete",versions[0]),&[],None).await?;split=true;
+        context.complete("version-delete-split", &json!(true)).await?;
         let survivors=crate::versions::existing(state,&versions).await?;if versions.iter().any(|v|!survivors.contains(v)){return Err(ApiError::bad("Emby版本组拆分后未保留全部版本，源文件未删除"));}
         context.checkpoint().await?;
         verify_delete_resources(state, &resources, &remaining).await?;
         // Finish source rollback/protection after this point even if a stop is requested.
         state.webhooks.mark_manual_delete(&versions).await;
+        context.save_plan("version-native-requested", &json!(true)).await?;
         state.emby(Method::DELETE,&format!("Items/{id}"),&[],None).await?;deleted=true;
+        context.complete("version-native-deleted", &json!(true)).await?;
         let survivors=crate::versions::existing(state,&remaining).await?;if remaining.iter().any(|v|!survivors.contains(v)){return Err(ApiError::bad("Emby连带删除了其他版本，115和本地源文件已保留，请扫描媒体库恢复"));}
-        if !fids.is_empty(){crate::p115::delete_files(state,&fids.iter().cloned().collect::<Vec<_>>()).await?;}
+        if !fids.is_empty(){
+            context.save_plan("version-cloud-requested", &json!(true)).await?;
+            crate::p115::delete_files(state,&fids.iter().cloned().collect::<Vec<_>>()).await?;
+            for fid in &fids { context.complete(&format!("version-cloud-deleted:{fid}"), &json!(true)).await?; }
+        }
         committed=true;
         snapshot.restore(false).await?;
+        context.complete("version-local-deleted", &json!(true)).await?;
         if !fids.is_empty(){sqlx::query("DELETE FROM p115_filesystem_cache WHERE id=ANY($1)").bind(fids.iter().cloned().collect::<Vec<_>>()).execute(&state.db).await?;}
         crate::versions::unbind(state,&[id.into()]).await?;
+        context.complete("version-delete-unbound", &json!(true)).await?;
         if let Err(error) = regroup(state,&remaining).await {
             let warning = format!("剩余版本重新合并失败：{}，源文件已保护，请重新合并版本组",error.1);
             tracing::warn!("[版本删除] {warning}");
@@ -1721,6 +2049,7 @@ pub async fn delete_version(
         atomic_write(&recovery.join("pending-scan.json"), &serde_json::to_vec(
             &json!({"position":position,"ids":submitted})).unwrap()).await?;
         wait_delete_scan(state,&submitted,position,&snapshot,context,protection_delays).await?;
+        context.complete("version-delete-scanned", &json!(true)).await?;
         confirmed.store(true, Ordering::Release);
         Ok(json!({"message":format!("指定媒体版本已删除，115、STRM、媒体信息和Emby已刷新{}",if warning_details.is_empty(){String::new()}else{format!("；收尾有 {} 条警告，请查看任务结果",warning_details.len())}),"deleted_item_id":id,"remaining_item_id":remaining.first(),"warnings":warning_details.len(),"warning_details":warning_details}))
         }).catch_unwind().await.unwrap_or_else(|_| Err(ApiError::bad("版本删除执行异常")));
@@ -1749,6 +2078,7 @@ pub async fn delete_version(
     }
         result
     }, &confirmed, &recovery).await;
+    if let Ok(result) = &outcome { context.complete("version-delete-finished", result).await?; }
     if recovery_failed
         || !confirmed.load(Ordering::Acquire)
         || outcome

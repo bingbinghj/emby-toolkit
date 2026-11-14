@@ -125,7 +125,7 @@ for (const theme of themes) test(`${theme.name} confirmation text and settings h
   api.respond('GET', '/api/media_organize/history', { items: [{ id: '00000000-0000-4000-8000-000000000101',
     item_id: '101', name: '确认按钮文字对比验证', item_type: 'Movie', status: 'success' }], total: 1 });
   await page.goto('/media-organize');
-  await page.getByTestId('organize-items').locator('tbody tr').first().getByRole('checkbox').check();
+  await page.getByTestId('organize-items').locator('tbody tr').filter({ has: page.getByRole('checkbox') }).first().getByRole('checkbox').check();
   await page.getByTestId('organize-selected').click();
   const organize = page.getByTestId('organize-confirm');
   await expect(organize.locator('.v-btn__content')).toHaveCSS('font-size', '14px');

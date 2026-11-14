@@ -12,10 +12,10 @@
       <div v-for="detail in creditsExtractionFeedback.details" :key="detail" class="text-wrap">{{ detail }}</div>
     </VAlert>
 
-    <VAlert v-if="pageMediaRecoveryRecords.length || mediaRecoveryError" type="warning" :title="pageMediaRecoveryRecords.length ? (isRecoveryCleanupOnly(pageMediaRecoveryRecords) ? '恢复备份待清理' : '媒体信息需要恢复') : '恢复状态未确认'" variant="tonal" class="mb-4" data-testid="media-recovery-alert">
-      <p>{{ isRecoveryCleanupOnly(pageMediaRecoveryRecords) ? '媒体信息与原神医配置已通过验收，恢复备份尚未删除。' : '完成恢复验收与备份清理后才能继续保存媒体信息。' }}</p>
+    <VAlert v-if="pageMediaRecoveryRecords.length || mediaRecoveryError" type="warning" :title="pageMediaRecoveryRecords.length ? (isRecoveryWashOnly(pageMediaRecoveryRecords) ? '换版媒体信息待更新' : (isRecoveryCleanupOnly(pageMediaRecoveryRecords) ? '恢复备份待清理' : '媒体信息需要恢复')) : '恢复状态未确认'" variant="tonal" class="mb-4" data-testid="media-recovery-alert">
+      <p>{{ isRecoveryWashOnly(pageMediaRecoveryRecords) ? '请重试受影响文件的整理或刮削，更新媒体信息并通过验收后再保存。' : (isRecoveryCleanupOnly(pageMediaRecoveryRecords) ? '媒体信息与原神医配置已通过验收，恢复备份尚未删除。' : '完成恢复验收与备份清理后才能继续保存媒体信息。') }}</p>
       <div v-for="record in pageMediaRecoveryRecords" :key="record.id" class="mt-3">
-        <div class="text-wrap">{{ record.reason }}</div><div class="text-break">恢复目录：{{ record.directory }}</div>
+        <div class="text-wrap">{{ record.reason }}</div><div class="text-break">{{ record.kind === 'wash-pending' ? '核查目录' : '恢复目录' }}：{{ record.directory }}</div>
         <div v-for="directory in record.conflict_backup_directories || []" :key="directory" class="text-break">当前 JSON 已另行备份并保留：{{ directory }}</div>
         <div v-for="conflict in record.json_conflicts || []" :key="`${conflict.item_id}:${conflict.path}`" class="mt-3">
           <div class="text-break">当前 JSON：{{ conflict.path }}（媒体 ID：{{ conflict.item_id }}）</div>
@@ -25,7 +25,7 @@
           </tbody></VTable>
           <div v-if="conflict.change_count > (conflict.changes?.length || 0)" class="text-caption">另有 {{ conflict.change_count - (conflict.changes?.length || 0) }} 处字段变化</div>
         </div>
-        <VBtn class="mt-2" color="warning" variant="flat" :prepend-icon="record.kind === 'verified-cleanup' ? 'mdi-delete-outline' : (record.json_conflicts?.length ? 'mdi-content-save-outline' : 'mdi-restore')" :loading="isRecoveringMediaInfo" :disabled="!record.can_recover || isCheckingMediaRecovery || isConfirmingMediaRecovery || (record.json_conflicts?.length && !recoveryJsonConflictHashes(record))" :data-testid="`media-recovery-${record.id}`" @click="confirmMediaRecovery(record)">{{ record.kind === 'verified-cleanup' ? '清理恢复备份' : (record.json_conflicts?.length ? '备份当前 JSON 并恢复' : '恢复媒体信息') }}</VBtn>
+        <VBtn v-if="record.kind !== 'wash-pending'" class="mt-2" color="warning" variant="flat" :prepend-icon="record.kind === 'verified-cleanup' ? 'mdi-delete-outline' : (record.json_conflicts?.length ? 'mdi-content-save-outline' : 'mdi-restore')" :loading="isRecoveringMediaInfo" :disabled="!record.can_recover || isCheckingMediaRecovery || isConfirmingMediaRecovery || (record.json_conflicts?.length && !recoveryJsonConflictHashes(record))" :data-testid="`media-recovery-${record.id}`" @click="confirmMediaRecovery(record)">{{ record.kind === 'verified-cleanup' ? '清理恢复备份' : (record.json_conflicts?.length ? '备份当前 JSON 并恢复' : '恢复媒体信息') }}</VBtn>
       </div>
       <div v-if="mediaRecoveryError" class="mt-3 text-wrap">{{ mediaRecoveryError }}</div>
       <VBtn class="mt-3" variant="text" :loading="isCheckingMediaRecovery" :disabled="isRecoveringMediaInfo" @click="loadMediaRecovery">重新检查恢复状态</VBtn>
@@ -217,10 +217,10 @@
       <VCard>
         <VCardTitle class="d-flex align-center"><span class="flex-grow-1">编辑媒体信息 (音轨/字幕)</span><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭媒体信息编辑器" @click="closeMediaInfoEditor" /></VCardTitle>
         <VCardText>
-          <VAlert v-if="editorMediaRecoveryRecords.length || mediaRecoveryError" type="warning" :title="editorMediaRecoveryRecords.length ? (isRecoveryCleanupOnly(editorMediaRecoveryRecords) ? '恢复备份待清理' : '媒体信息需要恢复') : '恢复状态未确认'" variant="tonal" class="mb-4" data-testid="media-recovery-alert">
-            <p>{{ isRecoveryCleanupOnly(editorMediaRecoveryRecords) ? '媒体信息与原神医配置已通过验收，恢复备份尚未删除。' : '完成恢复验收与备份清理后才能继续保存媒体信息。' }}</p>
+          <VAlert v-if="editorMediaRecoveryRecords.length || mediaRecoveryError" type="warning" :title="editorMediaRecoveryRecords.length ? (isRecoveryWashOnly(editorMediaRecoveryRecords) ? '换版媒体信息待更新' : (isRecoveryCleanupOnly(editorMediaRecoveryRecords) ? '恢复备份待清理' : '媒体信息需要恢复')) : '恢复状态未确认'" variant="tonal" class="mb-4" data-testid="media-recovery-alert">
+            <p>{{ isRecoveryWashOnly(editorMediaRecoveryRecords) ? '请重试受影响文件的整理或刮削，更新媒体信息并通过验收后再保存。' : (isRecoveryCleanupOnly(editorMediaRecoveryRecords) ? '媒体信息与原神医配置已通过验收，恢复备份尚未删除。' : '完成恢复验收与备份清理后才能继续保存媒体信息。') }}</p>
             <div v-for="record in editorMediaRecoveryRecords" :key="record.id" class="mt-3">
-              <div class="text-wrap">{{ record.reason }}</div><div class="text-break">恢复目录：{{ record.directory }}</div>
+              <div class="text-wrap">{{ record.reason }}</div><div class="text-break">{{ record.kind === 'wash-pending' ? '核查目录' : '恢复目录' }}：{{ record.directory }}</div>
               <div v-for="directory in record.conflict_backup_directories || []" :key="directory" class="text-break">当前 JSON 已另行备份并保留：{{ directory }}</div>
               <div v-for="conflict in record.json_conflicts || []" :key="`${conflict.item_id}:${conflict.path}`" class="mt-3">
                 <div class="text-break">当前 JSON：{{ conflict.path }}（媒体 ID：{{ conflict.item_id }}）</div>
@@ -230,7 +230,7 @@
                 </tbody></VTable>
                 <div v-if="conflict.change_count > (conflict.changes?.length || 0)" class="text-caption">另有 {{ conflict.change_count - (conflict.changes?.length || 0) }} 处字段变化</div>
               </div>
-              <VBtn class="mt-2" color="warning" variant="flat" :prepend-icon="record.kind === 'verified-cleanup' ? 'mdi-delete-outline' : (record.json_conflicts?.length ? 'mdi-content-save-outline' : 'mdi-restore')" :loading="isRecoveringMediaInfo" :disabled="!record.can_recover || isCheckingMediaRecovery || isConfirmingMediaRecovery || (record.json_conflicts?.length && !recoveryJsonConflictHashes(record))" :data-testid="`media-recovery-${record.id}`" @click="confirmMediaRecovery(record)">{{ record.kind === 'verified-cleanup' ? '清理恢复备份' : (record.json_conflicts?.length ? '备份当前 JSON 并恢复' : '恢复媒体信息') }}</VBtn>
+              <VBtn v-if="record.kind !== 'wash-pending'" class="mt-2" color="warning" variant="flat" :prepend-icon="record.kind === 'verified-cleanup' ? 'mdi-delete-outline' : (record.json_conflicts?.length ? 'mdi-content-save-outline' : 'mdi-restore')" :loading="isRecoveringMediaInfo" :disabled="!record.can_recover || isCheckingMediaRecovery || isConfirmingMediaRecovery || (record.json_conflicts?.length && !recoveryJsonConflictHashes(record))" :data-testid="`media-recovery-${record.id}`" @click="confirmMediaRecovery(record)">{{ record.kind === 'verified-cleanup' ? '清理恢复备份' : (record.json_conflicts?.length ? '备份当前 JSON 并恢复' : '恢复媒体信息') }}</VBtn>
             </div>
             <div v-if="mediaRecoveryError" class="mt-3 text-wrap">{{ mediaRecoveryError }}</div>
             <VBtn class="mt-3" variant="text" :loading="isCheckingMediaRecovery" :disabled="isRecoveringMediaInfo" @click="loadMediaRecovery">重新检查恢复状态</VBtn>
@@ -624,11 +624,12 @@ const mediaRecoveryRecordsFor = (mediaId) => {
 const pageMediaRecoveryRecords = computed(() => mediaRecoveryRecordsFor(itemId.value));
 const editorMediaRecoveryRecords = computed(() => mediaRecoveryRecordsFor(currentEditMediaId.value));
 const isRecoveryCleanupOnly = records => records.length > 0 && records.every(record => record.kind === 'verified-cleanup');
+const isRecoveryWashOnly = records => records.length > 0 && records.every(record => record.kind === 'wash-pending');
 const mediaRecoveryError = ref('');
 const isCheckingMediaRecovery = ref(false);
 const isRecoveringMediaInfo = ref(false);
 const isConfirmingMediaRecovery = ref(false);
-const mediaRecoveryBlocked = computed(() => mediaRecoveryState.value.pending || Boolean(mediaRecoveryError.value) || isCheckingMediaRecovery.value || isRecoveringMediaInfo.value);
+const mediaRecoveryBlocked = computed(() => (mediaRecoveryState.value.pending && (!isRecoveryWashOnly(mediaRecoveryState.value.records) || pageMediaRecoveryRecords.value.length > 0 || editorMediaRecoveryRecords.value.length > 0)) || Boolean(mediaRecoveryError.value) || isCheckingMediaRecovery.value || isRecoveringMediaInfo.value);
 const isExtractingCredits = ref(false);
 const creditsExtractionFeedback = ref(null);
 const creditsExtractionBlocked = computed(() => mediaRecoveryBlocked.value || isBackgroundTaskRunning.value

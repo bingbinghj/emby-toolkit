@@ -5,7 +5,7 @@ use crate::{
     state::string,
 };
 use reqwest::Method;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -474,6 +474,15 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
     let started = tokio::time::Instant::now();
     let mut deadline = started + Duration::from_secs(1800);
     checkpoint_deadline(context, &mut deadline).await?;
+    let checkpoint_key = format!("native-task:{key}");
+    if context.is_persistent() && context.completed(&checkpoint_key).await?.is_some() {
+        return Ok(());
+    }
+    let saved = if context.is_persistent() {
+        context.plan(&checkpoint_key).await?
+    } else {
+        None
+    };
     let discovery = tokio::select! {
         _ = context.cancelled() => return context.checkpoint().await,
         result = tokio::time::timeout_at(deadline, state.emby(Method::GET, "ScheduledTasks", &[], None)) => result,
@@ -489,8 +498,66 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
         .and_then(|tasks| tasks.iter().find(|t| t["Key"] == key))
         .ok_or_else(|| ApiError::bad(format!("未找到 Emby 任务：{key}")))?;
     let id = string(task, "Id");
-    let running = matches!(task["State"].as_str(), Some("Running" | "Cancelling"));
-    let previous = task["LastExecutionResult"]["StartTimeUtc"].clone();
+    if saved.as_ref().is_some_and(|saved| saved["id"] != id) {
+        return Err(ApiError::bad(
+            "重启后 Emby 计划任务身份发生变化，已停止原任务恢复",
+        ));
+    }
+    let mut running = matches!(task["State"].as_str(), Some("Running" | "Cancelling"));
+    let previous = saved
+        .as_ref()
+        .map(|saved| saved["previous"].clone())
+        .unwrap_or_else(|| task["LastExecutionResult"]["StartTimeUtc"].clone());
+    let previous_running = saved
+        .as_ref()
+        .is_some_and(|saved| saved["initial_running"] == true);
+    let finished = |task: &Value| {
+        task["State"] == "Idle"
+            && (previous_running
+                || (!task["LastExecutionResult"]["StartTimeUtc"].is_null()
+                    && task["LastExecutionResult"]["StartTimeUtc"] != previous))
+    };
+    if saved.is_some() && finished(task) {
+        if task["LastExecutionResult"]["Status"] != "Completed" {
+            return Err(ApiError::bad("重启前的 Emby 计划任务未成功完成"));
+        }
+        context
+            .complete(&checkpoint_key, &task["LastExecutionResult"])
+            .await?;
+        return Ok(());
+    }
+    if saved
+        .as_ref()
+        .is_some_and(|saved| saved["attempted"] == true)
+        && !running
+    {
+        // A request may have reached Emby just before the process stopped. Read
+        // it again after a short settling period before retrying an idle task.
+        context.sleep(Duration::from_secs(2)).await?;
+        let tasks = state.emby(Method::GET, "ScheduledTasks", &[], None).await?;
+        let latest = tasks
+            .as_array()
+            .and_then(|tasks| tasks.iter().find(|task| task["Id"] == id))
+            .ok_or_else(|| ApiError::bad("重启恢复期间 Emby 计划任务消失"))?;
+        if finished(latest) {
+            if latest["LastExecutionResult"]["Status"] != "Completed" {
+                return Err(ApiError::bad("重启前的 Emby 计划任务未成功完成"));
+            }
+            context
+                .complete(&checkpoint_key, &latest["LastExecutionResult"])
+                .await?;
+            return Ok(());
+        }
+        running = matches!(latest["State"].as_str(), Some("Running" | "Cancelling"));
+    }
+    let mut native_plan = saved.clone().unwrap_or_else(|| {
+        json!({
+            "id":id,"previous":previous,"initial_running":running,"attempted":false,"accepted":false
+        })
+    });
+    if context.is_persistent() {
+        context.save_plan(&checkpoint_key, &native_plan).await?;
+    }
     let native_name = string(task, "Name");
     let task_name = if native_name == "Extract MediaInfo"
         || native_name.is_empty() && key == "MediaInfoExtractTask"
@@ -528,12 +595,17 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
             ),
         )
         .await;
-    let mut submitted = false;
-    let mut accepted_start = false;
+    let mut submitted = saved
+        .as_ref()
+        .is_some_and(|saved| saved["attempted"] == true);
+    let resume_wait = submitted;
+    let mut accepted_start = saved
+        .as_ref()
+        .is_some_and(|saved| saved["accepted"] == true);
     let mut observed_start = false;
     let outcome = async {
     let mut start_error = None;
-    if !running {
+    if !running && !resume_wait {
         checkpoint_deadline(context, &mut deadline).await?;
         if tokio::time::Instant::now() >= deadline {
             return Err(timeout());
@@ -542,6 +614,10 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
         // Resolve this one submission before cancellation cleanup: dropping an
         // accepted POST could leave it starting after we declare the task idle.
         submitted = true;
+        if context.is_persistent() {
+            native_plan["attempted"] = json!(true);
+            context.save_plan(&checkpoint_key, &native_plan).await?;
+        }
         let submission = tokio::time::timeout_at(
             deadline,
             state.emby_once(Method::POST, &path, &[], None),
@@ -549,6 +625,10 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
         match submission.map_err(|_| timeout())? {
             Ok(_) => {
                 accepted_start = true;
+                if context.is_persistent() {
+                    native_plan["accepted"] = json!(true);
+                    context.save_plan(&checkpoint_key, &native_plan).await?;
+                }
                 tracing::info!(
                 "[Emby计划任务] {task_name}（任务ID：{id}）启动请求已接收，等待本次执行结果"
                 );
@@ -563,12 +643,14 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
         }
     }
     let mut next_notice = started;
+    let mut poll_seconds = 2_u64;
+    let mut last_poll = json!([task["State"],task["CurrentProgressPercentage"],task["LastExecutionResult"]]);
     loop {
         checkpoint_deadline(context, &mut deadline).await?;
         if tokio::time::Instant::now() >= deadline {
             break;
         }
-        let delay = Duration::from_secs(2)
+        let delay = Duration::from_secs(poll_seconds)
             .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
         tokio::select! {
             _ = context.cancelled() => return context.checkpoint().await,
@@ -591,6 +673,9 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
             .as_array()
             .and_then(|tasks| tasks.iter().find(|t| t["Id"] == id))
             .ok_or_else(|| ApiError::bad("等待期间 Emby 任务消失"))?;
+        let observation = json!([task["State"],task["CurrentProgressPercentage"],task["LastExecutionResult"]]);
+        poll_seconds = if observation == last_poll { (poll_seconds + 1).min(5) } else { 2 };
+        last_poll = observation;
         observed_start |= matches!(task["State"].as_str(), Some("Running" | "Cancelling"))
             || (!task["LastExecutionResult"]["StartTimeUtc"].is_null()
                 && task["LastExecutionResult"]["StartTimeUtc"] != previous);
@@ -617,6 +702,9 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
                 "[Emby计划任务] {task_name}（任务ID：{id}）本次执行已确认完成，耗时 {} 秒",
                 started.elapsed().as_secs()
             );
+            if context.is_persistent() {
+                context.complete(&checkpoint_key, &task["LastExecutionResult"]).await?;
+            }
             return Ok(());
         }
         if tokio::time::Instant::now() >= next_notice {
@@ -640,7 +728,7 @@ pub async fn scheduled(state: &AppState, key: &str, context: &JobContext) -> Res
     }
     Err(timeout())
     }.await;
-    if submitted && context.is_cancelled() {
+    if submitted && context.is_cancelled() && !context.is_interrupted() {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
         if !accepted_start && !observed_start {
             let tasks = tokio::time::timeout_at(
@@ -868,7 +956,7 @@ pub(crate) async fn wait_item_refresh(
 }
 
 pub async fn finalize_refresh(state: &AppState, item: &Value, context: &JobContext) -> Result<()> {
-    finalize_refresh_inner(state, item, context, None).await
+    finalize_refresh_inner(state, item, context, None, true).await
 }
 pub(crate) async fn finalize_refresh_guarded(
     state: &AppState,
@@ -877,7 +965,98 @@ pub(crate) async fn finalize_refresh_guarded(
     confirmed: &std::sync::atomic::AtomicBool,
     recovery: &std::path::Path,
 ) -> Result<()> {
-    finalize_refresh_inner(state, item, context, Some((confirmed, recovery))).await
+    finalize_refresh_inner(state, item, context, Some((confirmed, recovery)), true).await
+}
+pub(crate) async fn finalize_refresh_targets_guarded(
+    state: &AppState,
+    item: &Value,
+    episode_ids: &[String],
+    context: &JobContext,
+    confirmed: &std::sync::atomic::AtomicBool,
+    recovery: &std::path::Path,
+) -> Result<()> {
+    finalize_refresh_targets_inner(
+        state,
+        item,
+        episode_ids,
+        context,
+        Some((confirmed, recovery)),
+    )
+    .await
+}
+pub(crate) async fn finalize_refresh_targets(
+    state: &AppState,
+    item: &Value,
+    episode_ids: &[String],
+    context: &JobContext,
+) -> Result<()> {
+    finalize_refresh_targets_inner(state, item, episode_ids, context, None).await
+}
+async fn finalize_refresh_targets_inner(
+    state: &AppState,
+    item: &Value,
+    episode_ids: &[String],
+    context: &JobContext,
+    guard: Option<(&std::sync::atomic::AtomicBool, &std::path::Path)>,
+) -> Result<()> {
+    if item["Type"] == "Series" && !episode_ids.is_empty() {
+        let mut seasons = std::collections::BTreeSet::new();
+        for id in episode_ids {
+            let episode =
+                crate::media_edit::details(state, id, "Id,Type,Name,Path,SeriesId,ParentId")
+                    .await?;
+            if episode["Id"] != id.as_str()
+                || episode["Type"] != "Episode"
+                || episode["SeriesId"] != item["Id"]
+            {
+                return Err(ApiError::bad(
+                    "元数据刷新目标与当前电视剧不一致，未扩大范围",
+                ));
+            }
+            if let Some(parent) = episode["ParentId"]
+                .as_str()
+                .filter(|parent| !parent.is_empty())
+            {
+                seasons.insert(parent.to_string());
+            }
+            let key = format!("metadata-refresh-target:{id}");
+            let identity = json!({"Id":episode["Id"],"Type":episode["Type"],"Path":episode["Path"],"SeriesId":episode["SeriesId"]});
+            if let Some(previous) = context.completed(&key).await? {
+                if previous != identity {
+                    return Err(ApiError::bad("原元数据刷新目标身份已变化"));
+                }
+            } else {
+                Box::pin(finalize_refresh_inner(
+                    state, &episode, context, guard, false,
+                ))
+                .await?;
+                context.complete(&key, &identity).await?;
+            }
+        }
+        for id in seasons {
+            let season =
+                crate::media_edit::details(state, &id, "Id,Type,Name,Path,ParentId").await?;
+            if season["Id"] != id || season["Type"] != "Season" || season["ParentId"] != item["Id"]
+            {
+                return Err(ApiError::bad("目标分集所属季身份不一致，未扩大刷新"));
+            }
+            Box::pin(finalize_refresh_inner(
+                state, &season, context, guard, false,
+            ))
+            .await?;
+        }
+        // Parent metadata still reads its NFO; unrelated episodes are untouched.
+        Box::pin(finalize_refresh_inner(state, item, context, guard, false)).await
+    } else {
+        if let Some((confirmed, recovery)) = guard {
+            Box::pin(finalize_refresh_guarded(
+                state, item, context, confirmed, recovery,
+            ))
+            .await
+        } else {
+            Box::pin(finalize_refresh(state, item, context)).await
+        }
+    }
 }
 pub(crate) async fn prepare_refresh_guard(
     guard: Option<(&std::sync::atomic::AtomicBool, &std::path::Path)>,
@@ -901,6 +1080,7 @@ async fn finalize_refresh_inner(
     item: &Value,
     context: &JobContext,
     guard: Option<(&std::sync::atomic::AtomicBool, &std::path::Path)>,
+    recursive: bool,
 ) -> Result<()> {
     let id = string(item, "Id");
     let series = item["Type"] == "Series";
@@ -943,7 +1123,7 @@ async fn finalize_refresh_inner(
             Method::POST,
             &format!("Items/{id}/Refresh"),
             &[
-                ("Recursive", series.to_string()),
+                ("Recursive", (series && recursive).to_string()),
                 ("MetadataRefreshMode", "FullRefresh".into()),
                 ("ImageRefreshMode", "FullRefresh".into()),
                 ("ReplaceAllMetadata", "false".into()),

@@ -1,13 +1,14 @@
 use crate::{
     AppState,
     error::{ApiError, Result},
-    jobs::JobContext,
+    jobs::{JobContext, JobManager, JobSpec},
     media_edit::list,
 };
 use notify::{
     EventKind, RecursiveMode, Watcher,
     event::{CreateKind, ModifyKind, RenameMode},
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -25,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 #[path = "../tests/fixtures/monitor_lifecycle.rs"]
 mod lifecycle_tests;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
     pub enabled: bool,
     pub roots: Vec<PathBuf>,
@@ -247,19 +248,86 @@ impl Service {
             self.running.store(false, Ordering::SeqCst);
             return;
         };
+        let prepared = tokio::select! {
+            _=cancel.cancelled()=>false,
+            ready=self.state.jobs.wait_recovery_ready()=>match ready {
+                Ok(())=>true,
+                Err(error)=>{tracing::warn!(reason=%error.1,"实时监控等待恢复准备结束，保留待办");false},
+            },
+        };
+        if !prepared {
+            *self.rx.lock().unwrap() = Some(rx);
+            self.running.store(false, Ordering::SeqCst);
+            return;
+        }
+        let mut delay = 1_u64;
+        let manager = loop {
+            let result = tokio::select! {
+                _ = cancel.cancelled() => break None,
+                result = JobManager::open_lane(self.state.db.clone(), "monitor") => result,
+            };
+            match result {
+                Ok(manager) => break Some(Arc::new(manager)),
+                Err(error) => tracing::warn!(reason=%error.1,"实时监控持久任务读取失败，保留待办并自动重试"),
+            }
+            tokio::select! {
+                _ = cancel.cancelled() => break None,
+                _ = tokio::time::sleep(Duration::from_secs(delay)) => {},
+            }
+            delay = (delay * 2).min(8);
+        };
+        let Some(manager) = manager else {
+            *self.rx.lock().unwrap() = Some(rx);
+            self.running.store(false, Ordering::SeqCst);
+            return;
+        };
+        manager.bind_config(&self.state.config);
+        let dispatch_ready = Arc::new(AtomicBool::new(false));
+        let restored = dispatch_ready.clone();
+        let restore_manager = manager.clone();
+        let restore_state = self.state.clone();
+        let restore_cancel = cancel.clone();
+        let restore = tokio::spawn(async move {
+            let mut delay = 1_u64;
+            loop {
+                let result = tokio::select! {
+                    _ = restore_cancel.cancelled() => return,
+                    result = restore_manager.resume_pending(restore_state.clone(), restore_cancel.clone()) => result,
+                };
+                match result {
+                    Ok(()) => {
+                        if !restore_cancel.is_cancelled() {
+                            restored.store(true, Ordering::Release);
+                        }
+                        return;
+                    }
+                    Err(error) => tracing::warn!(reason=%error.1,"实时监控未完成任务恢复失败，保留原任务并自动重试"),
+                }
+                tokio::select! {
+                    _ = restore_cancel.cancelled() => return,
+                    _ = tokio::time::sleep(Duration::from_secs(delay)) => {},
+                }
+                delay = (delay * 2).min(8);
+            }
+        });
         let mut watcher = None;
         let mut signature = String::new();
-        let mut batch_cancel = cancel.child_token();
         let initial_config = self.state.config.read().await.clone();
         let mut settings = Settings::read(&initial_config).await;
         let mut queue = BTreeSet::new();
-        let mut deadline = None;
+        let mut deadline = Some(tokio::time::Instant::now());
         let mut tick = tokio::time::interval(Duration::from_millis(250));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _=cancel.cancelled()=>break,
-                path=rx.recv()=>if let Some(path)=path && settings.enabled && let Some(path)=settings.accepts(&path).await{queue.insert(path);deadline=Some(tokio::time::Instant::now()+Duration::from_secs(3));},
+                path=rx.recv()=>if let Some(path)=path && settings.enabled && let Some(path)=settings.accepts(&path).await{
+                    if let Err(error)=crate::monitor_persistence::record(&self.state,&path).await {
+                        tracing::error!(reason=%error.1,"实时监控事件未能持久保存，保留事件并重试");
+                        queue.insert(path);
+                    }
+                    deadline=Some(tokio::time::Instant::now()+Duration::from_secs(3));
+                },
                 _=tick.tick()=>{
                     let config=self.state.config.read().await.clone();let next_signature=json!([config["monitor_enabled"],config["monitor_paths"],config["monitor_extensions"],config["monitor_exclude_dirs"],config["monitor_exclude_refresh_delay"]]).to_string();
                     if next_signature!=signature{
@@ -275,22 +343,44 @@ impl Service {
                                         || path_excluded(path, std::slice::from_ref(root))
                                 })
                             });
-                        if !retains_scope{batch_cancel.cancel();batch_cancel=cancel.child_token();}
+                        if !retains_scope && manager.status().await["is_running"]==true {
+                            if let Err(error)=manager.control(None,"stop").await {
+                                tracing::warn!(reason=%error.1,"实时监控范围已改变，正在停止原任务");
+                            }
+                        }
                         if watcher.take().is_some(){tracing::info!("[实时监控] 目录监听实例已停止，重新加载配置");}
                         settings=next_settings;signature=next_signature;
                         let mut retained=BTreeSet::new();for path in &queue{if let Some(path)=settings.accepts(path).await{retained.insert(path);}}queue=retained;
+                        if let Err(error)=crate::monitor_persistence::retain(&self.state,&settings).await {
+                            tracing::error!(reason=%error.1,"实时监控待办范围核对失败，保留待办");
+                        }
                         if settings.enabled&&!settings.roots.is_empty(){let tx=self.tx.clone();match notify::recommended_watcher(move|event:notify::Result<notify::Event>|{match event{
                             Ok(event)=>{let paths=match event.kind{EventKind::Create(CreateKind::File|CreateKind::Any)=>event.paths,EventKind::Modify(ModifyKind::Name(RenameMode::To))=>event.paths,EventKind::Modify(ModifyKind::Name(RenameMode::Both))=>event.paths.into_iter().skip(1).collect(),_=>vec![]};for path in paths{let _=tx.send(path);}},
                             Err(error)=>tracing::warn!(%error,"实时监控文件事件读取失败")
                         }}){Ok(mut next)=>{let mut watched=0;for root in &settings.roots{match next.watch(root,RecursiveMode::Recursive){Ok(())=>watched+=1,Err(error)=>tracing::warn!(path=%root.display(),%error,"无法监控目录")}}
                             tracing::info!(watched,total=settings.roots.len(),"[实时监控] 目录监听实例已初始化");watcher=Some(next);},Err(error)=>tracing::warn!(%error,"实时监控初始化失败")}}
                         if !settings.enabled{queue.clear();deadline=None;}
+                        else {deadline=Some(tokio::time::Instant::now()+Duration::from_secs(3));}
                     }
-                    if settings.enabled&&!queue.is_empty()&&deadline.is_some_and(|d|d<=tokio::time::Instant::now()){
-                        let paths=queue.iter().cloned().collect::<Vec<_>>();let work=self.state.clone();let snapshot=settings.clone();let shutdown=batch_cancel.clone();
-                        let manager=Arc::new(crate::jobs::JobManager::default());
-                        let submitted=manager.submit("实时监控入库预处理",move|context|async move{process_batch(&work,&snapshot,&paths,&context,&shutdown).await}).await;
-                        match submitted{Ok(_)=>{queue.clear();deadline=None;},Err(error)if error.0==axum::http::StatusCode::CONFLICT=>{},Err(error)=>tracing::warn!(reason=%error.1,"实时监控队列提交失败，保留待处理文件")}
+                    if settings.enabled && dispatch_ready.load(Ordering::Acquire) && deadline.is_some_and(|d|d<=tokio::time::Instant::now()) && manager.status().await["is_running"]!=true {
+                        let mut saved=vec![];
+                        for path in &queue {
+                            if crate::monitor_persistence::record(&self.state,path).await.is_ok(){saved.push(path.clone());}
+                        }
+                        for path in saved {queue.remove(&path);}
+                        match crate::monitor_persistence::next(&self.state,&settings).await {
+                            Ok(Some(payload))=>{
+                                let work=self.state.clone();let spec=JobSpec::new("monitor",payload.clone());
+                                if let Err(error)=manager.submit_persistent("实时监控入库预处理",spec,move|context|async move{
+                                    execute_persisted(&work,&payload,&context).await.map(|(_,result)|result)
+                                }).await {
+                                    tracing::warn!(reason=%error.1,"实时监控队列提交失败，保留持久批次");
+                                }
+                            },
+                            Ok(None) if queue.is_empty()=>deadline=None,
+                            Ok(None)=>{},
+                            Err(error)=>tracing::error!(reason=%error.1,"实时监控持久待办读取失败，未执行文件操作"),
+                        }
                     }
                 }
             }
@@ -298,9 +388,69 @@ impl Service {
         if watcher.take().is_some() {
             tracing::info!("[实时监控] 目录监听实例已停止，服务正在关闭");
         }
+        manager.shutdown().await;
+        let _ = restore.await;
         *self.rx.lock().unwrap() = Some(rx);
         self.running.store(false, Ordering::SeqCst);
     }
+}
+pub async fn execute_persisted(
+    state: &AppState,
+    payload: &Value,
+    context: &JobContext,
+) -> Result<(u16, Value)> {
+    let settings: Settings = serde_json::from_value(payload["settings"].clone())
+        .map_err(|_| ApiError::bad("实时监控持久批次配置无效"))?;
+    let paths: Vec<PathBuf> = serde_json::from_value(payload["paths"].clone())
+        .map_err(|_| ApiError::bad("实时监控持久批次路径无效"))?;
+    let current = Settings::read(&state.config.read().await.clone()).await;
+    if !current.enabled {
+        return Ok((
+            200,
+            json!({"prepared":0,"failed":0,"status":"monitor_disabled","message":"实时监控已关闭，未继续原批次"}),
+        ));
+    }
+    let mut eligible = vec![];
+    for path in paths {
+        if settings.accepts(&path).await.is_some() && current.accepts(&path).await.is_some() {
+            eligible.push(path);
+        }
+    }
+    let result = process_batch(
+        state,
+        &settings,
+        &eligible,
+        context,
+        &CancellationToken::new(),
+    )
+    .await?;
+    Ok((200, result))
+}
+async fn stable_for_phase(
+    settings: &Settings,
+    paths: &[PathBuf],
+    context: &JobContext,
+    cancel: &CancellationToken,
+    phase: &str,
+) -> Result<Vec<PathBuf>> {
+    let mut candidates = paths.to_vec();
+    if let Some(saved) = context.plan(phase).await? {
+        let selected: Vec<PathBuf> = serde_json::from_value(saved["paths"].clone())
+            .map_err(|_| ApiError::bad("实时监控文件范围检查点无效"))?;
+        candidates = selected
+            .into_iter()
+            .filter(|path| paths.contains(path))
+            .collect();
+        if crate::monitor_persistence::revision(&candidates).await? == saved["revision"] {
+            return Ok(candidates);
+        }
+    }
+    let stable = stable_files(settings, &candidates, context, cancel).await?;
+    let revision = crate::monitor_persistence::revision(&stable).await?;
+    context
+        .save_plan(phase, &json!({"paths":stable,"revision":revision}))
+        .await?;
+    Ok(stable)
 }
 async fn process_batch(
     state: &AppState,
@@ -314,7 +464,8 @@ async fn process_batch(
         .cloned()
         .partition(|path| !settings.excluded(path));
     let scrape_work = async {
-        let stable = stable_files(settings, &scrape, context, cancel).await?;
+        let stable =
+            stable_for_phase(settings, &scrape, context, cancel, "monitor-scrape-files").await?;
         if stable.is_empty() {
             return Ok(json!({"prepared":0,"failed":0}));
         }
@@ -328,16 +479,34 @@ async fn process_batch(
         .await
     };
     let refresh_work = async {
-        let refresh = stable_files(settings, &refresh, context, cancel).await?;
+        let refresh =
+            stable_for_phase(settings, &refresh, context, cancel, "monitor-refresh-files").await?;
         if refresh.is_empty() {
             return Ok::<_, ApiError>(0);
         }
+        let revision = crate::monitor_persistence::revision(&refresh).await?;
+        if context
+            .completed("monitor-refresh")
+            .await?
+            .is_some_and(|saved| saved["revision"] == revision)
+        {
+            return Ok(refresh.len());
+        }
         context.checkpoint().await?;
-        let mut remaining = settings.refresh_delay;
+        let mut remaining = context
+            .plan("monitor-refresh-delay")
+            .await?
+            .and_then(|saved| saved.as_u64())
+            .unwrap_or(settings.refresh_delay);
+        context
+            .save_plan("monitor-refresh-delay", &json!(remaining))
+            .await?;
         while remaining > 0 {
-            tokio::select! {_=cancel.cancelled()=>return Err(ApiError::bad("实时监控服务已停止")),_=tokio::time::sleep(Duration::from_secs(1))=>{}}
-            context.checkpoint().await?;
+            tokio::select! {_=cancel.cancelled()=>return Err(ApiError::bad("实时监控服务已停止")),result=context.sleep(Duration::from_secs(1))=>result?}
             remaining -= 1;
+            context
+                .save_plan("monitor-refresh-delay", &json!(remaining))
+                .await?;
         }
         let config = state.config.read().await.clone();
         let current = Settings::read(&config).await;
@@ -359,6 +528,9 @@ async fn process_batch(
             )
             .await?;
         }
+        context
+            .complete("monitor-refresh", &json!({"revision":revision}))
+            .await?;
         Ok(refresh.len())
     };
     let work = async {

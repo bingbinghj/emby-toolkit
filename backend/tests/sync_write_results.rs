@@ -5,7 +5,7 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use emby_toolkit::{AppState, metadata, sync};
+use emby_toolkit::{AppState, jobs::JobSpec, metadata, sync};
 use serde_json::json;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::Mutex;
@@ -88,9 +88,14 @@ async fn sync_counts_committed_rows_reports_sql_failures_and_preserves_failed_tm
     let work = state.clone();
     let job = state
         .jobs
-        .submit("同步写入验收", move |context| async move {
-            sync::cache(&work, true, &context).await
-        })
+        .submit_persistent(
+            "同步写入验收",
+            JobSpec::new(
+                "tasks",
+                json!({"task":"populate-metadata","full":true,"batch_size":10,"unsupported":[]}),
+            ),
+            move |context| async move { sync::cache(&work, true, &context).await },
+        )
         .await
         .unwrap();
     let result = tokio::time::timeout(Duration::from_secs(15), async {
@@ -116,6 +121,28 @@ async fn sync_counts_committed_rows_reports_sql_failures_and_preserves_failed_tm
         .await
         .unwrap()
         .unwrap();
+    let steps: Vec<String> =
+        sqlx::query_scalar("SELECT step_key FROM durable_job_steps WHERE job_id=$1")
+            .bind(&job)
+            .fetch_all(&state.db)
+            .await
+            .unwrap();
+    assert!(
+        steps
+            .iter()
+            .any(|key| key == "completed:sync-record:Movie:123")
+    );
+    assert!(
+        steps
+            .iter()
+            .any(|key| key == "completed:sync-record:Movie:789")
+    );
+    assert!(
+        !steps
+            .iter()
+            .any(|key| key == "completed:sync-record:Movie:456"),
+        "failed savepoint must not leave a completion checkpoint"
+    );
     state.jobs.shutdown().await;
     server.abort();
     state.db.close().await;

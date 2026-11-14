@@ -1,7 +1,7 @@
 use crate::{
     AppState,
     error::{ApiError, Result},
-    jobs::JobContext,
+    jobs::{JobContext, JobSpec},
     media_edit::details,
     state::string,
 };
@@ -11,7 +11,6 @@ use axum::{
     http::{HeaderMap, StatusCode},
     routing::post,
 };
-use futures_util::FutureExt;
 use serde_json::{Value, json};
 
 pub fn router() -> Router<AppState> {
@@ -32,8 +31,8 @@ async fn reorganize(
         .user_id;
     let selected = body["item_ids"]
         .as_array()
-        .filter(|ids| !ids.is_empty() && ids.len() <= 500)
-        .ok_or_else(|| ApiError::bad("请选择 1 至 500 个明确的媒体项目"))?;
+        .filter(|ids| !ids.is_empty() && ids.len() <= 1000)
+        .ok_or_else(|| ApiError::bad("请选择 1 至 1000 个明确的媒体项目"))?;
     let mut ids = vec![];
     for value in selected {
         let id = value
@@ -50,77 +49,26 @@ async fn reorganize(
             ids.push(id.to_string());
         }
     }
+    let mode = crate::media_organize_queue::mode(body.get("mode"))?;
     let history_ids = crate::media_organize_history::selected_history(&state, &body, &ids).await?;
-    let work = state.clone();
-    let task = state.jobs.submit_response("媒体重新整理", move |context| async move {
-        crate::notifications::with_operator(operator, async move {
-        let total = ids.len();
-        let mut items = vec![];
-        let mut failures = vec![];
-        let mut warning_details = vec![];
-        let mut warnings = 0_u64;
-        let mut updated = 0;
-        for (index, id) in ids.iter().enumerate() {
-            if let Err(error) = context.checkpoint().await {
-                if context.is_cancelled() { break; }
-                return Err(error);
-            }
-            context.update_counted(index as u64, total as u64, "媒体重新整理", &format!("重新执行 ETK 流程：媒体 {id}")).await;
-            crate::media_organize_history::begin_reorganize(&work,&history_ids,id).await?;
-            // The empty reason runs the complete rebuilding and scrape flow, rather
-            // than the missing-media-info shortcut used by review retries.
-            let report = std::panic::AssertUnwindSafe(reprocess_inner(&work, id, "", &context, true)).catch_unwind().await
-                .unwrap_or_else(|_|Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR,"任务执行异常".into())));
-            if let Err(error) = crate::media_organize_history::finish_reorganize(&work,&history_ids,id,&report).await {
-                warnings += 1;
-                warning_details.push(json!(format!("{id}：入库处理记录未能保存，{}",crate::logs::redact(&error.1))));
-            }
-            match report {
-                Ok(report) => {
-                    let mut errors = crate::media_edit::list(&report["failures"]);
-                    if let Some(error) = report["error"].as_str().filter(|error| !error.is_empty()) {
-                        errors.push(json!(error));
-                    }
-                    let failed = !errors.is_empty() || report["success"] == false
-                        || report["failed"].as_u64().unwrap_or(0) > 0;
-                    let details = crate::media_edit::list(&report["warning_details"]);
-                    warnings += report["warnings"].as_u64().unwrap_or(0);
-                    warning_details.extend(details.iter().map(|detail| json!(format!("{id}：{}", detail.as_str().unwrap_or("处理有提醒")))));
-                    if failed {
-                        failures.push(format!("{id}：{}", if errors.is_empty() { string(&report, "message") } else { errors.iter().map(|error| error.as_str().map(str::to_string).unwrap_or_else(||error.to_string())).collect::<Vec<_>>().join("；") }));
-                    } else {
-                        updated += 1;
-                    }
-                    items.push(json!({"item_id":id,"status":if failed {"failed"} else {"completed"},"report":report}));
-                }
-                Err(error) if context.is_cancelled() => {
-                    items.push(json!({"item_id":id,"status":"cancelled","error":error.1}));
-                    break;
-                }
-                Err(error) => {
-                    failures.push(format!("{id}：{}", error.1));
-                    items.push(json!({"item_id":id,"status":"failed","error":error.1}));
-                }
-            }
-        }
-        let failed = failures.len();
-        let remaining = &ids[items.len()..];
-        let cancelled = context.is_cancelled();
-        if cancelled {
-            warning_details.push(json!(format!("任务已取消，已保留处理结果，仍有 {} 项未开始整理", remaining.len())));
-        }
-        Ok((if failed > 0 || warnings > 0 || !warning_details.is_empty() {207} else {200}, json!({
-            "selected_count":total,"updated":updated,"failed":failed,"items":items,"remaining_ids":remaining,"cancelled":cancelled,
-            "failures":failures,"warnings":warnings,"warning_details":warning_details,
-            "message":format!("媒体重新整理{}：处理 {updated} 项，失败 {failed} 项", if cancelled {"已取消"} else {"完成"})
-        })))
-        }).await
-    }).await?;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(json!({"task_id":task,"message":"媒体重新整理任务已提交"})),
-    ))
+    let queued =
+        crate::media_organize_queue::enqueue(&state, &ids, &history_ids, mode, &operator).await?;
+    Ok((StatusCode::ACCEPTED, Json(queued)))
 }
+
+pub(crate) async fn run_organize_item(
+    state: &AppState,
+    id: &str,
+    mode: &str,
+    context: &JobContext,
+) -> Result<Value> {
+    match mode {
+        "reprocess" => Box::pin(reprocess_inner(state, id, "", context, true)).await,
+        "rescrape" => Box::pin(crate::media_rescrape::run(state, id, context)).await,
+        _ => Err(ApiError::bad("整理模式无效")),
+    }
+}
+
 async fn submit(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -132,14 +80,15 @@ async fn submit(
         .from_headers(&headers)
         .ok_or_else(ApiError::forbidden)?
         .user_id;
+    let payload = json!({"operation":"reprocess_item","id":id,"reason":string(&body,"reason")});
+    let spec = JobSpec::new("actions", payload.clone()).operator(operator.clone());
     let work = state.clone();
     let task = state
         .jobs
-        .submit("重新处理项目", move |context| async move {
-            crate::notifications::with_operator(
-                operator,
-                reprocess(&work, &id, body["reason"].as_str().unwrap_or(""), &context),
-            )
+        .submit_persistent("重新处理项目", spec, move |context| async move {
+            crate::notifications::with_operator(operator, async move {
+                Ok(execute_persisted(&work, &payload, &context).await?.1)
+            })
             .await
         })
         .await?;
@@ -162,39 +111,108 @@ async fn all(
     if !["", "Movie", "Series"].contains(&kind.as_str()) {
         return Err(ApiError::bad("媒体类型仅支持电视剧或电影"));
     }
-    let reason = string(&body, "reason");
+    let payload =
+        json!({"operation":"review_items","media_type":kind,"reason":string(&body,"reason")});
+    let spec = JobSpec::new("actions", payload.clone()).operator(operator.clone());
     let work = state.clone();
-    let task=state.jobs.submit("重新处理待复核项",move|context|async move{
-        crate::notifications::with_operator(operator, async move {
-        let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(f) FROM failed_log f WHERE ($1='' OR reason LIKE $1||'%') AND ($2='' OR item_type=$2 OR ($2='Series' AND item_type IN ('Season','Episode')))").bind(reason).bind(kind).fetch_all(&work.db).await?;
-        let mut updated=0;let mut failures=vec![];let mut warnings=0_u64;let mut warning_details=vec![];
-        for row in rows{
-            context.checkpoint().await?;let id=string(&row,"item_id");
-            match reprocess(&work,&id,&string(&row,"reason"),&context).await{
-                Ok(report)=>{
-                    updated+=1;
-                    warnings+=report["warnings"].as_u64().unwrap_or(0);
-                    warning_details.extend(crate::media_edit::list(&report["warning_details"]));
-                },
-                Err(error) if context.is_cancelled()=>return Err(error),
-                Err(error)=>failures.push(format!("{id}: {}",error.1))
-            }
-        }
-        Ok(json!({"updated":updated,"failures":failures,"warnings":warnings,"warning_details":warning_details,"message":format!("待复核项目重新处理完成：处理 {updated} 项，失败 {} 项，提醒 {warnings} 条",failures.len())}))
-        }).await
-    }).await?;
+    let task = state
+        .jobs
+        .submit_persistent("重新处理待复核项", spec, move |context| async move {
+            crate::notifications::with_operator(operator, async move {
+                Ok(execute_persisted(&work, &payload, &context).await?.1)
+            })
+            .await
+        })
+        .await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({"task_id":task,"message":"批量重新处理任务已提交"})),
     ))
 }
+
+pub(crate) async fn execute_persisted(
+    state: &AppState,
+    payload: &Value,
+    context: &JobContext,
+) -> Result<(u16, Value)> {
+    if payload["operation"] == "reprocess_item" {
+        if let Some(report) = context.completed("item").await? {
+            return Ok((200, report));
+        }
+        let item_context = context.scoped("item");
+        let report = reprocess(
+            state,
+            &string(payload, "id"),
+            &string(payload, "reason"),
+            &item_context,
+        )
+        .await?;
+        context.complete("item", &report).await?;
+        return Ok((200, report));
+    }
+    if payload["operation"] != "review_items" {
+        return Err(ApiError::bad("未知重新处理任务"));
+    }
+    let rows = if let Some(rows) = context.plan("review_rows").await? {
+        rows
+    } else {
+        let rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(f) FROM failed_log f WHERE ($1='' OR reason LIKE $1||'%') AND ($2='' OR item_type=$2 OR ($2='Series' AND item_type IN ('Season','Episode'))) ORDER BY item_id")
+            .bind(string(payload,"reason")).bind(string(payload,"media_type")).fetch_all(&state.db).await?;
+        let rows = json!(rows);
+        context.save_plan("review_rows", &rows).await?;
+        rows
+    };
+    let mut updated = 0;
+    let mut failures = vec![];
+    let mut warnings = 0_u64;
+    let mut warning_details = vec![];
+    let rows = crate::media_edit::list(&rows);
+    for (index, row) in rows.iter().enumerate() {
+        context.checkpoint().await?;
+        let id = string(row, "item_id");
+        let key = format!("review:{index}:{id}");
+        context
+            .update_counted(
+                index as u64,
+                rows.len() as u64,
+                "重新处理待复核项",
+                &format!("重新处理媒体 {id}"),
+            )
+            .await;
+        let report = if let Some(report) = context.completed(&key).await? {
+            report
+        } else {
+            let item_context = context.scoped(&key);
+            let report = match reprocess(state, &id, &string(row, "reason"), &item_context).await {
+                Ok(report) => report,
+                Err(error) if context.is_cancelled() => return Err(error),
+                Err(error) => json!({"error":crate::logs::redact(&error.1)}),
+            };
+            context.complete(&key, &report).await?;
+            report
+        };
+        if let Some(error) = report["error"].as_str() {
+            failures.push(format!("{id}: {error}"));
+        } else {
+            updated += 1;
+            warnings += report["warnings"].as_u64().unwrap_or(0);
+            warning_details.extend(crate::media_edit::list(&report["warning_details"]));
+        }
+    }
+    Ok((
+        200,
+        json!({"updated":updated,"failures":failures,"warnings":warnings,"warning_details":warning_details,
+        "message":format!("待复核项目重新处理完成：处理 {updated} 项，失败 {} 项，提醒 {warnings} 条",failures.len())}),
+    ))
+}
+
 pub async fn reprocess(
     state: &AppState,
     id: &str,
     reason: &str,
     context: &JobContext,
 ) -> Result<Value> {
-    reprocess_inner(state, id, reason, context, false).await
+    Box::pin(reprocess_inner(state, id, reason, context, false)).await
 }
 async fn reprocess_inner(
     state: &AppState,
@@ -230,49 +248,73 @@ async fn reprocess_inner(
         }
     }
     let mut rebuilt = std::collections::BTreeMap::new();
-    for asset in &ids {
-        context.checkpoint().await?;
-        let target = crate::media_edit::target(state, asset).await?;
-        let final_path = sidecar(state, &target).await?;
-        if missing
-            && let Ok(bytes) = tokio::fs::read(&final_path).await
-            && let Ok(info) = serde_json::from_slice::<Value>(&bytes)
-            && !has_strm_container(&info)
-        {
-            continue;
+    let mut current_identities = vec![];
+    if file_refresh {
+        // Reorganize must inspect the current entity, rather than rebuilding
+        // an old raw-ffprobe cache under an unchanged FUSE path or Item ID.
+        for asset in &ids {
+            let current = details(
+                state,
+                asset,
+                "Id,Type,Name,Path,Size,MediaSources,MediaStreams,Chapters",
+            )
+            .await?;
+            if current["Id"] != asset.as_str()
+                || !matches!(current["Type"].as_str(), Some("Movie" | "Episode"))
+            {
+                return Err(ApiError::bad("重新整理的原生媒体身份或类型未确认"));
+            }
+            let identity = crate::moviepilot_ingest::observe(state, &current, context).await?;
+            Box::pin(crate::moviepilot_ingest::ensure_media(
+                state, &identity, context,
+            ))
+            .await?;
+            current_identities.push(identity);
         }
-        let (pc, sha, _) = crate::fingerprints::lookup(state, &target.path).await?;
-        let pc = pc.ok_or_else(|| ApiError::bad("缺失115 PC"))?;
-        let sha = sha
-            .or(target.sha.clone())
-            .ok_or_else(|| ApiError::bad("缺失SHA1"))?;
-        let source = crate::media_paths::strm_target(&target.path)
-            .await
-            .unwrap_or(target.path.clone());
-        let ext = crate::media_paths::extension(&source);
-        let filename = format!(
-            "{}{}",
-            std::path::Path::new(&target.path)
-                .file_stem()
-                .unwrap_or_default()
-                .to_string_lossy(),
-            if ext == ".strm" { "" } else { &ext }
-        );
-        let mut info = if missing {
-            crate::media_restore::info(state, &sha, &pc, &filename, false, context).await?
-        } else {
-            crate::media_restore::rebuild_info(state, &sha, &pc, &filename, context).await?
-        };
-        crate::identity::verify(&target.asset, &info)?;
-        if missing {
-            let item = details(state, asset, "Path,Size,MediaSources,Chapters").await?;
-            let before = crate::revalidation::observation(state, &item).await;
-            crate::identity::verify(&json!({"size_bytes":item["Size"]}), &info)?;
-            let chapters = crate::media_info::clean_chapters(&item["Chapters"])?;
-            crate::media_info::preserve_chapters(&mut info, &chapters)?;
-            let stage =
-                final_path.with_file_name(format!(".etk-info-{}", uuid::Uuid::new_v4().simple()));
-            let result = async {
+    } else {
+        for asset in &ids {
+            context.checkpoint().await?;
+            let target = crate::media_edit::target(state, asset).await?;
+            let final_path = sidecar(state, &target).await?;
+            if missing
+                && let Ok(bytes) = tokio::fs::read(&final_path).await
+                && let Ok(info) = serde_json::from_slice::<Value>(&bytes)
+                && !has_strm_container(&info)
+            {
+                continue;
+            }
+            let (pc, sha, _) = crate::fingerprints::lookup(state, &target.path).await?;
+            let pc = pc.ok_or_else(|| ApiError::bad("缺失115 PC"))?;
+            let sha = sha
+                .or(target.sha.clone())
+                .ok_or_else(|| ApiError::bad("缺失SHA1"))?;
+            let source = crate::media_paths::strm_target(&target.path)
+                .await
+                .unwrap_or(target.path.clone());
+            let ext = crate::media_paths::extension(&source);
+            let filename = format!(
+                "{}{}",
+                std::path::Path::new(&target.path)
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy(),
+                if ext == ".strm" { "" } else { &ext }
+            );
+            let mut info = if missing {
+                crate::media_restore::info(state, &sha, &pc, &filename, false, context).await?
+            } else {
+                crate::media_restore::rebuild_info(state, &sha, &pc, &filename, context).await?
+            };
+            crate::identity::verify(&target.asset, &info)?;
+            if missing {
+                let item = details(state, asset, "Path,Size,MediaSources,Chapters").await?;
+                let before = crate::revalidation::observation(state, &item).await;
+                crate::identity::verify(&json!({"size_bytes":item["Size"]}), &info)?;
+                let chapters = crate::media_info::clean_chapters(&item["Chapters"])?;
+                crate::media_info::preserve_chapters(&mut info, &chapters)?;
+                let stage = final_path
+                    .with_file_name(format!(".etk-info-{}", uuid::Uuid::new_v4().simple()));
+                let result = async {
                 use tokio::io::AsyncWriteExt;
                 let mut file = tokio::fs::OpenOptions::new().write(true).create_new(true).open(&stage).await?;
                 file.write_all(&serde_json::to_vec(&info).unwrap()).await?;
@@ -289,10 +331,11 @@ async fn reprocess_inner(
                 sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2) ON CONFLICT(sha1) DO UPDATE SET mediainfo_json=EXCLUDED.mediainfo_json").bind(&sha).bind(&info).execute(&state.db).await?;
                 Ok::<_,ApiError>(())
             }.await;
-            let _ = tokio::fs::remove_file(stage).await;
-            result?;
-        } else {
-            rebuilt.insert(asset.clone(), info);
+                let _ = tokio::fs::remove_file(stage).await;
+                result?;
+            } else {
+                rebuilt.insert(asset.clone(), info);
+            }
         }
     }
     if missing {
@@ -303,21 +346,71 @@ async fn reprocess_inner(
     if let Some(first) = rebuilt.keys().next() {
         let body = json!({"mediainfo":rebuilt[first],"target_item_ids":ids,"stream_patches":[]});
         let (status, result) = if file_refresh {
-            crate::media_save::save_rebuilt_files(state, first, &body, &rebuilt, context).await?
+            Box::pin(crate::media_save::save_rebuilt_files(
+                state, first, &body, &rebuilt, context,
+            ))
+            .await?
         } else {
-            crate::media_save::save_with_rebuilt(state, first, &body, &rebuilt, context).await?
+            Box::pin(crate::media_save::save_with_rebuilt(
+                state, first, &body, &rebuilt, context,
+            ))
+            .await?
         };
         ensure_rebuild_completed(status, &result)?;
         rebuild_warnings = result["warnings"].as_u64().unwrap_or(0);
         rebuild_warning_details = crate::media_edit::list(&result["warning_details"]);
     }
+    let requested = if file_refresh {
+        details(
+            state,
+            id,
+            "Id,Name,Type,Path,People,ProviderIds,Genres,MediaSources,SeriesId,ParentId",
+        )
+        .await?
+    } else {
+        requested
+    };
+    let single_episode = requested["Type"] == "Episode";
     let item = series_parent(state, requested).await?;
     let episodes = if item["Type"] == "Series" {
         ids
     } else {
         vec![]
     };
-    let mut result = crate::ingest::scrape(state, &item, &episodes, None, context).await?;
+    let refresh_position = if file_refresh && !single_episode {
+        Some(crate::media_extra::log_position(state).await?)
+    } else {
+        None
+    };
+    let mut result = if single_episode {
+        Box::pin(scrape_episode_scope(state, &item, &episodes, context)).await?
+    } else {
+        Box::pin(crate::ingest::scrape(
+            state, &item, &episodes, None, context,
+        ))
+        .await?
+    };
+    if let Some(position) = refresh_position {
+        let finishing = JobContext::for_recovery(Some(context)).await;
+        if result["status"] != "ignored_library" {
+            crate::emby::wait_item_refresh(
+                state,
+                &string(&item, "Id"),
+                None,
+                Some(crate::media_extra::RefreshTrace::new(position)),
+                &finishing,
+                "重新整理元数据刷新验收",
+                &string(&item, "Name"),
+            )
+            .await?;
+        }
+    }
+    if !current_identities.is_empty() {
+        let finishing = JobContext::for_recovery(Some(context)).await;
+        for identity in &current_identities {
+            crate::moviepilot_ingest::finish(state, identity, &finishing).await?;
+        }
+    }
     if rebuild_warnings > 0 || !rebuild_warning_details.is_empty() {
         result["warnings"] = json!(result["warnings"].as_u64().unwrap_or(0) + rebuild_warnings);
         let mut details = crate::media_edit::list(&result["warning_details"]);
@@ -329,6 +422,104 @@ async fn reprocess_inner(
         ));
     }
     Ok(result)
+}
+
+async fn scrape_episode_scope(
+    state: &AppState,
+    series: &Value,
+    episode_ids: &[String],
+    context: &JobContext,
+) -> Result<Value> {
+    if episode_ids.is_empty() {
+        return Err(ApiError::bad("目标分集范围为空，未扩大到整剧"));
+    }
+    let context = context.scoped("organize-metadata");
+    if context.is_resuming() {
+        Box::pin(crate::media_rescrape::resume_cleanup(state, &context)).await?;
+    }
+    let recovery = state
+        .data_dir
+        .join("backups/media-info-reload")
+        .join(uuid::Uuid::new_v4().simple().to_string());
+    context
+        .save_plan("rescrape-recovery", &json!(recovery))
+        .await?;
+    let protection = Box::pin(crate::media_reload::ingest_preservation::capture_targets(
+        state,
+        series,
+        episode_ids,
+        &context,
+        &recovery,
+    ))
+    .await?;
+    protection.check(state, &context).await?;
+    protection.publish().await?;
+    let confirmed = std::sync::atomic::AtomicBool::new(true);
+    let result = Box::pin(crate::strm::with_settings_guarded(
+        state,
+        "preserve",
+        || async {
+            protection.check(state, &context).await?;
+            let report = Box::pin(crate::ingest::scrape_for_ingest(
+                state,
+                series,
+                episode_ids,
+                None,
+                &context,
+            ))
+            .await?;
+            if report["status"] != "ignored_library" {
+                crate::emby::finalize_refresh_targets_guarded(
+                    state,
+                    series,
+                    episode_ids,
+                    &context,
+                    &confirmed,
+                    &recovery,
+                )
+                .await?;
+            }
+            let finishing = JobContext::for_recovery(Some(&context)).await;
+            protection.verify(state, &finishing).await?;
+            protection.verify_unchanged_json().await?;
+            Ok(report)
+        },
+        &confirmed,
+        &recovery,
+    ))
+    .await;
+    if result.is_ok() {
+        let marker = crate::media_recovery::mark_verified(&recovery, &json!(episode_ids)).await?;
+        crate::media_recovery::cleanup_verified(
+            &recovery,
+            &marker,
+            &state.data_dir.join("backups/media-info-conflicts"),
+        )
+        .await?;
+    }
+    match result {
+        Ok(report) => Ok(report),
+        Err(error) => {
+            if !tokio::fs::try_exists(recovery.join("original-settings.json")).await? {
+                let _ = tokio::fs::remove_dir_all(&recovery).await;
+            } else if confirmed.load(std::sync::atomic::Ordering::Acquire) {
+                let finishing = JobContext::for_recovery(Some(&context)).await;
+                let _ = Box::pin(
+                    crate::media_reload::ingest_preservation::finish_saved_guard(
+                        state, &recovery, &finishing,
+                    ),
+                )
+                .await;
+            }
+            if !tokio::fs::try_exists(&recovery).await? {
+                return Err(error);
+            }
+            Err(ApiError(
+                error.0,
+                format!("{}；恢复材料：{}", error.1, recovery.display()),
+            ))
+        }
+    }
 }
 
 fn ensure_rebuild_completed(status: u16, result: &Value) -> Result<()> {

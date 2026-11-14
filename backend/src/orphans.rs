@@ -13,6 +13,7 @@ use axum::{
     routing::post,
 };
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
@@ -28,14 +29,23 @@ async fn submit(
     let work = state.clone();
     let task = state
         .jobs
-        .submit("检查当前媒体115孤儿文件", move |context| async move {
-            repair(&work, &id, &context).await
-        })
+        .submit_persistent(
+            "检查当前媒体115孤儿文件",
+            crate::jobs::JobSpec::new("orphans", json!({"id":id})),
+            move |context| async move { repair(&work, &id, &context).await },
+        )
         .await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({"task_id":task,"message":"当前媒体的115孤儿文件检查已提交。"})),
     ))
+}
+pub(crate) async fn execute_persisted(
+    state: &AppState,
+    payload: &Value,
+    context: &JobContext,
+) -> Result<(u16, Value)> {
+    Ok((200, repair(state, &string(payload, "id"), context).await?))
 }
 pub async fn current_id(state: &AppState, id: &str) -> Result<String> {
     if id.is_empty()
@@ -398,7 +408,295 @@ struct Reader<'a> {
     directories: BTreeMap<(String, String), String>,
     parents: BTreeMap<String, bool>,
 }
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MoveFile {
+    id: String,
+    name: String,
+    parent_id: String,
+    pick_code: String,
+    sha1: String,
+    size: String,
+}
+impl MoveFile {
+    fn snapshot(value: &Value) -> Self {
+        Self {
+            id: id(value),
+            name: name(value),
+            parent_id: parent(value),
+            pick_code: text(value, &["pick_code", "pickcode", "pc"]),
+            sha1: text(value, &["sha1", "sha", "file_sha1"]),
+            size: text(value, &["size", "file_size", "s"]),
+        }
+    }
+    fn matches(&self, value: &Value) -> bool {
+        !is_directory(value)
+            && id(value) == self.id
+            && name(value) == self.name
+            && (self.pick_code.is_empty()
+                || text(value, &["pick_code", "pickcode", "pc"]) == self.pick_code)
+            && (self.sha1.is_empty()
+                || self
+                    .sha1
+                    .eq_ignore_ascii_case(&text(value, &["sha1", "sha", "file_sha1"])))
+            && (self.size.is_empty() || text(value, &["size", "file_size", "s"]) == self.size)
+    }
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MovePlan {
+    #[serde(default)]
+    operation: String,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    connection: String,
+    root: String,
+    target: String,
+    parts: Vec<String>,
+    video_id: String,
+    source_parent: String,
+    files: Vec<MoveFile>,
+}
+async fn move_connection(state: &AppState) -> Result<String> {
+    let config = state.config.read().await.clone();
+    let tokens = crate::db::setting(&state.db, "p115_auth_tokens")
+        .await?
+        .unwrap_or(json!({}));
+    let cookie = string(&tokens, "cookie");
+    let access = string(&tokens, "access_token");
+    let account =
+        if !access.is_empty() && (cookie.is_empty() || config["p115_api_priority"] == "openapi") {
+            let user = text(&tokens, &["user_id", "uid"]);
+            json!([
+                "openapi",
+                if user.is_empty() {
+                    format!("{:x}", Sha256::digest(access.as_bytes()))
+                } else {
+                    user
+                }
+            ])
+        } else {
+            let uid = cookie
+                .split(';')
+                .find_map(|part| part.trim().strip_prefix("UID="))
+                .and_then(|uid| uid.split('_').next())
+                .filter(|uid| !uid.is_empty());
+            json!([
+                "cookie",
+                uid.map(str::to_string)
+                    .unwrap_or_else(|| format!("{:x}", Sha256::digest(cookie.as_bytes())))
+            ])
+        };
+    let server = config["emby_server_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(|id| json!(["id", id]))
+        .unwrap_or_else(|| json!(["url", crate::jobs::server_url(&config)]));
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(
+            json!([server, config["emby_user_id"], account])
+                .to_string()
+                .as_bytes()
+        )
+    ))
+}
+impl MovePlan {
+    fn validate(&self, candidate: &Value, root: &str, connection: &str) -> Result<()> {
+        let parts = list(&candidate["target_parts"])
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        let ids = self
+            .files
+            .iter()
+            .map(|file| file.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let names = self
+            .files
+            .iter()
+            .map(|file| file.name.as_str())
+            .collect::<BTreeSet<_>>();
+        let video = self.files.iter().find(|file| file.id == self.video_id);
+        let related = video.is_some_and(|video| {
+            let stem = std::path::Path::new(&video.name)
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy();
+            self.files
+                .iter()
+                .all(|file| file.id == self.video_id || sidecar(&file.name, &stem))
+        });
+        if self.operation != "orphan-move"
+            || self.path != string(candidate, "path")
+            || self.connection != connection
+            || self.root != root
+            || self.parts != parts
+            || self.video_id != string(candidate, "fid")
+            || self.target.is_empty()
+            || self.files.is_empty()
+            || ids.len() != self.files.len()
+            || names.len() != self.files.len()
+            || !related
+            || self.files.iter().any(|file| {
+                file.id.parse::<u64>().is_err()
+                    || file.name.is_empty()
+                    || file.parent_id != self.source_parent
+            })
+        {
+            return Err(ApiError::bad(
+                "已保存的孤儿移动计划与当前连接、文件身份或资源范围不一致",
+            ));
+        }
+        Ok(())
+    }
+}
 impl Reader<'_> {
+    async fn destination(&mut self, plan: &MovePlan) -> Result<Vec<Value>> {
+        // Resolve the live directory chain again after a pause or process restart.
+        self.children.clear();
+        self.directories.clear();
+        if self.directory(&plan.root, &plan.parts, false).await? != plan.target {
+            return Err(ApiError::bad("孤儿文件的原目标目录已变化，未继续移动"));
+        }
+        let entries = self.children(&plan.target, true).await?;
+        if plan.files.iter().any(|file| {
+            entries
+                .iter()
+                .any(|entry| name(entry) == file.name && id(entry) != file.id)
+        }) {
+            return Err(ApiError::bad("目标目录存在同名文件，未继续移动"));
+        }
+        Ok(entries)
+    }
+    async fn pending(&mut self, key: &str, plan: &MovePlan) -> Result<Vec<String>> {
+        let entries = self.destination(plan).await?;
+        let mut pending = vec![];
+        for file in &plan.files {
+            let fid = file
+                .id
+                .parse()
+                .map_err(|_| ApiError::bad("孤儿移动计划的文件ID无效"))?;
+            self.before().await?;
+            let actual = p115::file_info(self.state, fid).await;
+            self.after();
+            let actual = actual?;
+            if !file.matches(&actual) {
+                return Err(ApiError::bad(format!(
+                    "孤儿文件 {} 的身份已变化，未继续移动",
+                    file.name
+                )));
+            }
+            let mut location = parent(&actual);
+            if location.is_empty() {
+                location = actual["paths"]
+                    .as_array()
+                    .and_then(|paths| paths.last())
+                    .map(id)
+                    .unwrap_or_default();
+            }
+            let listed = entries.iter().find(|entry| id(entry) == file.id);
+            if location == plan.target {
+                if listed.is_none_or(|entry| name(entry) != file.name || is_directory(entry)) {
+                    return Err(ApiError::bad(
+                        "文件详情与目标目录回读不一致，未确认移动完成",
+                    ));
+                }
+                self.context
+                    .complete(
+                        &format!("{key}:file:{}", file.id),
+                        &json!({
+                            "id":file.id,"name":file.name,"target":plan.target
+                        }),
+                    )
+                    .await?;
+            } else if location == file.parent_id && listed.is_none() {
+                pending.push(file.id.clone());
+            } else {
+                return Err(ApiError::bad(format!(
+                    "孤儿文件 {} 的原位置已变化，未继续移动",
+                    file.name
+                )));
+            }
+        }
+        let confirmed = self.destination(plan).await?;
+        for file in &plan.files {
+            let present = confirmed.iter().any(|entry| {
+                id(entry) == file.id && name(entry) == file.name && !is_directory(entry)
+            });
+            if present == pending.contains(&file.id) {
+                return Err(ApiError::bad(
+                    "逐文件详情与最终目标目录回读不一致，未继续移动",
+                ));
+            }
+        }
+        Ok(pending)
+    }
+    async fn finish_move(
+        &mut self,
+        key: &str,
+        candidate: &Value,
+        root: &str,
+        plan: MovePlan,
+    ) -> Result<(&'static str, usize)> {
+        plan.validate(candidate, root, &move_connection(self.state).await?)?;
+        loop {
+            let generation = self.context.pause_generation();
+            let pending = self.pending(key, &plan).await?;
+            if generation != self.context.pause_generation() {
+                continue;
+            }
+            if pending.is_empty() {
+                break;
+            }
+            self.before().await?;
+            let source = plan
+                .source_parent
+                .parse()
+                .map_err(|_| ApiError::bad("115原父目录ID无效"))?;
+            let parent = p115::file_info_response(self.state, source).await;
+            self.after();
+            let parent = parent?;
+            if p115::success(&parent) || !p115::missing(&parent) {
+                return Err(ApiError::bad("未重新确认115原父目录失效，未继续移动"));
+            }
+            self.context
+                .activity(
+                    "恢复孤儿文件",
+                    &format!("继续恢复原计划中 {} 个未到位文件", pending.len()),
+                )
+                .await;
+            let destination = self.destination(&plan).await?;
+            self.before().await?;
+            if generation != self.context.pause_generation()
+                || pending
+                    .iter()
+                    .any(|fid| destination.iter().any(|entry| id(entry) == *fid))
+            {
+                continue;
+            }
+            plan.validate(candidate, root, &move_connection(self.state).await?)?;
+            let response = p115::move_files(self.state, &pending, &plan.target).await;
+            self.after();
+            let remaining = self.pending(key, &plan).await?;
+            if generation != self.context.pause_generation() {
+                continue;
+            }
+            if !remaining.is_empty() {
+                return Err(response.err().unwrap_or_else(|| {
+                    ApiError::bad(format!(
+                        "115移动未完成，原计划仍有 {} 个文件未到位",
+                        remaining.len()
+                    ))
+                }));
+            }
+            break;
+        }
+        let sidecars = plan.files.len().saturating_sub(1);
+        self.context
+            .complete(key, &json!({"sidecars":sidecars}))
+            .await?;
+        Ok(("repaired_videos", sidecars))
+    }
     async fn before(&self) -> Result<()> {
         self.context.checkpoint().await?;
         if let Some(last) = self.last {
@@ -468,6 +766,9 @@ impl Reader<'_> {
                 )));
             }
             let next = if let Some(item) = matches.first() {
+                if !is_directory(item) {
+                    return Err(ApiError::bad("115目标目录层级存在同名文件"));
+                }
                 id(item)
             } else {
                 if !create {
@@ -511,6 +812,28 @@ impl Reader<'_> {
             .filter_map(|v| v.as_str().map(str::to_string))
             .collect::<Vec<_>>();
         let path = string(candidate, "path");
+        let fid = string(candidate, "fid");
+        let plan_key = format!("orphan-move:{fid}:{path}");
+        if let Some(saved) = self.context.plan(&plan_key).await? {
+            let plan =
+                serde_json::from_value(saved).map_err(|_| ApiError::bad("孤儿移动计划无效"))?;
+            return self.finish_move(&plan_key, candidate, root, plan).await;
+        }
+        if self.context.is_persistent() {
+            let previous: Vec<Value> = sqlx::query_scalar("SELECT DISTINCT s.value_json FROM durable_job_steps s JOIN durable_jobs j ON j.id=s.job_id WHERE s.job_id<>$1 AND s.step_key LIKE 'plans:%' AND s.value_json->>'operation'='orphan-move' AND s.value_json->>'video_id'=$2 AND s.value_json->>'path'=$3 AND j.state_json->>'state' IN ('failed','cancelled') AND NOT EXISTS(SELECT 1 FROM durable_job_steps same_plan JOIN durable_job_steps done ON done.job_id=same_plan.job_id AND done.step_key='completed:'||substring(same_plan.step_key from 7) WHERE same_plan.step_key LIKE 'plans:%' AND same_plan.value_json=s.value_json) LIMIT 2")
+                .bind(&self.context.id).bind(&fid).bind(&path).fetch_all(&self.state.db).await?;
+            if previous.len() > 1 {
+                return Err(ApiError::bad("旧孤儿移动计划不唯一，未猜测剩余文件范围"));
+            }
+            if let Some(saved) = previous.into_iter().next() {
+                let plan: MovePlan = serde_json::from_value(saved.clone())
+                    .map_err(|_| ApiError::bad("旧孤儿移动计划无效"))?;
+                plan.validate(candidate, root, &move_connection(self.state).await?)?;
+                self.destination(&plan).await?;
+                self.context.save_plan(&plan_key, &saved).await?;
+                return self.finish_move(&plan_key, candidate, root, plan).await;
+            }
+        }
         self.context
             .activity(
                 "定位原整理目录",
@@ -523,7 +846,6 @@ impl Reader<'_> {
         } else {
             self.children(&target, false).await?
         };
-        let fid = string(candidate, "fid");
         if children.iter().any(|item| id(item) == fid) {
             return Ok(("already_correct", 0));
         }
@@ -557,7 +879,7 @@ impl Reader<'_> {
         let verified = &candidate["verified"];
         if verified.is_object()
             && (current != parent(verified)
-                || name(video) != name(verified)
+                || !MoveFile::snapshot(verified).matches(video)
                 || text(video, &["pick_code", "pickcode", "pc"])
                     != text(verified, &["pick_code", "pickcode", "pc"]))
         {
@@ -615,47 +937,31 @@ impl Reader<'_> {
                     && (id(item) == fid || sidecar(&name(item), &stem))
             })
             .collect::<Vec<_>>();
-        let mut ids = vec![];
-        for item in &related {
-            let id = id(item);
-            if !id.is_empty() && !ids.contains(&id) {
-                ids.push(id);
-            }
-        }
-        if !ids.contains(&fid) {
-            ids.insert(0, fid.clone());
-        }
         let names = children.iter().map(name).collect::<BTreeSet<_>>();
         if related.iter().any(|item| names.contains(&name(item))) {
             return Err(ApiError::bad("目标目录存在同名文件"));
         }
+        let plan = MovePlan {
+            operation: "orphan-move".into(),
+            path,
+            connection: move_connection(self.state).await?,
+            root: root.into(),
+            target,
+            parts,
+            video_id: fid,
+            source_parent: current,
+            files: related
+                .iter()
+                .map(|item| MoveFile::snapshot(item))
+                .collect(),
+        };
         self.context
-            .activity(
-                "恢复孤儿文件",
-                &format!(
-                    "正在恢复 {path}，关联文件 {} 个",
-                    ids.len().saturating_sub(1)
-                ),
+            .save_plan(
+                &plan_key,
+                &serde_json::to_value(&plan).map_err(|_| ApiError::bad("无法保存孤儿移动计划"))?,
             )
-            .await;
-        self.before().await?;
-        let response = p115::move_files(self.state, &ids, &target).await;
-        self.after();
-        let response = response?;
-        if !p115::success(&response) {
-            return Err(ApiError::bad("115移动失败"));
-        }
-        self.context
-            .activity(
-                "验收孤儿文件",
-                &format!("正在确认 {path} 已恢复到原整理目录"),
-            )
-            .await;
-        let verified = self.children(&target, true).await?;
-        if !verified.iter().any(|item| id(item) == fid) {
-            return Err(ApiError::bad("移动接口成功但目标目录未找到视频"));
-        }
-        Ok(("repaired_videos", ids.len().saturating_sub(1)))
+            .await?;
+        self.finish_move(&plan_key, candidate, root, plan).await
     }
 }
 /// Restore a freshly verified search hit without first persisting its PickCode.
@@ -731,7 +1037,14 @@ pub async fn repair(state: &AppState, item_id: &str, context: &JobContext) -> Re
     if root.is_empty() || [&local, &cd2, &cloud].iter().all(|s| s.is_empty()) {
         return Err(ApiError::bad("未配置媒体路径根目录或115媒体库根CID"));
     }
-    let candidates = candidates(&rows, selected.as_ref(), &[&local, &cd2, &cloud]);
+    let plan_key = format!("orphans:{item_id}");
+    let candidates = if let Some(saved) = context.plan(&plan_key).await? {
+        list(&saved)
+    } else {
+        let candidates = candidates(&rows, selected.as_ref(), &[&local, &cd2, &cloud]);
+        context.save_plan(&plan_key, &json!(candidates)).await?;
+        candidates
+    };
     tracing::info!(
         "[修复115孤儿文件] 从 {} 条当前范围记录提取 {} 个视频，开始核对原整理目录",
         rows.len(),
@@ -750,6 +1063,16 @@ pub async fn repair(state: &AppState, item_id: &str, context: &JobContext) -> Re
     for (index, candidate) in candidates.iter().enumerate() {
         context.checkpoint().await?;
         let path = string(candidate, "path");
+        let checkpoint = format!("orphan:{item_id}:{path}");
+        if let Some(saved) = context.completed(&checkpoint).await? {
+            let key = string(&saved, "kind");
+            result[&key] = json!(result[&key].as_u64().unwrap_or(0) + 1);
+            result["repaired_sidecars"] = json!(
+                result["repaired_sidecars"].as_u64().unwrap_or(0)
+                    + saved["sidecars"].as_u64().unwrap_or(0)
+            );
+            continue;
+        }
         context
             .update_counted(
                 index as u64,
@@ -760,6 +1083,9 @@ pub async fn repair(state: &AppState, item_id: &str, context: &JobContext) -> Re
             .await;
         let message = match reader.check(candidate, &root).await {
             Ok((key, count)) => {
+                context
+                    .complete(&checkpoint, &json!({"kind":key,"sidecars":count}))
+                    .await?;
                 result[key] = json!(result[key].as_u64().unwrap() + 1);
                 result["repaired_sidecars"] =
                     json!(result["repaired_sidecars"].as_u64().unwrap() + count as u64);

@@ -106,9 +106,26 @@ pub async fn monthly_statistics(
 }
 
 pub async fn interrupt_unfinished(pool: &sqlx::PgPool) -> Result<()> {
-    // Webhook jobs are in memory. A new process cannot claim that an old
-    // admission is still executing or that it finished successfully.
-    sqlx::query("UPDATE media_organize_history SET status='failed',message='上次 ETK 入库处理在服务重启前未完成，请核对后重新整理',completed_at=NOW() WHERE status='processing'")
+    // Keep admissions whose accepted event or durable job can still resume;
+    // only legacy orphaned history has no executable work after a restart.
+    sqlx::query("UPDATE media_organize_history h
+        SET status='failed',message='上次 ETK 入库处理缺少可恢复任务，请核对后重新整理',completed_at=NOW()
+        WHERE h.status='processing'
+        AND NOT EXISTS(SELECT 1 FROM media_organize_queue q WHERE q.history_ids ? h.id AND q.status IN ('queued','running'))
+        AND NOT EXISTS(SELECT 1 FROM webhook_pending p WHERE p.event_json->'history_ids' ? h.id
+            AND NOT EXISTS(SELECT 1 FROM durable_jobs registered WHERE registered.spec_json#>>'{payload,event,_pending_id}'=p.event_json->>'_pending_id'
+                AND (registered.state_json->>'state' IN ('failed','cancelled') OR registered.state_json->>'stop_requested'='true')))
+        AND NOT EXISTS(SELECT 1 FROM durable_jobs j WHERE j.spec_json->>'kind' IN ('webhook','monitor')
+            AND COALESCE(j.state_json->>'stop_requested','false')<>'true'
+            AND (j.state_json->>'state' IN ('running','interrupted','paused','pausing','stopping')
+                AND (j.spec_json#>'{payload,event,history_ids}' ? h.id
+                    OR jsonb_path_exists(j.checkpoint_json,'$.completed.*.ids[*] ? (@ == $id)',jsonb_build_object('id',h.item_id)))
+                OR j.spec_json#>'{payload,event,history_ids}' ? h.id AND j.state_json#>'{result,awaiting_emby}'='true'::jsonb
+                    AND j.state_json->>'state' IN ('completed','completed_with_warnings')
+                    AND EXISTS(SELECT 1 FROM webhook_prepared p WHERE p.item_id=h.item_id)
+                    AND NOT EXISTS(SELECT 1 FROM durable_jobs failed WHERE failed.spec_json->>'kind'='webhook'
+                        AND failed.spec_json#>>'{payload,event,source}'='emby' AND failed.spec_json#>'{payload,event,history_ids}' ? h.id
+                        AND failed.state_json->>'state' IN ('failed','cancelled'))))")
         .execute(pool).await?;
     Ok(())
 }
@@ -310,6 +327,43 @@ pub async fn bind_item(state: &AppState, event: &Value, path: &str, item: &Value
 }
 
 pub async fn finish(state: &AppState, event: &Value, result: &Result<Value>) -> Result<()> {
+    finish_scoped(state, event, result, None).await
+}
+
+pub async fn finish_moviepilot(
+    state: &AppState,
+    event: &Value,
+    context: &crate::jobs::JobContext,
+    result: &Result<Value>,
+) -> Result<()> {
+    if context.is_interrupted() {
+        return Ok(());
+    }
+    // Original file plans retain admissions when the same job resumes. A new
+    // event's unchanged files have only skipped attempts and add no history.
+    let paths = context
+        .saved_plans()
+        .await?
+        .into_iter()
+        .filter_map(|(key, value)| {
+            if key.starts_with("moviepilot_file:") {
+                value["identity"]["path"].as_str().map(identity)
+            } else if key.starts_with("moviepilot_attempt:") && value["skipped"] == false {
+                value["path"].as_str().map(identity)
+            } else {
+                None
+            }
+        })
+        .collect::<BTreeSet<_>>();
+    finish_scoped(state, event, result, Some(&paths)).await
+}
+
+async fn finish_scoped(
+    state: &AppState,
+    event: &Value,
+    result: &Result<Value>,
+    paths: Option<&BTreeSet<String>>,
+) -> Result<()> {
     let ids = list(&event["history_ids"])
         .into_iter()
         .filter_map(|id| id.as_str().map(str::to_string))
@@ -340,9 +394,14 @@ pub async fn finish(state: &AppState, event: &Value, result: &Result<Value>) -> 
         message = "ETK 预增强已完成，等待 Emby 入库回流验收".into();
     }
     let mut transaction = state.db.begin().await?;
-    let completed: Vec<Value> = sqlx::query_scalar("UPDATE media_organize_history SET status=$1,message=$2,completed_at=CASE WHEN $1='processing' THEN NULL ELSE NOW() END,item_json=item_json || $4 WHERE id=ANY($3) AND status='processing' RETURNING item_json || jsonb_build_object('item_id',item_id)")
-        .bind(status).bind(&message).bind(&ids).bind(preparation).fetch_all(&mut *transaction).await?;
+    if let Some(paths) = paths {
+        sqlx::query("DELETE FROM media_organize_history WHERE id=ANY($1) AND source='moviepilot' AND status='processing' AND NOT(source_identity=ANY($2))")
+            .bind(&ids).bind(paths.iter().cloned().collect::<Vec<_>>()).execute(&mut *transaction).await?;
+    }
+    let completed: Vec<Value> = sqlx::query_scalar("UPDATE media_organize_history SET status=$1,message=$2,completed_at=CASE WHEN $1='processing' THEN NULL ELSE NOW() END,item_json=item_json || $4 WHERE id=ANY($3) AND status='processing' AND ($5=false OR source='moviepilot') RETURNING item_json || jsonb_build_object('item_id',item_id)")
+        .bind(status).bind(&message).bind(&ids).bind(preparation).bind(paths.is_some()).fetch_all(&mut *transaction).await?;
     if completed.is_empty() {
+        transaction.commit().await?;
         return Ok(());
     }
     if event["source"] == "emby" {
@@ -353,36 +412,23 @@ pub async fn finish(state: &AppState, event: &Value, result: &Result<Value>) -> 
     }
     transaction.commit().await?;
     if status == "failed" {
-        notify_failures(state, completed, &message);
+        notify_failures(state, completed, &message).await;
     }
     Ok(())
 }
 
-fn notify_failures(state: &AppState, items: Vec<Value>, reason: &str) {
-    if items.is_empty() {
+async fn notify_failures(state: &AppState, items: Vec<Value>, reason: &str) {
+    if items.is_empty() || reason == "任务已取消" {
         return;
     }
-    // Persisted results are authoritative; notification delivery cannot block
-    // completion or change a failed admission into another outcome.
-    let state = state.clone();
-    let reason = reason.to_string();
-    let operator = crate::notifications::current_operator();
-    tokio::spawn(async move {
-        let notify = async {
-            for item in items {
-                let native =
-                    json!({"Id":item["item_id"],"Name":item["name"],"Type":item["item_type"]});
-                if let Err(error) = crate::notifications::failure(&state, &native, &reason).await {
-                    tracing::warn!("整理失败通知未能发送：{}", error.1);
-                }
-            }
-        };
-        if let Some(operator) = operator {
-            crate::notifications::with_operator(operator, notify).await;
-        } else {
-            notify.await;
+    // Save the intent before completing the task; the worker handles delivery.
+    // Awaiting only the database keeps the original operator and task scope.
+    for item in items {
+        let native = json!({"Id":item["item_id"],"Name":item["name"],"Type":item["item_type"]});
+        if let Err(error) = crate::notifications::enqueue_failure(state, &native, reason).await {
+            tracing::warn!("整理失败通知未能入队：{}", error.1);
         }
-    });
+    }
 }
 
 fn outcome(result: &Result<Value>) -> (&'static str, String) {
@@ -460,8 +506,8 @@ pub async fn selected_history(
     };
     let selected = selected
         .as_array()
-        .filter(|ids| !ids.is_empty() && ids.len() <= 500)
-        .ok_or_else(|| ApiError::bad("请选择 1 至 500 条真实入库记录"))?;
+        .filter(|ids| !ids.is_empty() && ids.len() <= 1000)
+        .ok_or_else(|| ApiError::bad("请选择 1 至 1000 条真实入库记录"))?;
     let mut ids = vec![];
     for id in selected {
         let id = id
@@ -472,8 +518,8 @@ pub async fn selected_history(
             ids.push(id.to_string());
         }
     }
-    let linked:Vec<String> = sqlx::query_scalar("SELECT item_id FROM media_organize_history WHERE id=ANY($1) AND item_id=ANY($2) AND status<>'processing'")
-        .bind(&ids).bind(item_ids).fetch_all(&state.db).await?;
+    let linked:Vec<String> = sqlx::query_scalar("SELECT h.item_id FROM media_organize_history h WHERE h.id=ANY($1) AND h.item_id=ANY($2) AND (h.status<>'processing' OR EXISTS (SELECT 1 FROM media_organize_queue q WHERE q.item_id=h.item_id AND q.mode=$3 AND q.status IN ('queued','running') AND q.history_ids ? h.id))")
+        .bind(&ids).bind(item_ids).bind(crate::media_organize_queue::mode(body.get("mode"))?).fetch_all(&state.db).await?;
     if linked.len() != ids.len()
         || linked.iter().collect::<BTreeSet<_>>() != item_ids.iter().collect::<BTreeSet<_>>()
     {
@@ -506,7 +552,7 @@ pub async fn finish_reorganize(
     let completed: Vec<Value> = sqlx::query_scalar("UPDATE media_organize_history SET status=$1,message=$2,completed_at=NOW() WHERE id=ANY($3) AND item_id=$4 AND status='processing' RETURNING item_json || jsonb_build_object('item_id',item_id)")
         .bind(status).bind(&message).bind(ids).bind(item_id).fetch_all(&state.db).await?;
     if status == "failed" {
-        notify_failures(state, completed, &message);
+        notify_failures(state, completed, &message).await;
     }
     Ok(())
 }
@@ -521,7 +567,7 @@ async fn history(
         })
     };
     let page = number("page", 1)?.max(1);
-    let size = number("page_size", 24)?.clamp(1, 100);
+    let size = number("page_size", 50)?.clamp(1, 1000);
     let offset = page
         .checked_sub(1)
         .and_then(|page| page.checked_mul(size))

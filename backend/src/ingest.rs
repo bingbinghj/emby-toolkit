@@ -205,16 +205,25 @@ pub async fn scrape(
     group: Option<&str>,
     context: &JobContext,
 ) -> Result<Value> {
-    process(state, item, episode_ids, group, context, false, true)
-        .await
-        .inspect_err(|error| {
-            tracing::error!(
-                "完整刮削失败：Emby {}，名称 {}，{}",
-                string(item, "Id"),
-                string(item, "Name"),
-                error.1
-            )
-        })
+    Box::pin(process(
+        state,
+        item,
+        episode_ids,
+        group,
+        context,
+        false,
+        true,
+        None,
+    ))
+    .await
+    .inspect_err(|error| {
+        tracing::error!(
+            "完整刮削失败：Emby {}，名称 {}，{}",
+            string(item, "Id"),
+            string(item, "Name"),
+            error.1
+        )
+    })
 }
 pub(crate) async fn scrape_for_ingest(
     state: &AppState,
@@ -224,7 +233,42 @@ pub(crate) async fn scrape_for_ingest(
     context: &JobContext,
 ) -> Result<Value> {
     // Webhook finalization already refreshes metadata after fingerprint/audio work.
-    process(state, item, episode_ids, group, context, false, false).await
+    Box::pin(process(
+        state,
+        item,
+        episode_ids,
+        group,
+        context,
+        false,
+        false,
+        None,
+    ))
+    .await
+}
+
+pub(crate) async fn rescrape_metadata(
+    state: &AppState,
+    item: &Value,
+    target: &Value,
+    group: Option<&str>,
+    context: &JobContext,
+) -> Result<Value> {
+    let episodes = if target["Type"] == "Episode" {
+        vec![string(target, "Id")]
+    } else {
+        vec![]
+    };
+    Box::pin(process(
+        state,
+        item,
+        &episodes,
+        group,
+        context,
+        false,
+        false,
+        Some(target),
+    ))
+    .await
 }
 pub async fn prepare_new(
     state: &AppState,
@@ -233,16 +277,25 @@ pub async fn prepare_new(
     group: Option<&str>,
     context: &JobContext,
 ) -> Result<Value> {
-    process(state, item, episode_ids, group, context, true, false)
-        .await
-        .inspect_err(|error| {
-            tracing::error!(
-                "入库预处理失败：Emby {}，名称 {}，{}",
-                string(item, "Id"),
-                string(item, "Name"),
-                error.1
-            )
-        })
+    Box::pin(process(
+        state,
+        item,
+        episode_ids,
+        group,
+        context,
+        true,
+        false,
+        None,
+    ))
+    .await
+    .inspect_err(|error| {
+        tracing::error!(
+            "入库预处理失败：Emby {}，名称 {}，{}",
+            string(item, "Id"),
+            string(item, "Name"),
+            error.1
+        )
+    })
 }
 async fn process(
     state: &AppState,
@@ -252,6 +305,7 @@ async fn process(
     context: &JobContext,
     pending: bool,
     refresh_metadata: bool,
+    metadata_target: Option<&Value>,
 ) -> Result<Value> {
     let mut item = item.clone();
     let library = if pending {
@@ -323,6 +377,46 @@ async fn process(
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+    let target_scope = episodes
+        .iter()
+        .filter(|episode| episode_ids.is_empty() || episode_ids.contains(&string(episode, "Id")))
+        .filter_map(|episode| {
+            Some((
+                episode["ParentIndexNumber"].as_i64()?,
+                episode["IndexNumber"].as_i64()?,
+            ))
+        })
+        .collect::<Vec<_>>();
+    if kind == "Series"
+        && !episode_ids.is_empty()
+        && (target_scope.is_empty()
+            || episode_ids
+                .iter()
+                .any(|id| !episodes.iter().any(|episode| episode["Id"] == id.as_str())))
+    {
+        return Err(ApiError::bad(
+            "本次目标分集不在当前电视剧内，禁止扩大到全部季集",
+        ));
+    }
+    if let Some(target) = metadata_target.filter(|target| target["Type"] == "Episode") {
+        let current = episodes
+            .iter()
+            .find(|episode| episode["Id"] == target["Id"])
+            .ok_or_else(|| ApiError::bad("重新刮削目标不在当前电视剧范围内"))?;
+        if [
+            "Id",
+            "Type",
+            "Path",
+            "SeriesId",
+            "ParentIndexNumber",
+            "IndexNumber",
+        ]
+        .iter()
+        .any(|field| current[*field] != target[*field])
+        {
+            return Err(ApiError::bad("重新刮削目标的原生身份或季集号发生变化"));
+        }
+    }
     let target_seasons = if kind == "Movie" {
         "不适用".into()
     } else if target_numbers.is_empty() {
@@ -379,6 +473,29 @@ async fn process(
     } else {
         crate::tmdb::aggregate(state, &tmdb, &target_numbers).await?
     };
+    if kind == "Series" && !episode_ids.is_empty() {
+        let keys = target_scope
+            .iter()
+            .map(|(season, episode)| format!("S{season}E{episode}"))
+            .collect::<std::collections::BTreeSet<_>>();
+        let items = data["episodes_details"]
+            .as_object_mut()
+            .ok_or_else(|| ApiError::bad("目标分集元数据格式无效"))?;
+        if metadata_target.is_some() && keys.iter().any(|key| !items.contains_key(key)) {
+            return Err(ApiError::bad("TMDb 未返回重新刮削目标的分集元数据"));
+        }
+        items.retain(|key, _| keys.contains(key));
+        for season in data["seasons_details"].as_array_mut().into_iter().flatten() {
+            let number = season["season_number"].as_i64();
+            if let Some(items) = season["episodes"].as_array_mut() {
+                items.retain(|episode| {
+                    number
+                        .zip(episode["episode_number"].as_i64())
+                        .is_some_and(|scope| target_scope.contains(&scope))
+                });
+            }
+        }
+    }
     tracing::info!("TMDb 元数据已获取：《{media_name}》，TMDb {tmdb}，类型 {type_label}");
     let douban_report = if kind == "Series" {
         crate::douban::premerge_in_job_report(state, item, &mut data["series_details"], context)
@@ -396,11 +513,6 @@ async fn process(
     } else {
         "完整刮削已完成，元数据已写入本地文件与数据库".to_string()
     };
-    let target_scope = episodes
-        .iter()
-        .filter(|e| episode_ids.is_empty() || episode_ids.contains(&string(e, "Id")))
-        .filter_map(|e| Some((e["ParentIndexNumber"].as_i64()?, e["IndexNumber"].as_i64()?)))
-        .collect::<Vec<_>>();
     let source = if kind == "Series" {
         &data["series_details"]
     } else {
@@ -470,25 +582,57 @@ async fn process(
     let keywords = crate::db::setting(&state.db, "keyword_mapping")
         .await?
         .unwrap_or(defaults["DEFAULT_KEYWORD_MAPPING"].clone());
-    let movie_paths = if kind == "Movie" {
+    let movie_paths = if let Some(target) = metadata_target.filter(|_| kind == "Movie") {
+        vec![std::path::PathBuf::from(string(target, "Path"))]
+    } else if kind == "Movie" {
         crate::nfo_files::movie_paths(state, item, &payload).await?
     } else {
         vec![]
     };
     context.checkpoint().await?;
+    let media_paths = metadata_target
+        .map(|target| vec![std::path::PathBuf::from(string(target, "Path"))])
+        .unwrap_or_else(|| {
+            if kind == "Series" && !episode_ids.is_empty() {
+                episodes
+                    .iter()
+                    .filter(|episode| episode_ids.contains(&string(episode, "Id")))
+                    .map(|episode| std::path::PathBuf::from(string(episode, "Path")))
+                    .collect()
+            } else {
+                vec![]
+            }
+        });
     let options = crate::nfo_files::Options {
         force: true,
         seasons: &target_numbers,
         episodes: &target_scope,
         movie_paths: &movie_paths,
+        media_paths: &media_paths,
+        skip_parents: metadata_target.is_some(),
         config: &config,
         studio_mapping: &studio,
         keyword_mapping: &keywords,
         ..Default::default()
     };
     let written = crate::nfo_files::sync(&kind, item, &payload, &cast, &options).await?;
-    let image_report =
-        crate::images::download_report(state, &kind, &tmdb, item, &payload, context).await?;
+    let image_report = if let Some(target) = metadata_target {
+        crate::images::download_target_report(state, &kind, &tmdb, item, &payload, context, target)
+            .await?
+    } else if kind == "Series" && !episode_ids.is_empty() {
+        crate::images::download_episode_paths_report(
+            state,
+            &kind,
+            &tmdb,
+            item,
+            &payload,
+            context,
+            &media_paths,
+        )
+        .await?
+    } else {
+        crate::images::download_report(state, &kind, &tmdb, item, &payload, context).await?
+    };
     let images = image_report["downloaded"].as_u64().unwrap_or(0);
     warning_details.extend(list(&image_report["warning_details"]));
     if state.configured().await && !pending {
@@ -530,7 +674,41 @@ async fn process(
     } else {
         crate::metadata_records::online(state, &kind, &payload, &cast, item, &input).await?
     };
-    metadata::ingest(state, &mut records, !pending && group.is_some()).await?;
+    let mut expected = Value::Null;
+    if let Some(target) = metadata_target {
+        records.retain(|record| {
+            record["item_type"] == target["Type"]
+                && list(&record["emby_item_ids_json"]).contains(&target["Id"])
+        });
+        if records.len() != 1 {
+            return Err(ApiError::bad("重新刮削未能确定唯一的目标元数据记录"));
+        }
+        expected = json!({"Name":records[0]["title"],"Overview":records[0]["overview"]});
+        if let Some(old) = metadata::row(
+            state,
+            &string(&records[0], "tmdb_id"),
+            &string(&records[0], "item_type"),
+        )
+        .await?
+        {
+            for field in [
+                "emby_item_ids_json",
+                "asset_details_json",
+                "file_pickcode_json",
+                "file_sha1_json",
+                "in_library",
+                "date_added",
+            ] {
+                records[0][field] = old[field].clone();
+            }
+        }
+    }
+    metadata::ingest(
+        state,
+        &mut records,
+        metadata_target.is_none() && !pending && group.is_some(),
+    )
+    .await?;
     if let Some(reason) = warning_details.first().and_then(Value::as_str) {
         message.push_str(&format!(
             "；有 {} 条提醒：{}；完整明细见任务结果",
@@ -547,15 +725,19 @@ async fn process(
             json!({"updated":records.len(),"nfo_written":written,"images_downloaded":images,"message":message,"warnings":warning_details.len(),"warning_details":warning_details}),
         );
     }
-    record_processed(state, item).await?;
+    if metadata_target.is_none() {
+        record_processed(state, item).await?;
+    }
     tracing::info!(
         "完整刮削完成：《{media_name}》，Emby {}，TMDb {tmdb}，数据库记录 {} 条，NFO 写入 {written} 个，图片下载 {images} 个",
         string(item, "Id"),
         records.len()
     );
-    Ok(
-        json!({"updated":records.len(),"nfo_written":written,"images_downloaded":images,"message":message,"warnings":warning_details.len(),"warning_details":warning_details}),
-    )
+    let mut result = json!({"updated":records.len(),"nfo_written":written,"images_downloaded":images,"message":message,"warnings":warning_details.len(),"warning_details":warning_details});
+    if metadata_target.is_some() {
+        result["_rescrape_expected"] = expected;
+    }
+    Ok(result)
 }
 
 pub async fn patch_cached_series_report(
@@ -867,11 +1049,23 @@ pub async fn prepare_cached_report(
     } else {
         vec![]
     };
+    let episode_paths = if kind == "Series" && !episode_ids.is_empty() {
+        children
+            .iter()
+            .filter(|episode| {
+                episode["Type"] == "Episode" && episode_ids.contains(&string(episode, "Id"))
+            })
+            .map(|episode| std::path::PathBuf::from(string(episode, "Path")))
+            .collect::<Vec<_>>()
+    } else {
+        vec![]
+    };
     context.checkpoint().await?;
     let options = crate::nfo_files::Options {
         seasons: &seasons,
         episodes: &scope,
         movie_paths: &movie_paths,
+        media_paths: &episode_paths,
         config: &config,
         studio_mapping: &studios,
         keyword_mapping: &keywords,
@@ -910,8 +1104,20 @@ pub async fn prepare_cached_report(
     };
     if !root.join("poster.jpg").is_file() {
         tracing::info!("缓存恢复图片补抓开始：《{media_name}》，TMDb {id}，本地海报缺失");
-        let images =
-            crate::images::download_report(state, &kind, &id, item, &payload, context).await?;
+        let images = if kind == "Series" && !episode_ids.is_empty() {
+            crate::images::download_episode_paths_report(
+                state,
+                &kind,
+                &id,
+                item,
+                &payload,
+                context,
+                &episode_paths,
+            )
+            .await?
+        } else {
+            crate::images::download_report(state, &kind, &id, item, &payload, context).await?
+        };
         report["warnings"] = json!(
             report["warnings"].as_u64().unwrap_or(0) + images["warnings"].as_u64().unwrap_or(0)
         );

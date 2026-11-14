@@ -94,9 +94,9 @@ impl Fixture {
             .connect(&std::env::var("DATABASE_URL").unwrap())
             .await
             .unwrap();
-        let artifacts = Path::new("/root/emby-toolkit-nov12-followup3-verification/monitor");
-        std::fs::create_dir_all(artifacts).unwrap();
-        let root = tempfile::tempdir_in(artifacts).unwrap();
+        let artifacts = std::env::temp_dir();
+        std::fs::create_dir_all(&artifacts).unwrap();
+        let root = tempfile::tempdir_in(&artifacts).unwrap();
         let mut state = AppState::new(pool, root.path().join("app")).await.unwrap();
         let events = Arc::new(tokio::sync::Mutex::new(vec![]));
         let mut hosts = vec![];
@@ -125,8 +125,11 @@ impl Fixture {
         state.save_config(&json!({"monitor_enabled":true,"monitor_paths":[media],"monitor_extensions":[".strm"],"monitor_exclude_dirs":[],"monitor_exclude_refresh_delay":0,"emby_server_url":bases[0],"emby_api_key":"fixture","tmdb_api_key":"fixture","tmdb_api_base_url":bases[0],"local_strm_root":media,"monitor_sha1_pc_search":true,"extract_thumb":false})).await.unwrap();
         state.p115 = Arc::new(crate::p115::Service::with_endpoints(
             crate::p115::Endpoints {
+                qrcode: bases[0].clone(),
+                passport: bases[0].clone(),
                 openapi: bases[0].clone(),
-                ..Default::default()
+                webapi: bases[0].clone(),
+                profile: bases[0].clone(),
             },
         ));
         crate::db::save_setting(
@@ -502,4 +505,454 @@ async fn monitor_disable_during_capture_keeps_final_images_unwritten() {
         );
         assert_eq!(unchanged, "https://115.invalid/d/fixturepc");
     }
+}
+
+struct CrashChild(std::process::Child);
+impl CrashChild {
+    fn kill(&mut self) {
+        self.0.kill().unwrap();
+        self.0.wait().unwrap();
+    }
+    async fn shutdown(&mut self) {
+        assert!(
+            std::process::Command::new("/bin/kill")
+                .args(["-INT", &self.0.id().to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(status) = self.0.try_wait().unwrap() {
+                    assert!(status.success());
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+}
+impl Drop for CrashChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+async fn crash_child(f: &Fixture, phase: &str, paths: &[PathBuf]) -> CrashChild {
+    let marker = f.root.path().join(format!("child-ready-{phase}"));
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "monitor::lifecycle_tests::monitor_restart_child",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env("ETK_MONITOR_RESTART_PHASE", phase)
+        .env("ETK_MONITOR_RESTART_SCHEMA", &f.schema)
+        .env("ETK_MONITOR_RESTART_DATA", f.root.path())
+        .env(
+            "ETK_MONITOR_RESTART_PATHS",
+            serde_json::to_string(paths).unwrap(),
+        )
+        .env("TMPDIR", f.root.path())
+        .env("TMP", f.root.path())
+        .env("TEMP", f.root.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let child = CrashChild(child);
+    until_file(&marker).await;
+    child
+}
+
+#[tokio::test]
+#[ignore = "helper subprocess for monitor crash tests; requires their explicit fixture environment"]
+async fn monitor_restart_child() {
+    let Ok(phase) = std::env::var("ETK_MONITOR_RESTART_PHASE") else {
+        return;
+    };
+    let schema = std::env::var("ETK_MONITOR_RESTART_SCHEMA").unwrap();
+    assert!(
+        schema
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    );
+    let search = format!("SET search_path TO {schema}");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .after_connect(move |connection, _| {
+            let search = search.clone();
+            Box::pin(async move {
+                sqlx::query(&search).execute(connection).await?;
+                Ok(())
+            })
+        })
+        .connect(&std::env::var("DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    let root = PathBuf::from(std::env::var("ETK_MONITOR_RESTART_DATA").unwrap());
+    let mut state = AppState::new(pool, root.join("app")).await.unwrap();
+    let base = state.config.read().await["emby_server_url"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    state.p115 = Arc::new(crate::p115::Service::with_endpoints(
+        crate::p115::Endpoints {
+            qrcode: base.clone(),
+            passport: base.clone(),
+            openapi: base.clone(),
+            webapi: base.clone(),
+            profile: base,
+        },
+    ));
+    let paths: Vec<PathBuf> =
+        serde_json::from_str(&std::env::var("ETK_MONITOR_RESTART_PATHS").unwrap()).unwrap();
+    if phase == "pending" {
+        let service = Service::new(state.clone());
+        let watcher = service.clone();
+        tokio::spawn(async move {
+            watcher.run(CancellationToken::new()).await;
+        });
+        for path in &paths {
+            service.tx.send(path.clone()).unwrap();
+        }
+        let count = paths.iter().collect::<BTreeSet<_>>().len() as i64;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let saved: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM monitor_pending_events")
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap();
+                if saved == count {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    } else {
+        for path in &paths {
+            crate::monitor_persistence::record(&state, path)
+                .await
+                .unwrap();
+        }
+    }
+    let marker = root.join(format!("child-ready-{phase}"));
+    if phase == "claimed" {
+        let settings = Settings::read(&state.config.read().await.clone()).await;
+        let payload = crate::monitor_persistence::next(&state, &settings)
+            .await
+            .unwrap()
+            .unwrap();
+        tokio::fs::write(&marker, serde_json::to_vec(&payload).unwrap())
+            .await
+            .unwrap();
+    } else {
+        tokio::fs::write(&marker, "ready").await.unwrap();
+    }
+    if phase == "running" {
+        let cancel = CancellationToken::new();
+        let service = Service::new(state);
+        let running = service.run(cancel.clone());
+        tokio::pin!(running);
+        tokio::select! {
+            _=&mut running=>{},
+            _=tokio::signal::ctrl_c()=>{cancel.cancel();running.await;},
+        }
+    } else {
+        std::future::pending::<()>().await;
+    }
+}
+
+async fn monitor_result(f: &Fixture, seconds: u64) -> (String, Value) {
+    tokio::time::timeout(Duration::from_secs(seconds),async {
+        loop {
+            let result:Option<(String,Value)>=sqlx::query_as("SELECT id,state_json FROM durable_jobs WHERE lane='monitor' AND spec_json->>'kind'='monitor' ORDER BY job_order DESC LIMIT 1")
+                .fetch_optional(&f.state.db).await.unwrap();
+            if let Some((id,result))=result && matches!(result["state"].as_str(),Some("completed"|"failed"|"cancelled")) {
+                return (id,result);
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.unwrap()
+}
+
+async fn monitor_checkpoint(f: &Fixture, id: &str) -> Value {
+    let mut checkpoint: Value =
+        sqlx::query_scalar("SELECT checkpoint_json FROM durable_jobs WHERE id=$1")
+            .bind(id)
+            .fetch_one(&f.state.db)
+            .await
+            .unwrap();
+    let steps: Vec<(String, Value)> =
+        sqlx::query_as("SELECT step_key,value_json FROM durable_job_steps WHERE job_id=$1")
+            .bind(id)
+            .fetch_all(&f.state.db)
+            .await
+            .unwrap();
+    for (key, value) in steps {
+        if let Some(key) = key.strip_prefix("plans:") {
+            checkpoint["plans"][key] = value;
+        } else if let Some(key) = key.strip_prefix("completed:") {
+            checkpoint["completed"][key] = value;
+        } else {
+            checkpoint["completed"][&key] = value;
+        }
+    }
+    checkpoint
+}
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL DATABASE_URL; kills a fixture subprocess before job creation"]
+async fn monitor_pending_events_and_claimed_batches_survive_a_hard_restart_once() {
+    for phase in ["pending", "claimed"] {
+        let f = Fixture::new().await;
+        let movie = f.movie(true).await;
+        let mut child = crash_child(&f, phase, &[movie.clone(), movie.clone()]).await;
+        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM monitor_pending_events")
+            .fetch_one(&f.state.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            pending, 1,
+            "duplicate file events must coalesce before handoff"
+        );
+        let claimed = if phase == "claimed" {
+            Some(
+                serde_json::from_slice::<Value>(
+                    &tokio::fs::read(f.root.path().join("child-ready-claimed"))
+                        .await
+                        .unwrap(),
+                )
+                .unwrap(),
+            )
+        } else {
+            None
+        };
+        child.kill();
+        let (_, cancel, listener, _) = start_listener(&f).await;
+        let (_, result) = monitor_result(&f, 15).await;
+        let jobs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM durable_jobs WHERE lane='monitor'")
+                .fetch_one(&f.state.db)
+                .await
+                .unwrap();
+        let spec: Value =
+            sqlx::query_scalar("SELECT spec_json FROM durable_jobs WHERE lane='monitor'")
+                .fetch_one(&f.state.db)
+                .await
+                .unwrap();
+        let nfo = tokio::fs::read_to_string(movie.with_extension("nfo"))
+            .await
+            .unwrap_or_default();
+        cancel.cancel();
+        listener.await.unwrap();
+        f.close().await;
+        assert_eq!(result["state"], "completed", "{phase}: {result}");
+        assert_eq!(result["result"]["prepared"], 1, "{phase}: {result}");
+        assert_eq!(
+            jobs, 1,
+            "a retained event must not become a second job after {phase}"
+        );
+        assert_eq!(spec["payload"]["paths"], json!([movie]));
+        if let Some(claimed) = claimed {
+            assert_eq!(
+                spec["payload"]["batch_id"], claimed["batch_id"],
+                "claim identity must survive before a job exists"
+            );
+        }
+        assert!(nfo.contains("测试电影"), "{phase}: {nfo}");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL DATABASE_URL; kills a fixture subprocess after its first group checkpoint"]
+async fn monitor_hard_restart_keeps_the_task_and_does_not_rewrite_a_completed_group() {
+    for mode in ["kill", "shutdown", "changed-input"] {
+        let f = Fixture::new().await;
+        let movie = f.movie(true).await;
+        let second_directory = f.media().join("Z Movie [tmdb-123]");
+        tokio::fs::create_dir_all(&second_directory).await.unwrap();
+        let second = second_directory.join("second.strm");
+        tokio::fs::write(&second, "https://115.invalid/d/fixturepc")
+            .await
+            .unwrap();
+        tokio::fs::write(second_directory.join("poster.jpg"), "keep second poster")
+            .await
+            .unwrap();
+        f.state
+            .save_config(&json!({"delay_between_items_sec":30}))
+            .await
+            .unwrap();
+        let mut child = crash_child(&f, "running", &[movie.clone(), second.clone()]).await;
+        let task_id = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let row: Option<String> = sqlx::query_scalar(
+                    "SELECT id FROM durable_jobs WHERE lane='monitor' ORDER BY job_order LIMIT 1",
+                )
+                .fetch_optional(&f.state.db)
+                .await
+                .unwrap();
+                if let Some(id) = row {
+                    let checkpoint = monitor_checkpoint(&f, &id).await;
+                    if checkpoint["completed"].as_object().is_some_and(|done| {
+                        done.values().any(|value| value["prepared"]["nfo"] == 1)
+                    }) {
+                        break id;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let nfo = movie.with_extension("nfo");
+        let before = tokio::fs::read(&nfo).await.unwrap();
+        let modified = tokio::fs::metadata(&nfo).await.unwrap().modified().unwrap();
+        assert!(
+            !second.with_extension("nfo").exists(),
+            "the second group must still be unstarted"
+        );
+        if mode == "shutdown" {
+            child.shutdown().await;
+            let stopped: Value =
+                sqlx::query_scalar("SELECT state_json FROM durable_jobs WHERE id=$1")
+                    .bind(&task_id)
+                    .fetch_one(&f.state.db)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                stopped["state"], "interrupted",
+                "graceful close must remain resumable: {stopped}"
+            );
+            assert_ne!(
+                stopped["stop_requested"], true,
+                "service shutdown must preserve the user's stop intent"
+            );
+        } else {
+            child.kill();
+        }
+        if mode == "changed-input" {
+            tokio::fs::write(&movie, "https://115.invalid/d/fixturenewpc")
+                .await
+                .unwrap();
+            sqlx::query(
+                "UPDATE p115_filesystem_cache SET pick_code='fixturenewpc',sha1='DEF' WHERE id='1'",
+            )
+            .execute(&f.state.db)
+            .await
+            .unwrap();
+        }
+        f.state
+            .save_config(&json!({"delay_between_items_sec":0}))
+            .await
+            .unwrap();
+        let (_, cancel, listener, _) = start_listener(&f).await;
+        let (restored_id, result) = monitor_result(&f, 15).await;
+        let after = tokio::fs::read(&nfo).await.unwrap();
+        let after_modified = tokio::fs::metadata(&nfo).await.unwrap().modified().unwrap();
+        let second_nfo = tokio::fs::read_to_string(second.with_extension("nfo"))
+            .await
+            .unwrap_or_default();
+        let jobs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM durable_jobs WHERE lane='monitor'")
+                .fetch_one(&f.state.db)
+                .await
+                .unwrap();
+        cancel.cancel();
+        listener.await.unwrap();
+        f.close().await;
+        assert_eq!(
+            restored_id, task_id,
+            "recovery must retain its original job ID"
+        );
+        assert_eq!(
+            jobs, 1,
+            "handoff compensation must not duplicate an existing job"
+        );
+        assert_eq!(result["state"], "completed", "{result}");
+        assert_eq!(
+            result["result"]["prepared"], 2,
+            "completed groups still contribute their real results"
+        );
+        if mode == "changed-input" {
+            assert_eq!(
+                result["result"]["nfo_written"], 1,
+                "the changed group must be reprocessed without counting its old NFO write twice"
+            );
+        }
+        assert_eq!(after, before);
+        assert_eq!(
+            after_modified, modified,
+            "identical NFO content was written a second time"
+        );
+        assert!(
+            second_nfo.contains("测试电影"),
+            "remaining group was not completed: {second_nfo}"
+        );
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires isolated PostgreSQL DATABASE_URL; kills a fixture subprocess during refresh-only delay"]
+async fn monitor_hard_restart_preserves_remaining_refresh_delay_and_fixed_scope() {
+    let f = Fixture::new().await;
+    let movie = f.movie(true).await;
+    f.state.save_config(&json!({"monitor_exclude_dirs":[movie.parent().unwrap()],"monitor_exclude_refresh_delay":8})).await.unwrap();
+    let mut child = crash_child(&f, "running", &[movie.clone()]).await;
+    let (task_id, remaining) = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let row: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM durable_jobs WHERE lane='monitor' ORDER BY job_order LIMIT 1",
+            )
+            .fetch_optional(&f.state.db)
+            .await
+            .unwrap();
+            if let Some(id) = row {
+                let checkpoint = monitor_checkpoint(&f, &id).await;
+                if let Some(remaining) = checkpoint["plans"]["monitor-refresh-delay"].as_u64()
+                    && (1..=6).contains(&remaining)
+                {
+                    break (id, remaining);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    child.kill();
+    f.state
+        .save_config(&json!({"monitor_exclude_refresh_delay":30}))
+        .await
+        .unwrap();
+    let (_, cancel, listener, _) = start_listener(&f).await;
+    let checkpoint = monitor_checkpoint(&f, &task_id).await;
+    assert!(
+        checkpoint["plans"]["monitor-refresh-delay"]
+            .as_u64()
+            .unwrap()
+            <= remaining,
+        "a restart reset the configured wait"
+    );
+    let (restored_id, result) = monitor_result(&f, remaining + 5).await;
+    let spec: Value = sqlx::query_scalar("SELECT spec_json FROM durable_jobs WHERE id=$1")
+        .bind(&task_id)
+        .fetch_one(&f.state.db)
+        .await
+        .unwrap();
+    cancel.cancel();
+    listener.await.unwrap();
+    f.close().await;
+    assert_eq!(restored_id, task_id);
+    assert_eq!(result["state"], "completed", "{result}");
+    assert_eq!(result["result"]["refresh_only"], 1, "{result}");
+    assert_eq!(spec["payload"]["paths"], json!([movie]));
+    assert_eq!(
+        spec["payload"]["settings"]["refresh_delay"], 8,
+        "the persisted snapshot changed on restart"
+    );
 }

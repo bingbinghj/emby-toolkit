@@ -195,6 +195,14 @@ async fn cached_info(
 }
 
 pub async fn restore(state: &AppState, full: bool, context: &JobContext) -> Result<Value> {
+    if let Some(report) = context.completed("media-restore-result").await? {
+        return Ok(report);
+    }
+    if full && let Some(saved) = context.completed("media-restore-full-save").await? {
+        if saved["task_result"].is_object() {
+            return Ok(saved["task_result"].clone());
+        }
+    }
     restore_files(state, full, context).await
 }
 async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Result<Value> {
@@ -206,7 +214,10 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
     if string(&config, "local_strm_root").is_empty() || !root.is_dir() {
         return Err(ApiError::bad("未配置本地媒体库目录或目录不存在"));
     }
-    let mut rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE in_library=true AND item_type IN ('Movie','Episode')").fetch_all(&state.db).await?;
+    let saved_plan = context.plan("media-restore-files").await?;
+    let mut rows:Vec<Value> = if saved_plan.is_some() { vec![] } else {
+        sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE in_library=true AND item_type IN ('Movie','Episode')").fetch_all(&state.db).await?
+    };
     crate::media_order::sort_rows(state, &mut rows).await?;
     let folders = list(
         &state
@@ -260,8 +271,8 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
             }
         }
     }
-    if !full {
-        let mut pending = vec![root];
+    if !full && saved_plan.is_none() {
+        let mut pending = vec![root.clone()];
         while let Some(directory) = pending.pop() {
             context.checkpoint().await?;
             let mut entries = tokio::fs::read_dir(directory).await?;
@@ -288,14 +299,23 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
     let mut pending_import = vec![];
     let mut full_report = Value::Null;
     let mut verified_ids = vec![];
+    let assets: Vec<(PathBuf, Vec<(String, Value)>)> = if let Some(plan) = saved_plan {
+        labels = serde_json::from_value(plan["labels"].clone())
+            .map_err(|_| ApiError::bad("媒体信息还原的已保存名称计划无效"))?;
+        serde_json::from_value(plan["assets"].clone())
+            .map_err(|_| ApiError::bad("媒体信息还原的已保存文件计划无效"))?
+    } else {
+        let mut assets = assets.into_iter().collect::<Vec<_>>();
+        assets.sort_by_cached_key(|(path, _)| {
+            order
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| crate::media_order::key(&json!({"Name":path.to_string_lossy()})))
+        });
+        context.save_plan("media-restore-files", &json!({"assets":assets,"labels":labels})).await?;
+        assets
+    };
     let total = assets.len();
-    let mut assets = assets.into_iter().collect::<Vec<_>>();
-    assets.sort_by_cached_key(|(path, _)| {
-        order
-            .get(path)
-            .cloned()
-            .unwrap_or_else(|| crate::media_order::key(&json!({"Name":path.to_string_lossy()})))
-    });
     for (index, (path, bindings)) in assets.into_iter().enumerate() {
         context.checkpoint().await?;
         let label = labels.get(&path).cloned().unwrap_or_else(|| {
@@ -304,6 +324,10 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
                 .to_string_lossy()
                 .into_owned()
         });
+        if !path.starts_with(&root) {
+            failures.push(format!("{}：文件已不在当前配置的本地媒体目录，未恢复", path.display()));
+            continue;
+        }
         context
             .update_counted(
                 index as u64,
@@ -353,6 +377,14 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
                 && crate::media_info::container(&info)
                     .is_some_and(|c| !string(c, "Container").eq_ignore_ascii_case("strm"))
             {
+                if let Some(prepared) = context.plan(&format!("media-restore-source:{}", path.display())).await? {
+                    if prepared["written"] == true
+                        && prepared["source"] == crate::media_paths::strm_target(path.to_str().unwrap_or("")).await.unwrap_or_default()
+                        && crate::media_info::restore_json(&prepared["info"]).ok() == crate::media_info::restore_json(&info).ok()
+                    {
+                        updated += 1;
+                    }
+                }
                 for (id, asset) in bindings.iter().filter(|(id, _)| !id.is_empty()) {
                     let candidate=async {
                         crate::identity::verify(asset,&info)?;
@@ -374,7 +406,11 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
                         Ok(Some(target)) => {
                             native_imports.insert(id.clone(), target);
                         }
-                        Ok(None) => {}
+                        Ok(None) => {
+                            if context.completed(&format!("media-restore-import:{id}")).await?.is_some() {
+                                verified_ids.push(id.clone());
+                            }
+                        }
                         Err(error) if context.is_cancelled() => return Err(error),
                         Err(error) => {
                             failures.push(format!("{id}：未导入现有备份：{}", error.1));
@@ -405,7 +441,15 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
                 (pc.unwrap_or_default(),sha.unwrap_or_default(),filename,None)
             };
             if sha.is_empty() || pc.is_empty(){return Err(ApiError::bad("缺少115 PC或SHA1"));}
-            let mut info=crate::media_info::restore_json(&info(state,&sha,&pc,&filename,full,context).await?)?;
+            let prepared_key = format!("media-restore-source:{}", path.display());
+            let prepared = context.plan(&prepared_key).await?;
+            let reusable = prepared.as_ref().filter(|prepared| prepared["source"] == source
+                && prepared["pick_code"] == pc && prepared["sha1"] == sha && prepared["size"] == json!(size));
+            let mut info = if let Some(prepared) = reusable {
+                crate::media_info::restore_json(&prepared["info"])?
+            } else {
+                crate::media_info::restore_json(&info(state,&sha,&pc,&filename,full,context).await?)?
+            };
             if let Some(size)=size{crate::identity::verify(&json!({"size_bytes":size}),&info)?;}
             for (_,asset) in &bindings{crate::identity::verify(asset,&info)?;}
             let mut chapters=None;
@@ -432,6 +476,8 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
                 let current=crate::media_edit::details(state,id,"Path,Size,MediaSources").await?;
                 if &crate::revalidation::observation(state,&current).await!=before{return Err(ApiError::bad("Emby 文件在提取期间变化"));}
             }
+            let already_written = reusable.is_some_and(|prepared| prepared["written"] == true);
+            context.save_plan(&prepared_key, &json!({"source":source,"pick_code":pc,"sha1":sha,"size":size,"info":info,"written":already_written})).await?;
             if full && !members.is_empty() {
                 // Prepare every selected version before any clear. The shared save
                 // protects linked versions that are outside the selected path list.
@@ -452,6 +498,7 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
             }.await;
             let _=tokio::fs::remove_file(&stage).await;
             write?;
+            context.save_plan(&prepared_key, &json!({"source":source,"pick_code":pc,"sha1":sha,"size":size,"info":info,"written":true})).await?;
             if members.is_empty() { pending_import.push(path.to_string_lossy().to_string()); }
             for (id,item_path,asset) in imports { native_imports.insert(id,ImportTarget{path:item_path,source:source.clone(),info:info.clone(),asset}); }
             Ok::<_,ApiError>(true)
@@ -498,11 +545,16 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
         let ids = full_rebuilt.keys().cloned().collect::<Vec<_>>();
         let body =
             json!({"mediainfo":full_rebuilt[&first],"target_item_ids":ids,"stream_patches":[]});
-        match crate::media_save::save_with_rebuilt(state, &first, &body, &full_rebuilt, context)
-            .await
-        {
+        let saved = if let Some(previous) = context.completed("media-restore-full-save").await? {
+            Ok((previous["status"].as_u64().unwrap_or(500) as u16, previous["report"].clone()))
+        } else {
+            crate::media_save::save_with_rebuilt(state, &first, &body, &full_rebuilt, context).await
+        };
+        match saved {
             Ok((status, report)) => {
                 if status < 400 && report["failures"].as_array().is_none_or(Vec::is_empty) {
+                    let task_result = restore_report(updated + full_paths.len(), &ids, &pending_import, &[], &report, &[]);
+                    context.complete("media-restore-full-save", &json!({"status":status,"report":report,"ids":ids,"task_result":task_result})).await?;
                     updated += full_paths.len();
                     verified_ids.extend(ids);
                 } else {
@@ -525,19 +577,31 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
             Err(error) => failures.push(format!("本地 JSON 已恢复，原生导入尚未确认：{}", error.1)),
         }
     }
-    let message = format!(
-        "媒体信息还原结束：本地恢复 {updated} 个文件，Emby 回读确认 {} 个目标，未绑定待导入 {} 个，失败 {} 项",
-        verified_ids.len(),
-        pending_import.len(),
-        failures.len()
-    );
+    let report = restore_report(updated, &verified_ids, &pending_import, &deferred_ids, &full_report, &failures);
+    if failures.is_empty() {
+        context.complete("media-restore-result", &report).await?;
+    }
+    let message = report["message"].as_str().unwrap();
     tracing::info!("[媒体信息还原] {message}");
     context
-        .update_counted(total as u64, total as u64, "媒体信息还原", &message)
+        .update_counted(total as u64, total as u64, "媒体信息还原", message)
         .await;
-    Ok(
-        json!({"updated":updated,"verified_ids":verified_ids,"pending_import":pending_import,"deferred_ids":deferred_ids,"full_restore":full_report,"failures":failures,"message":message}),
-    )
+    Ok(report)
+}
+
+fn restore_report(
+    updated: usize,
+    verified_ids: &[String],
+    pending_import: &[String],
+    deferred_ids: &[String],
+    full_report: &Value,
+    failures: &[String],
+) -> Value {
+    let message = format!(
+        "媒体信息还原结束：本地恢复 {updated} 个文件，Emby 回读确认 {} 个目标，未绑定待导入 {} 个，失败 {} 项",
+        verified_ids.len(), pending_import.len(), failures.len()
+    );
+    json!({"updated":updated,"verified_ids":verified_ids,"pending_import":pending_import,"deferred_ids":deferred_ids,"full_restore":full_report,"failures":failures,"message":message})
 }
 
 struct ImportTarget {
@@ -551,11 +615,15 @@ async fn restore_imports(
     imports: &BTreeMap<String, ImportTarget>,
     context: &JobContext,
 ) -> Result<()> {
-    let targets = imports
-        .iter()
-        .map(|(id, target)| (id.clone(), target.path.clone()))
-        .collect::<Vec<_>>();
+    let mut pending = std::collections::BTreeSet::new();
     for (id, target) in imports {
+        let completion_key = format!("media-restore-import:{id}");
+        if let Some(previous) = context.completed(&completion_key).await? {
+            if previous["path"] != target.path || previous["source"] != target.source {
+                return Err(ApiError::bad(format!("{id}：已验收导入的目标路径或来源发生变化")));
+            }
+            continue;
+        }
         let current = crate::media_edit::target(state, id).await?;
         if current.path != target.path || current.asset != target.asset {
             return Err(ApiError::bad(format!(
@@ -573,14 +641,26 @@ async fn restore_imports(
             )));
         }
         let live =
-            crate::media_edit::details(state, id, "Id,Path,Size,MediaSources,MediaStreams").await?;
+            crate::media_edit::details(state, id, "Id,Path,Size,MediaSources,MediaStreams,Chapters").await?;
         if live["Id"] != *id || string(&live, "Path") != target.path {
             return Err(ApiError::bad(format!(
                 "{id}：恢复前 Emby 路径或身份变化，未启动导入"
             )));
         }
         crate::identity::verify(&json!({"size_bytes":live["Size"]}), &target.info)?;
+        let chapters = &crate::media_info::object(&target.info).unwrap()["Chapters"];
+        if crate::media_info::stream_differences(&target.info, &live, &[&target.path, &target.source]).is_empty()
+            && crate::media_info::chapters_restored(chapters, &live["Chapters"])
+        {
+            context.complete(&completion_key, &json!({"path":target.path,"source":target.source})).await?;
+        } else {
+            pending.insert(id.clone());
+        }
     }
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let targets = pending.iter().map(|id| (id.clone(), imports[id].path.clone())).collect::<Vec<_>>();
     let settings = crate::media_save::restoration_settings(state, &targets, false).await?;
     let recovery = JobContext::for_recovery(Some(context)).await;
     crate::strm::with_changes(state, &settings, || async {
@@ -588,10 +668,6 @@ async fn restore_imports(
     })
     .await?;
     let mut deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-    let mut pending = imports
-        .keys()
-        .cloned()
-        .collect::<std::collections::BTreeSet<_>>();
     let mut last = String::new();
     while !pending.is_empty() {
         let paused = tokio::time::Instant::now();
@@ -623,6 +699,7 @@ async fn restore_imports(
                 differences.push("章节或片头片尾标记未恢复".into());
             }
             if differences.is_empty() {
+                context.complete(&format!("media-restore-import:{id}"), &json!({"path":path,"source":source})).await?;
                 pending.remove(&id);
             } else {
                 last = format!("{id}：{}", differences.join("；"));

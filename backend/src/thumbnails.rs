@@ -7,6 +7,7 @@ use crate::{
 };
 use regex::Regex;
 use reqwest::Method;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -14,6 +15,8 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+mod resume_tests;
 #[cfg(test)]
 mod tests;
 
@@ -131,7 +134,7 @@ pub fn encoder_script(encoder: &str, rules: &[Value]) -> String {
     lines.push(String::new());
     lines.join("\n")
 }
-#[derive(Default)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 pub struct ExtractionLog {
     started: bool,
     complete: bool,
@@ -219,6 +222,7 @@ async fn api(
 ) -> Result<Value> {
     state.emby(method, path, query, None).await
 }
+#[derive(Clone, Deserialize, Serialize)]
 struct LogCursor {
     anchor: Option<String>,
 }
@@ -313,6 +317,35 @@ async fn task(state: &AppState) -> Result<Value> {
 fn active(task: &Value) -> bool {
     matches!(task["State"].as_str(), Some("Running" | "Cancelling"))
 }
+#[derive(Deserialize, Serialize)]
+struct NativeRun {
+    task_id: String,
+    previous: Value,
+    cursor: LogCursor,
+    trace: ExtractionLog,
+    observed_start: bool,
+    execution_start: Option<Value>,
+    #[serde(default)]
+    execution_status: Option<String>,
+    start_error: Option<String>,
+}
+fn confirmed_run(run: &NativeRun, expected: Option<&str>) -> bool {
+    run.execution_status.as_deref() == Some("Completed")
+        && run
+            .execution_start
+            .as_ref()
+            .is_some_and(|start| !start.is_null())
+        && run.trace.result().is_ok()
+        && expected.is_none_or(|expected| {
+            run.trace.encoders.is_empty() || run.trace.encoders.contains(expected)
+        })
+}
+fn native_key(start: u64, end: u64, expected: Option<&str>) -> String {
+    format!(
+        "thumbnail-native:{start}:{end}:{}",
+        expected.unwrap_or("default")
+    )
+}
 async fn run_native(
     state: &AppState,
     timeout: Duration,
@@ -333,9 +366,27 @@ async fn run_with_trace(
     context: &JobContext,
     trace: &mut ExtractionLog,
 ) -> Result<BTreeSet<String>> {
+    let key = native_key(start, end, expected);
+    if let Some(completed) = context.completed(&key).await? {
+        let completed: NativeRun = serde_json::from_value(completed)
+            .map_err(|_| config_error("已完成的缩略图执行记录无效"))?;
+        *trace = completed.trace;
+        return trace.result();
+    }
+    let saved = context.plan(&key).await?;
+    let mut saved: Option<NativeRun> = saved
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| config_error("待恢复的缩略图执行记录无效"))?;
+    if let Some(run) = saved.as_ref().filter(|run| confirmed_run(run, expected)) {
+        context.complete(&key, &json!(run)).await?;
+        *trace = run.trace.clone();
+        return trace.result();
+    }
+    let restored_snapshot = saved.as_ref().map(|run| json!(run));
     let mut current = task(state).await?;
     let deadline = tokio::time::Instant::now() + timeout;
-    while active(&current) {
+    while saved.is_none() && active(&current) {
         context.checkpoint().await?;
         if tokio::time::Instant::now() >= deadline {
             return Err(ApiError::bad("等待已有神医提取任务结束超时"));
@@ -343,36 +394,88 @@ async fn run_with_trace(
         tokio::time::sleep(Duration::from_secs(2)).await;
         current = task(state).await?;
     }
-    if current["State"] != "Idle" {
+    if let Some(run) = saved.as_mut() {
+        if string(&current, "Id") != run.task_id {
+            return Err(config_error("神医缩略图计划任务身份变化，未恢复旧执行"));
+        }
+        run.trace.feed(&run.cursor.read(state).await?);
+        // A stopped native task, or an intent saved before the request reached
+        // Emby, has no unfinished native execution to wait for. Re-read its
+        // state and bounded logs before creating a new execution.
+        if current["State"] == "Idle"
+            && ((!run.trace.started
+                && current["LastExecutionResult"]["StartTimeUtc"] == run.previous)
+                || (current["LastExecutionResult"]["StartTimeUtc"] != run.previous
+                    && current["LastExecutionResult"]["Status"] != "Completed"))
+        {
+            saved = None;
+        }
+    }
+    if saved.is_none() && current["State"] != "Idle" {
         return Err(config_error("神医缩略图任务状态未确认空闲，未提交重复提取"));
     }
-    let previous = current["LastExecutionResult"]["StartTimeUtc"].clone();
-    let mut cursor = LogCursor::new(state).await?;
     let id = string(&current, "Id");
-    context.checkpoint().await?;
-    let start_error = state
-        .emby_once(
-            Method::POST,
-            &format!("ScheduledTasks/Running/{id}"),
-            &[],
-            None,
-        )
-        .await
-        .err();
+    let resumed = saved.is_some();
+    let mut run = if let Some(run) = saved {
+        *trace = run.trace.clone();
+        run
+    } else {
+        NativeRun {
+            task_id: id.clone(),
+            previous: current["LastExecutionResult"]["StartTimeUtc"].clone(),
+            cursor: LogCursor::new(state).await?,
+            trace: ExtractionLog::default(),
+            observed_start: false,
+            execution_start: None,
+            execution_status: None,
+            start_error: None,
+        }
+    };
+    let previous = run.previous.clone();
+    let mut cursor = run.cursor.clone();
+    if !resumed {
+        context.checkpoint().await?;
+        context.save_plan(&key, &json!(run)).await?;
+        run.start_error = state
+            .emby_once(
+                Method::POST,
+                &format!("ScheduledTasks/Running/{id}"),
+                &[],
+                None,
+            )
+            .await
+            .err()
+            .map(|error| crate::logs::redact(&error.1));
+        run.observed_start = run.start_error.is_none();
+        context.save_plan(&key, &json!(run)).await?;
+    }
+    let start_error = run.start_error.clone();
     if let Some(error) = &start_error {
         tracing::warn!(
             "[神医缩略图] 启动请求未正常返回，仅回读本次执行状态和日志，不重复提交：{}",
-            error.1
+            error
         );
     }
-    let mut observed_start = start_error.is_none();
+    let mut observed_start = run.observed_start;
+    let mut saved_snapshot = if resumed {
+        restored_snapshot.unwrap()
+    } else {
+        json!(run)
+    };
     let mut deadline = tokio::time::Instant::now() + timeout;
     let mut log_deadline = None;
     let mut stopped = false;
+    let mut ownership_changed = false;
     let outcome = async {
         while tokio::time::Instant::now() < deadline {
             if context.is_cancelled() && !stopped {
+                if context.is_interrupted() {
+                    context.checkpoint().await?;
+                }
                 stopped = true;
+                if run.execution_status.is_some() || trace.complete {
+                    return Err(config_error("神医提取已停止"));
+                }
                 deadline = deadline.min(tokio::time::Instant::now() + Duration::from_secs(90));
                 crate::emby::stop_scheduled(state, &id, deadline)
                     .await
@@ -390,10 +493,37 @@ async fn run_with_trace(
                 {
                     return Err(config_error(&format!(
                         "神医缩略图任务启动未确认，未读取到本次执行，未重复提交：{}",
-                        error.1
+                        error
                     )));
                 }
                 trace.feed(&cursor.read(state).await?);
+                run.cursor = cursor.clone();
+                run.trace = trace.clone();
+                run.observed_start = observed_start;
+                let executed = &current["LastExecutionResult"]["StartTimeUtc"];
+                if !confirmed_run(&run, expected) && !executed.is_null() && *executed != previous {
+                    if run
+                        .execution_start
+                        .as_ref()
+                        .is_some_and(|before| before != executed)
+                    {
+                        ownership_changed = true;
+                        return Err(config_error(
+                            "神医缩略图执行身份已变化，未使用另一次任务验收",
+                        ));
+                    }
+                    run.execution_start = Some(executed.clone());
+                    if current["State"] == "Idle" {
+                        run.execution_status = current["LastExecutionResult"]["Status"]
+                            .as_str()
+                            .map(str::to_string);
+                    }
+                }
+                let snapshot = json!(run);
+                if snapshot != saved_snapshot {
+                    context.save_plan(&key, &snapshot).await?;
+                    saved_snapshot = snapshot;
+                }
                 Ok::<_, ApiError>(())
             };
             let polled = tokio::select! {
@@ -401,6 +531,9 @@ async fn run_with_trace(
                 result=tokio::time::timeout_at(deadline,poll)=>result,
             };
             polled.map_err(|_| ApiError::bad("读取本次神医缩略图任务状态或日志超时"))??;
+            if confirmed_run(&run, expected) {
+                return trace.result();
+            }
             let result = &current["LastExecutionResult"];
             if current["State"] == "Idle"
                 && !result["StartTimeUtc"].is_null()
@@ -450,7 +583,13 @@ async fn run_with_trace(
         Err(ApiError::bad("等待神医提取结束超时，请检查Emby任务状态"))
     }
     .await;
-    if outcome.is_err() && !stopped {
+    if outcome.is_err()
+        && !stopped
+        && !context.is_interrupted()
+        && !ownership_changed
+        && run.execution_status.is_none()
+        && !trace.complete
+    {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
         if observed_start {
             crate::emby::stop_scheduled(state, &id, deadline).await
@@ -458,6 +597,9 @@ async fn run_with_trace(
             crate::emby::wait_scheduled_idle(state, &id, deadline).await
         }
         .map_err(|_| native_stop_error())?;
+    }
+    if outcome.is_ok() {
+        context.complete(&key, &json!(run)).await?;
     }
     outcome
 }
@@ -501,10 +643,12 @@ async fn missing(state: &AppState, item: &Value, options: &Value) -> Result<bool
     Ok(chapters.is_empty() || chapters.iter().any(|c| string(c, "ImageTag").is_empty()))
 }
 type Targets = BTreeMap<String, (Value, Value)>;
+#[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct NativeExtraction {
     pub report: Value,
     paths: BTreeSet<String>,
     targets: Targets,
+    candidates: Targets,
 }
 
 fn ordered_targets<'a>(
@@ -603,9 +747,9 @@ async fn remaining(
             )
             .await;
         let item = item(state, id).await?;
-        if item["Path"] != before["Path"] {
+        if !same_target(before, &item) {
             return Err(ApiError::bad(format!(
-                "Item {id} 路径在提取期间变化，未使用新路径图片验收或修复旧目标"
+                "Item {id} 路径或媒体输入在提取期间变化，未使用新版图片验收或修复旧目标"
             )));
         }
         if missing(state, &item, options).await? {
@@ -615,9 +759,48 @@ async fn remaining(
                 "[缩略图修复] {}（Item {id}）章节图或 BIF 已齐全",
                 string(&item, "Path")
             );
+            context
+                .complete(
+                    &format!("thumbnail-images:{id}"),
+                    &json!({"item":before,"options":options}),
+                )
+                .await?;
         }
     }
     Ok(result)
+}
+fn same_target(before: &Value, after: &Value) -> bool {
+    if before["Path"] != after["Path"] {
+        return false;
+    }
+    let unchanged =
+        |a: &Value, b: &Value, key: &str| a[key].is_null() || b[key].is_null() || a[key] == b[key];
+    if !unchanged(before, after, "RunTimeTicks") {
+        return false;
+    }
+    if let (Ok(before), Ok(after)) = (source(before), source(after)) {
+        if before["Path"] != after["Path"] {
+            return false;
+        }
+        for key in ["Size", "RunTimeTicks", "Container"] {
+            if !unchanged(&before, &after, key) {
+                return false;
+            }
+        }
+        let video = |source: &Value| {
+            list(&source["MediaStreams"])
+                .into_iter()
+                .filter(|stream| stream["Type"] == "Video")
+                .map(|stream| json!([stream["Codec"], stream["Width"], stream["Height"]]))
+                .collect::<Vec<_>>()
+        };
+        let a = video(&before);
+        let b = video(&after);
+        if !a.is_empty() && !b.is_empty() && a != b {
+            return false;
+        }
+    }
+    true
 }
 pub fn encoder_archive(folder: &str, encoder: &str, rules: &[Value]) -> Result<Vec<u8>> {
     let mut archive = tar::Builder::new(vec![]);
@@ -703,6 +886,217 @@ async fn find_container(docker: &bollard::Docker, system: &Value) -> Result<Stri
     }
     Ok(matches.remove(0))
 }
+#[derive(Deserialize, Serialize)]
+struct FallbackPlan {
+    original_encoder: String,
+    system_id: String,
+    container_id: String,
+    directory: String,
+    folder: String,
+    script: String,
+    rules: Vec<Value>,
+    cursor: LogCursor,
+    uploaded: bool,
+    backend_verified: bool,
+}
+async fn retire_fallback_files(
+    state: &AppState,
+    plan: &FallbackPlan,
+    context: &JobContext,
+    system: &Value,
+) -> Result<()> {
+    if !plan
+        .folder
+        .strip_prefix("etk-thumbnail-")
+        .is_some_and(|id| id.len() == 32 && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        || plan.script != format!("{}/{}/ffmpeg", plan.directory, plan.folder)
+        || !plan.directory.starts_with('/')
+    {
+        return Err(config_error("缩略图准备文件的归属未确认，已保留文件"));
+    }
+    let docker = crate::docker_host::client(state)?;
+    let id = find_container(&docker, system).await?;
+    if id != plan.container_id {
+        return Err(config_error("Emby容器身份变化，已保留旧准备文件"));
+    }
+    if crate::strm::config(state).await?["CustomEncoderPath"] == plan.script
+        || active(&task(state).await?)
+    {
+        return Err(config_error("缩略图准备文件仍可能使用，已保留文件"));
+    }
+    crate::docker_host::exec(
+        &docker,
+        &id,
+        &[
+            "rm".into(),
+            "-f".into(),
+            plan.script.clone(),
+            format!("{}/{}/rffmpeg", plan.directory, plan.folder),
+        ],
+    )
+    .await?;
+    crate::docker_host::exec(
+        &docker,
+        &id,
+        &[
+            "rmdir".into(),
+            format!("{}/{}", plan.directory, plan.folder),
+        ],
+    )
+    .await?;
+    context
+        .complete(
+            "thumbnail-fallback-cleanup",
+            &json!({"container_id":id,"script":plan.script}),
+        )
+        .await
+}
+pub(crate) async fn resume_cleanup(state: &AppState, context: &JobContext) -> Result<()> {
+    for (key, saved) in context.saved_plans().await? {
+        let Some(prefix) = key.strip_suffix("thumbnail-fallback") else {
+            continue;
+        };
+        if !prefix.is_empty() && !prefix.ends_with(':') {
+            continue;
+        }
+        let plan: FallbackPlan =
+            serde_json::from_value(saved).map_err(|_| config_error("缩略图编码器恢复计划无效"))?;
+        let scoped = if prefix.is_empty() {
+            context.clone()
+        } else {
+            context.scoped(prefix.trim_end_matches(':'))
+        };
+        if scoped
+            .completed("thumbnail-fallback-cleanup")
+            .await?
+            .is_some()
+        {
+            continue;
+        }
+        let step = native_key(65, 95, Some(&plan.script));
+        let config = crate::strm::config(state).await?;
+        if config["CustomEncoderPath"] != plan.script {
+            if plan.uploaded
+                && scoped.completed(&step).await?.is_some()
+                && task(state).await?["State"] == "Idle"
+            {
+                let system = crate::strm::admin_system(state).await?;
+                if string(&system, "Id") == plan.system_id {
+                    if let Err(error) = retire_fallback_files(state, &plan, &scoped, &system).await
+                    {
+                        tracing::warn!(
+                            "[缩略图恢复收尾] 已恢复原编码器，准备文件清理未确认：{}",
+                            error.1
+                        );
+                    }
+                }
+            }
+            continue;
+        }
+        let system = crate::strm::admin_system(state).await?;
+        if string(&system, "Id") != plan.system_id {
+            return Err(config_error("Emby服务器身份变化，未恢复旧缩略图配置"));
+        }
+        let saved_run = scoped.plan(&step).await?;
+        let mut run: Option<NativeRun> = saved_run
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(|_| config_error("缩略图原生执行恢复计划无效"))?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1800);
+        let mut next_notice = tokio::time::Instant::now();
+        let mut current = task(state).await?;
+        if run.as_ref().is_some_and(|run| {
+            !confirmed_run(run, Some(&plan.script)) && run.task_id != string(&current, "Id")
+        }) {
+            return Err(config_error("缩略图计划任务身份变化，保留旧编码器恢复计划"));
+        }
+        while active(&current) {
+            if tokio::time::Instant::now() >= next_notice {
+                context
+                    .activity(
+                        "恢复缩略图配置",
+                        "等待重启前的原生缩略图任务结束，再释放临时编码器",
+                    )
+                    .await;
+                next_notice = tokio::time::Instant::now() + Duration::from_secs(30);
+            }
+            tokio::select! {
+                _ = context.cancelled() => return context.checkpoint().await,
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {}
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(config_error(
+                    "旧缩略图原生任务尚未结束，保留配置和计划供下次恢复",
+                ));
+            }
+            current = task(state).await?;
+        }
+        if current["State"] != "Idle" {
+            return Err(config_error("旧缩略图原生任务状态未确认空闲"));
+        }
+        if scoped.completed(&step).await?.is_none() {
+            let verified = if let Some(run) = run.as_mut() {
+                if confirmed_run(run, Some(&plan.script)) {
+                    true
+                } else {
+                    if let Ok(lines) = run.cursor.read(state).await {
+                        run.trace.feed(&lines);
+                    }
+                    run.execution_start =
+                        Some(current["LastExecutionResult"]["StartTimeUtc"].clone());
+                    run.execution_status = current["LastExecutionResult"]["Status"]
+                        .as_str()
+                        .map(str::to_string);
+                    current["LastExecutionResult"]["Status"] == "Completed"
+                        && !current["LastExecutionResult"]["StartTimeUtc"].is_null()
+                        && current["LastExecutionResult"]["StartTimeUtc"] != run.previous
+                        && run.trace.result().is_ok()
+                        && (run.trace.encoders.is_empty()
+                            || run.trace.encoders.contains(&plan.script))
+                }
+            } else {
+                false
+            };
+            if verified {
+                scoped
+                    .complete(&step, &json!(run.as_ref().unwrap()))
+                    .await?;
+            } else {
+                // Preserve preparation, but discard an unverified execution's
+                // cursor before a future retry. Paused recovery never starts it.
+                let ready = NativeRun {
+                    task_id: string(&current, "Id"),
+                    previous: current["LastExecutionResult"]["StartTimeUtc"].clone(),
+                    cursor: LogCursor::new(state).await?,
+                    trace: ExtractionLog::default(),
+                    observed_start: false,
+                    execution_start: None,
+                    execution_status: None,
+                    start_error: None,
+                };
+                scoped.save_plan(&step, &json!(ready)).await?;
+            }
+        }
+        crate::strm::restore_thumbnail_encoder(
+            state,
+            &json!({"CustomEncoderPath":plan.original_encoder}),
+            &json!({"CustomEncoderPath":plan.script}),
+        )
+        .await?;
+        if scoped.completed(&step).await?.is_some() {
+            if let Err(error) = retire_fallback_files(state, &plan, &scoped, &system).await {
+                tracing::warn!(
+                    "[缩略图恢复收尾] 已恢复原编码器，准备文件清理未确认：{}",
+                    error.1
+                );
+            }
+        }
+        context
+            .activity("恢复缩略图配置", "已恢复原编码器，任务进度与验收结果已保留")
+            .await;
+    }
+    Ok(())
+}
 async fn fallback(
     state: &AppState,
     targets: &Targets,
@@ -710,10 +1104,19 @@ async fn fallback(
     context: &JobContext,
     order: &std::collections::HashMap<String, crate::media_order::Key>,
 ) -> Result<()> {
+    let saved = context.plan("thumbnail-fallback").await?;
+    let saved: Option<FallbackPlan> = saved
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| config_error("待恢复的缩略图编码器记录无效"))?;
     let config = crate::strm::config(state)
         .await
         .map_err(|_| config_error("无法读取神医当前编码器配置"))?;
-    let encoder = string(&config, "CustomEncoderPath").trim().to_string();
+    let current_encoder = string(&config, "CustomEncoderPath").trim().to_string();
+    let encoder = saved
+        .as_ref()
+        .map(|plan| plan.original_encoder.clone())
+        .unwrap_or_else(|| current_encoder.clone());
     let probe = config["CustomProbePath"]
         .as_str()
         .filter(|s| !s.trim().is_empty())
@@ -739,122 +1142,183 @@ async fn fallback(
     }
     let docker = crate::docker_host::client(state)?;
     let id = find_container(&docker, &system).await?;
-    let mut rules = vec![];
-    for (index, (_, (item, _))) in ordered_targets(targets, order).into_iter().enumerate() {
-        context.checkpoint().await?;
-        context
-            .update(
-                55 + 10 * (index + 1) as u64 / targets.len() as u64,
-                "检查失败原因",
-                &format!(
-                    "检查失败文件 {}/{}：《{}》 · {}",
-                    index + 1,
-                    targets.len(),
-                    string(item, "Name"),
+    let mut plan = if let Some(plan) = saved {
+        if plan.container_id != id || plan.system_id != string(&system, "Id") {
+            return Err(config_error("Emby容器或服务器身份变化，未恢复旧临时编码器"));
+        }
+        if current_encoder != plan.script && current_encoder != plan.original_encoder {
+            return Err(config_error("自定义编码器已由其他操作修改，已保留当前值"));
+        }
+        plan
+    } else {
+        let mut rules = vec![];
+        for (index, (item_id, (item, _))) in ordered_targets(targets, order).into_iter().enumerate()
+        {
+            context.checkpoint().await?;
+            context
+                .update(
+                    55 + 10 * (index + 1) as u64 / targets.len() as u64,
+                    "检查失败原因",
+                    &format!(
+                        "检查失败文件 {}/{}：《{}》 · {}",
+                        index + 1,
+                        targets.len(),
+                        string(item, "Name"),
+                        string(item, "Path")
+                    ),
+                )
+                .await;
+            let probe_key = format!("thumbnail-probe:{item_id}");
+            let result = if let Some(rule) = context.plan(&probe_key).await? {
+                Ok((!rule.is_null()).then_some(rule))
+            } else {
+                async {
+                    let source = source(item)?;
+                    let path = string(&source, "Path");
+                    if path.is_empty() || path.to_lowercase().ends_with(".strm") {
+                        return Err(ApiError::bad("缺少实际媒体输入路径"));
+                    }
+                    let (status, stdout, stderr) = crate::docker_host::exec_output(
+                        &docker,
+                        &id,
+                        &[
+                            "timeout".into(),
+                            "90".into(),
+                            probe.clone(),
+                            "-v".into(),
+                            "debug".into(),
+                            "-show_format".into(),
+                            "-show_streams".into(),
+                            "-show_chapters".into(),
+                            "-of".into(),
+                            "json".into(),
+                            path,
+                        ],
+                    )
+                    .await?;
+                    if status != 0 {
+                        return Err(ApiError::bad(format!("自定义ffprobe退出码{status}")));
+                    }
+                    let raw = serde_json::from_slice::<Value>(&stdout)
+                        .map_err(|_| ApiError::bad("ffprobe返回无效JSON"))?;
+                    let rule = repair_rule(item, &raw, &String::from_utf8_lossy(&stderr))?;
+                    context.save_plan(&probe_key, &json!(rule)).await?;
+                    Ok(rule)
+                }
+                .await
+            };
+            context.checkpoint().await?;
+            match result {
+                Ok(Some(rule)) => {
+                    let reasons = [
+                        ("ignore_editlist", "忽略零时长 MP4 edit list"),
+                        ("clamp_end", "末尾章节取帧前移 1 秒"),
+                    ]
+                    .into_iter()
+                    .filter(|(key, _)| rule[*key] == true)
+                    .map(|(_, reason)| reason)
+                    .collect::<Vec<_>>()
+                    .join("、");
+                    tracing::info!("[缩略图修复] {}：{reasons}", string(item, "Path"));
+                    rules.push(rule);
+                }
+                Ok(None) => tracing::warn!(
+                    "[缩略图修复] 未找到可自动修复的原因：{}",
                     string(item, "Path")
                 ),
-            )
-            .await;
-        let result = async {
-            let source = source(item)?;
-            let path = string(&source, "Path");
-            if path.is_empty() || path.to_lowercase().ends_with(".strm") {
-                return Err(ApiError::bad("缺少实际媒体输入路径"));
+                Err(error) => tracing::warn!(
+                    "[缩略图修复] 无法验证 {}：{}",
+                    string(item, "Path"),
+                    error.1
+                ),
             }
-            let (status, stdout, stderr) = crate::docker_host::exec_output(
-                &docker,
-                &id,
-                &[
-                    "timeout".into(),
-                    "90".into(),
-                    probe.clone(),
-                    "-v".into(),
-                    "debug".into(),
-                    "-show_format".into(),
-                    "-show_streams".into(),
-                    "-show_chapters".into(),
-                    "-of".into(),
-                    "json".into(),
-                    path,
-                ],
-            )
-            .await?;
-            if status != 0 {
-                return Err(ApiError::bad(format!("自定义ffprobe退出码{status}")));
-            }
-            let raw = serde_json::from_slice::<Value>(&stdout)
-                .map_err(|_| ApiError::bad("ffprobe返回无效JSON"))?;
-            repair_rule(item, &raw, &String::from_utf8_lossy(&stderr))
         }
-        .await;
+        if rules.is_empty() {
+            return Ok(());
+        }
         context.checkpoint().await?;
-        match result {
-            Ok(Some(rule)) => {
-                let reasons = [
-                    ("ignore_editlist", "忽略零时长 MP4 edit list"),
-                    ("clamp_end", "末尾章节取帧前移 1 秒"),
-                ]
-                .into_iter()
-                .filter(|(key, _)| rule[*key] == true)
-                .map(|(_, reason)| reason)
-                .collect::<Vec<_>>()
-                .join("、");
-                tracing::info!("[缩略图修复] {}：{reasons}", string(item, "Path"));
-                rules.push(rule);
-            }
-            Ok(None) => tracing::warn!(
-                "[缩略图修复] 未找到可自动修复的原因：{}",
-                string(item, "Path")
-            ),
-            Err(error) => tracing::warn!(
-                "[缩略图修复] 无法验证 {}：{}",
-                string(item, "Path"),
-                error.1
-            ),
+        if task(state).await?["State"] != "Idle" {
+            return Err(config_error("神医提取任务未确认空闲，未切换编码器"));
         }
-    }
-    if rules.is_empty() {
-        return Ok(());
-    }
-    context.checkpoint().await?;
-    if task(state).await?["State"] != "Idle" {
-        return Err(config_error("神医提取任务未确认空闲，未切换编码器"));
-    }
-    crate::docker_host::exec(
-        &docker,
-        &id,
-        &["sh".into(), "-c".into(), "command -v awk".into()],
-    )
-    .await?;
-    let folder = format!("etk-thumbnail-{}", uuid::Uuid::new_v4().simple());
-    let directory = format!(
-        "{}/temp",
-        string(&system, "CachePath").trim_end_matches('/')
-    );
-    let script = format!("{directory}/{folder}/ffmpeg");
-    let archive = encoder_archive(&folder, &encoder, &rules)?;
-    tracing::info!("[缩略图临时编码器] 开始上传补图文件");
-    docker
-        .upload_to_container(
+        crate::docker_host::exec(
+            &docker,
             &id,
-            Some(
-                bollard::query_parameters::UploadToContainerOptionsBuilder::default()
-                    .path(&directory)
-                    .build(),
-            ),
-            bollard::body_full(archive.into()),
+            &["sh".into(), "-c".into(), "command -v awk".into()],
         )
-        .await
-        .inspect_err(|error| tracing::warn!(%error, "[缩略图临时编码器] 补图文件上传失败"))?;
-    tracing::info!("[缩略图临时编码器] 补图文件已上传，开始补图，结束后恢复原编码器");
-    let result = async {
-        let mut cursor = LogCursor::new(state).await?;
-        crate::strm::with_changes(state, &json!({"CustomEncoderPath":script}), || async {
-            verify_backend(&cursor.read(state).await?, &script)?;
+        .await?;
+        let folder = format!("etk-thumbnail-{}", uuid::Uuid::new_v4().simple());
+        let directory = format!(
+            "{}/temp",
+            string(&system, "CachePath").trim_end_matches('/')
+        );
+        let script = format!("{directory}/{folder}/ffmpeg");
+        let plan = FallbackPlan {
+            original_encoder: encoder.clone(),
+            system_id: string(&system, "Id"),
+            container_id: id.clone(),
+            directory,
+            folder,
+            script,
+            rules,
+            cursor: LogCursor::new(state).await?,
+            uploaded: false,
+            backend_verified: false,
+        };
+        context
+            .save_plan("thumbnail-fallback", &json!(plan))
+            .await?;
+        plan
+    };
+    let script = plan.script.clone();
+    let directory = plan.directory.clone();
+    let folder = plan.folder.clone();
+    let result = if context
+        .completed(&native_key(65, 95, Some(&script)))
+        .await?
+        .is_some()
+    {
+        run_native(state, timeout, 65, 95, Some(&script), context)
+            .await
+            .map(|_| ())
+    } else {
+        if !plan.uploaded {
+            let archive = encoder_archive(&folder, &encoder, &plan.rules)?;
+            tracing::info!("[缩略图临时编码器] 开始上传补图文件");
+            docker
+                .upload_to_container(
+                    &id,
+                    Some(
+                        bollard::query_parameters::UploadToContainerOptionsBuilder::default()
+                            .path(&directory)
+                            .build(),
+                    ),
+                    bollard::body_full(archive.into()),
+                )
+                .await
+                .inspect_err(
+                    |error| tracing::warn!(%error, "[缩略图临时编码器] 补图文件上传失败"),
+                )?;
+            plan.uploaded = true;
+            context
+                .save_plan("thumbnail-fallback", &json!(plan))
+                .await?;
+        }
+        let work = async {
+            if !plan.backend_verified {
+                verify_backend(&plan.cursor.read(state).await?, &script)?;
+                plan.backend_verified = true;
+                context
+                    .save_plan("thumbnail-fallback", &json!(plan))
+                    .await?;
+            }
             run_native(state, timeout, 65, 95, Some(&script), context).await?;
             Ok(())
-        })
-        .await
+        };
+        if current_encoder == script {
+            work.await
+        } else {
+            crate::strm::with_changes(state, &json!({"CustomEncoderPath":script}), || work).await
+        }
         .map_err(|error| {
             if error.1.contains("神医临时") {
                 config_error(&error.1)
@@ -862,17 +1326,32 @@ async fn fallback(
                 error
             }
         })
+    };
+    if context.is_interrupted() {
+        return result;
     }
-    .await;
     match &result {
         Ok(()) => tracing::info!("[缩略图临时编码器] 补图执行结束，检查停用状态与文件清理"),
         Err(error) => {
             tracing::warn!(reason = %error.1, "[缩略图临时编码器] 补图执行失败，检查停用状态与文件清理")
         }
     }
-    let cleanup = async {
-        let config = crate::strm::config(state).await?;
-        if config["CustomEncoderPath"] != script && !active(&task(state).await?) {
+    crate::strm::restore_thumbnail_encoder(
+        state,
+        &json!({"CustomEncoderPath":plan.original_encoder}),
+        &json!({"CustomEncoderPath":script}),
+    )
+    .await?;
+    if context
+        .completed("thumbnail-fallback-cleanup")
+        .await?
+        .is_none()
+    {
+        let cleanup = async {
+            let config = crate::strm::config(state).await?;
+            if config["CustomEncoderPath"] == script || active(&task(state).await?) {
+                return Err(config_error("缩略图编码器仍可能使用，已保留补图文件"));
+            }
             crate::docker_host::exec(
                 &docker,
                 &id,
@@ -890,18 +1369,22 @@ async fn fallback(
                 &["rmdir".into(), format!("{directory}/{folder}")],
             )
             .await?;
+            context
+                .complete(
+                    "thumbnail-fallback-cleanup",
+                    &json!({"container_id":id,"script":script}),
+                )
+                .await?;
             tracing::info!("[缩略图临时编码器] 已确认停用，补图文件已清理");
-        } else {
-            tracing::warn!("[缩略图临时编码器] 暂时保留仍可能使用的缩略图编码器：{script}");
+            Ok::<_, ApiError>(())
         }
-        Ok::<_, ApiError>(())
-    }
-    .await;
-    if let Err(error) = cleanup {
-        tracing::warn!(
-            "[缩略图临时编码器] 未确认已停用或清理完成，保留剩余文件：{}",
-            error.1
-        );
+        .await;
+        if let Err(error) = cleanup {
+            tracing::warn!(
+                "[缩略图临时编码器] 未确认已停用或清理完成，保留剩余文件：{}",
+                error.1
+            );
+        }
     }
     result
 }
@@ -916,12 +1399,37 @@ async fn extract_with_timeout(
     timeout: Duration,
     context: &JobContext,
 ) -> Result<NativeExtraction> {
+    if let Some(saved) = context.plan("thumbnail-extraction").await? {
+        let mut saved: NativeExtraction = serde_json::from_value(saved)
+            .map_err(|_| config_error("待恢复的缩略图目标记录无效"))?;
+        let order = crate::media_order::id_keys(
+            state,
+            &saved.candidates.keys().cloned().collect::<Vec<_>>(),
+        )
+        .await?;
+        saved.targets = remaining(state, &saved.candidates, &order, context).await?;
+        saved.report["verified"] =
+            json!(saved.candidates.len().saturating_sub(saved.targets.len()));
+        saved.report["failed"] = json!(saved.targets.len());
+        saved.report["failed_ids"] = json!(saved.targets.keys().collect::<Vec<_>>());
+        saved.report["needs_repair"] = json!(
+            !saved.targets.is_empty()
+                && saved.report["native_ended"] == true
+                && saved.report["scope_verification"] == "complete"
+        );
+        if saved.targets.is_empty() && !saved.candidates.is_empty() {
+            saved.report["state"] = json!("completed");
+            saved.report["reason"] = json!("重启后已逐项重新验收本次目标的 BIF 或章节图");
+        }
+        return Ok(saved);
+    }
     let config = crate::strm::config(state).await?;
     if config["PersistMediaInfoMode"] == "Restore" {
         return Ok(NativeExtraction {
             report: json!({"state":"skipped","native_state":"not_started","verification":"not_requested","processed":0,"eligible":0,"verified":0,"failed":0,"needs_repair":false,"reason":"神医处于仅恢复模式，未启动实际图片提取"}),
             paths: BTreeSet::new(),
             targets: Targets::new(),
+            candidates: Targets::new(),
         });
     }
     let mut trace = ExtractionLog::default();
@@ -940,6 +1448,7 @@ async fn extract_with_timeout(
                     report: json!({"state":"unverified","native_state":"ended","native_ended":true,"verification":"incomplete_execution_log","failed":1,"needs_repair":false,"reason":error.1}),
                     paths: BTreeSet::new(),
                     targets: Targets::new(),
+                    candidates: Targets::new(),
                 });
             }
         },
@@ -948,6 +1457,7 @@ async fn extract_with_timeout(
                 report: json!({"state":"unverified","native_state":"unknown","native_ended":false,"verification":"not_confirmed","failed":1,"needs_repair":false,"reason":error.1}),
                 paths: BTreeSet::new(),
                 targets: Targets::new(),
+                candidates: Targets::new(),
             });
         }
     };
@@ -991,11 +1501,16 @@ async fn extract_with_timeout(
         "verification":"current_execution_log_and_item_images","scope_verification":if unknown_skips{"partial_unknown_skips"}else{"complete"},"processed":paths.len(),"eligible":candidates.len(),"skipped":trace.skipped,
         "verified":candidates.len().saturating_sub(missing.len()),"failed":failed,"failed_ids":missing.keys().collect::<Vec<_>>(),
         "needs_repair":!missing.is_empty() && ended && !unknown_skips,"reason":reason});
-    Ok(NativeExtraction {
+    let extraction = NativeExtraction {
         report,
         paths,
         targets: missing,
-    })
+        candidates,
+    };
+    context
+        .save_plan("thumbnail-extraction", &json!(extraction))
+        .await?;
+    Ok(extraction)
 }
 pub(crate) async fn repair_extraction(
     state: &AppState,
@@ -1020,7 +1535,19 @@ pub(crate) async fn repair_extraction(
             "本次跳过目标或修复范围未确认，未自动修复可能被原生策略排除的媒体",
         ));
     }
-    let targets = &extraction.targets;
+    let order = crate::media_order::id_keys(
+        state,
+        &extraction.targets.keys().cloned().collect::<Vec<_>>(),
+    )
+    .await?;
+    let outstanding = remaining(state, &extraction.targets, &order, context).await?;
+    let targets = &outstanding;
+    if targets.is_empty() {
+        return Ok(
+            json!({"state":"completed","repaired":extraction.targets.len(),"failed":0,
+            "verification":"item_images","message":"本次缺图目标已通过逐项回读验收，继续剩余任务"}),
+        );
+    }
     let config = crate::strm::config(state).await?;
     if config["PersistMediaInfoMode"] == "Restore" {
         return Err(ApiError::bad("神医处于仅恢复模式，未启动图片修复"));
@@ -1040,8 +1567,6 @@ pub(crate) async fn repair_extraction(
             .filter(|n| n.is_finite() && *n > 0.0)
             .unwrap_or(2.0);
     let timeout = Duration::from_secs_f64(estimate.clamp(1800.0, 86400.0));
-    let order =
-        crate::media_order::id_keys(state, &targets.keys().cloned().collect::<Vec<_>>()).await?;
     if let Err(error) = fallback(state, targets, timeout, context, &order).await {
         if context.is_cancelled() || error.0 == axum::http::StatusCode::CONFLICT {
             return Err(error);
@@ -1060,7 +1585,7 @@ pub(crate) async fn repair_extraction(
             crate::media_paths::clean(&string(item, "Path"))
         );
     }
-    let repaired = targets.len().saturating_sub(remaining.len());
+    let repaired = extraction.targets.len().saturating_sub(remaining.len());
     context
         .update(
             100,
@@ -1077,6 +1602,8 @@ pub(crate) async fn repair_extraction(
     )
 }
 pub async fn repair(state: &AppState, context: &JobContext) -> Result<Value> {
+    let scoped = context.scoped("thumbnail-repair");
+    let context = &scoped;
     let extraction = extract_with_timeout(state, Duration::from_secs(86400), context).await?;
     if extraction.report["state"] == "skipped" {
         return Ok(
@@ -1105,6 +1632,17 @@ pub(crate) async fn repair_saved(
     saved: &[(String, String)],
     context: &JobContext,
 ) -> Result<Value> {
+    use sha2::{Digest, Sha256};
+    let mut scope = saved.to_vec();
+    scope.sort();
+    let scope = format!(
+        "thumbnail-save:{:x}",
+        Sha256::digest(
+            serde_json::to_vec(&scope).map_err(|_| ApiError::bad("缩略图保存目标记录无效"))?
+        )
+    );
+    let scoped = context.scoped(&scope);
+    let context = &scoped;
     let mut report = repair(state, context).await?;
     for (id, path) in saved {
         context.checkpoint().await?;
@@ -1139,7 +1677,7 @@ pub(crate) async fn repair_saved(
     Ok(report)
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 struct IntroLog {
     started: bool,
     complete: bool,
@@ -1240,21 +1778,97 @@ impl IntroLog {
             "reason":reason})
     }
 }
+#[derive(Deserialize, Serialize)]
+struct IntroRun {
+    task_id: String,
+    previous: Value,
+    cursor: LogCursor,
+    trace: IntroLog,
+    #[serde(default)]
+    native_completed: bool,
+}
 pub(crate) async fn extract_intro_verified(
     state: &AppState,
     context: &JobContext,
 ) -> Result<Value> {
+    if let Some(report) = context.completed("intro-extraction").await? {
+        return Ok(report);
+    }
+    let saved: Option<IntroRun> = context
+        .plan("intro-extraction")
+        .await?
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|_| config_error("待恢复的片头声纹执行记录无效"))?;
+    if let Some(run) = saved.as_ref().filter(|run| run.native_completed) {
+        let mut report = run.trace.report();
+        if report["failed"] == 0 {
+            report["native_ended"] = json!(true);
+            context.complete("intro-extraction", &report).await?;
+            return Ok(report);
+        }
+    }
     if crate::strm::config(state).await?["PersistMediaInfoMode"] == "Restore" {
         return Ok(
             json!({"state":"skipped","native_state":"not_started","verification":"not_requested","failed":0,"reason":"神医处于恢复模式，未启动实际片头声纹提取"}),
         );
     }
-    let mut cursor = LogCursor::new(state).await?;
-    let outcome = crate::emby::scheduled(state, "IntroFingerprintExtractTask", context).await;
+    let current = api(state, Method::GET, "ScheduledTasks", &[]).await?;
+    let current = list(&current)
+        .into_iter()
+        .find(|task| task["Key"] == "IntroFingerprintExtractTask" && !string(task, "Id").is_empty())
+        .ok_or_else(|| config_error("未找到神医片头声纹计划任务"))?;
+    let resuming = saved.is_some();
+    let mut run = if let Some(saved) = saved {
+        saved
+    } else {
+        IntroRun {
+            task_id: string(&current, "Id"),
+            previous: current["LastExecutionResult"]["StartTimeUtc"].clone(),
+            cursor: LogCursor::new(state).await?,
+            trace: IntroLog::default(),
+            native_completed: false,
+        }
+    };
+    if !run.native_completed && run.task_id != string(&current, "Id") {
+        return Err(config_error("片头声纹计划任务身份变化，未恢复旧执行"));
+    }
+    if resuming {
+        run.trace.feed(&run.cursor.read(state).await?);
+        if !run.native_completed
+            && current["State"] == "Idle"
+            && current["LastExecutionResult"]["StartTimeUtc"] != run.previous
+            && current["LastExecutionResult"]["Status"] != "Completed"
+        {
+            run.previous = current["LastExecutionResult"]["StartTimeUtc"].clone();
+            run.cursor = LogCursor::new(state).await?;
+            run.trace = IntroLog::default();
+        }
+    }
+    context.save_plan("intro-extraction", &json!(run)).await?;
+    let mut cursor = run.cursor.clone();
+    let mut trace = run.trace.clone();
+    let outcome = if run.native_completed
+        || (resuming
+            && current["State"] == "Idle"
+            && current["LastExecutionResult"]["StartTimeUtc"] != run.previous
+            && current["LastExecutionResult"]["Status"] == "Completed")
+    {
+        Ok(())
+    } else if resuming && current["State"] == "Idle" && trace.started {
+        Err(config_error(
+            "上次片头声纹执行结果未确认，未重复提交原生任务",
+        ))
+    } else {
+        crate::emby::scheduled(state, "IntroFingerprintExtractTask", context).await
+    };
+    if outcome.is_ok() {
+        run.native_completed = true;
+        context.save_plan("intro-extraction", &json!(run)).await?;
+    }
     if context.is_cancelled() {
         context.checkpoint().await?;
     }
-    let mut trace = IntroLog::default();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut log_error = None;
     loop {
@@ -1270,6 +1884,9 @@ pub(crate) async fn extract_intro_verified(
                 break;
             }
         }
+        run.cursor = cursor.clone();
+        run.trace = trace.clone();
+        context.save_plan("intro-extraction", &json!(run)).await?;
         if trace.complete || outcome.is_err() || tokio::time::Instant::now() >= deadline {
             break;
         }
@@ -1297,6 +1914,9 @@ pub(crate) async fn extract_intro_verified(
         report["reason"] = json!(error.1);
     } else if let Some(error) = log_error {
         report["reason"] = json!(error);
+    }
+    if report["failed"] == 0 && report["native_ended"] == true {
+        context.complete("intro-extraction", &report).await?;
     }
     Ok(report)
 }

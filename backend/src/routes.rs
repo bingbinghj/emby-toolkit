@@ -37,6 +37,7 @@ pub fn router(state: AppState) -> Router {
         .merge(crate::covers::router())
         .merge(crate::actions::router())
         .merge(crate::media_organize_history::router())
+        .merge(crate::media_organize_queue::router())
         .merge(crate::orphans::router())
         .merge(crate::system_ops::router())
         .merge(crate::episodes::router())

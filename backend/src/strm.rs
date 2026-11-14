@@ -6,6 +6,7 @@ use crate::{
 use futures_util::FutureExt;
 use reqwest::Method;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{collections::HashSet, future::Future, sync::Arc};
 use tokio::sync::Mutex;
 
@@ -94,6 +95,45 @@ pub async fn admin_system(state: &AppState) -> Result<Value> {
 pub async fn config(state: &AppState) -> Result<Value> {
     read(state, &discover(state).await?).await
 }
+pub(crate) async fn restore_thumbnail_encoder(
+    state: &AppState,
+    original: &Value,
+    applied: &Value,
+) -> Result<()> {
+    let valid = |value: &Value| {
+        value.as_object().is_some_and(|fields| {
+            fields.len() == 1
+                && fields
+                    .get("CustomEncoderPath")
+                    .is_some_and(Value::is_string)
+        })
+    };
+    if !valid(original) || !valid(applied) {
+        return Err(ApiError::bad("缩略图编码器恢复记录无效"));
+    }
+    let _gate = state.strm.gate.lock().await;
+    let id = discover(state).await?;
+    check_rename_scan_guard(state, &id, None).await?;
+    let tasks = state.emby(Method::GET, "ScheduledTasks", &[], None).await?;
+    if !tasks.as_array().is_some_and(|tasks| {
+        tasks
+            .iter()
+            .any(|task| task["Key"] == "VideoThumbnailExtractTask" && task["State"] == "Idle")
+    }) {
+        return Err(ApiError(
+            axum::http::StatusCode::CONFLICT,
+            "缩略图原生任务尚未确认结束，保留临时编码器供重启后继续".into(),
+        ));
+    }
+    if !restore_settings(state, &id, original, Some(applied), "自定义配置", None).await {
+        return Err(ApiError(
+            axum::http::StatusCode::CONFLICT,
+            "缩略图编码器恢复未通过回读验收".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn media_tasks_idle(tasks: &Value) -> bool {
     tasks.as_array().is_some_and(|tasks| {
         tasks
@@ -118,7 +158,7 @@ where
 {
     let _gate = state.strm.gate.lock().await;
     let id = discover(state).await?;
-    check_rename_scan_guard(state, &id).await?;
+    check_rename_scan_guard(state, &id, None).await?;
     let original = read(state, &id).await?;
     let changes = changes
         .as_object()
@@ -334,7 +374,7 @@ pub(crate) fn temporary_features(original: &Value, mode: &str) -> Result<Value> 
     );
     Ok(json!(values.join(",")))
 }
-fn matches(actual: &Value, expected: &Value) -> bool {
+pub(crate) fn matches(actual: &Value, expected: &Value) -> bool {
     expected.as_object().is_some_and(|fields| {
         fields.iter().all(|(key, value)| {
             if key == "ExclusiveControlFeatures" {
@@ -529,6 +569,55 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<()>>,
 {
+    finish_media_recovery_inner(state, original, applied, false, function).await
+}
+
+pub(crate) async fn finish_media_recovery_rearmed<F, Fut>(
+    state: &AppState,
+    original: &Value,
+    applied: Option<&Value>,
+    function: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    finish_media_recovery_inner(state, original, applied, true, function).await
+}
+
+pub(crate) async fn restore_media_save_settings(state: &AppState, original: &Value, applied: &Value) -> Result<()> {
+    let valid = |settings: &Value| settings.as_object().is_some_and(|fields| !fields.is_empty() && fields.iter().all(|(key, value)| {
+        match key.as_str() {
+            "PersistMediaInfoMode" | "LibraryScope" => value.is_string(),
+            "IncludeExtra" => value.is_boolean(),
+            _ => false,
+        }
+    }));
+    if !valid(original) || !valid(applied) || original.as_object().unwrap().keys().ne(applied.as_object().unwrap().keys()) {
+        return Err(ApiError::bad("原媒体保存配置说明无效，未修改当前配置"));
+    }
+    let _gate = state.strm.gate.lock().await;
+    let id = discover(state).await?;
+    if !media_tasks_idle(&state.emby(Method::GET, "ScheduledTasks", &[], None).await?) {
+        return Err(ApiError::bad("原媒体恢复计划任务尚未结束，保留原恢复范围"));
+    }
+    if !restore_settings(state, &id, original, Some(applied), "preserve", None).await {
+        return Err(ApiError::bad("原媒体保存配置恢复未通过回读验收"));
+    }
+    Ok(())
+}
+
+async fn finish_media_recovery_inner<F, Fut>(
+    state: &AppState,
+    original: &Value,
+    applied: Option<&Value>,
+    rearm: bool,
+    function: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
     let _gate = state.strm.gate.lock().await;
     if !valid_recovery_settings(original) {
         return Err(ApiError::bad("原配置恢复说明无效，未修改神医配置"));
@@ -537,6 +626,42 @@ where
     let tasks = state.emby(Method::GET, "ScheduledTasks", &[], None).await?;
     if !media_tasks_idle(&tasks) {
         return Err(ApiError::bad("神医媒体任务尚未结束，请结束后重试恢复"));
+    }
+    if rearm && let Some(applied) = applied {
+        let fields = applied.as_object().ok_or_else(|| ApiError::bad("原临时配置恢复说明无效"))?;
+        let current = read(state, &id).await?;
+        let mut desired = current.clone();
+        for (key, value) in fields {
+            if original.get(key).is_none() || !matches!(key.as_str(), "ExclusiveControlFeatures" | "PersistMediaInfoMode" | "EnableImageCapture")
+                || (key == "ExclusiveControlFeatures" && !value.is_string() && !value.is_null())
+                || (key == "PersistMediaInfoMode" && value != "Restore")
+                || (key == "EnableImageCapture" && value != true)
+            {
+                return Err(ApiError::bad("原临时配置包含未授权字段，未重新启用"));
+            }
+            if key == "ExclusiveControlFeatures" {
+                let before = features(&original[key]);
+                let after = features(value);
+                let mut merged = features(&current[key]);
+                for removed in before.difference(&after) { merged.remove(removed); }
+                for added in after.difference(&before) { merged.insert(added.clone()); }
+                desired[key] = if merged == after { value.clone() } else {
+                    let mut merged = merged.into_iter().collect::<Vec<_>>();
+                    merged.sort();
+                    json!(merged.join(","))
+                };
+            } else if current[key] == original[key] || current[key] == *value {
+                desired[key] = value.clone();
+            } else {
+                return Err(ApiError::bad("恢复配置在任务中断后已被修改，未覆盖当前设置"));
+            }
+        }
+        if !matches(&current, &desired) {
+            write(state, &id, &desired).await?;
+            if !matches(&read(state, &id).await?, &desired) {
+                return Err(ApiError::bad("重启后原临时配置启用未通过回读验收"));
+            }
+        }
     }
     function().await?;
     if !restore_settings(state, &id, original, applied, "preserve", None).await {
@@ -555,7 +680,11 @@ fn settings_finished<T>(mode: &str, outcome: Result<T>) -> Result<T> {
     }
     outcome
 }
-async fn check_rename_scan_guard(state: &AppState, id: &str) -> Result<()> {
+async fn check_rename_scan_guard(
+    state: &AppState,
+    id: &str,
+    current: Option<&std::path::Path>,
+) -> Result<()> {
     let root = state.data_dir.join("backups/media-info-reload");
     let blocked = |reason: String| {
         ApiError(
@@ -567,7 +696,11 @@ async fn check_rename_scan_guard(state: &AppState, id: &str) -> Result<()> {
         )
     };
     let mut pending = vec![];
-    for directory in [&root, &state.data_dir.join("rename-recovery")] {
+    for directory in [
+        &root,
+        &state.data_dir.join("rename-recovery"),
+        &state.data_dir.join("backups/media-info-wash"),
+    ] {
         let mut entries = match tokio::fs::read_dir(directory).await {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -578,6 +711,45 @@ async fn check_rename_scan_guard(state: &AppState, id: &str) -> Result<()> {
             .await
             .map_err(|error| blocked(format!("无法读取恢复目录：{error}")))?
         {
+            if current == Some(entry.path().as_path())
+                && !tokio::fs::try_exists(entry.path().join("original-settings.json")).await?
+                && !tokio::fs::try_exists(entry.path().join("applied-settings.json")).await?
+                && !tokio::fs::try_exists(entry.path().join("pending-scan.json")).await?
+                && !tokio::fs::try_exists(entry.path().join("image-capture.json")).await?
+                && tokio::fs::try_exists(entry.path().join("media-reload.json")).await?
+            {
+                let prepared =
+                    crate::media_recovery::read_json(&entry.path().join("media-reload.json"))
+                        .await?;
+                let active = state.jobs.status().await;
+                let config = state.config.read().await;
+                let connection = json!([
+                    config["emby_server_url"],
+                    config["emby_api_key"],
+                    config["emby_user_id"]
+                ]);
+                let fingerprint =
+                    format!("{:x}", Sha256::digest(connection.to_string().as_bytes()));
+                let mut native_intent = false;
+                let mut children = tokio::fs::read_dir(entry.path()).await?;
+                while let Some(child) = children.next_entry().await? {
+                    native_intent |= child
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("clear-intent-");
+                }
+                if prepared["preparation_kind"] == "ingest-resource-guard"
+                    && prepared["owner_task_id"]
+                        .as_str()
+                        .is_some_and(|owner| !owner.is_empty() && active["task_id"] == owner)
+                    && prepared["connection_sha256"] == fingerprint
+                    && !native_intent
+                {
+                    // Only the active owner's exact, still read-only preparation
+                    // is exempt; every previous/submitted guard remains enforced.
+                    continue;
+                }
+            }
             if tokio::fs::try_exists(entry.path().join("media-reload.json")).await? {
                 return Err(blocked(format!(
                     "媒体信息重载尚未完成，请先核对恢复目录 {}",
@@ -708,6 +880,7 @@ async fn check_rename_scan_guard(state: &AppState, id: &str) -> Result<()> {
     tracing::info!("[神医临时设置] 前次媒体刷新已完成验收并恢复原配置，允许继续处理");
     Ok(())
 }
+
 pub async fn with_settings<F, Fut, T>(state: &AppState, mode: &str, function: F) -> Result<T>
 where
     F: FnOnce() -> Fut,
@@ -748,7 +921,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
-    check_rename_scan_guard(state, &id).await?;
+    check_rename_scan_guard(state, &id, guard.map(|(_, directory)| directory)).await?;
     let original = read(state, &id).await?;
     if mode == "restore_media_info"
         && !media_tasks_idle(&state.emby(Method::GET, "ScheduledTasks", &[], None).await?)

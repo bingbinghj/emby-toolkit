@@ -63,10 +63,12 @@ function updateFloatingNavbarGeometry() {
 }
 watch([horizontal, width], updateFloatingNavbarGeometry, { flush: 'post' });
 
-function navigate(key) {
+function navigate(event) {
+  if (event?.metaKey || event?.ctrlKey || event?.shiftKey || event?.altKey
+    || (event?.button != null && event.button !== 0)
+    || event?.currentTarget?.getAttribute('target') === '_blank') return;
   overlayOpen.value = false;
   openHorizontalGroup.value = null;
-  emit('navigate', key);
 }
 function toggleNavigation() {
   overlayOpen.value = !overlayOpen.value;
@@ -126,7 +128,7 @@ onBeforeUnmount(() => { pageResizeObserver?.disconnect(); window.removeEventList
           <VTooltip v-for="item in menu.children || [menu]" :key="item.key" :text="item.label" location="end" :disabled="!collapsed">
             <template #activator="{ props: tooltipProps }">
               <VListItem v-bind="tooltipProps" :title="item.label" :prepend-icon="item.icon"
-                :active="item.key === activeKey" :value="item.key" @click="navigate(item.key)" />
+                :to="{ name: item.key }" :active="item.key === activeKey" :value="item.key" @click="navigate($event)" />
             </template>
           </VTooltip>
         </template>
@@ -158,11 +160,11 @@ onBeforeUnmount(() => { pageResizeObserver?.disconnect(); window.removeEventList
               </template>
               <VList class="theme-horizontal-nav__menu" min-width="208" density="comfortable">
                 <VListItem v-for="item in group.children" :key="item.key" :title="item.label" :prepend-icon="item.icon"
-                  :active="item.key === activeKey" @click="navigate(item.key)" />
+                  :to="{ name: item.key }" :active="item.key === activeKey" @click="navigate($event)" />
               </VList>
             </VMenu>
             <VBtn v-else :prepend-icon="group.icon" :variant="groupActive(group) ? 'tonal' : 'text'" rounded="pill"
-              class="theme-horizontal-nav__item" @click="navigate(group.key)">{{ group.label }}</VBtn>
+              :to="{ name: group.key }" class="theme-horizontal-nav__item" @click="navigate($event)">{{ group.label }}</VBtn>
           </template>
         </nav>
         <slot name="header-tabs" />
@@ -180,7 +182,7 @@ onBeforeUnmount(() => { pageResizeObserver?.disconnect(); window.removeEventList
         <VCard class="footer-nav-card" rounded="pill" elevation="3">
           <VCardText class="footer-card-content">
             <VBtn v-for="item in dockMenus" :key="item.key" variant="text" rounded="pill" class="footer-nav-btn"
-              :color="item.key === activeKey ? 'primary' : undefined" :aria-label="item.label" @click="navigate(item.key)">
+              :to="{ name: item.key }" :color="item.key === activeKey ? 'primary' : undefined" :aria-label="item.label" @click="navigate($event)">
               <div class="btn-content"><VIcon :icon="item.icon" size="25" /><span>{{ item.label }}</span></div>
             </VBtn>
             <VBtn variant="text" rounded="pill" class="footer-nav-btn" aria-label="更多导航" @click="overlayOpen = true">

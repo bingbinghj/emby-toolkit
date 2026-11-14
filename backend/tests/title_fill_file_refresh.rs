@@ -72,6 +72,7 @@ struct Host {
     refresh_accepted: Arc<AtomicBool>,
     release_scan: Arc<Notify>,
     refresh_saw_ready_titles: Arc<AtomicBool>,
+    refresh_ready_checks: Arc<Mutex<Vec<(String, bool)>>>,
     nfo_scan_complete: Arc<AtomicBool>,
     stable_year_reads: Arc<AtomicUsize>,
     post_nfo_title_reads: Arc<AtomicUsize>,
@@ -555,19 +556,20 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
             let requested_id = path
                 .strip_prefix("/Items/")
                 .and_then(|value| value.strip_suffix("/Refresh"));
-            let movie_id = h
+            let playable_id = h
                 .items
                 .lock()
                 .await
                 .iter()
-                .find(|(id, item)| Some(id.as_str()) == requested_id && item["Type"] == "Movie")
+                .find(|(id, item)| Some(id.as_str()) == requested_id && matches!(item["Type"].as_str(), Some("Movie" | "Episode")))
                 .map(|(id, _)| id.clone());
             let restoring = full_refresh
                 && query
                     .get("ImageRefreshMode")
                     .is_some_and(|mode| mode == "ValidationOnly");
             let root_refresh = full_refresh
-                && (path == "/Items/series/Refresh" || movie_id.is_some() || restoring);
+                && (path == "/Items/series/Refresh" || playable_id.is_some() || restoring);
+            let recursive = query.get("Recursive").is_some_and(|value| value == "true");
             let nfo_refresh = path == "/Items/series/Refresh"
                 && query.get("Recursive").is_some_and(|value| value == "false")
                 && query
@@ -626,11 +628,13 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
                 .await
                 .iter()
                 .filter(|(id, item)| {
-                    if restoring {
+                    if restoring || (!recursive && playable_id.is_some()) {
                         Some(id.as_str()) == requested_id
+                    } else if root_refresh && !recursive {
+                        false
                     } else {
                         !root_refresh
-                            || movie_id
+                            || playable_id
                                 .as_ref()
                                 .map_or(item["SeriesId"] == "series", |movie| *id == movie)
                     }
@@ -638,7 +642,12 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
                 .map(|(id, _)| id.clone())
                 .collect::<Vec<_>>();
             if root_refresh {
-                let ready = ids.iter().all(|id| {
+                // Parent-only refresh may read its children's completed title
+                // preparation, while native writes remain scoped to `ids`.
+                let ready_ids = if ids.is_empty() && path == "/Items/series/Refresh" {
+                    h.items.lock().await.iter().filter(|(_, item)| item["SeriesId"] == "series").map(|(id, _)| id.clone()).collect()
+                } else { ids.clone() };
+                let ready = ready_ids.iter().all(|id| {
                     let path = h.root.join(format!("{id}-mediainfo.json"));
                     let info = std::fs::read(path)
                         .ok()
@@ -647,6 +656,7 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
                         language::fill(&info, &json!([]), true).1["changed"] == 0
                     })
                 });
+                h.refresh_ready_checks.lock().await.push((refresh_id.clone(), ready));
                 h.refresh_saw_ready_titles.store(ready, Ordering::SeqCst);
                 h.refresh_accepted.store(true, Ordering::SeqCst);
                 h.refresh_log.lock().await.push(format!(
@@ -812,6 +822,7 @@ impl Fixture {
             refresh_accepted: Arc::default(),
             release_scan: Arc::default(),
             refresh_saw_ready_titles: Arc::default(),
+            refresh_ready_checks: Arc::default(),
             nfo_scan_complete: Arc::default(),
             stable_year_reads: Arc::default(),
             post_nfo_title_reads: Arc::default(),
@@ -981,12 +992,11 @@ impl Fixture {
                                 None,
                             )
                             .await?;
-                        // The production callback already waits for final refresh. This
-                        // explicit late-import fault also exercises the title readback wait.
-                        if *host.fault.lock().await != "late-import" {
-                            while !host.final_scan_complete.load(Ordering::SeqCst) {
-                                tokio::time::sleep(Duration::from_millis(5)).await;
-                            }
+                        // The production callback waits for metadata completion too.
+                        // PRO Sync has already imported the prepared title bundles;
+                        // a delayed metadata acknowledgement must remain guarded.
+                        while !host.final_scan_complete.load(Ordering::SeqCst) {
+                            tokio::time::sleep(Duration::from_millis(5)).await;
                         }
                         Ok(())
                     };
@@ -1720,6 +1730,7 @@ async fn real_series_webhook_saves_titles_before_full_refresh_and_verifies_after
     let year_reads = f.host.stable_year_reads.load(Ordering::SeqCst);
     let title_reads = f.host.post_nfo_title_reads.load(Ordering::SeqCst);
     let early_reads = f.host.title_reads_before_year_check.load(Ordering::SeqCst);
+    let ready_checks = f.host.refresh_ready_checks.lock().await.clone();
     f.close().await;
     assert_eq!(
         result["result"]["title_fill"]["completed"], true,
@@ -1731,13 +1742,18 @@ async fn real_series_webhook_saves_titles_before_full_refresh_and_verifies_after
         "both JSON files must be normalized before the root Full refresh"
     );
     assert_eq!(syncs, vec!["10001".to_string(), "10002".to_string()]);
-    assert_eq!(refreshes.len(), 2);
-    assert_eq!(refreshes[0].0, "/Items/series/Refresh");
+    assert_eq!(refreshes.len(), 4);
+    assert_eq!(refreshes[0].0, "/Items/10001/Refresh");
     assert_eq!(refreshes[0].1["MetadataRefreshMode"], "FullRefresh");
-    assert_eq!(refreshes[0].1["Recursive"], "true");
-    assert_eq!(refreshes[1].0, "/Items/series/Refresh");
-    assert_eq!(refreshes[1].1["MetadataRefreshMode"], "Default");
-    assert_eq!(refreshes[1].1["Recursive"], "false");
+    assert_eq!(refreshes[1].0, "/Items/10002/Refresh");
+    assert_eq!(refreshes[1].1["MetadataRefreshMode"], "FullRefresh");
+    assert_eq!(refreshes[2].0, "/Items/series/Refresh");
+    assert_eq!(refreshes[2].1["MetadataRefreshMode"], "FullRefresh");
+    assert_eq!(refreshes[3].0, "/Items/series/Refresh");
+    assert_eq!(refreshes[3].1["MetadataRefreshMode"], "Default");
+    assert!(refreshes.iter().all(|(_, query)| query["Recursive"] == "false"));
+    assert_eq!(ready_checks.len(), 3);
+    assert!(ready_checks.iter().all(|(_, ready)| *ready));
     assert_eq!(year_reads, 3);
     assert!(title_reads >= 2);
     assert_eq!(

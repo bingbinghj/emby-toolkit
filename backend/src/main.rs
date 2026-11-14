@@ -44,6 +44,27 @@ async fn main() -> anyhow::Result<()> {
         .parse()?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     let background = tokio_util::sync::CancellationToken::new();
+    let recovery_manager = state.jobs.clone();
+    let recovery_state = state.clone();
+    let recovery_cancel = background.clone();
+    let recovery = tokio::spawn(async move {
+        let mut delay = 1_u64;
+        loop {
+            match recovery_manager
+                .resume_pending(recovery_state.clone(), recovery_cancel.clone())
+                .await
+            {
+                Ok(()) => break,
+                Err(error) => tracing::warn!("恢复准备尚未完成，保留原任务并自动重试：{}", error.1),
+            }
+            tokio::select! {
+                _ = recovery_cancel.cancelled() => return,
+                _ = tokio::time::sleep(std::time::Duration::from_secs(delay)) => {},
+            }
+            delay = (delay * 2).min(8);
+        }
+        emby_toolkit::webhook::resume_pending_with_retry(&recovery_state, &recovery_cancel).await;
+    });
     let bot = tokio::spawn(emby_toolkit::telegram_bot::run(
         state.clone(),
         background.clone(),
@@ -54,6 +75,10 @@ async fn main() -> anyhow::Result<()> {
     ));
     let monitor = emby_toolkit::monitor::Service::new(state.clone());
     let watcher = tokio::spawn(monitor.run(background.clone()));
+    let organize_queue = tokio::spawn(emby_toolkit::media_organize_queue::run(
+        state.clone(),
+        background.clone(),
+    ));
     let shutdown = background.clone();
     let jobs = state.jobs.clone();
     let shutdown_jobs = jobs.clone();
@@ -79,6 +104,8 @@ async fn main() -> anyhow::Result<()> {
     bot.await?;
     notifications.await?;
     watcher.await?;
+    organize_queue.await?;
+    recovery.await?;
     tracing::info!("应用程序已关闭，后台任务已结束");
     Ok(())
 }

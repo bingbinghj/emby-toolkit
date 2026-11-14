@@ -40,7 +40,7 @@ fn identifier(name: &str) -> Result<String> {
     Ok(format!("\"{name}\""))
 }
 pub async fn tables(pool: &PgPool) -> Result<Vec<String>> {
-    Ok(sqlx::query_scalar("SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema() AND table_type='BASE TABLE' ORDER BY table_name").fetch_all(pool).await?)
+    Ok(sqlx::query_scalar("SELECT table_name FROM information_schema.tables WHERE table_schema=current_schema() AND table_type='BASE TABLE' AND table_name NOT IN ('durable_jobs','durable_job_steps','webhook_pending','webhook_prepared','monitor_pending_events','notification_outbox','media_organize_queue') ORDER BY table_name").fetch_all(pool).await?)
 }
 async fn selected(pool: &PgPool, value: &Value) -> Result<Vec<String>> {
     let values = value
@@ -196,24 +196,11 @@ async fn import(
     .await?;
     let backup = decode(name, bytes, true).await?;
     validate_backup(&backup, &names)?;
+    let payload = json!({"backup":backup,"names":names});
     let manager = state.jobs.clone();
-    let task = manager
-        .submit("数据库恢复", move |context| async move {
-            let _gate = state.ai.cache_gate.write().await;
-            if names.iter().any(|n| n == "translation_cache") {
-                state
-                    .ai
-                    .cache_revision
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            }
-            import_data(&state.db, &backup, &names, Some(&context)).await?;
-            let reload_requested = names.iter().any(|name| name == "app_settings");
-            let config_error = if reload_requested { state.reload_config().await.err() } else { None };
-            let warning_details: Vec<_> = config_error.iter().map(|error| format!("数据已恢复，但运行配置重载失败：{}", error.1)).collect();
-            drop(_gate);
-            Ok(json!({"message":if warning_details.is_empty() { format!("已恢复 {} 个数据表",names.len()) } else { warning_details.join("；") },"data_restored":true,"restored_tables":names,"config_reloaded":reload_requested.then(|| config_error.is_none()),"warnings":warning_details.len(),"warning_details":warning_details}))
-        })
-        .await?;
+    let task = manager.submit_persistent("数据库恢复", crate::jobs::JobSpec::new("database_admin", payload.clone()), move |context| async move {
+        Ok(execute_persisted(&state, &payload, &context).await?.1)
+    }).await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({"message":"文件上传成功，已提交后台任务恢复数据表","task_id":task})),
@@ -241,6 +228,17 @@ pub async fn import_data(
 ) -> Result<()> {
     if names.is_empty() {
         return Err(ApiError::bad("未选择数据表"));
+    }
+    if names.iter().any(|name| ["durable_jobs","durable_job_steps","webhook_pending","webhook_prepared","monitor_pending_events","notification_outbox","media_organize_queue"].contains(&name.as_str())) {
+        return Err(ApiError::bad("任务恢复记录不能通过数据库恢复覆盖"));
+    }
+    if let Some(context) = context
+        && context.completed("database-import").await?.is_some()
+    {
+        if let Err(error) = correct_sequences_for(pool, Some(names)).await {
+            tracing::error!("数据库导入已提交，后续 ID 计数器校准失败：{}", error.1);
+        }
+        return Ok(());
     }
     validate_backup(backup, names)?;
     let mut names = names.to_vec();
@@ -331,15 +329,19 @@ pub async fn import_data(
     }
     if let Some(context) = context {
         context.checkpoint().await?;
+        context.complete_in_tx(&mut transaction, "database-import", &json!({"tables":names})).await?;
     }
     transaction.commit().await?;
-    if let Err(error) = correct_sequences(pool).await {
+    if let Err(error) = correct_sequences_for(pool, Some(&names)).await {
         tracing::error!("数据库导入已提交，后续 ID 计数器校准失败：{}", error.1);
     }
     Ok(())
 }
 pub async fn correct_sequences(pool: &PgPool) -> Result<Vec<String>> {
-    let rows=sqlx::query("SELECT table_name,column_name FROM information_schema.columns WHERE table_schema=current_schema() AND (column_default LIKE 'nextval%' OR is_identity='YES')").fetch_all(pool).await?;
+    correct_sequences_for(pool, None).await
+}
+async fn correct_sequences_for(pool: &PgPool, names: Option<&[String]>) -> Result<Vec<String>> {
+    let rows=sqlx::query("SELECT table_name,column_name FROM information_schema.columns WHERE table_schema=current_schema() AND ($1::TEXT[] IS NULL OR table_name=ANY($1)) AND (column_default LIKE 'nextval%' OR is_identity='YES')").bind(names).fetch_all(pool).await?;
     let mut result = vec![];
     for row in rows {
         let table: String = row.try_get("table_name")?;
@@ -520,4 +522,23 @@ async fn rebuild(State(state): State<AppState>) -> Result<Json<Value>> {
     Ok(Json(
         json!({"message":"为 Emby 媒体库重建的准备工作已成功完成","details":{"truncated_tables":["emby_users","emby_users_extended"],"updated_rows":{"media_metadata":count}}}),
     ))
+}
+
+pub(crate) async fn execute_persisted(state: &AppState, payload: &Value, context: &JobContext) -> Result<(u16, Value)> {
+    let backup = &payload["backup"];
+    let names: Vec<String> = serde_json::from_value(payload["names"].clone()).map_err(|_| ApiError::bad("数据库恢复任务表列表无效"))?;
+
+            let _gate = state.ai.cache_gate.write().await;
+            if names.iter().any(|n| n == "translation_cache") {
+                state
+                    .ai
+                    .cache_revision
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            import_data(&state.db, &backup, &names, Some(&context)).await?;
+            let reload_requested = names.iter().any(|name| name == "app_settings");
+            let config_error = if reload_requested { state.reload_config().await.err() } else { None };
+            let warning_details: Vec<_> = config_error.iter().map(|error| format!("数据已恢复，但运行配置重载失败：{}", error.1)).collect();
+            drop(_gate);
+            Ok((200, json!({"message":if warning_details.is_empty() { format!("已恢复 {} 个数据表",names.len()) } else { warning_details.join("；") },"data_restored":true,"restored_tables":names,"config_reloaded":reload_requested.then(|| config_error.is_none()),"warnings":warning_details.len(),"warning_details":warning_details})))
 }

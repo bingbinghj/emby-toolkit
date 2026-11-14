@@ -163,6 +163,77 @@ pub async fn download_with_overwrite_report(
     context: &crate::jobs::JobContext,
     force_overwrite_episodes: &[String],
 ) -> Result<Value> {
+    download_scoped_report(
+        state,
+        kind,
+        id,
+        item,
+        aggregate,
+        context,
+        force_overwrite_episodes,
+        None,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn download_target_report(
+    state: &AppState,
+    kind: &str,
+    id: &str,
+    item: &Value,
+    aggregate: &Value,
+    context: &crate::jobs::JobContext,
+    target: &Value,
+) -> Result<Value> {
+    download_scoped_report(
+        state,
+        kind,
+        id,
+        item,
+        aggregate,
+        context,
+        &[],
+        Some(target),
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn download_episode_paths_report(
+    state: &AppState,
+    kind: &str,
+    id: &str,
+    item: &Value,
+    aggregate: &Value,
+    context: &crate::jobs::JobContext,
+    episode_paths: &[PathBuf],
+) -> Result<Value> {
+    download_scoped_report(
+        state,
+        kind,
+        id,
+        item,
+        aggregate,
+        context,
+        &[],
+        None,
+        Some(episode_paths),
+    )
+    .await
+}
+
+async fn download_scoped_report(
+    state: &AppState,
+    kind: &str,
+    id: &str,
+    item: &Value,
+    aggregate: &Value,
+    context: &crate::jobs::JobContext,
+    force_overwrite_episodes: &[String],
+    target: Option<&Value>,
+    episode_paths: Option<&[PathBuf]>,
+) -> Result<Value> {
     let media_name = string(item, "Name");
     tracing::info!(
         "图片资产下载开始：类型 {kind}，TMDb {id}，名称 {}",
@@ -261,7 +332,11 @@ pub async fn download_with_overwrite_report(
     };
     let mut pending = vec![root.to_path_buf()];
     let mut files = vec![];
-    if kind == "Series" {
+    if let Some(paths) = episode_paths {
+        files.extend_from_slice(paths);
+    } else if let Some(target) = target.filter(|target| target["Type"] == "Episode") {
+        files.push(PathBuf::from(string(target, "Path")));
+    } else if kind == "Series" {
         while let Some(directory) = pending.pop() {
             let mut entries = tokio::fs::read_dir(directory).await?;
             while let Some(entry) = entries.next_entry().await? {
@@ -275,7 +350,15 @@ pub async fn download_with_overwrite_report(
         }
     }
     let mut count = 0;
-    let plan = plan(kind, root, &data, aggregate, &files);
+    let mut plan = plan(kind, root, &data, aggregate, &files);
+    if let Some(target) = target.filter(|target| target["Type"] == "Episode") {
+        let path = PathBuf::from(string(target, "Path"));
+        let thumbnail = path.with_file_name(format!(
+            "{}-thumb.jpg",
+            path.file_stem().unwrap_or_default().to_string_lossy()
+        ));
+        plan.retain(|path, _| path == &thumbnail);
+    }
     let planned = plan.len();
     tracing::info!(
         "图片资产下载计划：《{media_name}》，TMDb {id}，目标 {} 个",

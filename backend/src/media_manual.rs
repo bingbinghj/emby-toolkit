@@ -194,7 +194,7 @@ async fn submit(
     let work = state.clone();
     let task = state
         .jobs
-        .submit("手动更新演员与NFO", move |context| async move {
+        .submit_persistent("手动更新演员与NFO", crate::jobs::JobSpec::new("media_manual", json!({"operation":"save","id":id,"body":body})), move |context| async move {
             save(&work, &id, &body, &context).await
         })
         .await?;
@@ -363,7 +363,7 @@ async fn translate(
     let work = state.clone();
     let task = state
         .jobs
-        .submit("翻译演员表", move |context| async move {
+        .submit_persistent("翻译演员表", crate::jobs::JobSpec::new("media_manual", json!({"operation":"translate","body":body})), move |context| async move {
             context.checkpoint().await?;
             translate_cast(&work, &body).await
         })
@@ -372,6 +372,15 @@ async fn translate(
         StatusCode::ACCEPTED,
         Json(json!({"task_id":task,"message":"翻译演员表任务已提交"})),
     ))
+}
+pub(crate) async fn execute_persisted(state: &AppState, payload: &Value, context: &JobContext) -> Result<(u16, Value)> {
+    context.checkpoint().await?;
+    let value = match payload["operation"].as_str() {
+        Some("save") => save(state, &string(payload, "id"), &payload["body"], context).await?,
+        Some("translate") => translate_cast(state, &payload["body"]).await?,
+        _ => return Err(ApiError::bad("未知的演员处理操作")),
+    };
+    Ok((200, value))
 }
 pub async fn translate_cast(state: &AppState, body: &Value) -> Result<Value> {
     let mut actors = list(&body["cast"]);

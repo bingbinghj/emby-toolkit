@@ -195,15 +195,28 @@ pub async fn generate(
     context
         .activity("读取媒体库", "正在获取需要生成封面的媒体库列表")
         .await;
+    let mut scope = library_ids.map(|ids| ids.to_vec()).unwrap_or_default();
+    scope.sort();
+    let scope = if library_ids.is_none() {
+        "all".into()
+    } else {
+        serde_json::to_string(&scope).unwrap()
+    };
+    let plan_key = format!("cover-libraries:{scope}");
+    let saved_plan = context.plan(&plan_key).await?;
     let user = string(&*state.config.read().await, "emby_user_id");
-    let views = state
-        .emby(
-            reqwest::Method::GET,
-            &format!("emby/Users/{user}/Views"),
-            &[],
-            None,
-        )
-        .await?;
+    let views = if let Some(plan) = &saved_plan {
+        json!({"Items":plan})
+    } else {
+        state
+            .emby(
+                reqwest::Method::GET,
+                &format!("emby/Users/{user}/Views"),
+                &[],
+                None,
+            )
+            .await?
+    };
     let multi = config["cover_style"] == "multi_1";
     let multi_fonts = multi && config["multi_1_use_main_font"] != true;
     let fonts = [
@@ -213,7 +226,16 @@ pub async fn generate(
     let mut updated = 0;
     let mut failures = vec![];
     let mut warning_details = vec![];
-    let mut libraries = list(&views["Items"]);
+    let mut libraries = if let Some(plan) = saved_plan {
+        plan.as_array()
+            .cloned()
+            .ok_or_else(|| ApiError::bad("封面生成的已保存媒体库计划无效"))?
+    } else {
+        let mut libraries = list(&views["Items"]);
+        crate::media_order::sort(&mut libraries);
+        context.save_plan(&plan_key, &json!(libraries)).await?;
+        libraries
+    };
     crate::media_order::sort(&mut libraries);
     for library in libraries {
         let id = string(&library, "Id");
@@ -232,6 +254,17 @@ pub async fn generate(
             continue;
         }
         context.checkpoint().await?;
+        let completion_key = format!("cover:{scope}:{id}");
+        if let Some(previous) = context.completed(&completion_key).await? {
+            updated += 1;
+            warning_details.extend(
+                list(&previous["warning_details"])
+                    .into_iter()
+                    .filter_map(|value| value.as_str().map(str::to_string)),
+            );
+            continue;
+        }
+        let warnings_before = warning_details.len();
         context
             .activity(
                 "生成媒体库封面",
@@ -385,6 +418,9 @@ pub async fn generate(
         .await;
         match result {
             Ok(()) => {
+                context
+                    .complete(&completion_key, &json!({"warning_details":warning_details[warnings_before..]}))
+                    .await?;
                 updated += 1;
                 tracing::info!("[封面生成] 媒体库《{name}》封面已生成并上传");
             }

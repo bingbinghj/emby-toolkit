@@ -5,8 +5,15 @@ use axum::{
 };
 use emby_toolkit::{AppState, db, p115, tasks};
 use serde_json::{Value, json};
-use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::sync::Mutex;
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+use tokio::sync::{Mutex, Notify};
 
 #[derive(Clone, Default)]
 struct Requests {
@@ -14,6 +21,10 @@ struct Requests {
     emby: Arc<Mutex<Vec<String>>>,
     root: String,
     mutation: Arc<Mutex<Option<sqlx::PgPool>>>,
+    interrupt_second: Arc<AtomicBool>,
+    second_entered: Arc<Notify>,
+    release_second: Arc<Notify>,
+    backup_mode: Arc<AtomicBool>,
 }
 
 async fn run(state: &AppState) -> Value {
@@ -92,10 +103,15 @@ async fn repair_uses_cache_and_only_queries_cloud_for_missing_cache_fields() {
     let fake = Router::new()
         .route("/files/file", get(|State(requests): State<Requests>, Query(query): Query<HashMap<String,String>>| async move {
             requests.cloud.lock().await.push(query["file_id"].clone());
+            if query["file_id"] == "102" && requests.interrupt_second.swap(false, Ordering::SeqCst) {
+                requests.second_entered.notify_one();
+                requests.release_second.notified().await;
+            }
             if let Some(pool) = requests.mutation.lock().await.take() {
                 sqlx::query("UPDATE media_metadata SET asset_details_json=jsonb_set(jsonb_set(asset_details_json,'{0,fingerprint_pending}','true'),'{0,fingerprint_revision}','8') WHERE tmdb_id='film'").execute(&pool).await.unwrap();
             }
-            Json(json!({"state":true,"data":{"id":query["file_id"],"parent_id":"3","name":if query["file_id"] == "102" { "Second.mkv" } else { "First.mkv" },"pick_code":query["file_id"],"sha1":"CACHE-SHA","size":100}}))
+            let backup = requests.backup_mode.load(Ordering::SeqCst);
+            Json(json!({"state":true,"data":{"id":query["file_id"],"parent_id":"3","name":if query["file_id"] == "102" && !backup { "Second.mkv" } else { "First.mkv" },"pick_code":query["file_id"],"sha1":if backup { if query["file_id"] == "101" { "OLD-SHA" } else { "NEW-SHA" } } else { "CACHE-SHA" },"size":100}}))
         }))
         .route("/Users/admin/Items/{id}", get(|State(requests): State<Requests>, Path(id): Path<String>| async move {
             requests.emby.lock().await.push(id.clone());
@@ -335,6 +351,161 @@ async fn repair_uses_cache_and_only_queries_cloud_for_missing_cache_fields() {
     assert_eq!(pending[0], json!([null]));
     assert_eq!(pending[1][0]["fingerprint_pending"], true);
     assert_eq!(pending[1][0]["fingerprint_revision"], 8);
+
+    // A restart between two versions retains the first version's write and
+    // report, and reloads the row before writing the second frozen target.
+    media(&pool, &path, Value::Null, Value::Null, false).await;
+    sqlx::query("UPDATE media_metadata SET emby_item_ids_json=$1,asset_details_json=$2,file_pickcode_json='[null,null]',file_sha1_json='[null,null]' WHERE tmdb_id='film'")
+        .bind(json!(["101","102"])).bind(json!([{"emby_item_id":"101","path":path,"size_bytes":100},{"emby_item_id":"102","path":second,"size_bytes":100}])).execute(&pool).await.unwrap();
+    cache(&pool, None, Some("CACHE-SHA")).await;
+    sqlx::query("INSERT INTO p115_filesystem_cache(id,parent_id,name,pick_code,sha1,local_path,size) VALUES('102','','Second.mkv','102','CACHE-SHA','Film/Second.mkv',100)").execute(&pool).await.unwrap();
+    requests.cloud.lock().await.clear();
+    requests.interrupt_second.store(true, Ordering::SeqCst);
+    let id = tasks::submit_task(&state, "repair-p115-fingerprints", false)
+        .await
+        .unwrap()["task_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    tokio::time::timeout(Duration::from_secs(10), requests.second_entered.notified())
+        .await
+        .unwrap();
+    let before: Value =
+        sqlx::query_scalar("SELECT file_pickcode_json FROM media_metadata WHERE tmdb_id='film'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(before, json!(["101", null]));
+    state.jobs.shutdown().await;
+    let interrupted = state.jobs.result(&id).await.unwrap();
+    assert_eq!(interrupted["state"], "interrupted", "{interrupted}");
+    requests.release_second.notify_one();
+    let endpoints = state.p115.clone();
+    state = AppState::new(pool.clone(), directory.path().into())
+        .await
+        .unwrap();
+    state.p115 = endpoints;
+    state
+        .jobs
+        .clone()
+        .resume_pending(state.clone(), tokio_util::sync::CancellationToken::new())
+        .await
+        .unwrap();
+    let resumed = finish(&state, &id).await;
+    assert_eq!(resumed["state"], "completed", "{resumed}");
+    assert_eq!(resumed["result"]["fixed_assets"], 2);
+    assert_eq!(resumed["result"]["api_fixed_assets"], 2);
+    assert_eq!(resumed["result"]["cache_updates"], 2);
+    assert_eq!(
+        requests
+            .cloud
+            .lock()
+            .await
+            .iter()
+            .filter(|id| id.as_str() == "101")
+            .count(),
+        1
+    );
+    let pair: Value = sqlx::query_scalar("SELECT jsonb_build_array(file_pickcode_json,file_sha1_json) FROM media_metadata WHERE tmdb_id='film'").fetch_one(&pool).await.unwrap();
+    assert_eq!(pair[0], json!(["101", "102"]));
+    assert_eq!(pair[1], json!(["CACHE-SHA", "CACHE-SHA"]));
+
+    // An unfinished backup must not inherit an older nested fingerprint result
+    // when its same native path and size now refer to a different cloud object.
+    requests.backup_mode.store(true, Ordering::SeqCst);
+    for old_cache_present in [false, true] {
+        media(&pool, &path, Value::Null, Value::Null, false).await;
+        sqlx::query("DELETE FROM p115_mediainfo_cache")
+            .execute(&pool)
+            .await
+            .unwrap();
+        tokio::fs::write(&path, "http://fixture/d/101")
+            .await
+            .unwrap();
+        let snapshot: Value =
+            sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE tmdb_id='film'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let work = state.clone();
+        let ready = Arc::new(Notify::new());
+        let reached = ready.clone();
+        let spec = emby_toolkit::jobs::JobSpec::new(
+            "tasks",
+            json!({"task":"backup-mediainfo","full":false,"batch_size":10,"unsupported":[]}),
+        );
+        let task = state
+            .jobs
+            .submit_persistent("备份媒体信息", spec, move |context| async move {
+                context
+                    .save_plan("tasks:backup-mediainfo:plan", &json!([snapshot]))
+                    .await?;
+                emby_toolkit::revalidation::ids(&work, &["101".into()], &context).await?;
+                reached.notify_one();
+                context.cancelled().await;
+                context.checkpoint().await?;
+                Ok(json!({}))
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), ready.notified())
+            .await
+            .unwrap();
+        state.jobs.shutdown().await;
+        let old = json!({"Size":100,"RunTimeTicks":600000000,"MediaStreams":[{"Index":0,"Type":"Video","Codec":"h264","Width":640}],"Container":"mkv"});
+        if old_cache_present {
+            sqlx::query(
+                "INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES('OLD-SHA',$1)",
+            )
+            .bind(&old)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let replacement = json!({"Size":100,"RunTimeTicks":600000000,"MediaStreams":[{"Index":0,"Type":"Video","Codec":"h264","Width":1920}],"Container":"mkv"});
+        tokio::fs::write(&path, "http://fixture/d/102")
+            .await
+            .unwrap();
+        tokio::fs::write(
+            path.with_file_name("First-mediainfo.json"),
+            serde_json::to_vec(&replacement).unwrap(),
+        )
+        .await
+        .unwrap();
+        let endpoints = state.p115.clone();
+        state = AppState::new(pool.clone(), directory.path().into())
+            .await
+            .unwrap();
+        state.p115 = endpoints;
+        state
+            .jobs
+            .clone()
+            .resume_pending(state.clone(), tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
+        let result = state.jobs.result(&task).await.unwrap();
+        assert_eq!(result["state"], "completed", "{result}");
+        let new: Option<Value> = sqlx::query_scalar(
+            "SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1='NEW-SHA'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        let new = new.expect("replacement must be backed up under its current SHA1");
+        // Native restore backups wrap their media source; verify the entire
+        // replacement rather than relying on the legacy top-level layout.
+        let new_source = emby_toolkit::media_info::container(&new)
+            .expect("replacement backup must expose its restorable media source");
+        assert_eq!(new_source, &replacement);
+        let retained: Option<Value> = sqlx::query_scalar(
+            "SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1='OLD-SHA'",
+        )
+        .fetch_optional(&pool)
+        .await
+        .unwrap();
+        assert_eq!(retained, old_cache_present.then_some(old));
+    }
+    requests.backup_mode.store(false, Ordering::SeqCst);
 
     state.jobs.shutdown().await;
     server.abort();

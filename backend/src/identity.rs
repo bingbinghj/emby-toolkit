@@ -53,6 +53,9 @@ pub fn merge(
         "fingerprint_pending",
         "fingerprint_revision",
         "fingerprint_target",
+        "moviepilot_media_identity",
+        "moviepilot_ingest_identity",
+        "moviepilot_media_pending",
     ] {
         if asset.get(key).is_none() && old.get(key).is_some() {
             asset[key] = old[key].clone();
@@ -82,6 +85,11 @@ fn media_size(value: &Value) -> Option<u64> {
     }
 }
 pub fn verify(asset: &Value, info: &Value) -> Result<()> {
+    if asset["moviepilot_media_pending"] == true {
+        return Err(ApiError::bad(
+            "当前版本的媒体信息尚未验收，请重试入库提取，已拒绝旧版媒体信息",
+        ));
+    }
     if asset["fingerprint_pending"].as_bool().unwrap_or(false) {
         return Err(ApiError::bad("文件身份待校验，请先重新校验指纹"));
     }

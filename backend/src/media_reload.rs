@@ -646,9 +646,34 @@ pub(crate) async fn recover_record(
     context: &JobContext,
     current_hashes: &BTreeMap<String, String>,
 ) -> Result<Vec<PathBuf>> {
+    recover_record_inner(state, recovery, context, current_hashes, false).await
+}
+
+pub(crate) async fn recover_started_record(
+    state: &AppState,
+    recovery: &Path,
+    context: &JobContext,
+) -> Result<Vec<PathBuf>> {
+    recover_record_inner(state, recovery, context, &BTreeMap::new(), true).await
+}
+
+async fn recover_record_inner(
+    state: &AppState,
+    recovery: &Path,
+    context: &JobContext,
+    current_hashes: &BTreeMap<String, String>,
+    started_only: bool,
+) -> Result<Vec<PathBuf>> {
     context.checkpoint().await?;
-    let record = recovery_record(recovery).await?;
-    let (targets, requested) = prepare_recovery_json(state, recovery, &record).await?;
+    let mut record = recovery_record(recovery).await?;
+    let (mut targets, mut requested) = prepare_recovery_json(state, recovery, &record).await?;
+    let cleared = original_clear_intents(state, recovery, &record, &targets).await?;
+    if started_only {
+        targets.retain(|target| cleared.contains(&target.id));
+        requested.retain(|id, _| cleared.contains(id));
+        if targets.is_empty() { return Ok(vec![]); }
+        narrow_recovery_record(&mut record, &cleared)?;
+    }
     let json_paths = requested
         .values()
         .map(|(path, _)| path.clone())
@@ -849,7 +874,10 @@ pub(crate) async fn recover_record(
         restore_files(&resources, &owners).await?;
         let confirmed = AtomicBool::new(false);
         let retry = recovery.join(format!("retry-{}", uuid::Uuid::new_v4().simple()));
-        reload(state, &targets, &finish, &confirmed, &retry).await?;
+        for target in &targets {
+            finish.save_plan(&format!("saved-formal-json:{}", target.id), &target.info).await?;
+        }
+        reload_inner(state, &targets, &finish, &confirmed, &retry, recovery, &cleared).await?;
         verify_reloaded(
             state,
             &targets.iter().collect::<Vec<_>>(),
@@ -928,7 +956,7 @@ async fn identity_details(state: &AppState, target: &SavedTarget) -> Result<Valu
     Ok(live)
 }
 
-fn differences(target: &SavedTarget, live: &Value) -> Vec<String> {
+pub(crate) fn differences(target: &SavedTarget, live: &Value) -> Vec<String> {
     let paths = [&target.path[..], target.source.as_deref().unwrap_or("")];
     let mut reasons = media_info::stream_differences(&target.info, live, &paths);
     if let (Some(expected), Some(actual)) = (
@@ -1599,7 +1627,7 @@ pub(crate) async fn preflight_file_imports(
     Ok(())
 }
 
-async fn refresh_from_file(
+pub(crate) async fn refresh_from_file(
     state: &AppState,
     target: &SavedTarget,
     context: &JobContext,
@@ -1643,6 +1671,20 @@ async fn refresh_from_file(
             target.id, error.1
         )
     }))
+}
+
+pub(crate) async fn preflight_ingest_import(
+    state: &AppState,
+    target: &SavedTarget,
+    context: &JobContext,
+) -> Result<()> {
+    ensure_single_bundle(&target.info)?;
+    ensure_json_streams_unfiltered(&target.info, &target.id)?;
+    ensure_file_import_supported(state, &crate::strm::config(state).await?, &target.id, false)
+        .await?;
+    let live = identity_details(state, target).await?;
+    ensure_target_reload_supported(target, &live)?;
+    ensure_single_clear_scope(state, target, &live, context).await
 }
 
 fn ensure_target_unfiltered(target: &SavedTarget, live: &Value) -> Result<()> {
@@ -2075,7 +2117,7 @@ async fn verify_reloaded(
             let mut reasons = differences(target, &live);
             for field in METADATA_FIELDS {
                 if live[*field] != before[&target.id][*field] {
-                    reasons.push(format!("当前元数据字段 {field} 在同步期间被修改"));
+                    return Err(conflict(format!("当前元数据字段 {field} 在同步期间被修改，已保留现场和恢复备份")));
                 }
             }
             let expected = media_info::container(&target.info).unwrap();
@@ -2268,12 +2310,75 @@ async fn verify_unchanged_resources(
     }
 }
 
+fn explicitly_cleared(live: &Value) -> bool {
+    live["MediaStreams"].as_array().is_some_and(Vec::is_empty)
+        && live["Chapters"].as_array().is_some_and(Vec::is_empty)
+        && live["MediaSources"].as_array().is_some_and(|sources| {
+            sources.iter().all(|source| source["MediaStreams"].as_array().is_some_and(Vec::is_empty))
+        })
+}
+
+fn clear_intent(target: &SavedTarget, record: &Value) -> Value {
+    json!({"id":target.id,"path":target.path,"source":target.source,"sha":target.sha,"asset":target.asset,
+        "manifest_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(record).unwrap()))})
+}
+
+async fn original_clear_intents(
+    state: &AppState,
+    recovery: &Path,
+    record: &Value,
+    targets: &[SavedTarget],
+) -> Result<BTreeSet<String>> {
+    let mut cleared = BTreeSet::new();
+    for target in targets {
+        let proof = recovery.join(format!("clear-intent-{}.json", target.id));
+        if !tokio::fs::try_exists(&proof).await? { continue; }
+        if crate::media_recovery::read_json(&proof).await? != clear_intent(target, record) {
+            return Err(conflict("原清理意图与媒体身份或恢复记录不一致，未继续导入"));
+        }
+        let live = saved_details(state, target).await?;
+        if explicitly_cleared(&live) || differences(target, &live).is_empty() {
+            cleared.insert(target.id.clone());
+        }
+    }
+    Ok(cleared)
+}
+
+fn narrow_recovery_record(record: &mut Value, owners: &BTreeSet<String>) -> Result<()> {
+    for key in ["observations", "thumbnail_times", "chapter_images"] {
+        if let Some(values) = record[key].as_object_mut() { values.retain(|id, _| owners.contains(id)); }
+    }
+    for (key, field) in [("targets", "id"), ("json", "item_id"), ("audio_complete", "item_id"), ("bridges", "item_id")] {
+        if let Some(values) = record[key].as_array_mut() { values.retain(|value| owners.contains(&string(value, field))); }
+    }
+    let mut files = vec![];
+    for mut file in media_edit::list(&record["files"]) {
+        let kept = media_edit::list(&file["owner_ids"]).into_iter().filter(|id| id.as_str().is_some_and(|id| owners.contains(id))).collect::<Vec<_>>();
+        if !kept.is_empty() { file["owner_ids"] = json!(kept); files.push(file); }
+    }
+    record["files"] = json!(files);
+    record["target_ids"] = json!(owners);
+    Ok(())
+}
+
 pub(crate) async fn reload(
     state: &AppState,
     targets: &[SavedTarget],
     context: &JobContext,
     confirmed: &AtomicBool,
     recovery: &Path,
+) -> Result<Vec<String>> {
+    reload_inner(state, targets, context, confirmed, recovery, recovery, &BTreeSet::new()).await
+}
+
+async fn reload_inner(
+    state: &AppState,
+    targets: &[SavedTarget],
+    context: &JobContext,
+    confirmed: &AtomicBool,
+    recovery: &Path,
+    intent_directory: &Path,
+    already_cleared: &BTreeSet<String>,
 ) -> Result<Vec<String>> {
     let mut observations = BTreeMap::new();
     let mut affected = vec![];
@@ -2442,6 +2547,15 @@ pub(crate) async fn reload(
             }
         }
         snapshot_file(&path, recovery, &mut files, &target.id).await?;
+        if let Some(expected) = context.plan(&format!("saved-formal-json:{}", target.id)).await? {
+            let canonical = tokio::fs::canonicalize(&path).await?;
+            let saved = files.get(&canonical).ok_or_else(|| conflict("原已保存 JSON 现已缺失，未采纳新的恢复基线"))?;
+            let actual: Value = serde_json::from_slice(&snapshot_bytes(saved).await?)
+                .map_err(|_| conflict("原已保存 JSON 现已无效，未采纳新的恢复基线"))?;
+            if actual != expected {
+                return Err(conflict("已保存 JSON 在任务中断后发生变化，保留用户新文件和原持久请求"));
+            }
+        }
         if let Ok(path) = tokio::fs::canonicalize(&path).await {
             formal_paths.insert(path);
         }
@@ -2729,14 +2843,25 @@ pub(crate) async fn reload(
                         // ClearMediaInfo expands by presentation key and extras.
                         // It is only allowed after proving that scope is this
                         // single protected file; no unrequested sibling is reset.
-                        let cleared = state
-                            .emby_once(
+                        let cleared = if already_cleared.contains(&target.id) {
+                            if !explicitly_cleared(&current) {
+                                return Err(conflict("原清理阶段已开始，但当前媒体流再次变化，未重复清理"));
+                            }
+                            Ok(Value::Null)
+                        } else {
+                            let proof = intent_directory.join(format!("clear-intent-{}.json", target.id));
+                            let intent = clear_intent(target, &recovery_record(intent_directory).await?);
+                            tokio::fs::write(&proof, serde_json::to_vec(&intent).unwrap()).await?;
+                            tokio::fs::File::open(&proof).await?.sync_all().await?;
+                            tokio::fs::File::open(intent_directory).await?.sync_all().await?;
+                            state.emby_once(
                                 Method::POST,
                                 &format!("Items/{}/ClearMediaInfo", target.id),
                                 &[],
                                 None,
                             )
-                            .await;
+                            .await
+                        };
                         // Once Clear was submitted, attempt every local recovery
                         // even when its HTTP result or a JSON guard fails.
                         let mut recovery_failures = vec![];

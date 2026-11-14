@@ -6,14 +6,24 @@
         <template #append><VChip :color="backgroundTaskStatus.state === 'failed' ? 'error' : backgroundTaskStatus.state === 'completed_with_warnings' ? 'warning' : 'primary'" variant="tonal">{{ currentTaskStateLabel }}</VChip></template>
       </VCardItem>
       <VCardText>
-        <VProgressLinear v-if="backgroundTaskStatus.is_running" :model-value="backgroundTaskStatus.progress" :indeterminate="!backgroundTaskStatus.progress_known" color="primary" height="4" rounded />
+        <VProgressLinear v-if="backgroundTaskStatus.is_running" :model-value="backgroundTaskStatus.progress" :indeterminate="!taskPaused && !taskStopping && !backgroundTaskStatus.progress_known" color="primary" height="4" rounded />
         <div class="task-status-message mt-3">{{ backgroundTaskStatus.message }}</div>
         <div v-if="backgroundTaskStatus.progress_known && backgroundTaskStatus.is_running" class="text-caption mt-2">{{ backgroundTaskStatus.progress }}%</div>
+        <template v-if="taskResultTarget?.current && taskResultTarget.task_id === backgroundTaskStatus.task_id && !taskResultOpen">
+          <VProgressLinear v-if="taskResultLoading" indeterminate class="mt-3" aria-label="读取任务结果" />
+          <VAlert v-if="taskResultError" type="error" variant="tonal" class="mt-3">{{ taskResultError }}<VBtn variant="text" :loading="taskResultLoading" @click="readTaskResult">重新读取结果</VBtn></VAlert>
+          <VAlert v-else-if="taskResultFeedback" :type="taskResultFeedback.type" :title="taskResultFeedback.message" variant="tonal" class="mt-3" data-testid="scheduler-restored-result">
+            <div v-for="detail in taskResultFeedback.details" :key="detail" class="text-wrap">{{ detail }}</div>
+          </VAlert>
+        </template>
       </VCardText>
-      <VCardActions v-if="backgroundTaskStatus.is_running">
+      <VCardActions v-if="backgroundTaskStatus.is_running || isTerminalTask(backgroundTaskStatus)">
         <VSpacer />
-        <VBtn variant="text" :prepend-icon="taskPaused ? 'mdi-play' : 'mdi-pause'" :loading="taskControlBusy" :disabled="taskStopping || backgroundTaskStatus.state === 'pausing'" @click="controlTask(taskPaused ? 'resume' : 'pause')">{{ taskPaused ? '继续' : backgroundTaskStatus.state === 'pausing' ? '暂停中' : '暂停' }}</VBtn>
-        <VBtn color="error" variant="text" prepend-icon="mdi-stop" :disabled="taskStopping || taskControlBusy" @click="confirmStopTask">{{ taskStopping ? '停止中' : '停止' }}</VBtn>
+        <VBtn v-if="isTerminalTask(backgroundTaskStatus)" variant="text" prepend-icon="mdi-text-box-search-outline" :disabled="Boolean(isTriggeringTask)" @click="openTaskResult(backgroundTaskStatus)">查看结果</VBtn>
+        <template v-if="backgroundTaskStatus.is_running">
+          <VBtn variant="text" :prepend-icon="taskPaused ? 'mdi-play' : 'mdi-pause'" :loading="taskControlBusy" :disabled="taskStopping || (!taskPaused && taskPausing)" @click="controlTask(taskPaused ? 'resume' : 'pause')">{{ taskPaused ? '继续' : taskPausing ? '暂停中' : '暂停' }}</VBtn>
+          <VBtn color="error" variant="text" prepend-icon="mdi-stop" :disabled="taskStopping || taskControlBusy" @click="confirmStopTask">{{ taskStopping ? '停止中' : '停止' }}</VBtn>
+        </template>
       </VCardActions>
     </VCard>
     <div v-if="isLoading" class="center-container"><VProgressCircular indeterminate color="primary" size="48" /></div>
@@ -39,7 +49,7 @@
         </VCard>
         <FingerprintAuditPanel class="fingerprint-overview-card" :running="isBackgroundTaskRunning" :task-state="backgroundTaskStatus.state" />
       </div>
-      <VAlert v-if="taskRunFeedback" :type="taskRunFeedback.type" variant="tonal" :title="taskRunFeedback.message" role="status">
+      <VAlert v-if="taskRunFeedback && !taskResultFeedback" :type="taskRunFeedback.type" variant="tonal" :title="taskRunFeedback.message" role="status">
         <div v-for="detail in taskRunFeedback.details" :key="detail">{{ detail }}</div>
       </VAlert>
       <div class="scheduler-category-list" :data-testid="mdAndUp ? 'scheduler-desktop-tasks' : 'scheduler-mobile-tasks'">
@@ -65,13 +75,15 @@
                   <VCardText class="scheduler-task-details">
                     <p class="temp-task-description">{{ getTaskHelp(task) }}</p>
                     <div v-if="isCurrentTask(task) && isBackgroundTaskRunning" class="scheduler-progress">
-                      <VProgressLinear :model-value="backgroundTaskStatus.progress" :indeterminate="!backgroundTaskStatus.progress_known" color="primary" height="4" rounded />
+                      <VProgressLinear :model-value="backgroundTaskStatus.progress" :indeterminate="!taskPaused && !taskStopping && !backgroundTaskStatus.progress_known" color="primary" height="4" rounded />
                       <div class="scheduler-progress-meta"><span>{{ backgroundTaskStatus.message }}</span><strong v-if="backgroundTaskStatus.progress_known">{{ backgroundTaskStatus.progress }}%</strong></div>
                     </div>
                   </VCardText>
                   <VCardActions><VBtn color="primary" variant="flat" size="small" prepend-icon="mdi-play"
                     :loading="isTriggeringTask === task.key" :disabled="isBackgroundTaskRunning || Boolean(isTriggeringTask)"
-                    @click="triggerTaskNow(task.key)">执行</VBtn></VCardActions>
+                    @click="triggerTaskNow(task.key)">执行</VBtn>
+                    <VBtn v-if="isCurrentTask(task) && isTerminalTask(backgroundTaskStatus)" variant="text" size="small" :disabled="Boolean(isTriggeringTask)" @click="openTaskResult(backgroundTaskStatus)">查看结果</VBtn>
+                  </VCardActions>
                 </VCard>
               </template>
             </Draggable>
@@ -86,6 +98,26 @@
           :loading="manualOrderSaving" :disabled="manualOrderSaving || !taskCatalogLoaded" @click="saveManualTaskOrder">保存任务顺序</VBtn>
       </div>
     </div>
+    <VCard v-if="taskHistory.length" class="dashboard-card mt-6" title="最近任务" data-testid="scheduler-task-history">
+      <VList class="scheduler-history-list">
+        <VListItem v-for="task in taskHistory" :key="task.task_id" :data-task-id="task.task_id" :title="task.last_action || '历史任务'" :subtitle="`${taskStateText(task.state)} · ${task.message || ''}`">
+          <template #append><VBtn variant="text" size="small" @click="openTaskResult(task)">查看结果</VBtn></template>
+        </VListItem>
+      </VList>
+    </VCard>
+    <VDialog :model-value="taskResultOpen" max-width="800" scrollable :fullscreen="!mdAndUp" @update:model-value="open => { if (!open) closeTaskResult(); }">
+      <VCard>
+        <VCardTitle class="d-flex align-center ga-3"><span class="flex-grow-1 text-wrap">{{ taskResultTarget?.last_action || '任务结果' }}</span><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭任务结果" @click="closeTaskResult" /></VCardTitle>
+        <VCardText>
+          <VProgressLinear v-if="taskResultLoading" indeterminate aria-label="读取任务结果" />
+          <VAlert v-if="taskResultError" type="error" variant="tonal">{{ taskResultError }}</VAlert>
+          <VAlert v-else-if="taskResultFeedback" :type="taskResultFeedback.type" :title="taskResultFeedback.message" variant="tonal" data-testid="scheduler-task-result">
+            <div v-for="detail in taskResultFeedback.details" :key="detail" class="text-wrap">{{ detail }}</div>
+          </VAlert>
+        </VCardText>
+        <VCardActions><VSpacer /><VBtn variant="text" @click="closeTaskResult">关闭</VBtn><VBtn variant="tonal" prepend-icon="mdi-refresh" :loading="taskResultLoading" @click="readTaskResult">重新读取结果</VBtn></VCardActions>
+      </VCard>
+    </VDialog>
     <VDialog v-model="showTgMenuConfigModal" max-width="600" persistent>
       <VCard title="配置 Telegram 快捷菜单">
         <VCardText>
@@ -125,9 +157,11 @@ import FingerprintAuditPanel from './FingerprintAuditPanel.vue';
 import Sortable from 'sortablejs';
 import Draggable from 'vuedraggable';
 import { useContextSearch } from '../../composables/useContextSearch.js';
+import { useAuthStore } from '../../stores/auth.js';
 
 const message = useMessage();
 const dialog = useDialog();
+const auth = useAuthStore();
 const { mdAndUp } = useDisplay();
 const manualTaskDragGroup = { pull: false, put: false };
 
@@ -167,7 +201,10 @@ const { isBackgroundTaskRunning, backgroundTaskStatus, refreshTaskStatus } = use
 const taskControlBusy = ref(false);
 const taskPaused = computed(() => backgroundTaskStatus.value.state === 'paused');
 const taskStopping = computed(() => backgroundTaskStatus.value.stop_requested || backgroundTaskStatus.value.state === 'stopping');
-const currentTaskStateLabel = computed(() => ({
+const taskPausing = computed(() => backgroundTaskStatus.value.pause_requested || backgroundTaskStatus.value.state === 'pausing');
+const currentTaskStateLabel = computed(() => backgroundTaskStatus.value.is_running && taskStopping.value ? '停止中'
+  : backgroundTaskStatus.value.is_running && taskPaused.value ? '已暂停'
+    : backgroundTaskStatus.value.is_running && taskPausing.value ? '暂停中' : ({
   running: '运行中', pausing: '暂停中', paused: '已暂停', stopping: '停止中', cancelled: '已停止',
   completed: '已完成', completed_with_warnings: '已完成，有提醒', failed: '失败',
 }[backgroundTaskStatus.value.state] || backgroundTaskStatus.value.state || '等待任务'));
@@ -215,6 +252,68 @@ useContextSearch({
 });
 const isTriggeringTask = ref(null);
 const taskRunFeedback = ref(null);
+const taskResultTarget = ref(null), taskResult = ref(null), taskResultOpen = ref(false);
+const taskResultLoading = ref(false), taskResultError = ref('');
+let taskResultGeneration = 0, taskResultController = null;
+const isTerminalTask = task => Boolean(task?.task_id && task.is_running === false
+  && ['completed', 'completed_with_warnings', 'failed', 'cancelled'].includes(task.state));
+const taskStateText = state => ({ completed: '已完成', completed_with_warnings: '已完成，有提醒', failed: '失败', cancelled: '已停止' }[state] || '结果尚未确认');
+const taskHistory = computed(() => Array.isArray(backgroundTaskStatus.value.history) ? backgroundTaskStatus.value.history.filter(isTerminalTask) : []);
+const taskResultFeedback = computed(() => {
+  const task = taskResult.value;
+  if (!task) return null;
+  const result = task.result;
+  const details = [...new Set([
+    ...(Array.isArray(result.failures) ? result.failures : []),
+    ...(Array.isArray(result.warning_details) ? result.warning_details : []),
+    ...(Array.isArray(result.items) ? result.items.filter(item => item.status === 'skipped' && !item.chapter && item.error) : []),
+  ].map(value => typeof value === 'string' ? value : value == null ? ''
+    : [value.item_id || value.path, value.reason || value.error || value.message].filter(Boolean).join('：') || JSON.stringify(value)).filter(Boolean))];
+  const failed = task.state === 'failed' || task.result_status >= 400 || result.success === false || Boolean(result.error)
+    || Number(result.failed) > 0 || (Array.isArray(result.failures) && result.failures.length > 0);
+  const warnings = task.state === 'completed_with_warnings' || task.state === 'cancelled' || task.result_status === 207 || Number(result.warnings) > 0 || details.length > 0;
+  return { type: failed ? 'error' : warnings ? 'warning' : 'success',
+    message: `${taskStateText(task.state)}：${task.message || result.error || result.message || '结果已读取'}`, details };
+});
+const clearTaskResult = () => {
+  ++taskResultGeneration;
+  taskResultController?.abort(); taskResultController = null;
+  taskResult.value = null; taskResultLoading.value = false; taskResultError.value = '';
+};
+const closeTaskResult = () => {
+  clearTaskResult(); taskResultTarget.value = null; taskResultOpen.value = false;
+};
+const readTaskResult = async () => {
+  const target = taskResultTarget.value;
+  if (!pageActive || !auth.isLoggedIn || !auth.isAdmin || !isTerminalTask(target)) return;
+  clearTaskResult();
+  const id = target.task_id, user = auth.user, userId = user?.id, generation = taskResultGeneration;
+  const controller = new AbortController();
+  taskResultController = controller; taskResultLoading.value = true;
+  const current = () => pageActive && generation === taskResultGeneration && taskResultTarget.value === target
+    && auth.isLoggedIn && auth.isAdmin && auth.user === user && auth.user?.id === userId
+    && (target.current ? backgroundTaskStatus.value.task_id === id && isTerminalTask(backgroundTaskStatus.value) && !isTriggeringTask.value : taskResultOpen.value);
+  try {
+    const { data } = await axios.get(`/api/tasks/result/${encodeURIComponent(id)}`, { timeout: 10000, signal: controller.signal, headers: { 'Cache-Control': 'no-cache' } });
+    if (!current()) return;
+    if (data?.task_id !== id) throw new Error('返回的任务结果与所选任务不一致，请重试。');
+    if (!isTerminalTask(data)) throw new Error('任务尚未结束，结果尚未确认。');
+    if (!data.result || typeof data.result !== 'object' || Array.isArray(data.result)) throw new Error('任务结果详情缺失，请重试读取。');
+    taskResult.value = data;
+  } catch (error) {
+    if (current() && error.code !== 'ERR_CANCELED' && error.name !== 'AbortError') taskResultError.value = error.response?.data?.error || error.message || '读取任务结果失败，请重试。';
+  } finally {
+    if (current()) { taskResultLoading.value = false; taskResultController = null; }
+  }
+};
+const openTaskResult = task => {
+  if (!pageActive || !auth.isLoggedIn || !auth.isAdmin || !isTerminalTask(task)) return;
+  closeTaskResult();
+  // 手动查看固定所选任务；只有自动恢复的内联结果跟随当前任务。
+  taskResultTarget.value = { ...task, current: false };
+  taskResultOpen.value = true;
+  return readTaskResult();
+};
 const showTgMenuConfigModal = ref(false);
 const tgMenuSaving = ref(false), tgMenuError = ref('');
 const configuredTgMenuSequence = ref([]);
@@ -289,6 +388,7 @@ const getTaskRowState = (task) => {
 };
 const getTaskRowColor = (task) => {
   if (!isCurrentTask(task) || (isTriggeringTask.value === task.key && !backgroundTaskStatus.value.is_running)) return '';
+  if (backgroundTaskStatus.value.is_running && (taskStopping.value || taskPaused.value || taskPausing.value)) return 'warning';
   return { running: 'success', failed: 'error', completed_with_warnings: 'warning', paused: 'warning', pausing: 'warning' }[backgroundTaskStatus.value.state] || '';
 };
 const getTaskIcon = (task) => ({
@@ -442,6 +542,19 @@ onMounted(() => {
   fetchAvailableTasks();
 });
 
+watch([() => backgroundTaskStatus.value.task_id, () => backgroundTaskStatus.value.state, () => backgroundTaskStatus.value.is_running], () => {
+  if (taskResultTarget.value && !taskResultTarget.value.current) return;
+  closeTaskResult();
+  if (isTerminalTask(backgroundTaskStatus.value) && !isTriggeringTask.value && auth.isLoggedIn && auth.isAdmin) {
+    taskResultTarget.value = { ...backgroundTaskStatus.value, current: true };
+    readTaskResult();
+  }
+}, { immediate: true, flush: 'sync' });
+watch(isTriggeringTask, busy => { if (busy) closeTaskResult(); }, { flush: 'sync' });
+watch([() => auth.isLoggedIn, () => auth.isAdmin, () => auth.user, () => auth.user?.id], () => {
+  closeTaskResult(); taskRunFeedback.value = null;
+}, { flush: 'sync' });
+
 watch([showTgMenuConfigModal, draggableContainerTgMenu], ([visible, container]) => {
   if (visible && container && !sortableInstanceTgMenu) {
     nextTick(() => {
@@ -454,7 +567,7 @@ watch([showTgMenuConfigModal, draggableContainerTgMenu], ([visible, container]) 
     sortableInstanceTgMenu = null;
   }
 });
-onBeforeUnmount(() => { pageActive = false; ++taskCatalogRequest; sortableInstanceTgMenu?.destroy(); });
+onBeforeUnmount(() => { pageActive = false; closeTaskResult(); ++taskCatalogRequest; sortableInstanceTgMenu?.destroy(); });
 
 watch([() => configModel.value?.tg_menu_tasks, availableTasksForTgMenu], ([saved, tgMenuTasks]) => {
   if (!configModel.value) { showTgMenuConfigModal.value = false; configuredTgMenuSequence.value = []; return; }
@@ -481,6 +594,7 @@ watch([() => configModel.value?.tg_menu_tasks, availableTasksForTgMenu], ([saved
 .temp-task-name { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
 .temp-task-description { margin: 6px 0 0; font-size: 12px; line-height: 1.6; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); overflow-wrap: anywhere; white-space: normal; }
 .task-status-message { white-space: pre-wrap; overflow-wrap: anywhere; }
+.scheduler-history-list { max-height: 320px; overflow-y: auto; }
 .scheduler-progress { margin-block-start: 8px; max-inline-size: 320px; }
 .scheduler-progress-meta { display: flex; justify-content: space-between; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: 11px; gap: 12px; margin-block-start: 4px; }
 .scheduler-progress-meta span { min-inline-size: 0; overflow-wrap: anywhere; white-space: normal; }

@@ -159,14 +159,39 @@ async fn scheduled_does_not_restart_a_cancelling_execution() {
 
 #[tokio::test]
 async fn cancelled_local_job_does_not_start_emby_extraction() {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let starts = Arc::new(AtomicUsize::new(0));
+    let read_count = reads.clone();
+    let start_count = starts.clone();
+    let app = Router::new()
+        .route(
+            "/ScheduledTasks",
+            get(move || {
+                read_count.fetch_add(1, Ordering::SeqCst);
+                async { Json(json!([task("Idle", "old", json!("Completed"))])) }
+            }),
+        )
+        .route(
+            "/ScheduledTasks/Running/extract",
+            post(move || {
+                start_count.fetch_add(1, Ordering::SeqCst);
+                async { StatusCode::NO_CONTENT }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let directory = tempfile::tempdir().unwrap();
-    let state = state(directory.path(), "http://127.0.0.1:1");
+    let state = state(directory.path(), &base);
     let work = state.clone();
+    let entered = Arc::new(AtomicUsize::new(0));
+    let entry_count = entered.clone();
     let (release, released) = tokio::sync::oneshot::channel();
     let (observe, observed) = tokio::sync::oneshot::channel();
     let id = state
         .jobs
         .submit("取消验收", move |context| async move {
+            entry_count.fetch_add(1, Ordering::SeqCst);
             released.await.unwrap();
             let error = emby::scheduled(&work, "MediaInfoExtractTask", &context)
                 .await
@@ -177,9 +202,17 @@ async fn cancelled_local_job_does_not_start_emby_extraction() {
         .await
         .unwrap();
     state.jobs.control(Some(&id), "stop").await.unwrap();
-    release.send(()).unwrap();
-    assert_eq!(observed.await.unwrap(), "任务已取消");
-    assert_eq!(finish(&state, &id).await["state"], "cancelled");
+    let _ = release.send(());
+    match observed.await {
+        Ok(message) => assert_eq!(message, "任务已取消"),
+        Err(_) => assert_eq!(entered.load(Ordering::SeqCst), 0),
+    }
+    let result = finish(&state, &id).await;
+    assert_eq!(result["state"], "cancelled");
+    assert_eq!(result["message"], "任务已取消");
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+    server.abort();
 }
 
 async fn uncertain_start(executes: bool) -> (Value, usize) {

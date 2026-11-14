@@ -24,7 +24,7 @@ const completed = { ...running, is_running: false, state: 'completed', current_a
 function fixture(t, delayedStatus) {
   const oldStatus = deferred(), terminal = deferred(), requests = [], stops = [], unmounts = [];
   const auth = reactive({ isLoggedIn: true, isAdmin: true });
-  let server = { ...idle }, statusReads = 0, resultReads = 0, operation;
+  let server = { ...idle }, statusReads = 0, resultReads = 0, operation, disposed = false;
   const client = axios.create({ adapter: async config => {
     requests.push({ method: config.method, path: config.url });
     let data;
@@ -52,13 +52,18 @@ function fixture(t, delayedStatus) {
     this.subscribe = useTaskStatus; this.refresh = refreshTaskStatus; this.latest = backgroundTaskStatus;`, context);
   context.subscribe();
   const bootstrap = context.refresh();
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    unmounts.forEach(callback => callback()); stops.forEach(stop => stop());
+  };
   t.after(async () => {
     server = { ...completed }; oldStatus.resolve(); terminal.resolve();
     await operation?.catch(() => {}); await flush();
-    unmounts.forEach(callback => callback()); stops.forEach(stop => stop());
+    dispose();
   });
   return {
-    context, bootstrap, oldStatus, requests,
+    context, bootstrap, oldStatus, requests, dispose,
     statusReads: () => statusReads,
     async run() { operation = client.post('/api/tasks/run', {}); await flush(); assert.equal(resultReads, 2); },
     async finish() { server = { ...completed }; terminal.resolve(); const result = await operation; await flush(); return result; },
@@ -78,6 +83,15 @@ test('accepted task invalidates a delayed status snapshot from before submission
   assert.equal(f.requests.filter(request => request.method === 'post').length, 1);
 });
 
+test('accepted task refreshes its status without waiting for an obsolete blocked read', async t => {
+  const f = fixture(t, 0);
+  await f.run();
+  assert.equal(f.context.latest.value.task_id, running.task_id);
+  assert.equal(f.context.latest.value.is_running, true);
+  assert.equal(f.statusReads(), 2);
+  await f.finish();
+});
+
 test('completed task invalidates an in-flight running snapshot instead of resurrecting it', async t => {
   const f = fixture(t, 1);
   await f.bootstrap; await f.run();
@@ -89,12 +103,20 @@ test('completed task invalidates an in-flight running snapshot instead of resurr
   assert.equal(f.requests.filter(request => request.method === 'post').length, 1);
 });
 
-test('acceptance and completion sharing a blocked status read coalesce into one fresh terminal read', async t => {
+test('acceptance and completion both update status while an obsolete read remains blocked', async t => {
   const f = fixture(t, 0);
   await f.run(); await f.finish();
   f.oldStatus.resolve(); await f.bootstrap; await flush();
   assert.equal(f.context.latest.value.state, 'completed');
   assert.equal(f.context.latest.value.is_running, false);
-  assert.equal(f.statusReads(), 2);
+  assert.equal(f.statusReads(), 3);
   assert.equal(f.requests.filter(request => request.method === 'post').length, 1);
+});
+
+test('the last subscriber unmount discards its delayed status response', async t => {
+  const f = fixture(t, 0);
+  const before = f.context.latest.value;
+  f.dispose(); f.oldStatus.resolve();
+  await f.bootstrap; await flush();
+  assert.equal(f.context.latest.value, before);
 });

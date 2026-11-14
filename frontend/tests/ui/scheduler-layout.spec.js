@@ -40,7 +40,9 @@ test('task rows retain the original task identity when its phase changes and sho
   await expect(backup.getByText('待执行', { exact: true })).toBeVisible();
   await expect(backup.locator('.scheduler-progress')).toHaveCount(0);
   await expect(credits.getByRole('button', { name: '执行', exact: true })).toBeDisabled();
-  api.setTask({ ...active, is_running: false, state: 'completed', current_action: '空闲', message: '已完成' });
+  const completed = { ...active, is_running: false, state: 'completed', current_action: '空闲', message: '已完成' };
+  api.respond('GET', '/api/tasks/result/full-library-credits', { ...completed, result_status: 200, result: { message: completed.message } });
+  api.setTask(completed);
   await expect(credits.getByText('已完成', { exact: true })).toBeVisible();
   await expect(credits.locator('.scheduler-progress')).toHaveCount(0);
   await expect(credits.getByRole('button', { name: '执行', exact: true })).toBeEnabled();
@@ -239,7 +241,9 @@ test('task status polling keeps an active drag sortable and its preview outside 
   await page.mouse.down();
   await page.mouse.move(start.x + start.width / 2 - 8, start.y + start.height / 2, { steps: 2 });
   await expect(page.locator('body > .sortable-fallback')).toBeVisible();
-  api.setTask({ ...active, is_running: false, state: 'completed', last_action: tasks[1].name, current_action: '空闲', message: '拖拽期间状态已回读' });
+  const completed = { ...active, is_running: false, state: 'completed', last_action: tasks[1].name, current_action: '空闲', message: '拖拽期间状态已回读' };
+  api.respond('GET', '/api/tasks/result/full-library-credits', { ...completed, result_status: 200, result: { message: completed.message } });
+  api.setTask(completed);
   await expect(group.locator(`[data-task-key="${tasks[1].key}"]`).getByText('已完成', { exact: true })).toBeVisible();
   const target = await group.locator(`[data-task-key="${tasks[0].key}"]`).boundingBox();
   await page.mouse.move(target.x + 12, target.y + 16, { steps: 20 });

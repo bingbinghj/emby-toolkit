@@ -234,6 +234,86 @@ INSERT INTO app_settings(setting_key, value_json)
 VALUES('media_organize_history_started_at', to_jsonb(NOW()))
 ON CONFLICT(setting_key) DO NOTHING;
 
+CREATE TABLE IF NOT EXISTS media_organize_queue (
+    id TEXT PRIMARY KEY,
+    queue_order BIGSERIAL NOT NULL,
+    item_id TEXT NOT NULL,
+    mode TEXT NOT NULL CHECK (mode IN ('reprocess', 'rescrape')),
+    item_json JSONB NOT NULL,
+    history_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    operator_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'completed', 'failed', 'cancelled', 'interrupted')),
+    task_id TEXT,
+    message TEXT NOT NULL DEFAULT '',
+    result JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ
+);
+ALTER TABLE media_organize_queue ADD COLUMN IF NOT EXISTS queue_order BIGSERIAL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_media_organize_queue_active ON media_organize_queue(item_id, mode)
+    WHERE status IN ('queued', 'running');
+CREATE INDEX IF NOT EXISTS idx_media_organize_queue_order ON media_organize_queue(status, queue_order);
+
+CREATE TABLE IF NOT EXISTS durable_jobs (
+    id TEXT PRIMARY KEY,
+    job_order BIGSERIAL NOT NULL,
+    lane TEXT NOT NULL DEFAULT 'main',
+    spec_json JSONB NOT NULL,
+    state_json JSONB NOT NULL,
+    checkpoint_json JSONB NOT NULL DEFAULT '{"plans":{},"completed":{}}'::jsonb,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_durable_jobs_order ON durable_jobs(lane, job_order);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_durable_monitor_batch ON durable_jobs((spec_json->'payload'->>'batch_id'))
+    WHERE lane='monitor' AND spec_json->>'kind'='monitor';
+CREATE TABLE IF NOT EXISTS durable_job_steps (
+    job_id TEXT NOT NULL REFERENCES durable_jobs(id) ON DELETE CASCADE,
+    step_key TEXT NOT NULL,
+    value_json JSONB NOT NULL,
+    PRIMARY KEY(job_id,step_key)
+);
+
+CREATE TABLE IF NOT EXISTS webhook_pending (
+    event_key TEXT PRIMARY KEY,
+    event_json JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE TABLE IF NOT EXISTS webhook_prepared (
+    item_id TEXT PRIMARY KEY,
+    top_id TEXT NOT NULL,
+    path TEXT NOT NULL,
+    revision_json JSONB,
+    expires_at TIMESTAMPTZ NOT NULL
+);
+ALTER TABLE webhook_prepared ADD COLUMN IF NOT EXISTS revision_json JSONB;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_durable_webhook_pending ON durable_jobs((spec_json->'payload'->'event'->>'_pending_id'))
+    WHERE spec_json->>'kind'='webhook' AND spec_json->'payload'->'event'->>'_pending_id' IS NOT NULL;
+CREATE TABLE IF NOT EXISTS monitor_pending_events (
+    id TEXT PRIMARY KEY,
+    path TEXT NOT NULL,
+    batch_id TEXT,
+    settings_json JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE monitor_pending_events ADD COLUMN IF NOT EXISTS settings_json JSONB;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_monitor_pending_path ON monitor_pending_events(path) WHERE batch_id IS NULL;
+CREATE INDEX IF NOT EXISTS idx_monitor_pending_batch ON monitor_pending_events(batch_id);
+CREATE TABLE IF NOT EXISTS notification_outbox (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    method TEXT NOT NULL,
+    payload_json JSONB NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at BIGINT NOT NULL,
+    last_error TEXT,
+    attempts INT NOT NULL DEFAULT 0,
+    next_attempt_at BIGINT NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_notification_outbox_pending ON notification_outbox(status,next_attempt_at,created_at);
+
 -- Quality scoring no longer determines processing results. Retain legacy log
 -- columns and error records for existing databases and exports.
 UPDATE app_settings SET value_json=value_json - 'min_score_for_review'

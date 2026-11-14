@@ -1,7 +1,8 @@
 import { shallowReactive } from 'vue'
 import { useToast } from 'vue-toastification'
+import { feedbackDialogs } from './feedbackDialogs.js'
 
-export const feedbackDialogs = shallowReactive([])
+export { feedbackDialogs }
 let nextDialogId = 0
 
 function showMessage(type, content, options = {}) {
@@ -30,19 +31,22 @@ function showDialog(type, options) {
 export function dismissDialog(entry) {
   if (entry.busy) return
   const index = feedbackDialogs.indexOf(entry)
-  if (index >= 0) feedbackDialogs.splice(index, 1)
+  if (index < 0) return
+  feedbackDialogs.splice(index, 1)
   entry.options.onClose?.()
 }
 
 export async function answerDialog(entry, positive) {
-  if (entry.busy) return
+  if (entry.busy || !feedbackDialogs.includes(entry)) return
   entry.busy = true
   try {
     const result = await (positive ? entry.options.onPositiveClick?.() : entry.options.onNegativeClick?.())
     entry.busy = false
+    if (!feedbackDialogs.includes(entry)) return
     if (result !== false) dismissDialog(entry)
   } catch (error) {
     entry.busy = false
+    if (!feedbackDialogs.includes(entry)) return
     message.error(error.response?.data?.error || error.message || '操作失败，请查看处理结果。')
   }
 }

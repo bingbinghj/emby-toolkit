@@ -6,8 +6,147 @@ const second = { id: '00000000-0000-4000-8000-000000000202', item_id: '202', nam
 const listPath = '/api/media_organize/history';
 const list = (items, total = items.length) => ({ items, total });
 const result = ids => ({ selected_count: ids.length, updated: ids.length, failed: 0, items: ids.map(item_id => ({ item_id, status: 'completed', report: { updated: 1 } })), message: '媒体重新整理完成' });
-const selectRow = page => page.getByTestId('organize-items').locator('tbody tr').first().getByRole('checkbox').check();
+const selectRow = page => page.getByTestId('organize-items').locator('tbody tr').filter({ has: page.getByRole('checkbox') }).first().getByRole('checkbox').check();
 const posts = api => api.requests.filter(request => request.method === 'POST' && request.path === path);
+const changePageSize = async (page, size) => {
+  await page.getByTestId('organize-page-size').click();
+  await page.locator('.v-overlay--active').getByText(String(size), { exact: true }).click();
+};
+const historyRecords = (count = 1000, start = 1) => Array.from({ length: count }, (_, index) => ({ ...first,
+  id: `00000000-0000-4000-8000-${String(start + index).padStart(12, '0')}`, item_id: `media-${start + index}`, name: `记录${start + index}`, image_tag: null,
+}));
+const acceptedQueue = ids => ({ mode: 'reprocess', queued_count: ids.length, duplicate_count: 0,
+  queue_ids: ids.map(id => `queue-${id}`), items: ids.map(item_id => ({ id: `queue-${item_id}`, item_id, mode: 'reprocess', status: 'queued' })),
+  message: '媒体已加入整理队列',
+});
+
+for (const viewport of [{ width: 1280, height: 720 }, { width: 1100, height: 450 }]) {
+  test(`the default 50-record page keeps its footer visible while records scroll at ${viewport.width}x${viewport.height}`, async ({ page, api }) => {
+    await page.setViewportSize(viewport);
+    const records = historyRecords(50);
+    api.respond('GET', listPath, list(records, 100));
+    await page.goto('/media-organize');
+    const table = page.getByTestId('organize-items'), footer = page.locator('.media-organize-page .v-card-actions').first();
+    await expect(table).toContainText('记录1');
+    await expect(footer).toBeInViewport({ ratio: 1 });
+    expect(api.requests.find(request => request.path === listPath).query.page_size).toBe('50');
+    const scroll = table.locator('.v-table__wrapper');
+    expect(await scroll.evaluate(element => element.scrollHeight > element.clientHeight)).toBe(true);
+    await scroll.evaluate(element => { element.scrollTop = element.scrollHeight; });
+    const lastRecord = table.getByRole('link', { name: '记录50', exact: true });
+    await expect(lastRecord).toHaveAttribute('href', '/edit-media/media-50');
+    await expect(lastRecord).toBeVisible();
+    await expect(footer).toBeInViewport({ ratio: 1 });
+    await table.locator('thead').getByRole('checkbox').check();
+    await expect(page.getByTestId('organize-selection')).toContainText('已选择 50 条记录');
+    await expect(footer).toBeInViewport({ ratio: 1 });
+    await page.getByTestId('organize-selection').locator('.v-chip').filter({ hasText: '记录50 · 成功' }).locator('.v-chip__close').click();
+    await expect(page.getByTestId('organize-selection')).toContainText('已选择 49 条记录');
+    await expect(footer).toBeInViewport({ ratio: 1 });
+    const geometry = await footer.evaluate(element => ({ bottom: element.getBoundingClientRect().bottom,
+      dockTop: document.querySelector('.footer-nav-container')?.getBoundingClientRect().top ?? innerHeight,
+      documentHeight: document.documentElement.scrollHeight, viewportHeight: innerHeight,
+    }));
+    expect(geometry.bottom).toBeLessThanOrEqual(geometry.dockTop);
+    expect(geometry.documentHeight).toBeLessThanOrEqual(geometry.viewportHeight + 2);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  });
+}
+
+test('MP page-size choices and first-last controls show the requested record range and total', async ({ page, api }) => {
+  api.respond('GET', listPath, list([first], 123));
+  await page.goto('/media-organize');
+  const info = page.getByTestId('organize-page-info');
+  await expect(info).toHaveText('1 - 50 / 123');
+  expect(api.requests.find(request => request.path === listPath).query.page_size).toBe('50');
+  await page.getByTestId('organize-page-size').click();
+  for (const size of [25, 50, 100, 500, 1000]) await expect(page.locator('.v-overlay--active').getByText(String(size), { exact: true })).toBeVisible();
+  await page.locator('.v-overlay--active').getByText('50', { exact: true }).click();
+  await page.getByTestId('organize-pagination').locator('.v-pagination__last button').click();
+  await expect(info).toHaveText('101 - 123 / 123');
+  await page.getByTestId('organize-pagination').locator('.v-pagination__first button').click();
+  await expect(info).toHaveText('1 - 50 / 123');
+  expect(api.requests.filter(request => request.path === listPath).map(request => request.query.page)).toEqual(['1', '3', '1']);
+});
+
+test('1000 returned history rows render as a virtual table and all are accepted in one queue submission', async ({ page, api }) => {
+  const records = historyRecords();
+  api.respond('GET', listPath, request => list(records.slice(0, Number(request.query.page_size)), records.length));
+  api.respond('POST', path, request => acceptedQueue(request.body.item_ids), 202);
+  await page.goto('/media-organize');
+  await changePageSize(page, 1000);
+  const table = page.getByTestId('organize-items');
+  await expect(page.getByTestId('organize-page-info')).toHaveText('1 - 1000 / 1000');
+  expect(api.requests.filter(request => request.path === listPath).at(-1).query).toMatchObject({ page: '1', page_size: '1000' });
+  expect(await table.locator('tbody tr').count()).toBeLessThan(100);
+  const firstRowCheckbox = table.locator('tbody tr').filter({ has: page.getByRole('checkbox') }).first().getByRole('checkbox');
+  await firstRowCheckbox.focus();
+  await firstRowCheckbox.press('Space');
+  await expect(page.getByTestId('organize-selection')).toContainText('已选择 1 条记录');
+  await table.locator('thead').getByRole('checkbox').check();
+  await expect(page.getByTestId('organize-selection')).toContainText('已选择 1000 条记录，对应 1000 项媒体');
+  expect(await page.getByTestId('organize-selected-scroll').locator('.v-chip').count()).toBeLessThan(30);
+  await page.getByTestId('organize-selected').click();
+  const review = page.getByTestId('organize-confirmation-scroll');
+  await expect(review).toBeVisible();
+  expect(await review.locator('.v-list-item').count()).toBeLessThan(30);
+  await page.getByTestId('organize-confirm').click();
+  await expect(page.getByTestId('organize-result')).toContainText('媒体已加入整理队列');
+  expect(posts(api)).toHaveLength(1);
+  expect(posts(api)[0].body.item_ids).toEqual(records.map(item => item.item_id));
+  expect(posts(api)[0].body.history_ids).toEqual(records.map(item => item.id));
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+
+test('a virtual cross-page selection can remove its 1000th record before confirmation', async ({ page, api }) => {
+  const records = historyRecords(2000);
+  api.respond('GET', listPath, request => {
+    const size = Number(request.query.page_size), offset = (Number(request.query.page) - 1) * size;
+    return list(records.slice(offset, offset + size), records.length);
+  });
+  api.respond('POST', path, request => acceptedQueue(request.body.item_ids), 202);
+  await page.goto('/media-organize');
+  await changePageSize(page, 1000);
+  await page.getByTestId('organize-items').locator('thead').getByRole('checkbox').check();
+  await expect(page.getByTestId('organize-selection')).toContainText('已选择 1000 条记录');
+  await page.getByTestId('organize-pagination').locator('.v-pagination__item').filter({ hasText: /^2$/ }).getByRole('button').click();
+  await expect(page.getByTestId('organize-page-info')).toHaveText('1001 - 2000 / 2000');
+  const selected = page.getByTestId('organize-selected-scroll');
+  await selected.evaluate(element => { element.scrollTop = element.scrollHeight; });
+  const lastChip = selected.locator('.v-chip').filter({ hasText: '记录1000 · 成功' });
+  await expect(lastChip).toBeVisible();
+  await lastChip.locator('.v-chip__close').click();
+  await expect(page.getByTestId('organize-selection')).toContainText('已选择 999 条记录，对应 999 项媒体');
+  await page.getByTestId('organize-selected').click();
+  await page.getByTestId('organize-confirm').click();
+  await expect(page.getByTestId('organize-result')).toContainText('媒体已加入整理队列');
+  expect(posts(api)[0].body.item_ids).toEqual(records.slice(0, 999).map(item => item.item_id));
+  expect(posts(api)[0].body.history_ids).not.toContain(records[999].id);
+});
+
+test('mobile 1000-record cards keep the footer reachable and empty filters retain the selected page size', async ({ page, api }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const records = historyRecords();
+  api.respond('GET', listPath, request => list(request.query.status === 'failed' ? [] : records.slice(0, Number(request.query.page_size)), request.query.status === 'failed' ? 0 : records.length));
+  await page.goto('/media-organize');
+  await changePageSize(page, 1000);
+  const cards = page.getByTestId('organize-items-mobile');
+  await expect(page.getByTestId('organize-page-info')).toHaveText('1 - 1000 / 1000');
+  expect(await cards.locator('.history-card').count()).toBeLessThan(50);
+  await cards.locator('.history-card-scroll').evaluate(element => { element.scrollTop = element.scrollHeight; });
+  const lastRecord = cards.getByRole('link', { name: '记录1000', exact: true });
+  await expect(lastRecord).toHaveAttribute('href', '/edit-media/media-1000');
+  await expect(lastRecord).toBeVisible();
+  await page.getByTestId('organize-page-size').scrollIntoViewIfNeeded();
+  await expect(page.getByTestId('organize-page-size')).toBeInViewport();
+  await page.getByTestId('organize-status-filter').click();
+  await page.locator('.v-overlay--active').getByText('失败', { exact: true }).click();
+  await expect(cards).toContainText('当前条件下没有入库处理记录');
+  await expect(page.getByTestId('organize-page-info')).toHaveText('0 - 0 / 0');
+  expect(api.requests.filter(request => request.path === listPath).at(-1).query).toMatchObject({ page: '1', page_size: '1000', status: 'failed' });
+  expect(posts(api)).toHaveLength(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
 
 test('a selected movie runs the full background operation after scope confirmation', async ({ page, api }) => {
   api.respond('GET', listPath, list([first]));
@@ -21,12 +160,12 @@ test('a selected movie runs the full background operation after scope confirmati
   await dialog.getByTestId('organize-confirm').click();
   await expect(page.getByTestId('organize-result')).toContainText('媒体重新整理完成');
   expect(posts(api)).toHaveLength(1);
-  expect(posts(api)[0].body).toEqual({ item_ids: ['101'], history_ids: ['00000000-0000-4000-8000-000000000101'] });
+  expect(posts(api)[0].body).toEqual({ item_ids: ['101'], history_ids: ['00000000-0000-4000-8000-000000000101'], mode: 'reprocess' });
   expect(api.requests.some(request => request.path === '/api/tasks/result/organize-complete')).toBe(true);
 });
 
 test('cross page selections remain visible and only their IDs are submitted', async ({ page, api }) => {
-  api.respond('GET', listPath, request => list(Number(request.query.page) >= 2 ? [second] : [first], 48));
+  api.respond('GET', listPath, request => list(Number(request.query.page) >= 2 ? [second] : [first], 100));
   api.queueTask('POST', path, result(['101', '202']), { id: 'organize-two', status: 200, state: 'completed', polls: 0 });
   await page.goto('/media-organize');
   await selectRow(page);
@@ -38,7 +177,7 @@ test('cross page selections remain visible and only their IDs are submitted', as
   await page.getByTestId('organize-selected').click();
   await page.getByTestId('organize-confirm').click();
   await expect(page.getByTestId('organize-result')).toBeVisible();
-  expect(posts(api)[0].body).toEqual({ item_ids: ['101', '202'], history_ids: ['00000000-0000-4000-8000-000000000101', '00000000-0000-4000-8000-000000000202'] });
+  expect(posts(api)[0].body).toEqual({ item_ids: ['101', '202'], history_ids: ['00000000-0000-4000-8000-000000000101', '00000000-0000-4000-8000-000000000202'], mode: 'reprocess' });
   expect(api.requests.find(request => request.path === listPath && request.query.page === '2').query.page).toBe('2');
 });
 
@@ -104,7 +243,7 @@ test('ETK admission history is the source and an episode submits only its own ID
   await expect(page.locator('.v-overlay--active').filter({ has: page.getByTestId('organize-confirm') })).toContainText('剧集只处理所选单集');
   await page.getByTestId('organize-confirm').click();
   await expect(page.getByTestId('organize-result')).toContainText('媒体重新整理完成');
-  expect(posts(api)[0].body).toEqual({ item_ids: ['episode-5'], history_ids: ['00000000-0000-4000-8000-000000000005'] });
+  expect(posts(api)[0].body).toEqual({ item_ids: ['episode-5'], history_ids: ['00000000-0000-4000-8000-000000000005'], mode: 'reprocess' });
 });
 
 
@@ -153,7 +292,7 @@ test('confirmed organize reloads history status and preserves the selected recor
   await expect(page.getByTestId('organize-items')).toContainText('媒体已整理，图片待确认');
   await expect(page.getByTestId('organize-selection')).toContainText('有提醒');
   await expect(page.getByTestId('organize-selection')).toContainText('已选择 1 条记录');
-  expect(posts(api)[0].body).toEqual({ item_ids: ['101'], history_ids: ['00000000-0000-4000-8000-000000000101'] });
+  expect(posts(api)[0].body).toEqual({ item_ids: ['101'], history_ids: ['00000000-0000-4000-8000-000000000101'], mode: 'reprocess' });
 });
 
 test('repeated historical events for one movie submit all record IDs and one media ID', async ({ page, api }) => {
@@ -161,14 +300,14 @@ test('repeated historical events for one movie submit all record IDs and one med
   api.respond('GET', listPath, list([first, repeated], 2));
   api.respond('POST', path, result(['101']));
   await page.goto('/media-organize');
-  const rows = page.getByTestId('organize-items').locator('tbody tr');
+  const rows = page.getByTestId('organize-items').locator('tbody tr').filter({ has: page.getByRole('checkbox') });
   await rows.nth(0).getByRole('checkbox').check();
   await rows.nth(1).getByRole('checkbox').check();
   await expect(page.getByTestId('organize-selection')).toContainText('已选择 2 条记录，对应 1 项媒体');
   await page.getByTestId('organize-selected').click();
   await page.getByTestId('organize-confirm').click();
   await expect(page.getByTestId('organize-result')).toBeVisible();
-  expect(posts(api)[0].body).toEqual({ item_ids: ['101'], history_ids: ['00000000-0000-4000-8000-000000000101', '00000000-0000-4000-8000-000000000111'] });
+  expect(posts(api)[0].body).toEqual({ item_ids: ['101'], history_ids: ['00000000-0000-4000-8000-000000000101', '00000000-0000-4000-8000-000000000111'], mode: 'reprocess' });
 });
 
 test('typing a history query applies the MP delay and keeps real failure records available for retry', async ({ page, api }) => {

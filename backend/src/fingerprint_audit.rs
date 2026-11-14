@@ -208,7 +208,7 @@ async fn submit(
     let run_id = body["run_id"].as_str().map(str::to_string);
     let task = state
         .jobs
-        .submit("全库指纹校验与补齐", move |context| async move {
+        .submit_persistent("全库指纹校验与补齐", crate::jobs::JobSpec::new("fingerprint_audit", json!({"mode":mode,"run_id":run_id})), move |context| async move {
             scan(&work, &mode, run_id.as_deref(), &context).await
         })
         .await?;
@@ -216,6 +216,9 @@ async fn submit(
         StatusCode::ACCEPTED,
         Json(json!({"task_id":task,"message":"全库指纹校验与补齐已提交，可查看最新报告和日志"})),
     ))
+}
+pub(crate) async fn execute_persisted(state: &AppState, payload: &Value, context: &JobContext) -> Result<(u16, Value)> {
+    Ok((200, scan(state, &string(payload, "mode"), payload["run_id"].as_str(), context).await?))
 }
 async fn config_identity(state: &AppState) -> String {
     let config = state.config.read().await;
@@ -388,6 +391,10 @@ pub async fn scan(
     context: &JobContext,
 ) -> Result<Value> {
     let identity = config_identity(state).await;
+    let initialized = context.completed("fingerprint-initialized").await?;
+    let saved_run_id = initialized.as_ref().and_then(|value| value["run_id"].as_str());
+    let mode = if initialized.is_some() { "resume" } else { mode };
+    let run_id = saved_run_id.or(run_id);
     let (mut inventory, mut progress) = if mode == "start" {
         let rows = crate::revalidation::fingerprint_rows(state, None).await?;
         let mut items = vec![];
@@ -409,6 +416,7 @@ pub async fn scan(
         for (key, value) in [(INVENTORY, &inventory), (PROGRESS, &progress)] {
             sqlx::query("INSERT INTO app_settings(setting_key,value_json) VALUES($1,$2) ON CONFLICT(setting_key) DO UPDATE SET value_json=EXCLUDED.value_json").bind(key).bind(value).execute(&mut *transaction).await?;
         }
+        context.complete_in_tx(&mut transaction, "fingerprint-initialized", &json!({"run_id":id})).await?;
         transaction.commit().await?;
         (inventory, progress)
     } else {
@@ -507,6 +515,9 @@ pub async fn scan(
     progress["state"] = json!("running");
     progress.as_object_mut().unwrap().remove("error");
     save(state, &mut progress).await?;
+    if initialized.is_none() {
+        context.complete("fingerprint-initialized", &json!({"run_id":progress["run_id"]})).await?;
+    }
     let mut last_saved = tokio::time::Instant::now();
     let reader = crate::revalidation::AuditReader::new(context, true);
     let verifier = reader.verifier();
@@ -590,6 +601,7 @@ pub async fn scan(
                 progress["failed"].as_array_mut().unwrap().push(ordinal);
             }
             progress["pending"].as_array_mut().unwrap().remove(0);
+            db::save_setting(&state.db, PROGRESS, &progress).await?;
             if (number + 1) % 50 == 0 || last_saved.elapsed() >= std::time::Duration::from_secs(5) {
                 save(state, &mut progress).await?;
                 last_saved = tokio::time::Instant::now();

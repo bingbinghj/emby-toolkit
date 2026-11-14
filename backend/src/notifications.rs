@@ -5,9 +5,18 @@ use crate::{
     state::string,
 };
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 
 tokio::task_local! { static OPERATOR: String; }
+tokio::task_local! { static DELIVERY_KEY: String; }
+tokio::task_local! { static QUEUE_ONLY: bool; }
+
+pub async fn with_delivery_key<F: std::future::Future>(
+    key: impl Into<String>,
+    future: F,
+) -> F::Output {
+    DELIVERY_KEY.scope(key.into(), future).await
+}
 
 pub fn current_operator() -> Option<String> {
     OPERATOR
@@ -243,7 +252,9 @@ async fn targets(state: &AppState, config: &Value, kind: &str) -> BTreeSet<Strin
 
 pub struct Service {
     pub api_base: String,
-    queue: tokio::sync::Mutex<VecDeque<(String, String, Value)>>,
+    db: std::sync::Mutex<Option<sqlx::PgPool>>,
+    delivery: tokio::sync::Mutex<()>,
+    wake: tokio::sync::Notify,
 }
 impl Default for Service {
     fn default() -> Self {
@@ -254,20 +265,43 @@ impl Service {
     pub fn with_api_base(api_base: String) -> Self {
         Self {
             api_base,
-            queue: tokio::sync::Mutex::new(VecDeque::new()),
+            db: std::sync::Mutex::new(None),
+            delivery: tokio::sync::Mutex::new(()),
+            wake: tokio::sync::Notify::new(),
         }
     }
+    fn bind(&self, db: &sqlx::PgPool) {
+        *self.db.lock().unwrap_or_else(|error| error.into_inner()) = Some(db.clone());
+    }
     pub async fn pending(&self) -> usize {
-        self.queue.lock().await.len()
+        let db = self
+            .db
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        let Some(db) = db else { return 0 };
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM notification_outbox WHERE status='pending'",
+        )
+        .fetch_one(&db)
+        .await
+        .unwrap_or(0)
+        .max(0) as usize
     }
 }
 
 pub async fn run(state: AppState, stop: tokio_util::sync::CancellationToken) {
+    state.notifications.bind(&state.db);
     let mut timer = tokio::time::interval(std::time::Duration::from_secs(10));
     loop {
         tokio::select! {
             _ = stop.cancelled() => break,
-            _ = timer.tick() => {
+            _ = async {
+                tokio::select! {
+                    _ = timer.tick() => {},
+                    _ = state.notifications.wake.notified() => {},
+                }
+            } => {
                 tokio::select! {
                     _ = stop.cancelled() => break,
                     _ = flush(&state) => {},
@@ -278,44 +312,94 @@ pub async fn run(state: AppState, stop: tokio_util::sync::CancellationToken) {
 }
 
 pub async fn flush(state: &AppState) {
+    if let Err(error) = flush_ready(state, None).await {
+        tracing::warn!(
+            "[通知] 待发送通知保留，读取或保存失败：{}",
+            crate::logs::redact(&error.1)
+        );
+    }
+}
+
+async fn flush_ready(state: &AppState, only: Option<&str>) -> Result<()> {
+    state.notifications.bind(&state.db);
+    let _gate = state.notifications.delivery.lock().await;
     loop {
         let config = state.config.read().await.clone();
         if !in_send_window(&config, chrono::Local::now().time()) {
-            return;
+            return Ok(());
         }
-        let Some((kind, method, payload)) = state.notifications.queue.lock().await.pop_front()
-        else {
-            return;
+        // Keeping the row locked until the response is saved also prevents two
+        // workers from sending the same persisted notification concurrently.
+        let mut tx = state.db.begin().await?;
+        let row: Option<(String, String, String, Value, i32)> = sqlx::query_as(
+            "SELECT id,kind,method,payload_json,attempts FROM notification_outbox WHERE status='pending' AND next_attempt_at<=$1 AND ($2::TEXT IS NULL OR id=$2) ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED",
+        ).bind(chrono::Utc::now().timestamp()).bind(only).fetch_optional(&mut *tx).await?;
+        let Some((id, kind, method, payload, attempts)) = row else {
+            return Ok(());
         };
         if !enabled(&config, &kind) {
+            sqlx::query("UPDATE notification_outbox SET status='discarded' WHERE id=$1")
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
             continue;
         }
         let token = string(&config, "telegram_bot_token");
-        if let Err(error) = send(state, &token, &method, &payload).await {
-            tracing::warn!("[通知] 延迟通知发送失败：{}", error.1);
+        match send(state, &token, &method, &payload).await {
+            Ok(()) => {
+                sqlx::query("UPDATE notification_outbox SET status='sent',last_error=NULL,attempts=attempts+1 WHERE id=$1")
+                    .bind(&id).execute(&mut *tx).await?;
+            }
+            Err(error) => {
+                let reason: String = crate::logs::redact(&error.1).chars().take(1000).collect();
+                let delay = (5_i64 << attempts.clamp(0, 6)).min(300);
+                sqlx::query("UPDATE notification_outbox SET last_error=$2,attempts=attempts+1,next_attempt_at=$3 WHERE id=$1")
+                    .bind(&id).bind(&reason).bind(chrono::Utc::now().timestamp()+delay)
+                    .execute(&mut *tx).await?;
+                tracing::warn!("[通知] 通知发送失败，保留并稍后重试：{reason}");
+            }
         }
+        tx.commit().await?;
     }
 }
 
 async fn deliver(
     state: &AppState,
     kind: &str,
-    token: &str,
+    _token: &str,
     method: &str,
     payload: &Value,
 ) -> Result<bool> {
+    use sha2::{Digest, Sha256};
+    state.notifications.bind(&state.db);
+    let id = DELIVERY_KEY
+        .try_with(|key| {
+            let value = json!([kind, method, payload]);
+            format!("{key}:{:x}", Sha256::digest(value.to_string().as_bytes()))
+        })
+        .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
+    sqlx::query("INSERT INTO notification_outbox(id,kind,method,payload_json,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO NOTHING")
+        .bind(&id).bind(kind).bind(method).bind(payload).bind(chrono::Utc::now().timestamp_millis())
+        .execute(&state.db).await?;
     let config = state.config.read().await.clone();
-    if !in_send_window(&config, chrono::Local::now().time()) {
-        state.notifications.queue.lock().await.push_back((
-            kind.into(),
-            method.into(),
-            payload.clone(),
-        ));
-        tracing::info!("[通知] 当前不在发送时间内，通知已排队");
+    if QUEUE_ONLY.try_with(|only| *only).unwrap_or(false)
+        || !in_send_window(&config, chrono::Local::now().time())
+    {
+        state.notifications.wake.notify_one();
+        tracing::info!("[通知] 通知已持久排队，等待发送");
         Ok(false)
     } else {
-        send(state, token, method, payload).await?;
-        Ok(true)
+        flush_ready(state, Some(&id)).await?;
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM notification_outbox WHERE id=$1")
+                .bind(&id)
+                .fetch_one(&state.db)
+                .await?;
+        if status == "pending" {
+            state.notifications.wake.notify_one();
+        }
+        Ok(status == "sent")
     }
 }
 
@@ -1174,6 +1258,10 @@ pub async fn media(
 }
 
 /// A failed admission is a real organization result, independently of success notifications.
+pub async fn enqueue_failure(state: &AppState, item: &Value, reason: &str) -> Result<()> {
+    QUEUE_ONLY.scope(true, failure(state, item, reason)).await
+}
+
 pub async fn failure(state: &AppState, item: &Value, reason: &str) -> Result<()> {
     let config = state.config.read().await.clone();
     if !enabled(&config, "recognize_fail") {

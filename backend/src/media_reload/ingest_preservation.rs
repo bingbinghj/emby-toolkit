@@ -15,13 +15,19 @@ pub(crate) struct Guard {
     recovery: PathBuf,
     parent: Value,
     scope: BTreeMap<String, Value>,
+    selected_ids: Vec<String>,
 }
 
 fn observed_scope(members: &[Value]) -> BTreeMap<String, Value> {
     members.iter().map(|member| (string(member, "Id"), json!({"Id":member["Id"],"Type":member["Type"],"Path":member["Path"],"Chapters":member["Chapters"],"MediaStreams":member["MediaStreams"],"MediaSources":member["MediaSources"]}))).collect()
 }
 
-async fn members(state: &AppState, item: &Value, context: &JobContext) -> Result<Vec<Value>> {
+async fn members(
+    state: &AppState,
+    item: &Value,
+    context: &JobContext,
+    selected_ids: &[String],
+) -> Result<Vec<Value>> {
     if item["Type"] == "Series" {
         let parent = media_edit::details(state, &string(item, "Id"), "Id,Type,Path").await?;
         if ["Id", "Type", "Path"]
@@ -29,6 +35,28 @@ async fn members(state: &AppState, item: &Value, context: &JobContext) -> Result
             .any(|field| parent[*field] != item[*field])
         {
             return Err(conflict("入库刷新父项的身份或路径变化，未提交刷新"));
+        }
+        if !selected_ids.is_empty() {
+            let members = crate::emby::query_items(
+                state,
+                &[
+                    ("Ids", selected_ids.join(",")),
+                    ("IncludeItemTypes", "Episode".into()),
+                    ("Fields", FIELDS.into()),
+                ],
+                context,
+            )
+            .await?;
+            if members.len() != selected_ids.len()
+                || members.iter().any(|member| {
+                    member["Type"] != "Episode"
+                        || member["SeriesId"] != item["Id"]
+                        || !selected_ids.contains(&string(member, "Id"))
+                })
+            {
+                return Err(conflict("入库刷新目标不属于当前电视剧，未扩大处理范围"));
+            }
+            return Ok(members);
         }
         crate::emby::query_items(
             state,
@@ -94,6 +122,267 @@ fn connection(config: &Value) -> Value {
     ])
 }
 
+fn metadata_binding_asset(original: &Value, current: &Value) -> bool {
+    let mut original = original.clone();
+    let mut current = current.clone();
+    // These fields are derived by assets::parse from media already verified by
+    // this guard. Preserve every other field, including unknown provenance.
+    for field in [
+        "container", "video_codec", "video_bitrate_mbps", "bit_depth", "frame_rate",
+        "audio_tracks", "subtitles", "date_added_to_library", "runtime_minutes", "width", "height",
+        "resolution_display", "quality_display", "effect_display", "codec_display",
+        "audio_display", "subtitle_display", "audio_languages_raw", "subtitle_languages_raw", "release_group_raw",
+    ] {
+        original.as_object_mut().unwrap().remove(field);
+        current.as_object_mut().unwrap().remove(field);
+    }
+    for field in ["source_library_id", "ancestor_ids"] {
+        if original[field].is_null()
+            || original[field].as_str().is_some_and(|value| value.is_empty())
+            || original[field].as_array().is_some_and(|value| value.is_empty())
+        {
+            let valid = current[field].is_null() || if field == "source_library_id" {
+                current[field].is_string()
+            } else {
+                current[field].as_array().is_some_and(|ids| ids.iter().all(|id| {
+                    id.as_str().is_some_and(|value| !value.is_empty())
+                }))
+            };
+            if !valid { return false; }
+            original.as_object_mut().unwrap().remove(field);
+            current.as_object_mut().unwrap().remove(field);
+        }
+    }
+    original == current
+}
+
+async fn metadata_target_details(
+    state: &AppState,
+    target: &SavedTarget,
+    before: &Value,
+) -> Result<(SavedTarget, Value)> {
+    let binding = media_edit::repair_target(state, &target.id).await?;
+    if binding.path != target.path || binding.sha != target.sha
+        || target.asset.as_ref().is_some_and(|asset| !metadata_binding_asset(asset, &binding.asset))
+        || before.get("_ingest_guard_pick_code").is_some_and(|pc| *pc != json!(binding.pc))
+    {
+        return Err(conflict("重载期间媒体资产身份变化，已保留恢复备份"));
+    }
+    let mut checked = target.clone();
+    checked.asset = target.asset.as_ref().map(|_| binding.asset.clone());
+    let live = identity_details(state, &checked).await?;
+    if ["SeriesId", "ParentId"].iter().any(|field| before.get(*field).is_some_and(|value| *value != live[*field])) {
+        return Err(conflict("原媒体所属剧集或父项在元数据刷新期间变化，恢复材料已保留"));
+    }
+    if let Some(original) = &target.asset {
+        let added_library = string(original, "source_library_id").is_empty()
+            && !string(&binding.asset, "source_library_id").is_empty();
+        let added_ancestors = media_edit::list(&original["ancestor_ids"]).is_empty()
+            && !media_edit::list(&binding.asset["ancestor_ids"]).is_empty();
+        if added_library || added_ancestors {
+            let library = crate::emby::library_for_path(state, &target.path).await?
+                .ok_or_else(|| conflict("新增媒体库绑定未能按原生路径确认"))?;
+            if added_library && binding.asset["source_library_id"] != library["ItemId"] {
+                return Err(conflict("新增媒体库绑定与原生文件路径不一致"));
+            }
+            if added_ancestors {
+                let mut item = live.clone();
+                item["_SourceLibraryId"] = library["ItemId"].clone();
+                let (parents, guid) = if item["Type"] == "Movie" {
+                    crate::emby::ancestor_context(state, &item, Some(&library)).await
+                } else { (std::collections::HashMap::new(), String::new()) };
+                let parsed = crate::assets::parse_with_cache(&item, &parents, &guid, &json!([]), &Value::Null);
+                if parsed["ancestor_ids"] != binding.asset["ancestor_ids"] {
+                    return Err(conflict("新增祖先绑定与原生媒体树不一致"));
+                }
+            }
+        }
+    }
+    Ok((checked, live))
+}
+
+/// Finish a submitted metadata refresh without importing or replacing media.
+pub(crate) async fn finish_saved_guard(
+    state: &AppState,
+    recovery: &Path,
+    context: &JobContext,
+) -> Result<()> {
+    let mut record = recovery_record(recovery).await?;
+    context.ensure_server(state).await?;
+    let connection = connection(&*state.config.read().await);
+    if record["connection_sha256"]
+        .as_str()
+        .is_some_and(|expected| {
+            expected != format!("{:x}", Sha256::digest(connection.to_string().as_bytes()))
+        })
+    {
+        return Err(conflict("原媒体刷新使用的 Emby 连接已变化，保留原保护材料"));
+    }
+    if record["preparation_kind"] == "ingest-resource-guard" {
+        let observations = record["observations"].clone();
+        for saved in record["targets"].as_array_mut().ok_or_else(|| conflict("原入库保护目标记录无效"))? {
+            let target = SavedTarget {
+                id: string(saved, "id"), path: string(saved, "path"),
+                source: saved["source"].as_str().map(str::to_string),
+                sha: saved["sha"].as_str().map(str::to_string),
+                asset: saved["asset"].is_object().then(|| saved["asset"].clone()),
+                info: Value::Null, refresh_required: true,
+            };
+            let (checked, _) = metadata_target_details(state, &target, &observations[&target.id]).await?;
+            saved["asset"] = json!(checked.asset);
+        }
+    }
+    let (targets, requested) = prepare_recovery_json(state, recovery, &record).await?;
+    let owners = targets
+        .iter()
+        .map(|target| target.id.clone())
+        .collect::<BTreeSet<_>>();
+    let images = chapter_images::load(recovery, &record, &owners).await?;
+    let mut files = BTreeMap::new();
+    let mut bifs = BTreeMap::<String, Vec<BifEvidence>>::new();
+    for file in media_edit::list(&record["files"]) {
+        let path = PathBuf::from(string(&file, "path"));
+        let file_owners = media_edit::list(&file["owner_ids"])
+            .into_iter()
+            .filter_map(|owner| owner.as_str().map(str::to_string))
+            .collect::<BTreeSet<_>>();
+        if !path.is_absolute() || file_owners.is_empty() || !file_owners.is_subset(&owners) {
+            return Err(conflict("原媒体保护文件的路径或所属项目不完整"));
+        }
+        let saved = Snapshot {
+            path: path.clone(),
+            backup: recovery_backup(recovery, &file["backup"]).await?,
+            owners: file_owners,
+            sha256: snapshot_hash(&file)?,
+        };
+        let bytes = snapshot_bytes(&saved).await?;
+        if path
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("bif"))
+        {
+            if file["unused_bif_sha256"].is_null() {
+                let frames = recovery_bif_times(&bytes)?.as_array().unwrap().len();
+                for owner in &saved.owners {
+                    bifs.entry(owner.clone()).or_default().push(BifEvidence {
+                        path: path.clone(),
+                        bytes: bytes.clone(),
+                        frames,
+                    });
+                }
+            } else if file["unused_bif_sha256"].as_str()
+                != Some(format!("{:x}", Sha256::digest(&bytes)).as_str())
+                || recovery_bif_times(&bytes).is_ok()
+            {
+                return Err(conflict("原保护记录的未使用 BIF 证据无效"));
+            }
+        }
+        files.insert(path, saved);
+    }
+    let mut json_paths = BTreeSet::new();
+    for (path, _) in requested.values() {
+        json_paths.insert(tokio::fs::canonicalize(path).await?);
+    }
+    let guard = Guard {
+        targets,
+        observations: serde_json::from_value(record["observations"].clone())
+            .map_err(|_| conflict("原媒体保护观察记录不完整"))?,
+        images,
+        bifs,
+        files,
+        json_paths,
+        connection,
+        record: None,
+        recovery: recovery.into(),
+        parent: Value::Null,
+        scope: BTreeMap::new(),
+        selected_ids: vec![],
+    };
+    let finishing = JobContext::for_recovery(Some(context)).await;
+    let pending = recovery.join("pending-scan.json");
+    let has_pending_scan = tokio::fs::try_exists(&pending).await?;
+    if has_pending_scan {
+        let scan = crate::media_recovery::read_json(&pending).await?;
+        let position = scan["position"]
+            .as_u64()
+            .ok_or_else(|| conflict("原刷新日志基线缺失，保留媒体保护"))?;
+        let ids = scan["ids"]
+            .as_array()
+            .filter(|ids| !ids.is_empty())
+            .ok_or_else(|| conflict("原刷新目标缺失，保留媒体保护"))?;
+        for id in ids {
+            let id = id
+                .as_str()
+                .filter(|id| !id.is_empty())
+                .ok_or_else(|| conflict("原刷新目标无效"))?;
+            if !owners.contains(id) {
+                let parent = if record["refresh_parent"]["Id"] == id {
+                    record["refresh_parent"].clone()
+                } else {
+                    media_edit::list(&record["refresh_ancestors"])
+                        .into_iter()
+                        .find(|parent| parent["Id"] == id)
+                        .ok_or_else(|| conflict("原刷新目标不属于保护记录"))?
+                };
+                let current = media_edit::details(state, id, "Id,Type,Path").await?;
+                if ["Id", "Type", "Path"]
+                    .iter()
+                    .any(|field| current[*field] != parent[*field])
+                {
+                    return Err(conflict("原刷新父项身份或路径已经变化"));
+                }
+            }
+            crate::emby::wait_item_refresh(
+                state,
+                id,
+                scan["previous"][id].as_str(),
+                Some(crate::media_extra::RefreshTrace::new(position)),
+                &finishing,
+                "恢复前次元数据刷新",
+                id,
+            )
+            .await?;
+        }
+    }
+    let original =
+        crate::media_recovery::read_json(&recovery.join("original-settings.json")).await?;
+    let applied = crate::strm::recovery_applied_settings(recovery, &original).await?;
+    let mut native_intent = has_pending_scan;
+    let mut entries = tokio::fs::read_dir(recovery).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        native_intent |= entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("clear-intent-");
+    }
+    let preparation_only = !has_pending_scan
+        && !native_intent
+        && record["preparation_kind"] == "ingest-resource-guard"
+        && record["owner_task_id"]
+            .as_str()
+            .is_some_and(|owner| !owner.is_empty() && owner == context.id)
+        && crate::strm::valid_recovery_settings(&original)
+        && crate::strm::matches(&crate::strm::config(state).await?, &original);
+    let verify = async {
+        guard.verify(state, &finishing).await?;
+        guard.verify_unchanged_json().await
+    };
+    if preparation_only {
+        // No native refresh remains and settings already match the original.
+        // Discard verified duplicate preparation materials without changing
+        // configuration or requiring an unrelated media-extraction task.
+        verify.await?;
+    } else {
+        crate::strm::finish_media_recovery(state, &original, applied.as_ref(), || verify).await?;
+    }
+    let marker = crate::media_recovery::mark_verified(recovery, &record["target_ids"]).await?;
+    crate::media_recovery::cleanup_verified(
+        recovery,
+        &marker,
+        &state.data_dir.join("backups/media-info-conflicts"),
+    )
+    .await
+}
+
 impl Guard {
     pub(crate) fn protected(&self) -> bool {
         !self.targets.is_empty()
@@ -114,7 +403,9 @@ impl Guard {
         if connection(&*state.config.read().await) != self.connection {
             return Err(conflict("Emby 连接在入库刷新保护期间变化，未提交刷新"));
         }
-        if observed_scope(&members(state, &self.parent, context).await?) != self.scope {
+        if observed_scope(&members(state, &self.parent, context, &self.selected_ids).await?)
+            != self.scope
+        {
             return Err(conflict(
                 "入库最终刷新范围或原章节在准备期间变化，未提交刷新",
             ));
@@ -148,7 +439,7 @@ impl Guard {
         }
         for target in &self.targets {
             context.checkpoint().await?;
-            let live = identity_details(state, target).await?;
+            let (_, live) = metadata_target_details(state, target, &self.observations[&target.id]).await?;
             let reasons = differences(target, &live);
             if !reasons.is_empty() {
                 return Err(conflict(format!(
@@ -187,6 +478,20 @@ impl Guard {
         }
         Ok(())
     }
+
+    pub(crate) async fn verify_unchanged_json(&self) -> Result<()> {
+        for path in &self.json_paths {
+            let saved = self
+                .files
+                .get(path)
+                .ok_or_else(|| conflict("原媒体 JSON 备份范围未确认"))?;
+            check_ancestors(path).await?;
+            if tokio::fs::read(path).await? != snapshot_bytes(saved).await? {
+                return Err(conflict("重新刮削期间媒体 JSON 发生变化，原材料已保留"));
+            }
+        }
+        Ok(())
+    }
 }
 
 pub(crate) async fn capture(
@@ -195,10 +500,64 @@ pub(crate) async fn capture(
     context: &JobContext,
     recovery: &Path,
 ) -> Result<Guard> {
+    capture_inner(state, item, context, recovery, false, &[]).await
+}
+
+pub(crate) async fn capture_strict(
+    state: &AppState,
+    item: &Value,
+    context: &JobContext,
+    recovery: &Path,
+) -> Result<Guard> {
+    capture_inner(state, item, context, recovery, true, &[]).await
+}
+
+pub(crate) async fn capture_targets(
+    state: &AppState,
+    item: &Value,
+    selected_ids: &[String],
+    context: &JobContext,
+    recovery: &Path,
+) -> Result<Guard> {
+    if selected_ids.is_empty() {
+        capture(state, item, context, recovery).await
+    } else {
+        // A submitted subset refresh needs real JSON/stream recovery evidence
+        // even when its selected episode has no chapter or BIF files yet.
+        capture_inner(state, item, context, recovery, true, selected_ids).await
+    }
+}
+
+async fn capture_inner(
+    state: &AppState,
+    item: &Value,
+    context: &JobContext,
+    recovery: &Path,
+    force_media: bool,
+    selected_ids: &[String],
+) -> Result<Guard> {
     context.checkpoint().await?;
     let connection = connection(&*state.config.read().await);
     crate::emby::idle(state, context).await?;
-    let members = members(state, item, context).await?;
+    let members = members(state, item, context, selected_ids).await?;
+    let mut refresh_ancestors = vec![];
+    if item["Type"] == "Series" && !selected_ids.is_empty() {
+        let parents = members
+            .iter()
+            .filter_map(|member| member["ParentId"].as_str())
+            .filter(|parent| !parent.is_empty())
+            .collect::<BTreeSet<_>>();
+        for parent in parents {
+            let current = media_edit::details(state, parent, "Id,Type,Path,ParentId").await?;
+            if current["Id"] != parent
+                || current["Type"] != "Season"
+                || current["ParentId"] != item["Id"]
+            {
+                return Err(conflict("本批分集的父季身份不一致，未扩大保护范围"));
+            }
+            refresh_ancestors.push(current);
+        }
+    }
     let material = recovery.join(format!("ingest-refresh-{}", uuid::Uuid::new_v4().simple()));
     tokio::fs::create_dir_all(&material).await?;
     let mut guard = Guard {
@@ -213,6 +572,7 @@ pub(crate) async fn capture(
         recovery: recovery.into(),
         parent: item.clone(),
         scope: observed_scope(&members),
+        selected_ids: selected_ids.to_vec(),
     };
     let mut json_files = vec![];
     let mut unused_bifs = BTreeMap::new();
@@ -287,7 +647,8 @@ pub(crate) async fn capture(
                 }
             }
         }
-        if media_edit::list(&member["Chapters"]).is_empty()
+        if !force_media
+            && media_edit::list(&member["Chapters"]).is_empty()
             && !has_thumbs
             && guard.files.len() == before_files
         {
@@ -368,11 +729,17 @@ pub(crate) async fn capture(
             return Err(conflict(reason));
         }
         guard.images.insert(id.clone(), images);
-        guard.observations.insert(id, live);
+        let mut observation = live;
+        observation["_ingest_guard_pick_code"] = json!(binding.pc);
+        guard.observations.insert(id, observation);
         guard.targets.push(target);
     }
     if guard.protected() {
         let record = json!({"target_ids":guard.targets.iter().map(|target| &target.id).collect::<Vec<_>>(),
+            "preparation_kind":"ingest-resource-guard","owner_task_id":context.id,"selected_ids":selected_ids,
+            "connection_sha256":format!("{:x}",Sha256::digest(guard.connection.to_string().as_bytes())),
+            "refresh_parent":{"Id":guard.parent["Id"],"Type":guard.parent["Type"],"Path":guard.parent["Path"]},
+            "refresh_ancestors":refresh_ancestors,
             "targets":guard.targets.iter().map(|target|json!({"id":target.id,"path":target.path,"source":target.source,"sha":target.sha,"asset":target.asset})).collect::<Vec<_>>(),
             "observations":guard.observations,"chapter_images":guard.images,"json":json_files,
             "files":guard.files.values().map(|saved|json!({"path":saved.path,"backup":saved.backup,"owner_ids":saved.owners,"sha256":saved.sha256,"unused_bif_sha256":unused_bifs.get(&saved.path)})).collect::<Vec<_>>()});

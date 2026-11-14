@@ -1595,12 +1595,23 @@ mod native {
             .unwrap();
         let rejected = recover_from_editor(&f.native.state, id).await;
         assert_eq!(rejected["state"], "failed", "{rejected}");
-        assert!(rejected.to_string().contains("BIF"), "{rejected}");
+        assert_eq!(rejected["result_status"], 409, "{rejected}");
+        assert!(rejected["message"].as_str().is_some_and(|message| message.contains("BIF") || message.contains("原清理意图与媒体身份或恢复记录不一致")), "{rejected}");
+        assert_eq!(tokio::fs::read(&unused).await.unwrap(), empty);
+        assert_eq!(tokio::fs::read(&image).await.unwrap(), image_bytes);
         assert_eq!(recovery_status(&f.native.state).await["pending"], true);
         tokio::fs::write(&marker, serde_json::to_vec(&record).unwrap())
             .await
             .unwrap();
         let retried = recover_from_editor(&f.native.state, id).await;
+        if retried["state"] != "completed" {
+            for proof in std::fs::read_dir(&recovery).unwrap().flatten().filter(|entry| entry.file_name().to_string_lossy().starts_with("clear-intent-")) {
+                let value: Value = serde_json::from_slice(&std::fs::read(proof.path()).unwrap()).unwrap();
+                eprintln!("unused BIF retry original intent: {value}; restored manifest targets: {}", record["targets"]);
+                use sha2::Digest;
+                eprintln!("restored manifest sha256: {:x}", sha2::Sha256::digest(serde_json::to_vec(&record).unwrap()));
+            }
+        }
         assert_eq!(retried["state"], "completed", "{retried}");
         assert_eq!(tokio::fs::read(&unused).await.unwrap(), empty);
         assert_eq!(tokio::fs::read(&image).await.unwrap(), image_bytes);
@@ -2202,7 +2213,7 @@ mod native {
                 if let Some(item) = extra_item {
                     if id == "61617"
                         && query.get("Fields").is_some_and(|fields| {
-                            fields == "Id,Path,Size,MediaSources,MediaStreams,Chapters"
+                            matches!(fields.as_str(), "Id,Path,Size,MediaSources,MediaStreams,Chapters" | "Id,Path,Size,Type,ParentId,PartCount,ExtraType,MediaSources,MediaStreams,Chapters")
                         })
                         && proxy.mutate_unselected_once.swap(false, Ordering::SeqCst)
                     {
@@ -2214,7 +2225,7 @@ mod native {
                         return Json(requested_fields(item.clone(), &query)).into_response();
                     }
                     if query.get("Fields").is_some_and(|fields| {
-                        fields == "Id,Path,Size,MediaSources,MediaStreams,Chapters"
+                        matches!(fields.as_str(), "Id,Path,Size,MediaSources,MediaStreams,Chapters" | "Id,Path,Size,Type,ParentId,PartCount,ExtraType,MediaSources,MediaStreams,Chapters")
                     }) && proxy.fail_second_rename.swap(false, Ordering::SeqCst)
                     {
                         let file = info_path(&item);
@@ -2655,6 +2666,9 @@ mod native {
                 {
                     // The operation ran before its HTTP result failed.
                     return StatusCode::BAD_GATEWAY.into_response();
+                }
+                if proxy.protocol_fault.lock().await.as_str() == "save-clear-held" {
+                    proxy.sync_release.notified().await;
                 }
                 return StatusCode::NO_CONTENT.into_response();
             } else if path == "/ScheduledTasks/Running/media" {
@@ -5695,4 +5709,5 @@ mod native {
             f.close().await;
         }
     }
+    include!("support/media_save_resume_cases.rs");
 }

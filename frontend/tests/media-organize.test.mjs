@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
+import { queueReceiptMatches } from '../src/composables/useMediaOrganizeQueue.js';
 
 const source = readFileSync(new URL('../src/components/MediaOrganizePage.vue', import.meta.url), 'utf8');
 const movie = { id: '00000000-0000-4000-8000-000000000101', item_id: '101', name: '电影一', item_type: 'Movie', library_name: '电影', status: 'success' };
 const result = { selected_count: 1, updated: 1, failed: 0, items: [{ item_id: '101', status: 'completed' }], message: '整理完成' };
-const list = { items: [movie], total: 48 };
+const list = { items: [movie], total: 100 };
 const clone = value => JSON.parse(JSON.stringify(value));
 function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 function functionSource(name) {
@@ -18,19 +19,21 @@ function functionSource(name) {
 function fixture({ get = async () => ({ data: list }), post = async () => ({ status: 200, data: result }) } = {}) {
   const calls = [], messages = [];
   const context = vm.createContext({
-    active: true, itemSequence: 0, pageSize: 24,
-    statusFilter: { value: 'all' }, loadedQuery: { value: '[1,"","all"]' },
-    items: { value: [movie] }, search: { value: '' }, appliedSearch: { value: '' }, page: { value: 1 }, total: { value: 48 },
-    selectedItems: { value: [] }, confirmationItems: { value: [] }, confirmationOpen: { value: false },
+    active: true, itemSequence: 0, pageSize: { value: 50 }, pageSizeOptions: [25, 50, 100, 500, 1000], queueReceiptMatches,
+    computed: fn => ({ get value() { return fn(); } }),
+    statusFilter: { value: 'all' }, loadedQuery: { value: '[1,50,"","all"]' },
+    items: { value: [movie] }, search: { value: '' }, appliedSearch: { value: '' }, page: { value: 1 }, total: { value: 100 },
+    selectedItems: { value: [] }, confirmationItems: { value: [] }, confirmationOpen: { value: false }, confirmationMode: { value: 'reprocess' }, queueOpen: { value: false },
+    activeQueueItems: { value: new Set() }, queue: { refresh: async () => {} },
     loadingItems: { value: false }, itemsError: { value: '' }, processing: { value: false }, feedback: { value: null },
     axios: {
       get: async (url, options) => { calls.push({ method: 'GET', url, options: options && clone(options) }); return get(url, options); },
       post: async (url, body) => { calls.push({ method: 'POST', url, body: clone(body) }); return post(url, body); },
     },
-    message: Object.fromEntries(['success', 'warning', 'error'].map(type => [type, text => messages.push({ type, text })])),
+    message: Object.fromEntries(['success', 'info', 'warning', 'error'].map(type => [type, text => messages.push({ type, text })])),
   });
   const select = source.match(/const queryKey = .*;/)[0] + '\n' + source.match(/const canSelectItems = .*;/)[0] + '\n' + source.match(/const isReadyRecord = .*;/)[0] + '\n' + source.match(/const canSelectRecord = .*;/)[0];
-  vm.runInContext(select + '\n' + ['loadItems', 'updateSelection', 'openConfirmation', 'reorganize'].map(functionSource).join('\n') + '\nthis.load = loadItems; this.select = updateSelection; this.confirm = openConfirmation; this.run = reorganize;', context);
+  vm.runInContext(select + '\n' + source.match(/const pageTip = .*;/)[0] + '\n' + source.match(/const pages = .*;/)[0] + '\n' + ['loadItems', 'changePageSize', 'updateSelection', 'openConfirmation', 'reorganize'].map(functionSource).join('\n') + '\nthis.load = loadItems; this.resizePage = changePageSize; this.select = updateSelection; this.confirm = openConfirmation; this.run = reorganize; this.pageTip = pageTip; this.pages = pages;', context);
   return { context, calls, messages };
 }
 
@@ -40,7 +43,107 @@ test('pagination reads ETK admission history without requesting a whole library'
   f.context.appliedSearch.value = '电影';
   await f.context.load();
   assert.equal(f.calls[0].url, '/api/media_organize/history');
-  assert.deepEqual(f.calls[0].options.params, { page: 2, page_size: 24, search: '电影', status: 'all' });
+  assert.deepEqual(f.calls[0].options.params, { page: 2, page_size: 50, search: '电影', status: 'all' });
+});
+
+test('changing to MP 1000-record pagination reloads page one and preserves selected media', async () => {
+  const f = fixture();
+  f.context.select([movie.id]);
+  f.context.page.value = 2;
+  await f.context.resizePage(1000);
+  assert.equal(f.context.page.value, 1);
+  assert.deepEqual(f.calls[0].options.params, { page: 1, page_size: 1000, search: '', status: 'all' });
+  assert.deepEqual(clone(f.context.selectedItems.value).map(item => item.item_id), ['101']);
+});
+
+test('a response from the former page size cannot replace or unlock the newly requested page', async () => {
+  const pending = deferred(), resized = { ...movie, id: 'resized-record', item_id: 'resized-media' };
+  const f = fixture({ get: async (_url, options) => options.params.page_size === 50 ? pending.promise : { data: { items: [resized], total: 200 } } });
+  const old = f.context.load();
+  await f.context.resizePage(100);
+  pending.resolve({ data: list });
+  await old;
+  assert.equal(f.context.items.value[0].item_id, 'resized-media');
+  assert.equal(f.context.loadedQuery.value, '[1,100,"","all"]');
+  assert.equal(f.context.loadingItems.value, false);
+  f.context.select(['resized-record']);
+  assert.deepEqual(clone(f.context.selectedItems.value).map(item => item.item_id), ['resized-media']);
+});
+
+test('page-size identity disables stale row selection even before the replacement load starts', () => {
+  const f = fixture();
+  f.context.pageSize.value = 1000;
+  f.context.select([movie.id]);
+  assert.equal(f.context.selectedItems.value.length, 0);
+});
+
+test('queue-style history refresh retains the chosen page size and goes back to the last available page', async () => {
+  const f = fixture({ get: async (_url, options) => ({ data: { items: options.params.page === 1 ? [movie] : [], total: 1 } }) });
+  f.context.pageSize.value = 1000;
+  f.context.page.value = 3;
+  await f.context.load();
+  assert.deepEqual(f.calls.map(call => call.options.params.page), [3, 1]);
+  assert.equal(f.context.pageSize.value, 1000);
+  assert.equal(f.context.items.value[0].item_id, '101');
+  assert.equal(f.context.loadedQuery.value, '[1,1000,"","all"]');
+});
+
+test('MP range ends at the filtered total and an empty page has range zero without extra requests', async () => {
+  const f = fixture({ get: async () => ({ data: { items: [], total: 0 } }) });
+  f.context.page.value = 2;
+  f.context.total.value = 73;
+  assert.deepEqual(clone(f.context.pageTip.value), { begin: 51, end: 73 });
+  f.context.page.value = 1;
+  await f.context.load();
+  assert.deepEqual(clone(f.context.pageTip.value), { begin: 0, end: 0 });
+  assert.equal(f.context.pages.value, 1);
+  assert.equal(f.calls.length, 1);
+});
+
+test('all 1000 real rows can be selected and submitted in one confirmed queue operation', async () => {
+  const records = Array.from({ length: 1000 }, (_, index) => ({ ...movie, id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`, item_id: `media-${index}` }));
+  const f = fixture({ get: async () => ({ data: { items: records, total: 1000 } }), post: async (_url, body) => ({ status: 202, data: {
+    mode: body.mode, queued_count: body.item_ids.length, duplicate_count: 0, queue_ids: body.item_ids.map(id => `queue-${id}`),
+    items: body.item_ids.map(item_id => ({ id: `queue-${item_id}`, item_id, mode: body.mode, status: 'queued' })),
+  } }) });
+  await f.context.resizePage(1000);
+  f.context.select(records.map(item => item.id));
+  f.context.confirm();
+  await f.context.run();
+  const submissions = f.calls.filter(call => call.method === 'POST');
+  assert.equal(submissions.length, 1);
+  assert.equal(submissions[0].body.item_ids.length, 1000);
+  assert.equal(submissions[0].body.history_ids.length, 1000);
+  assert.equal(f.context.feedback.value.type, 'info');
+  assert.equal(f.context.selectedItems.value.length, 1000);
+});
+
+test('search and state filters reset to page one while preserving the chosen page size', async () => {
+  const f = fixture();
+  Object.assign(f.context, { searchComposing: { value: false }, searchTimer: null, clearTimeout() {} });
+  vm.runInContext(source.match(/const searchItems = .*;/)[0] + '\nthis.searchItems = searchItems;', f.context);
+  f.context.pageSize.value = 500;
+  f.context.page.value = 2;
+  f.context.search.value = '凡人修仙传';
+  f.context.searchItems();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.calls[0].options.params, { page: 1, page_size: 500, search: '凡人修仙传', status: 'all' });
+  f.context.watch = (_target, callback) => { f.context.filterChanged = callback; };
+  vm.runInContext(source.match(/watch\(statusFilter, .*\);/)[0], f.context);
+  f.context.page.value = 5;
+  f.context.statusFilter.value = 'failed';
+  f.context.filterChanged();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(f.calls[1].options.params, { page: 1, page_size: 500, search: '凡人修仙传', status: 'failed' });
+});
+
+test('unsupported sizes and sizes changed during submission do not issue requests', async () => {
+  const f = fixture();
+  await f.context.resizePage(30);
+  f.context.processing.value = true;
+  await f.context.resizePage(1000);
+  assert.equal(f.context.pageSize.value, 50);
+  assert.equal(f.calls.length, 0);
 });
 
 test('selection accumulates across pages and only deselects visible items', () => {
@@ -72,7 +175,7 @@ test('late recent data from an earlier search cannot replace a newer result', as
   pending.resolve({ data: list });
   await old;
   assert.equal(f.context.items.value[0].item_id, '303');
-  assert.equal(f.context.loadedQuery.value, '[1,"新剧集","all"]');
+  assert.equal(f.context.loadedQuery.value, '[1,50,"新剧集","all"]');
 });
 
 test('recent episodes are selected by their exact ID instead of expanding to the series', async () => {
@@ -83,7 +186,7 @@ test('recent episodes are selected by their exact ID instead of expanding to the
   f.context.confirm();
   await f.context.run();
   const body = f.calls.find(call => call.method === 'POST').body;
-  assert.deepEqual(body, { item_ids: ['episode-5'], history_ids: ['00000000-0000-4000-8000-000000000005'] });
+  assert.deepEqual(body, { item_ids: ['episode-5'], history_ids: ['00000000-0000-4000-8000-000000000005'], mode: 'reprocess' });
   assert.equal(body.item_ids.includes('whole-series'), false);
 });
 
@@ -103,7 +206,7 @@ test('confirmation captures the exact selected IDs rather than a changed later s
   f.context.confirm();
   f.context.selectedItems.value.push({ id: '00000000-0000-4000-8000-000000000303', item_id: '303', name: '后选剧集', item_type: 'Episode', status: 'success' });
   await f.context.run();
-  assert.deepEqual(f.calls[0], { method: 'POST', url: '/api/actions/reorganize', body: { item_ids: ['101'], history_ids: ['00000000-0000-4000-8000-000000000101'] } });
+  assert.deepEqual(f.calls[0], { method: 'POST', url: '/api/actions/reorganize', body: { item_ids: ['101'], history_ids: ['00000000-0000-4000-8000-000000000101'], mode: 'reprocess' } });
   assert.equal(f.context.feedback.value.type, 'success');
 });
 
@@ -162,7 +265,7 @@ test('multiple historical events for one media item submit one organize operatio
   f.context.select(['00000000-0000-4000-8000-000000000101', '00000000-0000-4000-8000-000000000111']);
   f.context.confirm();
   await f.context.run();
-  assert.deepEqual(f.calls.find(call => call.method === 'POST').body, { item_ids: ['101'], history_ids: ['00000000-0000-4000-8000-000000000101', '00000000-0000-4000-8000-000000000111'] });
+  assert.deepEqual(f.calls.find(call => call.method === 'POST').body, { item_ids: ['101'], history_ids: ['00000000-0000-4000-8000-000000000101', '00000000-0000-4000-8000-000000000111'], mode: 'reprocess' });
   assert.equal(f.context.feedback.value.type, 'success');
 });
 
@@ -233,5 +336,62 @@ test('history search ignores composing input and coalesces typed queries using M
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(timers.size, 0);
   assert.equal(f.calls.length, 1);
-  assert.deepEqual(f.calls[0].options.params, { page: 1, page_size: 24, search: '下一部电影', status: 'all' });
+  assert.deepEqual(f.calls[0].options.params, { page: 1, page_size: 50, search: '下一部电影', status: 'all' });
+});
+
+const acceptedQueue = (itemId = '101', mode = 'reprocess') => ({ mode, queued_count: 1, duplicate_count: 0,
+  queue_ids: ['queue-accepted'], items: [{ id: 'queue-accepted', item_id: itemId, mode, status: 'queued' }], message: '已加入整理队列' });
+
+test('an accepted queue response releases the form without claiming the media finished', async () => {
+  const f = fixture({ post: async () => ({ status: 202, data: acceptedQueue() }) });
+  f.context.select(['00000000-0000-4000-8000-000000000101']); f.context.confirm();
+  await f.context.run();
+  assert.equal(f.context.processing.value, false);
+  assert.equal(f.context.confirmationOpen.value, false);
+  assert.equal(f.context.queueOpen.value, true);
+  assert.equal(f.context.feedback.value.type, 'info');
+  assert.equal(f.context.feedback.value.message, '已加入整理队列');
+  assert.equal(f.calls.some(call => call.url.startsWith('/api/tasks/result/')), false);
+});
+
+test('rescrape freezes its selected episode and mode before awaiting queue acceptance', async () => {
+  const pending = deferred();
+  const episode = { ...movie, item_id: 'episode-5', item_type: 'Episode', series_id: 'whole-series' };
+  const f = fixture({ get: async () => ({ data: { items: [episode], total: 1 } }), post: () => pending.promise });
+  await f.context.load(); f.context.select([movie.id]); f.context.confirm();
+  f.context.confirmationMode.value = 'rescrape';
+  const work = f.context.run();
+  f.context.confirmationMode.value = 'reprocess';
+  pending.resolve({ status: 202, data: acceptedQueue('episode-5', 'rescrape') }); await work;
+  assert.deepEqual(f.calls.find(call => call.method === 'POST').body, { item_ids: ['episode-5'], history_ids: [movie.id], mode: 'rescrape' });
+  assert.equal(f.context.feedback.value.type, 'info');
+});
+
+test('an incomplete queue receipt cannot claim that every selected item was accepted', async () => {
+  const f = fixture({ post: async () => ({ status: 202, data: { ...acceptedQueue(), queue_ids: [] } }) });
+  f.context.select([movie.id]); f.context.confirm(); await f.context.run();
+  assert.equal(f.context.feedback.value.type, 'warning');
+  assert.equal(f.context.feedback.value.message, '整理队列提交结果尚未确认');
+  assert.equal(f.context.selectedItems.value.length, 1);
+});
+
+test('a queue receipt for a different mode or an already finished task cannot confirm acceptance', async () => {
+  for (const changes of [{ mode: 'rescrape' }, { status: 'completed' }]) {
+    const receipt = acceptedQueue();
+    receipt.items[0] = { ...receipt.items[0], ...changes };
+    const f = fixture({ post: async () => ({ status: 202, data: receipt }) });
+    f.context.select([movie.id]); f.context.confirm(); await f.context.run();
+    assert.equal(f.context.feedback.value.type, 'warning');
+    assert.equal(f.context.feedback.value.message, '整理队列提交结果尚未确认');
+  }
+});
+
+test('queue acceptance unlocks the form even while its queue refresh is slow', async () => {
+  const pending = deferred();
+  const f = fixture({ post: async () => ({ status: 202, data: acceptedQueue() }) });
+  f.context.queue.refresh = () => pending.promise;
+  f.context.select([movie.id]); f.context.confirm(); await f.context.run();
+  assert.equal(f.context.processing.value, false);
+  assert.equal(f.context.feedback.value.message, '已加入整理队列');
+  pending.resolve();
 });

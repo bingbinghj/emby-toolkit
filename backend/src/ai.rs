@@ -491,30 +491,49 @@ async fn translate_inner(
     let mut output = BTreeMap::new();
     let mut warning_details = vec![];
     let mut missing = BTreeMap::new();
-    let mut keys = BTreeMap::new();
+    let keys: BTreeMap<_, _> = inputs
+        .iter()
+        .map(|(id, source)| {
+            (
+                id.clone(),
+                cache_key(
+                    &config,
+                    purpose,
+                    prompt,
+                    &json!(source),
+                    context,
+                    &actors[id],
+                ),
+            )
+        })
+        .collect();
+    let uncached: Vec<_> = keys
+        .values()
+        .filter(|key| !memory.1.contains_key(*key))
+        .map(String::as_str)
+        .collect();
+    let database_cache: BTreeMap<String, Option<String>> = if uncached.is_empty() {
+        BTreeMap::new()
+    } else {
+        sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT original_text,translated_text FROM translation_cache WHERE original_text=ANY($1)",
+        )
+        .bind(&uncached)
+        .fetch_all(&state.db)
+        .await
+        .unwrap_or_else(|error| {
+            tracing::warn!("读取翻译结果缓存失败，继续翻译：{error}");
+            vec![]
+        })
+        .into_iter()
+        .collect()
+    };
     for (id, source) in inputs {
-        let key = cache_key(
-            &config,
-            purpose,
-            prompt,
-            &json!(source),
-            context,
-            &actors[id],
-        );
-        let cached: Option<String> = if let Some(value) = memory.1.get(&key) {
+        let key = &keys[id];
+        let cached: Option<String> = if let Some(value) = memory.1.get(key) {
             Some(value.clone())
         } else {
-            sqlx::query_scalar(
-                "SELECT translated_text FROM translation_cache WHERE original_text=$1",
-            )
-            .bind(&key)
-            .fetch_optional(&state.db)
-            .await
-            .unwrap_or_else(|error| {
-                tracing::warn!("读取翻译结果缓存失败，继续翻译：{error}");
-                None
-            })
-            .flatten()
+            database_cache.get(key).cloned().flatten()
         };
         if let Some(cached) = cached.filter(|s| {
             !s.is_empty() && (purpose != "batch_joke_fallback" || s.starts_with("【老六占位简介】"))
@@ -526,7 +545,6 @@ async fn translate_inner(
         } else {
             missing.insert(id.clone(), source.clone());
         }
-        keys.insert(id.clone(), key);
     }
     tracing::info!(
         "AI 翻译缓存检查完成：用途 {purpose_name}，命中 {} 条，待请求 {} 条",

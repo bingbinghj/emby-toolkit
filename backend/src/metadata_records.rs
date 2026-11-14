@@ -482,6 +482,10 @@ pub async fn online(
     }
     let mut groups = std::collections::BTreeMap::<(i64, i64), Vec<Value>>::new();
     for episode in context.episodes {
+        if !context.episode_ids.is_empty() && !context.episode_ids.contains(&string(episode, "Id"))
+        {
+            continue;
+        }
         if let (Some(season), Some(number)) = (
             integer(&episode["ParentIndexNumber"]),
             integer(&episode["IndexNumber"]),

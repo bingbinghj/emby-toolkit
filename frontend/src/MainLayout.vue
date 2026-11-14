@@ -5,7 +5,7 @@ import { useDisplay } from 'vuetify';
 import { useElementBounding, useMutationObserver } from '@vueuse/core';
 import axios from 'axios';
 import { useAuthStore } from '@/stores/auth';
-import { refreshTaskStatus } from '@/composables/useTaskStatus';
+import { refreshTaskStatus, useTaskStatusReadState } from '@/composables/useTaskStatus';
 import { useMessage, useDialog, feedbackDialogs } from '@/composables/useFeedback';
 import { useThemeCustomizer, THEME_CUSTOMIZER_OPEN_EVENT } from '@/composables/useThemeCustomizer';
 import { activeContextSearch } from '@/composables/useContextSearch';
@@ -16,6 +16,17 @@ import ThemeCustomizer from '@/components/theme/ThemeCustomizer.vue';
 import WallpaperSettings from '@/components/WallpaperSettings.vue';
 
 const props = defineProps({ taskStatus: Object });
+const { error: taskStatusReadError, lastUpdatedAt: taskStatusLastUpdatedAt } = useTaskStatusReadState();
+const taskStatusRetryBusy = ref(false);
+const taskStatusReadHint = computed(() => taskStatusLastUpdatedAt.value
+  ? `任务状态更新失败，显示 ${new Date(taskStatusLastUpdatedAt.value).toLocaleTimeString()} 最后确认的信息。点击重试。`
+  : '尚未成功读取任务状态，点击重试。');
+async function retryTaskStatus() {
+  if (taskStatusRetryBusy.value) return;
+  taskStatusRetryBusy.value = true;
+  try { await refreshTaskStatus(true); }
+  finally { taskStatusRetryBusy.value = false; }
+}
 const router = useRouter(), route = useRoute(), authStore = useAuthStore();
 const message = useMessage(), dialog = useDialog();
 const appearance = useThemeCustomizer();
@@ -133,6 +144,10 @@ function navigateSettings(value) {
 }
 const taskPaused = computed(() => props.taskStatus?.state === 'paused');
 const taskStopping = computed(() => props.taskStatus?.stop_requested || props.taskStatus?.state === 'stopping');
+const taskPausing = computed(() => props.taskStatus?.pause_requested || props.taskStatus?.state === 'pausing');
+const taskStateLabel = computed(() => taskStopping.value ? '停止中' : taskPaused.value ? '已暂停' : taskPausing.value ? '暂停中' : '');
+const taskTitle = computed(() => `${props.taskStatus?.current_action || '当前任务'}${taskStateLabel.value ? ` · ${taskStateLabel.value}` : ''}`);
+const taskPhase = computed(() => taskStateLabel.value || props.taskStatus?.phase || props.taskStatus?.state);
 const userOptions = computed(() => [
   { key: 'user-management', label: '用户管理', icon: 'mdi-account-group-outline' },
   ...(authStore.isAdmin ? [
@@ -311,7 +326,7 @@ const initMenuConfig = async () => {
   menuConfigError.value = '';
   if (!menuConfigTree.value.length) isMenuReady.value = false;
   try {
-    const response = await axios.get('/api/system/menu_config');
+    const response = await axios.get('/api/system/menu_config', { timeout: 10000 });
     if (response.data != null && !Array.isArray(response.data)) throw new Error('导航配置格式无效，请重试读取。');
     const saved = response.data || [];
     menuConfigTree.value = syncMenuConfig(saved);
@@ -319,7 +334,7 @@ const initMenuConfig = async () => {
   } catch (error) {
     console.error("获取菜单配置失败", error);
     menuConfigError.value = error.response?.data?.error || error.message || '读取导航配置失败。';
-    menuConfigTree.value = syncMenuConfig([]); // 失败时回退到默认
+    if (!menuConfigTree.value.length) menuConfigTree.value = syncMenuConfig([]);
   } finally {
     isMenuLoading.value = false;
     // 确保数据加载完再渲染菜单
@@ -545,6 +560,9 @@ onBeforeUnmount(() => { ++menuEditorSession; clearDragState(); });
       </RouterLink>
     </template>
     <template #navbar-leading>
+      <VBtn v-if="authStore.isAdmin && taskStatusReadError" variant="text" color="warning" icon="mdi-alert-circle-outline" :title="taskStatusReadHint" :loading="taskStatusRetryBusy" aria-label="重试读取任务状态" @click="retryTaskStatus" />
+      <VBtn v-if="isMenuLoading" variant="text" color="default" icon="mdi-menu" loading aria-label="正在读取导航" />
+      <VBtn v-else-if="menuConfigError" variant="text" color="warning" icon="mdi-refresh" aria-label="重试读取导航" title="导航读取失败，点击重试" @click="initMenuConfig" />
       <template v-if="searchAvailable">
         <VBtn v-if="isMobile" icon="mdi-magnify" variant="text" :aria-label="`打开${searchLabel}`" @click="openSearch" />
         <VMenu v-else v-model="searchOpen" location="bottom start" offset="8" :close-on-content-click="false" :open-on-click="false">
@@ -574,20 +592,20 @@ onBeforeUnmount(() => { ++menuEditorSession; clearDragState(); });
         <template #activator="{ props: taskMenuProps }">
           <VBtn v-bind="taskMenuProps" variant="tonal" color="default" class="running-task" :class="{ 'running-task-floating': taskCardFloating }"
             :style="taskCardStyle" :tabindex="taskCardFloating ? -1 : 0" :aria-disabled="taskCardFloating || undefined" aria-label="查看当前任务">
-            <span class="running-task-content"><strong>{{ taskStatus.current_action }}</strong>
-              <VProgressLinear :model-value="taskStatus.progress" :indeterminate="!taskStatus.progress_known" color="primary" rounded height="3" />
+            <span class="running-task-content"><strong>{{ taskTitle }}</strong>
+              <VProgressLinear :model-value="taskStatus.progress" :indeterminate="!taskPaused && !taskStopping && !taskStatus.progress_known" color="primary" rounded height="3" />
             </span>
           </VBtn>
         </template>
         <VCard width="360" max-width="calc(100vw - 24px)">
-          <VCardItem :title="taskStatus.current_action" :subtitle="taskStatus.phase || taskStatus.state" />
-          <VCardText><VProgressLinear :model-value="taskStatus.progress" :indeterminate="!taskStatus.progress_known" color="primary" rounded height="6" />
+          <VCardItem :title="taskTitle" :subtitle="taskPhase" />
+          <VCardText><VProgressLinear :model-value="taskStatus.progress" :indeterminate="!taskPaused && !taskStopping && !taskStatus.progress_known" color="primary" rounded height="6" />
             <div class="task-message">{{ taskStatus.message }}</div>
             <div v-if="taskStatus.progress_known" class="text-caption">{{ taskStatus.progress }}%</div>
           </VCardText>
           <VCardActions class="flex-wrap">
-            <VBtn :prepend-icon="taskPaused ? 'mdi-play' : 'mdi-pause'" :loading="taskControlBusy" :disabled="taskStopping || taskStatus.state === 'pausing'"
-              @click="controlTask(taskPaused ? 'resume' : 'pause')">{{ taskPaused ? '继续' : taskStatus.state === 'pausing' ? '暂停中' : '暂停' }}</VBtn>
+            <VBtn :prepend-icon="taskPaused ? 'mdi-play' : 'mdi-pause'" :loading="taskControlBusy" :disabled="taskStopping || (!taskPaused && taskPausing)"
+              @click="controlTask(taskPaused ? 'resume' : 'pause')">{{ taskPaused ? '继续' : taskPausing ? '暂停中' : '暂停' }}</VBtn>
             <VBtn color="error" prepend-icon="mdi-stop" :disabled="taskStopping || taskControlBusy" @click="confirmStopTask">{{ taskStopping ? '停止中' : '停止' }}</VBtn>
             <VSpacer /><VBtn icon="mdi-text-box-search-outline" aria-label="查看任务日志" @click="notificationOpen = true" />
           </VCardActions>
@@ -660,7 +678,7 @@ onBeforeUnmount(() => { ++menuEditorSession; clearDragState(); });
       <VCardText ref="menuEditorContent" class="menu-editor-content">
         <VAlert v-if="menuConfigError" type="warning" variant="tonal" title="导航设置尚未读取" class="mb-4">
           <div>{{ menuConfigError }}</div>
-          <p class="mt-2">默认导航仍可使用，成功读取后才能保存更改。</p>
+          <p class="mt-2">当前导航仍可使用，成功读取后才能保存更改。</p>
           <VBtn size="small" variant="tonal" class="mt-2" prepend-icon="mdi-refresh" :loading="isMenuLoading" @click="initMenuConfig">重试读取</VBtn>
         </VAlert>
         <div class="menu-editor-roots" :class="{ 'menu-editor-roots--dragging': dragSource }">

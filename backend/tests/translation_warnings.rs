@@ -410,9 +410,15 @@ async fn person_translation_task_reports_missing_translation_without_writing_ori
         .await
         .unwrap();
     let job = f.job(submitted["task_id"].as_str().unwrap()).await;
-    assert_eq!(job["state"], "completed_with_warnings", "{job}");
+    assert_eq!(job["state"], "failed", "{job}");
     assert_eq!(job["result"]["updated"], 0);
-    assert_eq!(job["result"]["failures"], json!([]));
+    assert_eq!(job["result"]["failures"].as_array().unwrap().len(), 1);
+    assert!(
+        job["result"]["failures"][0]
+            .as_str()
+            .unwrap()
+            .contains("未取得通过校验的姓名译文")
+    );
     assert_eq!(job["result"]["warnings"], 1);
     assert!(
         job["result"]["warning_details"][0]

@@ -1,7 +1,7 @@
 use crate::{
     AppState,
     error::{ApiError, Result},
-    jobs::JobContext,
+    jobs::{JobContext, JobSpec},
     state::string,
 };
 use axum::{Json, extract::State, http::StatusCode};
@@ -136,7 +136,7 @@ async fn remaining_conflict_directories(directories: Vec<PathBuf>) -> Vec<PathBu
     remaining
 }
 
-async fn mark_verified(directory: &Path, target_ids: &Value) -> Result<PathBuf> {
+pub(crate) async fn mark_verified(directory: &Path, target_ids: &Value) -> Result<PathBuf> {
     let marker = cleanup_marker(directory)?;
     let stage = marker.with_file_name(format!(
         ".cleanup-stage-{}.json",
@@ -210,15 +210,20 @@ where
     Ok(())
 }
 
-async fn cleanup_verified(directory: &Path, marker: &Path, conflict_root: &Path) -> Result<()> {
+pub(crate) async fn cleanup_verified(
+    directory: &Path,
+    marker: &Path,
+    conflict_root: &Path,
+) -> Result<()> {
     cleanup_verified_with(directory, marker, conflict_root, tokio::fs::remove_dir_all).await
 }
 
-async fn records(state: &AppState) -> Result<Vec<Record>> {
+async fn records(state: &AppState, display: bool) -> Result<Vec<Record>> {
     let mut records = vec![];
     for (prefix, root) in [
         ("media", state.data_dir.join("backups/media-info-reload")),
         ("rename", state.data_dir.join("rename-recovery")),
+        ("wash", state.data_dir.join("backups/media-info-wash")),
     ] {
         let mut entries = match tokio::fs::read_dir(&root).await {
             Ok(entries) => entries,
@@ -344,6 +349,10 @@ async fn records(state: &AppState) -> Result<Vec<Record>> {
                 .as_ref()
                 .map(|value| recovery_target_paths(value, kind, &target_ids))
                 .unwrap_or_default();
+            if prefix == "wash" {
+                can_recover = false;
+                reason = "覆盖后的媒体刷新尚未确认，请重试该文件入库以核对当前版本并恢复原配置；旧版媒体信息仅供留档".into();
+            }
             let mut json_conflicts = vec![];
             if can_recover {
                 match crate::media_reload::recovery_json_conflicts(state, &directory).await {
@@ -370,7 +379,11 @@ async fn records(state: &AppState) -> Result<Vec<Record>> {
             records.push(Record {
                 id: format!("{prefix}:{name}"),
                 directory,
-                kind,
+                kind: if prefix == "wash" {
+                    "wash-pending"
+                } else {
+                    kind
+                },
                 target_ids,
                 target_paths,
                 reason,
@@ -379,6 +392,61 @@ async fn records(state: &AppState) -> Result<Vec<Record>> {
                 conflict_backup_directories,
             });
         }
+    }
+    let pending_query=sqlx::query_scalar::<_,Value>("SELECT jsonb_build_object('ids',emby_item_ids_json,'assets',asset_details_json) FROM media_metadata WHERE asset_details_json @? '$[*] ? (@.moviepilot_media_pending == true)'")
+        .fetch_all(&state.db);
+    let mut database_unknown = false;
+    let rows = if display {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), pending_query).await {
+            Ok(Ok(rows)) => rows,
+            result => {
+                if let Ok(Err(error)) = result {
+                    tracing::warn!(%error,"恢复状态只能显示本地材料，数据库媒体状态尚未确认");
+                } else {
+                    tracing::warn!("恢复状态数据库查询超时，只能显示本地材料");
+                }
+                database_unknown = true;
+                vec![]
+            }
+        }
+    } else {
+        pending_query.await?
+    };
+    for row in rows {
+        for (index, asset) in crate::media_edit::list(&row["assets"])
+            .into_iter()
+            .enumerate()
+        {
+            if asset["moviepilot_media_pending"] != true {
+                continue;
+            }
+            let id = row["ids"][index].as_str().unwrap_or("");
+            if id.is_empty() {
+                continue;
+            }
+            let path = string(&asset, "path");
+            records.push(Record {
+                id: format!("wash-pending:{id}"),
+                directory: state.data_dir.join("backups/media-info-wash"),
+                kind: "wash-pending",
+                target_ids: json!([id]),
+                target_paths: BTreeMap::from([(id.into(), path)]),
+                reason:
+                    "覆盖后的媒体信息尚未通过验收，请重试该文件入库；旧版媒体信息不可用于当前版本"
+                        .into(),
+                can_recover: false,
+                json_conflicts: vec![],
+                conflict_backup_directories: vec![],
+            });
+        }
+    }
+    if database_unknown {
+        records.push(Record {
+            id:"~database-state-unknown".into(),directory:state.data_dir.clone(),kind:"database-unavailable",
+            target_ids:json!([]),target_paths:BTreeMap::new(),
+            reason:"数据库媒体状态尚未确认；本地恢复材料可查看，数据库恢复连接前禁止保存、刮削和媒体恢复".into(),
+            can_recover:false,json_conflicts:vec![],conflict_backup_directories:vec![],
+        });
     }
     records.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(records)
@@ -517,7 +585,7 @@ fn scope_connection(config: &Value) -> [String; 3] {
 }
 
 pub async fn status(State(state): State<AppState>) -> Result<Json<Value>> {
-    let records = records(&state).await?;
+    let records = records(&state, true).await?;
     let config = state.config.read().await.clone();
     let pinned = AppState {
         config: std::sync::Arc::new(tokio::sync::RwLock::new(config.clone())),
@@ -582,14 +650,20 @@ pub async fn submit(
     }) {
         return Err(ApiError::bad("当前 JSON 确认哈希无效，未修改媒体文件"));
     }
-    if !records(&state).await?.iter().any(|record| record.id == id) {
+    if !records(&state, false)
+        .await?
+        .iter()
+        .any(|record| record.id == id)
+    {
         return Err(ApiError::bad("未找到该待恢复记录，请重新检查恢复状态"));
     }
+    let payload = json!({"recovery_id":id,"current_json_hashes":hashes});
+    let spec = JobSpec::new("media_recovery", payload.clone());
     let task = state
         .jobs
         .clone()
-        .submit_response("恢复媒体信息", move |context| async move {
-            recover_confirmed(&state, &id, &context, &hashes).await
+        .submit_persistent_response("恢复媒体信息", spec, move |context| async move {
+            execute_persisted(&state, &payload, &context).await
         })
         .await?;
     Ok((
@@ -598,22 +672,87 @@ pub async fn submit(
     ))
 }
 
-async fn recover_confirmed(
+pub(crate) async fn execute_persisted(
+    state: &AppState,
+    payload: &Value,
+    context: &JobContext,
+) -> Result<(u16, Value)> {
+    if let Some(saved) = context.completed("media_recovery_result").await? {
+        return Ok((
+            saved["status"].as_u64().unwrap_or(200) as u16,
+            saved["result"].clone(),
+        ));
+    }
+    let id = string(payload, "recovery_id");
+    let hashes: BTreeMap<String, String> =
+        serde_json::from_value(payload["current_json_hashes"].clone())
+            .map_err(|_| ApiError::bad("持久恢复任务的 JSON 确认参数无效"))?;
+    let result = if let Some(verified) = context.completed("media_recovery_verified").await? {
+        let directory = PathBuf::from(string(&verified, "directory"));
+        let marker = cleanup_marker(&directory)?;
+        if tokio::fs::try_exists(&marker).await? {
+            if read_json(&marker).await? != verified["manifest"] {
+                return Err(ApiError::bad(
+                    "已验收清理记录在重启期间变化，未删除恢复材料",
+                ));
+            }
+            cleanup_verified(
+                &directory,
+                &marker,
+                &state.data_dir.join("backups/media-info-conflicts"),
+            )
+            .await?;
+        } else if tokio::fs::try_exists(&directory).await? {
+            return Err(ApiError::bad("已验收清理记录缺失，恢复材料仍保留"));
+        }
+        (
+            200,
+            json!({"message":"媒体恢复及原配置已验收，备份清理完成","recovered_id":id,
+            "pending":!records(state, false).await?.is_empty(),"backup_deleted":true,"warnings":0,
+            "warning_details":[],"conflict_backup_directories":[],
+            "deleted_conflict_backup_directories":verified["conflict_backup_directories"]}),
+        )
+    } else {
+        recover_confirmed(state, &id, context, &hashes).await?
+    };
+    context
+        .complete(
+            "media_recovery_result",
+            &json!({"status":result.0,"result":result.1}),
+        )
+        .await?;
+    Ok(result)
+}
+
+pub(crate) async fn recover_confirmed(
     state: &AppState,
     id: &str,
     context: &JobContext,
     hashes: &BTreeMap<String, String>,
 ) -> Result<(u16, Value)> {
-    let mut pending = records(state).await?;
+    let mut pending = records(state, false).await?;
     let position = pending
         .iter()
         .position(|record| record.id == id)
         .ok_or_else(|| ApiError::bad("该恢复记录已经处理或不存在，请重新检查"))?;
     let record = pending.remove(position);
+    let scope =
+        json!({"recovery_id":id,"directory":record.directory,"target_ids":record.target_ids});
+    let original_scope = context.plan("media_recovery_scope").await?;
+    if let Some(original) = &original_scope {
+        if original != &scope {
+            return Err(ApiError::bad("恢复任务的原目标范围已变化，未扩大恢复范围"));
+        }
+    } else {
+        context.save_plan("media_recovery_scope", &scope).await?;
+    }
     if !record.can_recover {
         return Err(ApiError(StatusCode::CONFLICT, record.reason));
     }
-    if record.kind == "verified-cleanup" && !hashes.is_empty() {
+    if record.kind == "verified-cleanup"
+        && !hashes.is_empty()
+        && !(context.is_resuming() && original_scope.is_some())
+    {
         return Err(ApiError::bad("已验收备份清理不接受媒体 JSON 覆盖确认"));
     }
     if record.kind != "verified-cleanup"
@@ -638,14 +777,18 @@ async fn recover_confirmed(
     } else {
         let original = read_json(&record.directory.join("original-settings.json")).await?;
         let applied = crate::strm::recovery_applied_settings(&record.directory, &original).await?;
-        let result =
-            crate::strm::finish_media_recovery(state, &original, applied.as_ref(), || async {
+        let result = crate::strm::finish_media_recovery_rearmed(
+            state,
+            &original,
+            applied.as_ref(),
+            || async {
                 retained =
                     crate::media_reload::recover_record(state, &record.directory, context, hashes)
                         .await?;
                 Ok(())
-            })
-            .await;
+            },
+        )
+        .await;
         if let Err(mut error) = result {
             if !retained.is_empty() && !error.1.contains(&retained[0].display().to_string()) {
                 error.1.push_str(&format!(
@@ -663,6 +806,13 @@ async fn recover_confirmed(
         // must not remove the only record that allows a cleanup-only retry.
         mark_verified(&record.directory, &record.target_ids).await?
     };
+    context
+        .complete(
+            "media_recovery_verified",
+            &json!({"directory":record.directory,
+        "manifest":read_json(&marker).await?,"conflict_backup_directories":retained}),
+        )
+        .await?;
     if let Err(error) = cleanup_verified(
         &record.directory,
         &marker,
@@ -688,7 +838,7 @@ async fn recover_confirmed(
     );
     Ok((
         StatusCode::OK.as_u16(),
-        json!({"message":if retained.is_empty() { "媒体恢复及原配置回读验收通过，原恢复备份已删除，可以继续保存" } else { "媒体恢复及原配置回读验收通过，恢复备份及当前 JSON 冲突备份均已删除，可以继续保存" }, "recovered_id":id,"pending":!records(state).await?.is_empty(),
+        json!({"message":if retained.is_empty() { "媒体恢复及原配置回读验收通过，原恢复备份已删除，可以继续保存" } else { "媒体恢复及原配置回读验收通过，恢复备份及当前 JSON 冲突备份均已删除，可以继续保存" }, "recovered_id":id,"pending":!records(state, false).await?.is_empty(),
         "backup_deleted":true, "warnings":0,"warning_details":[],"conflict_backup_directories":[],"deleted_conflict_backup_directories":retained}),
     ))
 }

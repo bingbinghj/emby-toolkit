@@ -34,6 +34,9 @@ impl AppState {
         crate::media_organize_history::interrupt_unfinished(&db)
             .await
             .map_err(|e| anyhow::anyhow!(e.1))?;
+        crate::media_organize_queue::recover_unfinished(&db)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.1))?;
         let mut config: Value =
             serde_json::from_str(include_str!("../assets/config_defaults.json"))?;
         if let Some(Value::Object(stored)) = db::setting(&db, "dynamic_app_config")
@@ -48,11 +51,19 @@ impl AppState {
             .remove("min_score_for_review");
         migrate_cookie_priority(&db, &mut config).await;
         config["emby_server_id"] = Value::Null;
+        config["emby_server_id_verified"] = Value::Bool(false);
         let logs = crate::logs::LogStore::open(&data_dir.join("logs"))?;
         logs.configure(&config);
+        let jobs = Arc::new(
+            crate::jobs::JobManager::open(db.clone())
+                .await
+                .map_err(|error| anyhow::anyhow!(error.1))?,
+        );
+        let config = Arc::new(RwLock::new(config));
+        jobs.bind_config(&config);
         Ok(Self {
             db,
-            config: Arc::new(RwLock::new(config)),
+            config,
             http: reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
                 .timeout(Duration::from_secs(60))
@@ -62,7 +73,7 @@ impl AppState {
             notifications: Arc::new(crate::notifications::Service::default()),
             webhooks: Arc::new(crate::webhook::Service::default()),
             ai: Arc::new(crate::ai::Service::default()),
-            jobs: Arc::new(crate::jobs::JobManager::default()),
+            jobs,
             logs,
             p115: Arc::new(crate::p115::Service::default()),
             strm: Arc::new(crate::strm::Service::default()),
@@ -89,7 +100,10 @@ impl AppState {
             .unwrap()
             .remove("min_score_for_review");
         migrate_cookie_priority(&self.db, &mut config).await;
-        config["emby_server_id"] = current["emby_server_id"].clone();
+        let same_identity = string(&config, "emby_server_url") == string(&current, "emby_server_url")
+            && string(&config, "emby_api_key") == string(&current, "emby_api_key");
+        config["emby_server_id"] = if same_identity { current["emby_server_id"].clone() } else { Value::Null };
+        config["emby_server_id_verified"] = Value::Bool(same_identity && current["emby_server_id_verified"] == true);
         self.logs.configure(&config);
         *current = config;
         Ok(())
@@ -116,9 +130,13 @@ impl AppState {
                 next[key] = config[key].clone();
             }
         }
-        next["emby_server_id"] = config["emby_server_id"].clone();
+        let same_identity = string(&next, "emby_server_url") == string(&config, "emby_server_url")
+            && string(&next, "emby_api_key") == string(&config, "emby_api_key");
+        next["emby_server_id"] = if same_identity { config["emby_server_id"].clone() } else { Value::Null };
+        next["emby_server_id_verified"] = Value::Bool(same_identity && config["emby_server_id_verified"] == true);
         let mut persisted = next.clone();
         persisted.as_object_mut().unwrap().remove("emby_server_id");
+        persisted.as_object_mut().unwrap().remove("emby_server_id_verified");
         db::save_setting(&self.db, "dynamic_app_config", &persisted).await?;
         self.logs.configure(&next);
         *config = next;
@@ -126,23 +144,20 @@ impl AppState {
     }
     pub async fn refresh_server_identity(&self) {
         let config = self.config.read().await.clone();
-        let base = string(&config, "emby_server_url");
+        let base = crate::jobs::server_url(&config);
         let key = string(&config, "emby_api_key");
         let mut id = Value::Null;
-        if !base.is_empty() && !key.is_empty() {
+        let mut verified = false;
+        if let Some(base) = &base && !key.is_empty() {
             let result = async {
                 let cached = db::setting(&self.db, "emby_server_id_cache")
                     .await?
                     .unwrap_or(Value::Null);
-                let truthy = |value: &Value| match value {
-                    Value::Null => false,
-                    Value::Bool(value) => *value,
-                    Value::Number(value) => value.as_f64().is_some_and(|value| value != 0.0),
-                    Value::String(value) => !value.is_empty(),
-                    Value::Array(value) => !value.is_empty(),
-                    Value::Object(value) => !value.is_empty(),
-                };
-                let timeout = if truthy(&cached) { 5 } else { 20 };
+                let cached_id = (cached["server_url"].as_str() == Some(base.as_str()))
+                    .then(|| cached["id"].as_str())
+                    .flatten()
+                    .filter(|id| !id.trim().is_empty());
+                let timeout = if cached_id.is_some() { 5 } else { 20 };
                 tracing::debug!("正在尝试连接 Emby 获取 Server ID (超时设定: {timeout}s)...");
                 let info = async {
                     crate::emby::send(
@@ -156,19 +171,27 @@ impl AppState {
                     .json::<Value>()
                     .await
                 }
-                .await
-                .inspect_err(|error| {
-                    tracing::warn!("获取 Emby 服务器信息失败 (可能是服务器离线): {error}");
-                });
-                if let Ok(info) = info
-                    && truthy(&info["Id"])
-                {
-                    id = info["Id"].clone();
+                .await;
+                let live_id = match info {
+                    Ok(info) => info["Id"].as_str().map(str::trim).filter(|id| !id.is_empty()).map(str::to_string),
+                    Err(error) => {
+                        tracing::warn!("获取 Emby 服务器信息失败 (可能是服务器离线): {}", error.without_url());
+                        None
+                    }
+                };
+                if let Some(live_id) = live_id {
+                    id = Value::String(live_id);
+                    verified = true;
                     tracing::trace!("成功获取到 Emby Server ID: {id}");
-                    db::save_setting(&self.db, "emby_server_id_cache", &id).await?;
-                } else if truthy(&cached) {
-                    id = cached;
-                    tracing::warn!("无法连接 Emby 服务器，已使用缓存的 Server ID: {id} 继续启动。");
+                    let current = self.config.read().await;
+                    if crate::jobs::server_url(&current).as_deref() == Some(base.as_str())
+                        && string(&current, "emby_api_key") == key
+                    {
+                        db::save_setting(&self.db, "emby_server_id_cache", &serde_json::json!({"id":id,"server_url":base})).await?;
+                    }
+                } else if let Some(cached_id) = cached_id {
+                    id = Value::String(cached_id.trim().to_string());
+                    tracing::warn!("无法连接 Emby 服务器，已使用同地址缓存的 Server ID: {id} 继续启动，身份尚未现场验证。");
                 } else {
                     tracing::error!("无法连接 Emby 且本地无缓存 Server ID，部分功能可能受限。");
                 }
@@ -179,7 +202,11 @@ impl AppState {
                 tracing::warn!("缓存 Emby Server ID 失败：{}", error.1);
             }
         }
-        self.config.write().await["emby_server_id"] = id;
+        let mut current = self.config.write().await;
+        if crate::jobs::server_url(&current) == base && string(&current, "emby_api_key") == key {
+            current["emby_server_id"] = id;
+            current["emby_server_id_verified"] = Value::Bool(verified);
+        }
     }
     pub async fn emby(
         &self,

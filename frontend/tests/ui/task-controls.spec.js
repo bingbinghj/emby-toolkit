@@ -34,6 +34,10 @@ for (const ended of [false, true]) {
   test(`task-center stop confirmation protects a task that ${ended ? 'ended' : 'was replaced'}`, async ({ page, api }) => {
     api.setTask(running);
     api.respond('POST', '/api/trigger_stop_task', { message: '停止请求已发送' });
+    if (ended) api.respond('GET', '/api/tasks/result/credits-A', {
+      ...running, is_running: false, state: 'completed', progress: 100, message: '已完成',
+      result_status: 200, result: { message: '已完成' },
+    });
     await page.goto('/settings/scheduler');
     const card = page.getByTestId('scheduler-current-task');
     await card.getByRole('button', { name: '停止', exact: true }).click();

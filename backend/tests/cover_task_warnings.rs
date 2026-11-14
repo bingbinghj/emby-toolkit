@@ -466,3 +466,36 @@ async fn missing_native_path_stops_preflight_before_considering_a_playback_path(
     assert_eq!(f.host.uploads.load(Ordering::SeqCst), 0);
     f.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn restart_continues_the_saved_cover_plan_without_uploading_finished_libraries_again() {
+    let f = Fixture::new().await;
+    let mut config = covers::defaults();
+    config["enabled"] = json!(true);
+    config["cover_style"] = json!("multi_1");
+    config["multi_1_use_main_font"] = json!(true);
+    db::save_setting(&f.state.db, "cover_generator_config", &config).await.unwrap();
+    let id = uuid::Uuid::new_v4().to_string();
+    let spec = emby_toolkit::jobs::JobSpec::new("tasks", json!({
+        "task":"generate-all-covers", "full":false, "batch_size":10, "unsupported":[]
+    }));
+    sqlx::query("INSERT INTO durable_jobs(id,spec_json,state_json,checkpoint_json) VALUES($1,$2,$3,$4)")
+        .bind(&id).bind(json!(spec))
+        .bind(json!({"task_id":id,"last_action":"生成媒体库封面","state":"running","is_running":true,"progress":50,"completed":1,"total":2}))
+        .bind(json!({"plans":{"cover-libraries:all":[
+            {"Id":"already-finished","Name":"已完成库","CollectionType":"movies"},
+            {"Id":"library","Name":"测试库","CollectionType":"movies"}
+        ]},"completed":{"cover:all:already-finished":{"warning_details":["此前另存封面提醒"]}}}))
+        .execute(&f.state.db).await.unwrap();
+    let restarted = AppState::new(f.state.db.clone(), f.state.data_dir.clone()).await.unwrap();
+    restarted.jobs.resume_pending(restarted.clone(), tokio_util::sync::CancellationToken::new()).await.unwrap();
+    let result = restarted.jobs.result(&id).await.unwrap();
+    assert_eq!(result["state"], "completed_with_warnings", "{result}");
+    assert_eq!(result["result"]["updated"], 2);
+    assert_eq!(result["result"]["warnings"], 2);
+    assert!(result["result"]["warning_details"].as_array().unwrap().contains(&json!("此前另存封面提醒")));
+    assert_eq!(f.host.uploads.load(Ordering::SeqCst), 1);
+    restarted.jobs.shutdown().await;
+    f.close().await;
+}

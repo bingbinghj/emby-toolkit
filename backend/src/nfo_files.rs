@@ -19,6 +19,8 @@ pub struct Options<'a> {
     pub seasons: &'a [i64],
     pub episodes: &'a [(i64, i64)],
     pub movie_paths: &'a [PathBuf],
+    pub media_paths: &'a [PathBuf],
+    pub skip_parents: bool,
     pub config: &'a Value,
     pub studio_mapping: &'a Value,
     pub keyword_mapping: &'a Value,
@@ -113,9 +115,19 @@ pub async fn movie_paths(state: &AppState, item: &Value, template: &Value) -> Re
     if !tmdb.is_empty()
         && let Some(row) = crate::metadata::row(state, &tmdb, "Movie").await?
     {
-        for cached in list(&row["emby_item_ids_json"]) {
-            if let Some(cached) = cached.as_str().filter(|value| !value.is_empty()) {
-                ids.insert(cached.to_string());
+        let cached = list(&row["emby_item_ids_json"])
+            .iter()
+            .filter_map(|value| {
+                value
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_string)
+            })
+            .collect::<Vec<_>>();
+        let existing = crate::versions::existing(state, &cached).await?;
+        for cached in cached {
+            if existing.contains(&cached) {
+                ids.insert(cached);
             }
         }
     }
@@ -397,8 +409,9 @@ pub async fn sync(
                     }).collect();
                 }
             }
-            written +=
-                usize::from(write(&top, &nfo::build("Series", &data, &cast), options.force).await?);
+            if !options.skip_parents {
+                written += usize::from(write(&top, &nfo::build("Series", &data, &cast), options.force).await?);
+            }
             let episodes = if let Some(map) = data["episodes_details"].as_object() {
                 map.values().cloned().collect::<Vec<_>>()
             } else {
@@ -413,7 +426,12 @@ pub async fn sync(
             }
             let seasons = list(&data["seasons_details"]);
             let mut directories = HashSet::new();
-            for file in files(root, true).await? {
+            let media = if options.media_paths.is_empty() { files(root, true).await? } else { options.media_paths.to_vec() };
+            for file in media {
+                if !options.media_paths.is_empty() && !options.media_paths.contains(&file) {
+                    out_of_scope += 1;
+                    continue;
+                }
                 let extension = file
                     .extension()
                     .and_then(|s| s.to_str())
@@ -423,7 +441,10 @@ pub async fn sync(
                 {
                     continue;
                 }
-                let Some(key) = episode_number(&file) else {
+                let key = if options.media_paths.len() == 1 && options.episodes.len() == 1 {
+                    options.episodes.first().copied()
+                } else { episode_number(&file) };
+                let Some(key) = key else {
                     continue;
                 };
                 if (!options.seasons.is_empty() && !options.seasons.contains(&key.0))
@@ -442,7 +463,7 @@ pub async fn sync(
                 let season = seasons
                     .iter()
                     .find(|s| s["season_number"].as_i64() == Some(key.0));
-                if directories.insert(directory.to_path_buf())
+                if !options.skip_parents && directories.insert(directory.to_path_buf())
                     && let Some(season) = season
                 {
                     written += usize::from(

@@ -126,75 +126,156 @@ async fn submit_with_batch(
         .to_string();
     let message = format!("任务 '{name}' 已成功提交。");
     let work = state.clone();
+    let payload =
+        json!({"task":task,"full":full,"batch_size":batch_size,"unsupported":unsupported});
+    let spec = crate::jobs::JobSpec::new("tasks", payload.clone());
     let id = state
         .jobs
-        .submit(&name, move |context| async move {
-            if !unsupported.is_empty() {
-                return Err(ApiError(StatusCode::INTERNAL_SERVER_ERROR, format!("任务 {task} 不支持参数：{}", unsupported.join(", "))));
-            }
-            match task.as_str() {
-                "populate-metadata"=>{
-                    let batch_size = batch_size.as_i64().or_else(|| batch_size.as_bool().map(i64::from))
-                        .ok_or_else(|| ApiError(StatusCode::INTERNAL_SERVER_ERROR, "分批大小必须是整数".into()))?;
-                    crate::sync::cache_with_batch(&work, full, batch_size, &context).await
-                },
-                "clear-mediainfo"=>{context.checkpoint().await?;let count=sqlx::query("DELETE FROM p115_mediainfo_cache").execute(&work.db).await?.rows_affected();Ok(json!({"message":format!("媒体信息备份已清空，共删除 {count} 条记录。"),"deleted":count}))},
-                "repair-p115-fingerprints"=>crate::revalidation::repair(&work,&context).await,
-                "role-translation"=>translate_roles(&work,full,&context).await,
-                "actor-translation"=>translate_persons(&work,&context).await,
-                "enrich-aliases"=>enrich_persons(&work,full,&context).await,
-                "restore-nfo-and-images"=>restore_metadata(&work,&context).await,
-                "purge-ghost-actors"=>purge_persons(&work,&context).await,
-                "restore_mediainfo"=>crate::media_restore::restore(&work,full,&context).await,
-                "repair-truehd-core-shift"=>crate::audio_tasks::repair_all(&work,&context).await,
-                "restore-truehd-core-backups"=>crate::audio_tasks::restore(&work,&context).await,
-                "clear-truehd-core-backups"=>crate::audio_tasks::clear(&work,&context).await,
-                "generate-all-covers"=>crate::covers::generate(&work,None,&context).await,
-                "clear-emby-activity-log"=>crate::activity::clear(&work,&context).await,
-                "repair-video-thumbnails"=>crate::thumbnails::repair(&work,&context).await,
-                "extract-episode-credits"=>crate::credits::extract_all(&work,&context).await,
-                _=>backup_info(&work,&context).await,
-            }
+        .submit_persistent_response(&name, spec, move |context| async move {
+            execute_persisted(&work, &payload, &context).await
         })
         .await?;
     Ok(json!({"message":message,"task_id":id}))
 }
 
+pub(crate) async fn execute_persisted(
+    work: &AppState,
+    payload: &Value,
+    context: &crate::jobs::JobContext,
+) -> Result<(u16, Value)> {
+    let task = payload["task"]
+        .as_str()
+        .ok_or_else(|| ApiError::bad("持久化任务名称无效"))?;
+    let full = payload["full"] == true;
+    let batch_size = payload["batch_size"].clone();
+    let unsupported: Vec<String> = serde_json::from_value(payload["unsupported"].clone())
+        .map_err(|_| ApiError::bad("持久化任务参数无效"))?;
+    if !unsupported.is_empty() {
+        return Err(ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("任务 {task} 不支持参数：{}", unsupported.join(", ")),
+        ));
+    }
+    let result = match task {
+        "populate-metadata" => {
+            let batch_size = batch_size
+                .as_i64()
+                .or_else(|| batch_size.as_bool().map(i64::from))
+                .ok_or_else(|| {
+                    ApiError(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "分批大小必须是整数".into(),
+                    )
+                })?;
+            Box::pin(crate::sync::cache_with_batch(
+                work, full, batch_size, context,
+            ))
+            .await
+        }
+        "clear-mediainfo" => {
+            let key = "tasks:clear-mediainfo";
+            if let Some(result) = context.completed(key).await? {
+                Ok(result)
+            } else {
+                context.checkpoint().await?;
+                let mut transaction = work.db.begin().await?;
+                let count = sqlx::query("DELETE FROM p115_mediainfo_cache")
+                    .execute(&mut *transaction)
+                    .await?
+                    .rows_affected();
+                let result = json!({"message":format!("媒体信息备份已清空，共删除 {count} 条记录。"),"deleted":count});
+                context
+                    .complete_in_tx(&mut transaction, key, &result)
+                    .await?;
+                transaction.commit().await?;
+                Ok(result)
+            }
+        }
+        "repair-p115-fingerprints" => Box::pin(crate::revalidation::repair(work, context)).await,
+        "role-translation" => Box::pin(translate_roles(work, full, context)).await,
+        "actor-translation" => Box::pin(translate_persons(work, context)).await,
+        "enrich-aliases" => Box::pin(enrich_persons(work, full, context)).await,
+        "restore-nfo-and-images" => Box::pin(restore_metadata(work, context)).await,
+        "purge-ghost-actors" => Box::pin(purge_persons(work, context)).await,
+        "restore_mediainfo" => Box::pin(crate::media_restore::restore(work, full, context)).await,
+        "repair-truehd-core-shift" => Box::pin(crate::audio_tasks::repair_all(work, context)).await,
+        "restore-truehd-core-backups" => Box::pin(crate::audio_tasks::restore(work, context)).await,
+        "clear-truehd-core-backups" => Box::pin(crate::audio_tasks::clear(work, context)).await,
+        "generate-all-covers" => Box::pin(crate::covers::generate(work, None, context)).await,
+        "clear-emby-activity-log" => Box::pin(crate::activity::clear(work, context)).await,
+        "repair-video-thumbnails" => Box::pin(crate::thumbnails::repair(work, context)).await,
+        "extract-episode-credits" => Box::pin(crate::credits::extract_all(work, context)).await,
+        "backup-mediainfo" => Box::pin(backup_info(work, context)).await,
+        _ => Err(ApiError(
+            StatusCode::NOT_FOUND,
+            format!("未知的任务名称: {task}"),
+        )),
+    }?;
+    Ok((200, result))
+}
+
+async fn task_plan(
+    context: &crate::jobs::JobContext,
+    key: &str,
+    build: impl std::future::Future<Output = Result<Value>>,
+) -> Result<Value> {
+    if let Some(plan) = context.plan(key).await? {
+        return Ok(plan);
+    }
+    let plan = build.await?;
+    context.save_plan(key, &plan).await?;
+    Ok(plan)
+}
+
 async fn translate_persons(state: &AppState, context: &crate::jobs::JobContext) -> Result<Value> {
+    context.checkpoint().await?;
     if state.config.read().await["ai_translate_actor_role"] != true {
         return Ok(json!({"updated":0,"message":"AI翻译功能未启用，跳过任务。"}));
     }
-    context
-        .activity("阶段1/3：扫描人物", "正在扫描 Emby，收集待翻译人物")
-        .await;
-    let mut people = crate::emby::persons(state, context).await?;
-    crate::media_order::sort(&mut people);
-    tracing::info!("[人物中文化] 已读取 {} 名媒体库关联人物", people.len());
-    let mut inputs = std::collections::BTreeMap::new();
-    let mut source_map = std::collections::HashMap::new();
-    for person in &people {
-        let name = crate::state::string(person, "Name");
-        if name.is_empty() || crate::translation::chinese(&name) {
-            continue;
-        }
-        let tmdb = crate::state::string(&person["ProviderIds"], "Tmdb")
-            .parse::<i32>()
-            .ok();
-        let original: Option<String> = if let Some(id) = tmdb {
-            sqlx::query_scalar("SELECT original_name FROM person_metadata WHERE tmdb_person_id=$1")
+    let plan = task_plan(context, "tasks:actor-translation:plan", async {
+        context
+            .activity("阶段1/3：扫描人物", "正在扫描 Emby，收集待翻译人物")
+            .await;
+        let mut people = crate::emby::persons(state, context).await?;
+        crate::media_order::sort(&mut people);
+        tracing::info!("[人物中文化] 已读取 {} 名媒体库关联人物", people.len());
+        let mut inputs = std::collections::BTreeMap::new();
+        let mut source_map = std::collections::HashMap::new();
+        for person in &people {
+            let name = crate::state::string(person, "Name");
+            if name.is_empty() || crate::translation::chinese(&name) {
+                continue;
+            }
+            let tmdb = crate::state::string(&person["ProviderIds"], "Tmdb")
+                .parse::<i32>()
+                .ok();
+            let original: Option<String> = if let Some(id) = tmdb {
+                sqlx::query_scalar(
+                    "SELECT original_name FROM person_metadata WHERE tmdb_person_id=$1",
+                )
                 .bind(id)
                 .fetch_optional(&state.db)
                 .await?
                 .flatten()
-        } else {
-            None
-        };
-        let source = original
-            .filter(|s| !s.is_empty() && !crate::translation::chinese(s))
-            .unwrap_or(name.clone());
-        inputs.insert(source.clone(), source.clone());
-        source_map.insert(name, source);
-    }
+            } else {
+                None
+            };
+            let source = original
+                .filter(|s| !s.is_empty() && !crate::translation::chinese(s))
+                .unwrap_or(name.clone());
+            inputs.insert(source.clone(), source.clone());
+            source_map.insert(name, source);
+        }
+        Ok(json!({"people":people,"inputs":inputs,"source_map":source_map}))
+    })
+    .await?;
+    let people = crate::media_edit::list(&plan["people"]);
+    let inputs: std::collections::BTreeMap<String, String> =
+        serde_json::from_value(plan["inputs"].clone())
+            .map_err(|_| ApiError::bad("人物翻译计划无效"))?;
+    let source_map: std::collections::HashMap<String, String> =
+        serde_json::from_value(plan["source_map"].clone())
+            .map_err(|_| ApiError::bad("人物翻译来源计划无效"))?;
     let mut updated = 0;
     let mut failures = vec![];
     let mut warning_details = vec![];
@@ -217,10 +298,75 @@ async fn translate_persons(state: &AppState, context: &crate::jobs::JobContext) 
                 ),
             )
             .await;
-        let inputs = batch.iter().cloned().collect();
-        let (translated, warnings) =
-            crate::ai::translate_report(state, &inputs, "fast_mode", &json!({}), &Value::Null)
+        let inputs: std::collections::BTreeMap<String, String> = batch.iter().cloned().collect();
+        let batch_key = format!("tasks:actor-translation:batch:{index}");
+        let saved = if let Some(result) = context.completed(&batch_key).await? {
+            Some(result)
+        } else {
+            context.plan(&batch_key).await?
+        };
+        let mut translated: std::collections::BTreeMap<String, String> =
+            if let Some(result) = &saved {
+                serde_json::from_value(result["translated"].clone())
+                    .map_err(|_| ApiError::bad("人物翻译结果无效"))?
+            } else {
+                std::collections::BTreeMap::new()
+            };
+        translated.retain(|source, value| {
+            inputs.contains_key(source)
+                && !value.trim().is_empty()
+                && value.as_str() != source.as_str()
+                && crate::translation::chinese(value)
+        });
+        let known_before_request = translated
+            .keys()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        let mut warnings: Vec<String> = if let Some(result) = &saved {
+            serde_json::from_value(result["warnings"].clone())
+                .map_err(|_| ApiError::bad("人物翻译提醒无效"))?
+        } else {
+            vec![]
+        };
+        let missing = inputs
+            .iter()
+            .filter(|(source, _)| !translated.contains_key(*source))
+            .map(|(source, value)| (source.clone(), value.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        if !missing.is_empty() && (saved.is_none() || context.is_resuming()) {
+            let (values, details) = Box::pin(crate::ai::translate_report(
+                state,
+                &missing,
+                "fast_mode",
+                &json!({}),
+                &Value::Null,
+            ))
+            .await?;
+            translated.extend(values);
+            translated.retain(|source, value| {
+                inputs.contains_key(source)
+                    && !value.trim().is_empty()
+                    && value.as_str() != source.as_str()
+                    && crate::translation::chinese(value)
+            });
+            warnings.extend(details);
+            let mut seen = std::collections::HashSet::new();
+            warnings.retain(|warning| seen.insert(warning.clone()));
+            context
+                .save_plan(
+                    &batch_key,
+                    &json!({"translated":translated,"warnings":warnings}),
+                )
                 .await?;
+        }
+        if inputs.keys().all(|source| translated.contains_key(source)) {
+            context
+                .complete(
+                    &batch_key,
+                    &json!({"translated":translated,"warnings":warnings}),
+                )
+                .await?;
+        }
         warning_details.extend(warnings);
         tracing::info!(
             "[人物中文化] 第 {} 批请求 {} 个名称，取得 {} 个结果，开始回写人物",
@@ -238,6 +384,19 @@ async fn translate_persons(state: &AppState, context: &crate::jobs::JobContext) 
             };
             context.checkpoint().await?;
             processed += 1;
+            let key = format!(
+                "tasks:actor-translation:person:{}",
+                crate::state::string(person, "Id")
+            );
+            if let Some(result) = context.completed(&key).await? {
+                if result["updated"].as_u64().unwrap_or(0) > 0
+                    || matches!(result["status"].as_str(), Some("completed" | "skipped"))
+                    || known_before_request.contains(source)
+                {
+                    updated += result["updated"].as_u64().unwrap_or(0);
+                    continue;
+                }
+            }
             context
                 .update_counted(
                     processed as u64,
@@ -246,8 +405,10 @@ async fn translate_persons(state: &AppState, context: &crate::jobs::JobContext) 
                     &format!("正在处理人物：{name}"),
                 )
                 .await;
+            let mut changed = false;
             if let Some(value) = translated.get(source) {
                 if value.is_empty() || value == &name {
+                    context.complete(&key, &json!({"updated":0,"status":"skipped","warning":"姓名已是目标译文，未重复写入"})).await?;
                     continue;
                 }
                 let id = crate::state::string(person, "Id");
@@ -255,6 +416,7 @@ async fn translate_persons(state: &AppState, context: &crate::jobs::JobContext) 
                 match result {
                     Ok(true) => {
                         updated += 1;
+                        changed = true;
                         tracing::info!("[人物中文化] '{name}' → '{value}' 已更新（Item {id}）");
                     }
                     Ok(false) => (),
@@ -267,9 +429,22 @@ async fn translate_persons(state: &AppState, context: &crate::jobs::JobContext) 
                             error.1
                         );
                         failures.push(format!("{id}: {}", error.1));
+                        continue;
                     }
                 }
+            } else {
+                failures.push(format!(
+                    "{}: 未取得通过校验的姓名译文，已保留原值",
+                    crate::state::string(person, "Id")
+                ));
+                continue;
             }
+            context
+                .complete(
+                    &key,
+                    &json!({"updated":u64::from(changed),"status":"completed"}),
+                )
+                .await?;
         }
     }
     context.checkpoint().await?;
@@ -293,12 +468,14 @@ async fn translate_roles(
     full: bool,
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
-    let config = state.config.read().await.clone();
-    if config["ai_translate_actor_role"] != true {
+    context.checkpoint().await?;
+    if state.config.read().await["ai_translate_actor_role"] != true {
         return Ok(json!({"updated":0,"message":"AI翻译功能未启用，跳过任务。"}));
     }
     let mut warnings = 0_u64;
     let mut warning_details = vec![];
+    let plan = task_plan(context, "tasks:role-translation:plan", async {
+    let config = state.config.read().await.clone();
     let mut ignored_ids = std::collections::HashSet::<String>::new();
     if !crate::media_edit::list(&config["libraries_to_ignore"]).is_empty() {
         let rows: Vec<(Value, Value)> = sqlx::query_as(
@@ -322,13 +499,6 @@ async fn translate_roles(
             }
         }
     }
-    if full {
-        context.checkpoint().await?;
-        sqlx::query("DELETE FROM processed_log WHERE NOT (item_id=ANY($1))")
-            .bind(ignored_ids.iter().cloned().collect::<Vec<_>>())
-            .execute(&state.db)
-            .await?;
-    }
     let mut media = vec![];
     context
         .activity("扫描媒体", "正在收集需要角色中文化的电影和电视剧")
@@ -341,61 +511,98 @@ async fn translate_roles(
                 .filter(|i| matches!(i["Type"].as_str(), Some("Movie" | "Series"))),
         );
     }
-    if !media.is_empty() {
-        let mut alive = ignored_ids;
-        for item in &media {
-            alive.insert(crate::state::string(item, "Id"));
-            if item["Type"] == "Movie" {
-                for source in crate::media_edit::list(&item["MediaSources"]) {
-                    let id = source["ItemId"]
-                        .as_str()
-                        .filter(|id| !id.is_empty())
-                        .or_else(|| source["Id"].as_str())
-                        .unwrap_or("")
-                        .trim_start_matches("mediasource_")
-                        .to_string();
-                    if !id.is_empty() {
-                        alive.insert(id);
+    crate::media_order::sort(&mut media);
+    Ok(json!({"media":media,"ignored_ids":ignored_ids}))
+    }).await?;
+    let mut media = crate::media_edit::list(&plan["media"]);
+    let ignored_ids: std::collections::HashSet<String> =
+        serde_json::from_value(plan["ignored_ids"].clone())
+            .map_err(|_| ApiError::bad("角色中文化媒体范围无效"))?;
+    let reset_key = "tasks:role-translation:reset";
+    if full && context.completed(reset_key).await?.is_none() {
+        context.checkpoint().await?;
+        let mut transaction = state.db.begin().await?;
+        sqlx::query("DELETE FROM processed_log WHERE NOT (item_id=ANY($1))")
+            .bind(ignored_ids.iter().cloned().collect::<Vec<_>>())
+            .execute(&mut *transaction)
+            .await?;
+        context
+            .complete_in_tx(&mut transaction, reset_key, &json!({"done":true}))
+            .await?;
+        transaction.commit().await?;
+    }
+    let cleanup_key = "tasks:role-translation:cleanup";
+    if let Some(report) = context.completed(cleanup_key).await? {
+        warnings += report["warnings"].as_u64().unwrap_or(0);
+        warning_details.extend(crate::media_edit::list(&report["warning_details"]));
+    } else {
+        if !media.is_empty() {
+            let mut alive = ignored_ids;
+            for item in &media {
+                alive.insert(crate::state::string(item, "Id"));
+                if item["Type"] == "Movie" {
+                    for source in crate::media_edit::list(&item["MediaSources"]) {
+                        let id = source["ItemId"]
+                            .as_str()
+                            .filter(|id| !id.is_empty())
+                            .or_else(|| source["Id"].as_str())
+                            .unwrap_or("")
+                            .trim_start_matches("mediasource_")
+                            .to_string();
+                        if !id.is_empty() {
+                            alive.insert(id);
+                        }
                     }
                 }
             }
-        }
-        let candidates: Vec<String> =
-            sqlx::query_scalar("SELECT item_id FROM processed_log WHERE NOT (item_id=ANY($1))")
-                .bind(alive.into_iter().collect::<Vec<_>>())
-                .fetch_all(&state.db)
-                .await?;
-        // A source ID is not proof that its native version disappeared.
-        let removed = match crate::emby::existing_ids(state, &candidates, Some(context)).await {
-            Ok(existing) => candidates
-                .into_iter()
-                .filter(|id| !existing.contains(id))
-                .collect::<Vec<_>>(),
-            Err(error) if context.is_cancelled() => return Err(error),
-            Err(error) => {
-                let reason = format!(
-                    "角色中文化清理未确认媒体存活状态，已保留处理和复核记录：{}",
-                    error.1
-                );
-                tracing::warn!("{reason}");
-                warnings += 1;
-                warning_details.push(json!(reason));
-                vec![]
-            }
-        };
-        if !removed.is_empty() {
-            let mut transaction = state.db.begin().await?;
-            for table in ["failed_log", "processed_log"] {
-                sqlx::query(&format!("DELETE FROM {table} WHERE item_id=ANY($1)"))
-                    .bind(&removed)
-                    .execute(&mut *transaction)
+            let candidates: Vec<String> =
+                sqlx::query_scalar("SELECT item_id FROM processed_log WHERE NOT (item_id=ANY($1))")
+                    .bind(alive.into_iter().collect::<Vec<_>>())
+                    .fetch_all(&state.db)
                     .await?;
+            // A source ID is not proof that its native version disappeared.
+            let removed = match crate::emby::existing_ids(state, &candidates, Some(context)).await {
+                Ok(existing) => candidates
+                    .into_iter()
+                    .filter(|id| !existing.contains(id))
+                    .collect::<Vec<_>>(),
+                Err(error) if context.is_cancelled() => return Err(error),
+                Err(error) => {
+                    let reason = format!(
+                        "角色中文化清理未确认媒体存活状态，已保留处理和复核记录：{}",
+                        error.1
+                    );
+                    tracing::warn!("{reason}");
+                    warnings += 1;
+                    warning_details.push(json!(reason));
+                    vec![]
+                }
+            };
+            let mut transaction = state.db.begin().await?;
+            if !removed.is_empty() {
+                for table in ["failed_log", "processed_log"] {
+                    sqlx::query(&format!("DELETE FROM {table} WHERE item_id=ANY($1)"))
+                        .bind(&removed)
+                        .execute(&mut *transaction)
+                        .await?;
+                }
+                tracing::info!(
+                    "[角色中文化] 已清理 {} 个已删除媒体项的处理和复核记录",
+                    removed.len()
+                );
             }
+            context
+                .complete_in_tx(
+                    &mut transaction,
+                    cleanup_key,
+                    &json!({"warnings":warnings,"warning_details":warning_details}),
+                )
+                .await?;
             transaction.commit().await?;
-            tracing::info!(
-                "[角色中文化] 已清理 {} 个已删除媒体项的处理和复核记录",
-                removed.len()
-            );
+        } else {
+            context
+                .complete(cleanup_key, &json!({"warnings":0,"warning_details":[]}))
+                .await?;
         }
     }
     let mut updated = 0;
@@ -407,6 +614,13 @@ async fn translate_roles(
         context.checkpoint().await?;
         let id = crate::state::string(&item, "Id");
         let name = item["Name"].as_str().unwrap_or(&id);
+        let key = format!("tasks:role-translation:item:{id}");
+        if let Some(report) = context.completed(&key).await? {
+            updated += report["updated"].as_u64().unwrap_or(0);
+            warnings += report["warnings"].as_u64().unwrap_or(0);
+            warning_details.extend(crate::media_edit::list(&report["warning_details"]));
+            continue;
+        }
         context
             .update_counted(
                 index as u64,
@@ -424,12 +638,14 @@ async fn translate_roles(
             .await?
         {
             tracing::info!("[角色中文化] 跳过《{name}》：已处理，快速模式保留现有数据");
+            context.complete(&key, &json!({"updated":0})).await?;
             continue;
         }
         if processed {
             state.item_delay(context).await?;
         }
         processed = true;
+        let item_context = context.scoped(&format!("tasks:role-translation:work:{id}"));
         let result = if full {
             let item = crate::media_edit::details(
                 state,
@@ -437,13 +653,20 @@ async fn translate_roles(
                 "Id,Type,Name,Path,ProviderIds,MediaSources,People,Genres",
             )
             .await?;
-            crate::ingest::scrape(state, &item, &[], None, context).await
+            Box::pin(crate::ingest::scrape(
+                state,
+                &item,
+                &[],
+                None,
+                &item_context,
+            ))
+            .await
         } else {
-            crate::webhook::process_emby(
+            Box::pin(crate::webhook::process_emby(
                 state,
                 &json!({"id":id,"episode_ids":[],"event":"item.add"}),
-                context,
-            )
+                &item_context,
+            ))
             .await
         };
         match result {
@@ -451,6 +674,7 @@ async fn translate_roles(
                 updated += 1;
                 warnings += report["warnings"].as_u64().unwrap_or(0);
                 warning_details.extend(crate::media_edit::list(&report["warning_details"]));
+                context.complete(&key, &json!({"updated":1,"warnings":report["warnings"],"warning_details":report["warning_details"]})).await?;
                 tracing::info!("[角色中文化] 《{name}》处理完成（Item {id}）");
             }
             Err(error) => {
@@ -484,14 +708,31 @@ async fn enrich_persons(
     full: bool,
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(p) FROM person_metadata p WHERE $1 OR ((imdb_id IS NULL OR profile_path IS NULL OR gender IS NULL OR original_name IS NULL) AND (last_updated_at IS NULL OR last_updated_at<NOW()-INTERVAL '30 days')) ORDER BY last_updated_at ASC NULLS FIRST,tmdb_person_id").bind(full).fetch_all(&state.db).await?;
+    context.checkpoint().await?;
+    let plan = task_plan(context, "tasks:enrich-aliases:plan", async {
+        let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(p) FROM person_metadata p WHERE $1 OR ((imdb_id IS NULL OR profile_path IS NULL OR gender IS NULL OR original_name IS NULL) AND (last_updated_at IS NULL OR last_updated_at<NOW()-INTERVAL '30 days')) ORDER BY last_updated_at ASC NULLS FIRST,tmdb_person_id").bind(full).fetch_all(&state.db).await?;
+        Ok(json!(rows))
+    }).await?;
+    let rows = crate::media_edit::list(&plan);
     let mut updated = 0;
     let mut deleted = 0;
     let mut failures = vec![];
     let total = rows.len();
+    let mut index = 0;
+    let mut pending_rows = vec![];
+    for row in rows {
+        let key = format!("tasks:enrich-aliases:person:{}", row["tmdb_person_id"]);
+        if let Some(result) = context.completed(&key).await? {
+            updated += result["updated"].as_u64().unwrap_or(0);
+            deleted += result["deleted"].as_u64().unwrap_or(0);
+            index += 1;
+        } else {
+            pending_rows.push(row);
+        }
+    }
     use futures_util::{FutureExt, StreamExt, stream};
     let limit = crate::strm::thread_limit(state, "secondary").await;
-    let pending = stream::iter(rows)
+    let pending = stream::iter(pending_rows)
         .map(|row| {
             async move {
                 let id = row["tmdb_person_id"].as_i64().unwrap() as i32;
@@ -502,10 +743,10 @@ async fn enrich_persons(
         })
         .buffer_unordered(limit);
     tokio::pin!(pending);
-    let mut index = 0;
     while let Some((row, result)) = pending.next().await {
         context.checkpoint().await?;
         let id = row["tmdb_person_id"].as_i64().unwrap() as i32;
+        let key = format!("tasks:enrich-aliases:person:{id}");
         let name = row["primary_name"]
             .as_str()
             .or_else(|| row["original_name"].as_str())
@@ -543,17 +784,30 @@ async fn enrich_persons(
                 }
                 sqlx::query("UPDATE person_metadata SET imdb_id=COALESCE($1,imdb_id),profile_path=$2,gender=$3,adult=$4,popularity=$5,original_name=$6,last_updated_at=NOW() WHERE tmdb_person_id=$7")
                 .bind(imdb).bind(person["profile_path"].as_str()).bind(person["gender"].as_i64().map(|n|n as i32)).bind(person["adult"].as_bool().unwrap_or(false)).bind(person["popularity"].as_f64().map(|n|n as f32)).bind(original).bind(target.unwrap_or(id)).execute(&mut *transaction).await?;
+                context
+                    .complete_in_tx(&mut transaction, &key, &json!({"updated":1,"deleted":0}))
+                    .await?;
                 transaction.commit().await?;
                 updated += 1;
                 tracing::info!("[演员数据补充] {name}（TMDb {id}）数据已更新");
             }
             Err(error) if context.is_cancelled() => return Err(error),
             Err(error) if error.0 == StatusCode::NOT_FOUND => {
-                deleted += sqlx::query("DELETE FROM person_metadata WHERE tmdb_person_id=$1")
+                let mut transaction = state.db.begin().await?;
+                let count = sqlx::query("DELETE FROM person_metadata WHERE tmdb_person_id=$1")
                     .bind(id)
-                    .execute(&state.db)
+                    .execute(&mut *transaction)
                     .await?
                     .rows_affected();
+                context
+                    .complete_in_tx(
+                        &mut transaction,
+                        &key,
+                        &json!({"updated":0,"deleted":count}),
+                    )
+                    .await?;
+                transaction.commit().await?;
+                deleted += count;
                 tracing::info!(
                     "[演员数据补充] {name}（TMDb {id}）在 TMDb 已不存在，已清理本地记录"
                 );
@@ -577,8 +831,13 @@ async fn enrich_persons(
 }
 
 async fn restore_metadata(state: &AppState, context: &crate::jobs::JobContext) -> Result<Value> {
-    let mut rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE in_library=true AND item_type IN ('Movie','Series') AND tmdb_id NOT IN ('0','None','null','')").fetch_all(&state.db).await?;
-    crate::media_order::sort(&mut rows);
+    context.checkpoint().await?;
+    let plan = task_plan(context, "tasks:restore-nfo-and-images:plan", async {
+        let mut rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE in_library=true AND item_type IN ('Movie','Series') AND tmdb_id NOT IN ('0','None','null','')").fetch_all(&state.db).await?;
+        crate::media_order::sort(&mut rows);
+        Ok(json!(rows))
+    }).await?;
+    let rows = crate::media_edit::list(&plan);
     let config = state.config.read().await.clone();
     let defaults: Value = serde_json::from_str(include_str!("../assets/defaults.json")).unwrap();
     let studio = crate::db::setting(&state.db, "studio_mapping")
@@ -597,6 +856,14 @@ async fn restore_metadata(state: &AppState, context: &crate::jobs::JobContext) -
         let id = crate::state::string(row, "tmdb_id");
         let kind = crate::state::string(row, "item_type");
         let title = crate::state::string(row, "title");
+        let key = format!("tasks:restore-nfo-and-images:{kind}:{id}");
+        if let Some(result) = context.completed(&key).await? {
+            updated += result["updated"].as_u64().unwrap_or(0);
+            written += result["written"].as_u64().unwrap_or(0);
+            images += result["images"].as_u64().unwrap_or(0);
+            warning_details.extend(crate::media_edit::list(&result["warning_details"]));
+            continue;
+        }
         context
             .update_counted(
                 index as u64,
@@ -624,9 +891,10 @@ async fn restore_metadata(state: &AppState, context: &crate::jobs::JobContext) -
             if crate::emby::path_ignored(state, &path).await? {
                 return Ok((0, 0, vec![]));
             }
-            let (payload, cast) = crate::metadata::reconstruct_full(state, &id, &kind, true)
-                .await?
-                .ok_or_else(|| ApiError::bad("缺失元数据缓存"))?;
+            let (payload, cast) =
+                Box::pin(crate::metadata::reconstruct_full(state, &id, &kind, true))
+                    .await?
+                    .ok_or_else(|| ApiError::bad("缺失元数据缓存"))?;
             let mut movie_paths = std::collections::BTreeSet::new();
             if kind == "Movie" {
                 for asset in &assets {
@@ -653,9 +921,32 @@ async fn restore_metadata(state: &AppState, context: &crate::jobs::JobContext) -
             };
             context.checkpoint().await?;
             let item = json!({"Path":path,"Type":kind});
-            let nfo = crate::nfo_files::sync(&kind, &item, &payload, &cast, &options).await?;
-            let images =
-                crate::images::download_report(state, &kind, &id, &item, &payload, context).await?;
+            let nfo_key = format!("{key}:nfo");
+            let nfo = if let Some(result) = context.completed(&nfo_key).await? {
+                result["written"].as_u64().unwrap_or(0)
+            } else {
+                verify_restore_bindings(state, row, &config).await?;
+                let count = Box::pin(crate::nfo_files::sync(
+                    &kind, &item, &payload, &cast, &options,
+                ))
+                .await? as u64;
+                context
+                    .complete(&nfo_key, &json!({"written":count}))
+                    .await?;
+                count
+            };
+            let images_key = format!("{key}:images");
+            let images = if let Some(result) = context.completed(&images_key).await? {
+                result
+            } else {
+                verify_restore_bindings(state, row, &config).await?;
+                let report = Box::pin(crate::images::download_report(
+                    state, &kind, &id, &item, &payload, context,
+                ))
+                .await?;
+                context.complete(&images_key, &report).await?;
+                report
+            };
             Ok::<_, ApiError>((
                 nfo,
                 images["downloaded"].as_u64().unwrap_or(0),
@@ -668,6 +959,7 @@ async fn restore_metadata(state: &AppState, context: &crate::jobs::JobContext) -
                 updated += 1;
                 written += nfo;
                 images += count;
+                context.complete(&key, &json!({"updated":1,"written":nfo,"images":count,"warning_details":warnings})).await?;
                 warning_details.extend(warnings);
                 tracing::info!(
                     "[NFO和封面还原] 《{title}》完成：写入 {nfo} 个 NFO、{count} 张图片"
@@ -702,7 +994,82 @@ async fn restore_metadata(state: &AppState, context: &crate::jobs::JobContext) -
     )
 }
 
+async fn verify_restore_bindings(state: &AppState, frozen: &Value, config: &Value) -> Result<()> {
+    let id = crate::state::string(frozen, "tmdb_id");
+    let kind = crate::state::string(frozen, "item_type");
+    let current = crate::metadata::row(state, &id, &kind)
+        .await?
+        .filter(|row| row["in_library"] == true)
+        .ok_or_else(|| ApiError::bad("原NFO恢复目标已不在库，未追随新媒体路径"))?;
+    let original_ids = crate::media_edit::list(&frozen["emby_item_ids_json"]);
+    let current_ids = crate::media_edit::list(&current["emby_item_ids_json"]);
+    let current_assets = crate::media_edit::list(&current["asset_details_json"]);
+    for (index, asset) in crate::media_edit::list(&frozen["asset_details_json"])
+        .iter()
+        .enumerate()
+    {
+        let path = crate::state::string(asset, "path");
+        if path.is_empty()
+            || path.starts_with("http")
+            || crate::emby::library_ignored(
+                config,
+                &crate::state::string(asset, "source_library_id"),
+            )
+        {
+            continue;
+        }
+        let native_id = asset["emby_item_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .or_else(|| original_ids.get(index).and_then(Value::as_str))
+            .unwrap_or("");
+        if native_id.is_empty() || !current_ids.contains(&json!(native_id)) {
+            return Err(ApiError::bad(
+                "原NFO恢复目标的媒体ID绑定已变化，未写入旧路径",
+            ));
+        }
+        let matches = current_assets
+            .iter()
+            .enumerate()
+            .filter(|(index, current)| {
+                let current_id = current["emby_item_id"]
+                    .as_str()
+                    .filter(|id| !id.is_empty())
+                    .or_else(|| current_ids.get(*index).and_then(Value::as_str))
+                    .unwrap_or("");
+                current_id == native_id
+                    && crate::media_paths::clean(&crate::state::string(current, "path"))
+                        == crate::media_paths::clean(&path)
+                    && !crate::emby::library_ignored(
+                        config,
+                        &crate::state::string(current, "source_library_id"),
+                    )
+            })
+            .count();
+        if matches != 1 {
+            return Err(ApiError::bad(
+                "原NFO恢复目标的路径绑定已变化，未写入旧目录或新路径",
+            ));
+        }
+        let native =
+            crate::media_edit::details(state, native_id, "Id,Type,Path,ProviderIds").await?;
+        let tmdb = crate::state::string(&native["ProviderIds"], "Tmdb");
+        if native["Id"] != native_id
+            || native["Type"] != kind
+            || crate::media_paths::clean(&crate::state::string(&native, "Path"))
+                != crate::media_paths::clean(&path)
+            || (!tmdb.is_empty() && tmdb != id)
+        {
+            return Err(ApiError::bad(
+                "原NFO恢复目标的原生ID、路径或作品绑定已变化，未覆盖旧目录",
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn purge_persons(state: &AppState, context: &crate::jobs::JobContext) -> Result<Value> {
+    context.checkpoint().await?;
     context
         .activity("扫描媒体和演员", "正在扫描媒体库，建立被引用的演员名单")
         .await;
@@ -758,10 +1125,21 @@ async fn purge_persons(state: &AppState, context: &crate::jobs::JobContext) -> R
         context,
     )
     .await?;
-    let orphans = people
+    let plan = task_plan(context, "tasks:purge-ghost-actors:plan", async {
+        Ok(json!(
+            people
+                .iter()
+                .filter(|p| !used.contains(&crate::state::string(p, "Id")))
+                .cloned()
+                .collect::<Vec<_>>()
+        ))
+    })
+    .await?;
+    let orphans = crate::media_edit::list(&plan);
+    let existing_people = people
         .iter()
-        .filter(|p| !used.contains(&crate::state::string(p, "Id")))
-        .collect::<Vec<_>>();
+        .map(|person| crate::state::string(person, "Id"))
+        .collect::<std::collections::HashSet<_>>();
     if orphans.is_empty() {
         return Ok(json!({"deleted":0,"message":"未发现幽灵演员"}));
     }
@@ -777,10 +1155,15 @@ async fn purge_persons(state: &AppState, context: &crate::jobs::JobContext) -> R
     let mut deleted = 0;
     let mut failures = vec![];
     let total = orphans.len();
-    for (index, person) in orphans.into_iter().enumerate() {
+    for (index, person) in orphans.iter().enumerate() {
         context.checkpoint().await?;
         let id = crate::state::string(person, "Id");
         let name = crate::state::string(person, "Name");
+        let key = format!("tasks:purge-ghost-actors:person:{id}");
+        if let Some(result) = context.completed(&key).await? {
+            deleted += result["deleted"].as_u64().unwrap_or(0);
+            continue;
+        }
         context
             .update_counted(
                 index as u64,
@@ -789,6 +1172,14 @@ async fn purge_persons(state: &AppState, context: &crate::jobs::JobContext) -> R
                 &format!("正在删除未被引用的演员：{name}（Item {id}）"),
             )
             .await;
+        // A resumed deletion may have already succeeded, or the person may now
+        // be referenced. Never replay a delete from the old scan alone.
+        if used.contains(&id) || !existing_people.contains(&id) {
+            context
+                .complete(&key, &json!({"deleted":0,"skipped":true}))
+                .await?;
+            continue;
+        }
         let response = crate::emby::send(
             state
                 .http
@@ -802,8 +1193,20 @@ async fn purge_persons(state: &AppState, context: &crate::jobs::JobContext) -> R
         .await;
         match response {
             Ok(response) if response.status().is_success() => {
-                deleted += 1;
-                tracing::info!("[幽灵演员清理] 已删除 {name}（Item {id}）");
+                match crate::emby::existing_ids(state, &[id.clone()], Some(context)).await {
+                    Ok(existing) if !existing.contains(&id) => {
+                        context.complete(&key, &json!({"deleted":1})).await?;
+                        deleted += 1;
+                        tracing::info!("[幽灵演员清理] 已删除 {name}（Item {id}）");
+                    }
+                    Err(error) if context.is_cancelled() => return Err(error),
+                    _ => {
+                        tracing::warn!(
+                            "[幽灵演员清理] {name}（Item {id}）删除后未确认消失，未认定完成"
+                        );
+                        failures.push(id);
+                    }
+                }
             }
             Ok(response) => {
                 context.checkpoint().await?;
@@ -835,11 +1238,16 @@ async fn purge_persons(state: &AppState, context: &crate::jobs::JobContext) -> R
     Ok(json!({"deleted":deleted,"failures":failures,"message":message}))
 }
 async fn backup_info(state: &AppState, context: &crate::jobs::JobContext) -> Result<Value> {
+    context.checkpoint().await?;
     context
         .activity("扫描媒体信息", "正在扫描需要备份的在库电影和分集")
         .await;
-    let mut rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE in_library=true AND item_type IN ('Movie','Episode')").fetch_all(&state.db).await?;
-    crate::media_order::sort_rows(state, &mut rows).await?;
+    let plan = task_plan(context, "tasks:backup-mediainfo:plan", async {
+        let mut rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE in_library=true AND item_type IN ('Movie','Episode')").fetch_all(&state.db).await?;
+        crate::media_order::sort_rows(state, &mut rows).await?;
+        Ok(json!(rows))
+    }).await?;
+    let rows = crate::media_edit::list(&plan);
     let mut updated = 0;
     let mut failures = vec![];
     let total = rows.len();
@@ -850,14 +1258,24 @@ async fn backup_info(state: &AppState, context: &crate::jobs::JobContext) -> Res
             .enumerate()
         {
             context.checkpoint().await?;
-            if crate::emby::path_ignored(state, &crate::state::string(asset, "path")).await? {
-                continue;
-            }
             let id = asset["emby_item_id"]
                 .as_str()
                 .or_else(|| ids.get(index).and_then(Value::as_str))
                 .unwrap_or("");
             if id.is_empty() {
+                continue;
+            }
+            let key = format!(
+                "tasks:backup-mediainfo:{}:{}:{index}:{id}",
+                crate::state::string(&row, "item_type"),
+                crate::state::string(&row, "tmdb_id")
+            );
+            if let Some(result) = context.completed(&key).await? {
+                updated += result["updated"].as_u64().unwrap_or(0);
+                continue;
+            }
+            if crate::emby::path_ignored(state, &crate::state::string(asset, "path")).await? {
+                context.complete(&key, &json!({"updated":0})).await?;
                 continue;
             }
             let label = crate::revalidation::media_label(&row, asset, index);
@@ -874,17 +1292,22 @@ async fn backup_info(state: &AppState, context: &crate::jobs::JobContext) -> Res
                 let item=crate::media_edit::details(state,id,"Id,Type,Path,Size,MediaSources").await?;
                 let observed=crate::revalidation::observation(state,&item).await;
                 let pc=crate::fingerprints::pickcode(&observed.1);
-                let old_pc=crate::media_edit::list(&row["file_pickcode_json"]).get(index).and_then(Value::as_str).unwrap_or("").to_string();
                 let changed=target.asset["fingerprint_pending"]==true
                     || observed.0!=target.path
                     || matches!((crate::identity::size(&target.asset["size_bytes"]),observed.2),(Some(a),Some(b)) if a!=b)
                     || target.asset["fingerprint_target"].as_str().is_some_and(|t|!t.is_empty()&&t!=observed.1)
-                    || pc.as_ref().is_some_and(|p|!old_pc.is_empty()&&p!=&old_pc);
+                    || pc.as_ref().is_some_and(|p|target.pc.as_ref()!=Some(p));
                 if changed || target.sha.is_none() {
-                    let result=crate::revalidation::ids(state,&[id.to_string()],context).await?;
+                    use sha2::Digest;
+                    let revision = format!("{:x}",sha2::Sha256::digest(json!(observed).to_string().as_bytes()));
+                    let verification = context.scoped(&format!("{key}:verify:{revision}"));
+                    let result=Box::pin(crate::revalidation::ids(state,&[id.to_string()],&verification)).await?;
                     if result["failed"].as_u64().unwrap_or(0)>0{return Err(ApiError::bad("文件身份待校验，未备份"));}
                     target=crate::media_edit::target(state,id).await?;
                 }
+                verify_backup_target(&target,&observed)?;
+                let reread = crate::media_edit::details(state,id,"Id,Type,Path,Size,MediaSources").await?;
+                if crate::revalidation::observation(state,&reread).await!=observed{return Err(ApiError::bad("媒体文件在指纹验证期间变化，未按旧SHA1备份"));}
                 let sha=target.sha.as_ref().ok_or_else(||ApiError::bad("缺失SHA1"))?;
                 if target.asset["fingerprint_pending"]==true{return Err(ApiError::bad("文件身份待校验"));}
                 let cached=sqlx::query_scalar::<_,Option<Value>>("SELECT mediainfo_json FROM p115_mediainfo_cache WHERE sha1=$1").bind(sha).fetch_optional(&state.db).await?.flatten();
@@ -903,7 +1326,13 @@ async fn backup_info(state: &AppState, context: &crate::jobs::JobContext) -> Res
                     if !crate::media_paths::matches_container(&info,&observed.1){return Err(ApiError::bad("媒体信息容器与当前文件不一致"));}
                     let current=crate::media_edit::details(state,id,"Id,Type,Path,Size,MediaSources").await?;
                     if crate::revalidation::observation(state,&current).await!=observed{return Err(ApiError::bad("文件在备份期间变化"));}
-                    sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2) ON CONFLICT(sha1) DO UPDATE SET mediainfo_json=EXCLUDED.mediainfo_json").bind(sha).bind(info).execute(&state.db).await?;
+                    let latest = crate::media_edit::target(state,id).await?;
+                    verify_backup_target(&latest,&observed)?;
+                    if latest.sha!=target.sha || latest.pc!=target.pc || latest.asset!=target.asset{return Err(ApiError::bad("备份目标的指纹或版本绑定在保存前变化"));}
+                    let mut transaction = state.db.begin().await?;
+                    sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2) ON CONFLICT(sha1) DO UPDATE SET mediainfo_json=EXCLUDED.mediainfo_json").bind(sha).bind(info).execute(&mut *transaction).await?;
+                    context.complete_in_tx(&mut transaction, &key, &json!({"updated":1})).await?;
+                    transaction.commit().await?;
                     return Ok::<_,ApiError>(true);
                 }
                 Err(ApiError::bad("缺失媒体信息"))
@@ -914,6 +1343,7 @@ async fn backup_info(state: &AppState, context: &crate::jobs::JobContext) -> Res
                     tracing::info!("[媒体信息备份] {label} 已成功备份至数据库");
                 }
                 Ok(false) => {
+                    context.complete(&key, &json!({"updated":0})).await?;
                     tracing::info!("[媒体信息备份] 跳过 {label}：已有备份或当前为 HTTP 媒体路径")
                 }
                 Err(error) => {
@@ -965,4 +1395,24 @@ async fn backup_info(state: &AppState, context: &crate::jobs::JobContext) -> Res
         .update_counted(total as u64, total as u64, "备份媒体信息", &message)
         .await;
     Ok(json!({"updated":updated,"failures":failures,"message":message}))
+}
+
+fn verify_backup_target(
+    target: &crate::media_edit::Target,
+    observed: &(String, String, Option<u64>),
+) -> Result<()> {
+    let pc = crate::fingerprints::pickcode(&observed.1);
+    if target.path != observed.0
+        || target.asset["fingerprint_pending"] == true
+        || matches!((crate::identity::size(&target.asset["size_bytes"]),observed.2),(Some(a),Some(b)) if a!=b)
+        || pc.as_ref().is_some_and(|pc| target.pc.as_ref() != Some(pc))
+        || target.asset["fingerprint_target"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty() && value != observed.1)
+    {
+        return Err(ApiError::bad(
+            "当前媒体观察与指纹目标不一致，未按旧SHA1备份",
+        ));
+    }
+    Ok(())
 }

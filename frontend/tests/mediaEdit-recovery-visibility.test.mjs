@@ -11,7 +11,7 @@ function fixture(records, pageId = '101', editorId = pageId) {
     mediaRecoveryState: ref({ pending: records.length > 0, records }), mediaRecoveryError: ref(''),
     isCheckingMediaRecovery: ref(false), isRecoveringMediaInfo: ref(false) });
   const names = ['mediaRecoveryCleanupOnly', 'mediaRecoveryRecordsFor', 'pageMediaRecoveryRecords',
-    'editorMediaRecoveryRecords', 'isRecoveryCleanupOnly', 'mediaRecoveryBlocked'];
+    'editorMediaRecoveryRecords', 'isRecoveryCleanupOnly', 'isRecoveryWashOnly', 'mediaRecoveryBlocked'];
   for (const name of names) {
     const start = page.indexOf(`const ${name} = `);
     if (start < 0) continue;
@@ -91,4 +91,17 @@ test('an empty current ID does not match an empty or unavailable recovery target
   const f = fixture([pending('unknown', []), pending('empty', [''])], '', '');
   assert.equal(f.visible(0), false);
   assert.equal(f.visible(1), false);
+});
+
+test('a failed replacement asks for fresh media information only within its affected scope', () => {
+  const record = { ...pending('wash-8', ['61838'], 'wash-pending'), related_item_ids: ['61789', '61788'] };
+  for (const id of ['61838', '61789', '61788']) {
+    const f = fixture([record], id);
+    assert.equal(f.visible(0), true);
+    assert.equal(f.title(0), '换版媒体信息待更新');
+  }
+  const unrelated = fixture([record], '61839');
+  assert.equal(unrelated.visible(0), false);
+  assert.equal(unrelated.context.mediaRecoveryBlocked.value, false);
+  assert.equal(fixture([record], '61838').context.mediaRecoveryBlocked.value, true);
 });

@@ -35,7 +35,7 @@ function fixture(status = {}) {
   const statusEnd = source.indexOf('));', statusStart) + 3;
   const filterStart = source.indexOf('const filteredManualTasks = computed(');
   const filterEnd = source.indexOf('});', filterStart) + 3;
-  vm.runInContext(source.slice(statusStart, statusEnd) + '\n' + source.slice(filterStart, filterEnd)
+  vm.runInContext(['taskPaused', 'taskStopping', 'taskPausing'].map(definition).join('\n') + '\n' + source.slice(statusStart, statusEnd) + '\n' + source.slice(filterStart, filterEnd)
     + '\n' + ['isCurrentTask', 'getTaskRowState', 'getTaskRowColor', 'normalizeManualTaskOrder', 'reorderManualTaskGroup', 'saveManualTaskOrder'].map(definition).join('\n')
     + '\nthis.current = isCurrentTask; this.state = getTaskRowState; this.color = getTaskRowColor; this.tasks = filteredManualTasks; this.normalizeOrder = normalizeManualTaskOrder; this.reorderGroup = reorderManualTaskGroup; this.saveOrder = saveManualTaskOrder;', context);
   return context;

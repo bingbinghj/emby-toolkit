@@ -38,6 +38,20 @@ test('pending media recovery has no global warning on the dashboard', async ({ p
   expect(api.requests.filter(request => request.path === recoveryPath)).toHaveLength(0);
 });
 
+test('a failed replacement requires fresh media information and offers no old-version restore', async ({ page, api }) => {
+  const record = { ...episodeRecord, id: 'wash-pending:61838', kind: 'wash-pending', can_recover: false,
+    reason: '换版媒体信息尚未验收，请重试整理或刮削', directory: '/config/backups/media-info-wash' };
+  api.respond('GET', '/api/media_for_editing/61838', { ...mediaDetails, item_id: '61838', item_name: '新版第8集', item_type: 'Episode' });
+  api.respond('GET', recoveryPath, { pending: true, records: [record] });
+  await page.goto('/edit-media/61838');
+  const alert = page.getByTestId('media-recovery-alert');
+  await expect(alert).toContainText('换版媒体信息待更新');
+  await expect(alert).toContainText('请重试受影响文件的整理或刮削');
+  await expect(page.getByTestId('media-recovery-wash-pending:61838')).toHaveCount(0);
+  await expect(alert.getByRole('button', { name: '恢复媒体信息', exact: true })).toHaveCount(0);
+  expect(api.requests.filter(request => request.method === 'POST' && request.path === recoveryPath)).toHaveLength(0);
+});
+
 test('changing the edited item clears an old recovery error while its new read is pending', async ({ page, api }) => {
   api.respond('GET', '/api/media_for_editing/61838', { ...mediaDetails, item_id: '61838', item_name: '第8集', item_type: 'Episode' });
   api.respond('GET', '/api/media_for_editing/61839', { ...mediaDetails, item_id: '61839', item_name: '第9集', item_type: 'Episode' });

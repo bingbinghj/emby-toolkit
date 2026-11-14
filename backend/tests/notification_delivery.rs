@@ -322,6 +322,116 @@ async fn outside_window_queues_then_sends_without_blocking_the_admission() {
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Telegram is localhost"]
+async fn queued_notifications_survive_restart_and_a_resumed_task_does_not_send_them_again() {
+    let f = Fixture::new().await;
+    let now = chrono::Local::now().time();
+    let later = NaiveTime::from_hms_opt((now.hour() + 12) % 24, now.minute(), 0)
+        .unwrap()
+        .format("%H:%M")
+        .to_string();
+    f.state
+        .save_config(&json!({"notification_time":{"start":later,"end":later}}))
+        .await
+        .unwrap();
+    notifications::with_delivery_key("resumable-task", f.failure()).await;
+    assert_eq!(f.state.notifications.pending().await, 2);
+    assert!(f.sent.lock().await.is_empty());
+    f.state
+        .save_config(&json!({"notification_time":{"start":"00:00","end":"23:59"}}))
+        .await
+        .unwrap();
+    let mut restarted = AppState::new(f.state.db.clone(), f._directory.path().into())
+        .await
+        .unwrap();
+    restarted.notifications = Arc::new(notifications::Service::with_api_base(
+        f.state.notifications.api_base.clone(),
+    ));
+    notifications::flush(&restarted).await;
+    assert_eq!(f.sent.lock().await.len(), 2);
+    assert_eq!(restarted.notifications.pending().await, 0);
+    notifications::with_delivery_key("resumable-task", f.failure()).await;
+    notifications::flush(&restarted).await;
+    assert_eq!(
+        f.sent.lock().await.len(),
+        2,
+        "completed deliveries must survive replay of the original task"
+    );
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Telegram is localhost"]
+async fn notification_delivery_is_unique_within_a_task_and_independent_between_tasks() {
+    let f = Fixture::new().await;
+    for _ in 0..2 {
+        notifications::with_delivery_key("first-task", f.failure()).await;
+    }
+    assert_eq!(f.sent.lock().await.len(), 2);
+    notifications::with_delivery_key("second-task", f.failure()).await;
+    assert_eq!(
+        f.sent.lock().await.len(),
+        4,
+        "a later real task must retain its own notification"
+    );
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Telegram is localhost"]
+async fn failed_notification_is_kept_and_retried_after_the_service_restarts() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut f = Fixture::new().await;
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let sent = f.sent.clone();
+    let calls = attempts.clone();
+    let app = Router::new().route(
+        "/botfixture/sendMessage",
+        post(move |Json(body): Json<Value>| {
+            let sent = sent.clone();
+            let calls = calls.clone();
+            async move {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    (
+                        axum::http::StatusCode::BAD_GATEWAY,
+                        Json(json!({"ok":false,"description":"temporary failure"})),
+                    )
+                } else {
+                    sent.lock().await.push(body);
+                    (
+                        axum::http::StatusCode::OK,
+                        Json(json!({"ok":true,"result":{"message_id":1}})),
+                    )
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    f.state.notifications = Arc::new(notifications::Service::with_api_base(base.clone()));
+    notifications::with_delivery_key("retry-task", f.failure()).await;
+    assert_eq!(f.state.notifications.pending().await, 1);
+    assert_eq!(f.sent.lock().await.len(), 1);
+    sqlx::query("UPDATE notification_outbox SET next_attempt_at=0 WHERE status='pending'")
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    f.state.notifications = Arc::new(notifications::Service::with_api_base(base));
+    notifications::flush(&f.state).await;
+    assert_eq!(f.state.notifications.pending().await, 0);
+    assert_eq!(f.sent.lock().await.len(), 2);
+    notifications::with_delivery_key("retry-task", f.failure()).await;
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        3,
+        "successful targets must not be sent twice during retry"
+    );
+    server.abort();
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Telegram is localhost"]
 async fn disabled_channel_or_failure_type_does_not_send_and_worker_stops() {
     let f = Fixture::new().await;
     f.state

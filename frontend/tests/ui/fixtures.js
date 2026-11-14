@@ -130,6 +130,7 @@ export const test = base.extend({
     respond('POST', '/api/portal/telegram-chat-id', request => ({ telegram_chat_id: request.body.telegram_chat_id, message: '通知设置已保存' }));
     respond('GET', '/api/portal/telegram-bot-info', { username: 'fixture_bot' });
     respond('GET', '/api/media_center/libraries', { libraries: [library] });
+    respond('GET', '/api/media_organize/queue', { items: [], total: 0, page: 1, page_size: 100, queued_count: 0, running_count: 0 });
     respond('GET', '/api/media_organize/history', {
       items: [{ id: 'history-101', item_id: '101', name: mediaDetails.item_name, item_type: 'Movie',
         production_year: 2026, image_tag: 'fixture', library_name: '电影', source: 'emby',

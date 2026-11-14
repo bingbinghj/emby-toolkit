@@ -54,14 +54,21 @@ async fn failed_moviepilot_history_write_releases_the_batch_for_retry() {
         .lock()
         .await
         .insert(key.into(), Instant::now());
-    submit_queued_event(
-        &state,
-        key.into(),
-        json!({
-            "source":"moviepilot", "batch_key":key, "files":[], "history_ids":["history"]
-        }),
-    )
-    .await;
+    let work = state.clone();
+    state
+        .jobs
+        .submit_response("已接受入库的历史写入故障", move |context| async move {
+            execute_persisted(
+                &work,
+                &json!({"event":{
+                    "source":"moviepilot", "batch_key":key, "files":[], "history_ids":["history"]
+                }}),
+                &context,
+            )
+            .await
+        })
+        .await
+        .unwrap();
     let result = completed_job(&state).await;
     assert_eq!(result["state"], "failed", "{result}");
     assert_eq!(result["result_status"], 500, "{result}");
@@ -81,14 +88,21 @@ async fn successful_moviepilot_task_keeps_its_batch_deduplication_marker() {
         .lock()
         .await
         .insert(key.into(), Instant::now());
-    submit_queued_event(
-        &state,
-        key.into(),
-        json!({
-            "source":"moviepilot", "batch_key":key, "files":[], "history_ids":[]
-        }),
-    )
-    .await;
+    let work = state.clone();
+    state
+        .jobs
+        .submit_response("已接受入库完成", move |context| async move {
+            execute_persisted(
+                &work,
+                &json!({"event":{
+                    "source":"moviepilot", "batch_key":key, "files":[], "history_ids":[]
+                }}),
+                &context,
+            )
+            .await
+        })
+        .await
+        .unwrap();
     let result = completed_job(&state).await;
     assert_eq!(result["state"], "completed", "{result}");
     assert_eq!(result["result"]["status"], "ignored_library", "{result}");

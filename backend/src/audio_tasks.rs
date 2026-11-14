@@ -28,15 +28,24 @@ async fn submit(
     let work = state.clone();
     let task = state
         .jobs
-        .submit("纠正高清音轨错位", move |context| async move {
-            let ids = crate::revalidation::scope(&work, &id, &context).await?;
-            repair(&work, &ids, &context).await
+        .submit_persistent("纠正高清音轨错位", crate::jobs::JobSpec::new("audio_tasks", json!({"id":id})), move |context| async move {
+            Ok(execute_persisted(&work, &json!({"id":id}), &context).await?.1)
         })
         .await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({"task_id":task,"message":"高清音轨纠正已提交"})),
     ))
+}
+pub(crate) async fn execute_persisted(state: &AppState, payload: &Value, context: &JobContext) -> Result<(u16, Value)> {
+    let ids = if let Some(ids) = context.plan("audio-scope").await? {
+        serde_json::from_value(ids).map_err(|_| ApiError::bad("音轨修复任务范围无效"))?
+    } else {
+        let ids = crate::revalidation::scope(state, &string(payload, "id"), context).await?;
+        context.save_plan("audio-scope", &json!(ids)).await?;
+        ids
+    };
+    Ok((200, repair(state, &ids, context).await?))
 }
 fn protected(path: &std::path::Path) -> bool {
     path.components().any(|c| {
@@ -301,6 +310,9 @@ fn removed_are_cores(info: &Value, report: &Value) -> bool {
         })
 }
 pub async fn repair_all(state: &AppState, context: &JobContext) -> Result<Value> {
+    if let Some(plan) = context.plan("audio-all").await? {
+        return repair_all_plan(state, context, &plan).await;
+    }
     context
         .activity("扫描高清音轨", "正在扫描媒体库中的高清音轨兼容核心结构")
         .await;
@@ -402,12 +414,16 @@ pub async fn repair_all(state: &AppState, context: &JobContext) -> Result<Value>
     }
     let mut ids = ids.into_iter().collect::<Vec<_>>();
     ids.sort_by(|a, b| a.1.cmp(&b.1));
-    let mut result = repair(
-        state,
-        &ids.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
-        context,
-    )
-    .await?;
+    let ids = ids.into_iter().map(|(id, _)| id).collect::<Vec<_>>();
+    let plan = json!({"ids":ids,"scanned":scanned,"warning_details":warning_details});
+    context.save_plan("audio-all", &plan).await?;
+    repair_all_plan(state, context, &plan).await
+}
+async fn repair_all_plan(state: &AppState, context: &JobContext, plan: &Value) -> Result<Value> {
+    let ids: Vec<String> = serde_json::from_value(plan["ids"].clone()).map_err(|_| ApiError::bad("音轨修复任务计划无效"))?;
+    let scanned = plan["scanned"].as_u64().unwrap_or(0);
+    let warning_details: Vec<String> = serde_json::from_value(plan["warning_details"].clone()).unwrap_or_default();
+    let mut result = repair(state, &ids, context).await?;
     result["scanned"] = json!(scanned);
     if !warning_details.is_empty() {
         result["warnings"] =
@@ -424,6 +440,7 @@ pub async fn repair_all(state: &AppState, context: &JobContext) -> Result<Value>
     }
     Ok(result)
 }
+
 pub async fn repair(state: &AppState, ids: &[String], context: &JobContext) -> Result<Value> {
     let mut result = json!({"scanned":ids.len(),"candidates":0,"ambiguous":0,"ambiguous_items":[],"repaired":0,"repaired_items":[],"skipped":0,"skipped_items":[],"failed":0,"failed_items":[]});
     let root =
@@ -436,6 +453,15 @@ pub async fn repair(state: &AppState, ids: &[String], context: &JobContext) -> R
         .join(chrono::Local::now().format("%Y%m%d-%H%M%S").to_string());
     for (index, id) in ids.iter().enumerate() {
         context.checkpoint().await?;
+        let checkpoint = format!("audio-repair:{id}");
+        if let Some(saved) = context.completed(&checkpoint).await? {
+            let kind = string(&saved, "kind");
+            let key = match kind.as_str() { "repaired" => "repaired_items", "ambiguous" => "ambiguous_items", _ => "skipped_items" };
+            result[key].as_array_mut().unwrap().push(saved["item"].clone());
+            result[&kind] = json!(result[&kind].as_u64().unwrap_or(0) + 1);
+            if kind == "repaired" { result["candidates"] = json!(result["candidates"].as_u64().unwrap_or(0) + 1); }
+            continue;
+        }
         let mut label = format!("Item {id}");
         context
             .update_counted(
@@ -445,7 +471,10 @@ pub async fn repair(state: &AppState, ids: &[String], context: &JobContext) -> R
                 &format!("正在读取第 {} 个媒体的音轨信息（Item {id}）", index + 1),
             )
             .await;
-        let outcome=async{
+        let outcome={
+            let item_context = context.scoped(&format!("audio-item:{id}"));
+            let context = &item_context;
+            async{
             let item=media_edit::details(state,id,"Name,Path,MediaSources,MediaStreams,PartCount,ExtraType").await?;
             label=format!("《{}》 · {}（Item {id}）", string(&item,"Name"), string(&item,"Path").replace('\\',"/").rsplit('/').next().unwrap_or(""));
             context.activity("分析音轨", &format!("正在核对 {label} 的高清音轨与兼容核心")).await;
@@ -512,9 +541,11 @@ pub async fn repair(state: &AppState, ids: &[String], context: &JobContext) -> R
                     Err(ApiError::bad(reason))
                 }
             }
-        }.await;
+        }.await
+        };
         match outcome {
             Ok((kind, item)) => {
+                context.complete(&checkpoint, &json!({"kind":kind,"item":item})).await?;
                 if kind == "repaired" {
                     tracing::info!(
                         "[音轨纠正] {label} 已纠正 {} 组兼容核心错位",
@@ -610,31 +641,34 @@ pub async fn repair(state: &AppState, ids: &[String], context: &JobContext) -> R
     result["report_path"] = json!(path);
     Ok(result)
 }
-async fn count_files(root: &std::path::Path, markdown: bool, context: &JobContext) -> Result<u64> {
-    let mut count = 0;
-    let mut directories = vec![root.to_path_buf()];
-    while let Some(directory) = directories.pop() {
-        context.checkpoint().await?;
-        let mut entries = tokio::fs::read_dir(directory).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let kind = entry.file_type().await?;
-            if kind.is_dir() {
-                directories.push(entry.path());
-            } else if !tokio::fs::metadata(entry.path())
-                .await
-                .is_ok_and(|m| m.is_dir())
-                && (!markdown
-                    || entry
-                        .file_name()
-                        .to_string_lossy()
-                        .to_lowercase()
-                        .ends_with(".md"))
-            {
-                count += 1;
+pub(crate) async fn clear_inventory(roots: &[PathBuf], context: &JobContext) -> Result<Value> {
+    let mut files = vec![];
+    let mut directories = vec![];
+    for (index, root) in roots.iter().enumerate() {
+        let mut pending = vec![root.clone()];
+        while let Some(directory) = pending.pop() {
+            context.checkpoint().await?;
+            let mut entries = match tokio::fs::read_dir(&directory).await {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            directories.push(directory);
+            while let Some(entry) = entries.next_entry().await? {
+                if entry.file_type().await?.is_dir() {
+                    pending.push(entry.path());
+                } else if entry.file_type().await?.is_file() {
+                    let bytes = tokio::fs::read(entry.path()).await?;
+                    let hash = format!("{:x}", Sha256::digest(&bytes));
+                    files.push(json!({"path":entry.path(),"hash":hash,"report":index==1,"counted":index==0||entry.file_name().to_string_lossy().to_lowercase().ends_with(".md")}));
+                } else {
+                    return Err(ApiError::bad("音轨备份或报告中含特殊文件，未清理"));
+                }
             }
         }
     }
-    Ok(count)
+    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    Ok(json!({"files":files,"directories":directories}))
 }
 pub async fn clear(state: &AppState, context: &JobContext) -> Result<Value> {
     context.checkpoint().await?;
@@ -656,16 +690,54 @@ pub async fn clear(state: &AppState, context: &JobContext) -> Result<Value> {
             return Err(ApiError::bad("音轨报告目录越界"));
         }
     }
-    let deleted_files = count_files(&root, false, context).await?;
-    let deleted_reports = if reports.is_dir() {
-        count_files(&reports, true, context).await?
+    let inventory = if let Some(inventory) = context.plan("audio-clear").await? {
+        inventory
     } else {
-        0
+        let inventory = clear_inventory(&[root.clone(), reports.clone()], context).await?;
+        context.save_plan("audio-clear", &inventory).await?;
+        inventory
     };
-    context.checkpoint().await?;
-    tokio::fs::remove_dir_all(root).await?;
-    if reports.is_dir() {
-        tokio::fs::remove_dir_all(reports).await?;
+    let mut deleted_files = 0;
+    let mut deleted_reports = 0;
+    let mut warning_details = vec![];
+    for entry in list(&inventory["files"]) {
+        context.checkpoint().await?;
+        let path = PathBuf::from(string(&entry, "path"));
+        if !(path.starts_with(&root) || path.starts_with(&reports)) {
+            return Err(ApiError::bad("音轨备份清理计划越界"));
+        }
+        let checkpoint = format!("audio-clear:{}", path.display());
+        if context.completed(&checkpoint).await?.is_none() {
+            match tokio::fs::symlink_metadata(&path).await {
+                Ok(metadata) => {
+                    if !metadata.file_type().is_file() || !tokio::fs::canonicalize(&path).await?.starts_with(&data_root) {
+                        return Err(ApiError::bad("音轨备份清理目标类型或路径已变化"));
+                    }
+                    let hash = format!("{:x}", Sha256::digest(tokio::fs::read(&path).await?));
+                    if entry["hash"] != hash {
+                        warning_details.push(format!("备份在任务中断后变化，已保留：{}", path.display()));
+                        continue;
+                    }
+                    tokio::fs::remove_file(&path).await?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => return Err(error.into()),
+            }
+            context.complete(&checkpoint, &json!(true)).await?;
+        }
+        if entry["counted"] == true {
+            if entry["report"] == true { deleted_reports += 1; } else { deleted_files += 1; }
+        }
+    }
+    for path in list(&inventory["directories"]) {
+        let path = PathBuf::from(path.as_str().ok_or_else(|| ApiError::bad("音轨清理目录无效"))?);
+        if path.starts_with(&root) || path.starts_with(&reports) {
+            if let Err(error) = tokio::fs::remove_dir(path).await
+                && !matches!(error.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty)
+            {
+                return Err(error.into());
+            }
+        }
     }
     let message = if deleted_files == 0 && deleted_reports == 0 {
         "没有可清理的音轨纠正备份或报告。".to_string()
@@ -676,7 +748,7 @@ pub async fn clear(state: &AppState, context: &JobContext) -> Result<Value> {
     };
     tracing::info!("[音轨备份] {message}");
     context.update(100, "清理完成", &message).await;
-    Ok(json!({"message":message,"deleted_files":deleted_files,"deleted_reports":deleted_reports}))
+    Ok(json!({"message":message,"deleted_files":deleted_files,"deleted_reports":deleted_reports,"warnings":warning_details.len(),"warning_details":warning_details}))
 }
 pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
     context
@@ -702,6 +774,13 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
     }
     let batch_pattern = regex::Regex::new(r"^\d{8}-\d{6}$").unwrap();
     let file_pattern = regex::Regex::new(r"^(.+)-([0-9a-f]{12})\.json$").unwrap();
+    let (selected, backup_files, mut skipped) = if let Some(plan) = context.plan("audio-restore-selection").await? {
+        let mut selected = BTreeMap::new();
+        for item in list(&plan["selected"]) {
+            selected.insert((string(&item,"id"), string(&item,"path_hash")), (PathBuf::from(string(&item,"backup_path")), item["mediainfo"].clone()));
+        }
+        (selected, plan["backup_files"].as_u64().unwrap_or(0) as usize, plan["skipped"].as_u64().unwrap_or(0) as usize)
+    } else {
     let mut selected = BTreeMap::<(String, String), (PathBuf, Value)>::new();
     let mut pending = vec![backups.clone()];
     let mut backup_files = 0;
@@ -765,6 +844,10 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
             }
         }
     }
+        let entries = selected.iter().map(|((id, hash), (path, info))| json!({"id":id,"path_hash":hash,"backup_path":path,"mediainfo":info})).collect::<Vec<_>>();
+        context.save_plan("audio-restore-selection", &json!({"selected":entries,"backup_files":backup_files,"skipped":skipped})).await?;
+        (selected, backup_files, skipped)
+    };
     if selected.is_empty() {
         context
             .update(100, "无需还原", "没有有效的音轨纠正备份，无需还原。")
@@ -783,6 +866,9 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
         .into_iter()
         .collect::<Vec<_>>();
     crate::media_order::sort_ids(state, &mut seed_ids).await?;
+    if let Some(order) = context.plan("audio-restore-order").await? {
+        seed_ids = serde_json::from_value(order).map_err(|_|ApiError::bad("音轨备份还原顺序无效"))?;
+    } else { context.save_plan("audio-restore-order", &json!(seed_ids)).await?; }
     let mut processed = HashSet::new();
     let mut updated = 0;
     let mut unchanged = 0;
@@ -790,6 +876,15 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
     let mut failures = vec![];
     let mut verified = 0;
     for (index, id) in seed_ids.iter().enumerate() {
+        if processed.contains(id) { continue; }
+        let checkpoint = format!("audio-restore:{id}");
+        if let Some(saved) = context.completed(&checkpoint).await? {
+            processed.extend(list(&saved["members"]).into_iter().filter_map(|id| id.as_str().map(str::to_string)));
+            updated += saved["updated"].as_u64().unwrap_or(0) as usize;
+            unchanged += saved["unchanged"].as_u64().unwrap_or(0) as usize;
+            verified += saved["verified"].as_u64().unwrap_or(0) as usize;
+            continue;
+        }
         if processed.contains(id) {
             continue;
         }
@@ -842,7 +937,10 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
         let mut write_attempted = false;
         let mut prepared_complete = false;
         let mut rollback_failed = false;
-        let result = async {
+        let result = {
+            let item_context = context.scoped(&format!("audio-restore-item:{id}"));
+            let context = &item_context;
+            async {
             let outcome = async {
                 for (member, item_path, path, original, backup) in &mut members {
                     let target = media_edit::target(state, member).await?;
@@ -986,7 +1084,8 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
             }
             outcome
         }
-        .await;
+        .await
+        };
         for path in stages.values() {
             let _ = tokio::fs::remove_file(path).await;
         }
@@ -1001,6 +1100,10 @@ pub async fn restore(state: &AppState, context: &JobContext) -> Result<Value> {
                 unchanged += same;
                 let confirmed = list(&report["verified_ids"]).len();
                 verified += confirmed;
+                if report["state"] == "verified" {
+                    let saved = json!({"members":members.iter().map(|(member,_,_,_,_)|member).collect::<Vec<_>>(),"updated":members.len()-same,"unchanged":same,"verified":confirmed});
+                    for (member,_,_,_,_) in &members { context.complete(&format!("audio-restore:{member}"), &saved).await?; }
+                }
                 if report["state"] != "verified" {
                     failed += members.len() - confirmed;
                     failures.extend(

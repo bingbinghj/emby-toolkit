@@ -49,6 +49,7 @@ impl Fixture {
         .await
         .unwrap();
         let host = Router::new()
+            .route("/System/Info/Public", get(|| async { Json(json!({"Id":"history-fixture"})) }))
             .route("/Library/VirtualFolders", get(|| async { Json(json!([])) }))
             .route(
                 "/Users/user/Items/{id}",
@@ -112,6 +113,178 @@ impl Fixture {
 }
 fn episode(id: &str) -> Value {
     json!({"Id":id,"Type":"Episode","Name":format!("本集-{id}"),"SeriesId":"series","SeriesName":"入库测试剧","ParentIndexNumber":1,"IndexNumber":2,"ImageTags":{"Primary":"frame"},"SeriesPrimaryImageTag":"series-poster","Path":format!("/media/{id}.strm"),"AccessToken":"must-not-store","ProviderIds":{"Tmdb":"private-extra"}})
+}
+
+async fn finish_moviepilot_with_plans(
+    f: &Fixture,
+    event: &Value,
+    plans: Value,
+    result: emby_toolkit::error::Result<Value>,
+    persistent: bool,
+) {
+    let state = f.state.clone();
+    let event = event.clone();
+    let payload = json!({"event":event});
+    let execute = move |context: emby_toolkit::jobs::JobContext| async move {
+        for (key, plan) in plans.as_object().unwrap() {
+            context.save_plan(key, plan).await?;
+        }
+        history::finish_moviepilot(&state, &event, &context, &result).await?;
+        Ok(json!({"message":"历史范围验证完成"}))
+    };
+    let id = if persistent {
+        f.state.jobs.submit_persistent("历史范围验证", emby_toolkit::jobs::JobSpec::new("webhook", payload), execute).await.unwrap()
+    } else {
+        f.state.jobs.submit("历史范围验证", execute).await.unwrap()
+    };
+    let finished = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let task = f.state.jobs.result(&id).await.unwrap();
+            if task["is_running"] == false { return task; }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.unwrap();
+    assert_eq!(finished["state"], "completed", "{finished}");
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL in DATABASE_URL; upstream is localhost"]
+async fn moviepilot_expanded_notice_records_only_the_handled_episode_200() {
+    let f = Fixture::new().await;
+    let files = (1..=203).map(|number| format!("/media/ep{number}.strm")).collect::<Vec<_>>();
+    let mut event = json!({"source":"moviepilot","media_type":"tv","files":files});
+    let ids = history::begin_moviepilot(&f.state, &event).await.unwrap();
+    event["history_ids"] = json!(ids);
+    let mut item = episode("ep200");
+    item["IndexNumber"] = json!(200);
+    history::bind_item(&f.state, &event, "/media/ep200.strm", &item).await.unwrap();
+    let mut plans = json!({"moviepilot_file:200":{"identity":{"path":"/media/ep200.strm"}}});
+    for number in 1..=203 {
+        plans[format!("moviepilot_attempt:{number}")] = json!({"path":format!("/media/ep{number}.strm"),"skipped":number!=200});
+    }
+    finish_moviepilot_with_plans(&f, &event, plans, Ok(json!({"updated":3,"awaiting_emby":true})), false).await;
+    let rows = f.rows().await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["item_id"], "ep200");
+    assert_eq!(rows[0]["episode_number"], 200);
+    assert_eq!(rows[0]["status"], "processing");
+    let (_, page) = f.request("", &f.cookie()).await;
+    assert_eq!(page["total"], 1);
+    assert_eq!(page["items"][0]["episode_number"], 200);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL in DATABASE_URL; upstream is localhost"]
+async fn moviepilot_pure_noop_adds_no_history_and_keeps_previous_finished_admissions() {
+    let f = Fixture::new().await;
+    let item = episode("ep200");
+    let previous = history::begin_emby(&f.state, "item.add", &item, "/media/ep200.strm", None).await.unwrap();
+    history::finish(&f.state, &json!({"source":"emby","history_ids":previous}), &Ok(json!({"updated":1}))).await.unwrap();
+    let before = f.rows().await;
+    let mut event = json!({"source":"moviepilot","media_type":"tv","files":["/media/ep200.strm","/media/ep1.strm"]});
+    event["history_ids"] = json!(history::begin_moviepilot(&f.state, &event).await.unwrap());
+    let plans = json!({"moviepilot_attempt:200":{"path":"/media/ep200.strm","skipped":true},
+        "moviepilot_attempt:1":{"path":"/media/ep1.strm","skipped":true}});
+    finish_moviepilot_with_plans(&f, &event, plans, Ok(json!({"updated":0})), false).await;
+    assert_eq!(f.rows().await, before);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL in DATABASE_URL; upstream is localhost"]
+async fn moviepilot_failure_does_not_fail_noop_or_unvisited_notice_paths() {
+    let f = Fixture::new().await;
+    let mut event = json!({"source":"moviepilot","media_type":"tv","files":["/media/ep1.strm","/media/ep200.strm","/media/ep201.strm","/media/ep202.strm"]});
+    event["history_ids"] = json!(history::begin_moviepilot(&f.state, &event).await.unwrap());
+    history::bind_item(&f.state, &event, "/media/ep200.strm", &episode("ep200")).await.unwrap();
+    let plans = json!({"moviepilot_attempt:1":{"path":"/media/ep1.strm","skipped":true},
+        "moviepilot_file:200":{"identity":{"path":"/media/ep200.strm"}},
+        "moviepilot_attempt:201":{"path":"/media/ep201.strm","skipped":false}});
+    finish_moviepilot_with_plans(&f, &event, plans, Err(ApiError::bad("入库项目查找失败")), false).await;
+    let rows = f.rows().await;
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row["status"] == "failed" && row["message"] == "入库项目查找失败"));
+    let names = rows.iter().map(|row| row["file_name"].as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(names, ["ep200.strm", "ep201.strm"].into_iter().collect());
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL in DATABASE_URL; upstream is localhost"]
+async fn moviepilot_persisted_original_file_plan_keeps_the_same_admission_without_new_attempts() {
+    let f = Fixture::new().await;
+    let mut event = json!({"source":"moviepilot","media_type":"tv","files":["/media/ep200.strm","/media/ep1.strm"]});
+    let ids = history::begin_moviepilot(&f.state, &event).await.unwrap();
+    event["history_ids"] = json!(ids);
+    history::bind_item(&f.state, &event, "/media/ep200.strm", &episode("ep200")).await.unwrap();
+    let plans = json!({"moviepilot_file:200":{"identity":{"path":"/media/ep200.strm"}},
+        "moviepilot_attempt:1":{"path":"/media/ep1.strm","skipped":true}});
+    finish_moviepilot_with_plans(&f, &event, plans, Ok(json!({"updated":1,"awaiting_emby":false})), true).await;
+    let rows = f.rows().await;
+    assert_eq!(rows.len(), 1);
+    assert!(ids.contains(&rows[0]["id"].as_str().unwrap().to_string()));
+    assert_eq!(rows[0]["item_id"], "ep200");
+    assert_eq!(rows[0]["status"], "success");
+    let durable: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM durable_job_steps WHERE step_key='plans:moviepilot_file:200'").fetch_one(&f.state.db).await.unwrap();
+    assert_eq!(durable, 1);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL in DATABASE_URL; upstream is localhost"]
+async fn moviepilot_scope_pruning_rolls_back_with_a_failed_history_finish() {
+    let f = Fixture::new().await;
+    let mut event = json!({"source":"moviepilot","media_type":"tv","files":["/media/ep200.strm","/media/ep1.strm"]});
+    event["history_ids"] = json!(history::begin_moviepilot(&f.state, &event).await.unwrap());
+    let before = f.rows().await;
+    sqlx::query("CREATE FUNCTION reject_scoped_finish() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture history finish rejected'; END $$")
+        .execute(&f.state.db).await.unwrap();
+    sqlx::query("CREATE TRIGGER reject_scoped_finish BEFORE UPDATE ON media_organize_history FOR EACH ROW EXECUTE FUNCTION reject_scoped_finish()")
+        .execute(&f.state.db).await.unwrap();
+    let state = f.state.clone();
+    let task = f.state.jobs.submit("历史事务验证", move |context| async move {
+        context.save_plan("moviepilot_file:200", &json!({"identity":{"path":"/media/ep200.strm"}})).await?;
+        let result = Ok(json!({"updated":1,"awaiting_emby":false}));
+        assert!(history::finish_moviepilot(&state, &event, &context, &result).await.is_err());
+        let after: Vec<Value> = sqlx::query_scalar("SELECT item_json || jsonb_build_object('id',id,'status',status,'message',message,'created_at',created_at,'completed_at',completed_at) FROM media_organize_history ORDER BY id")
+            .fetch_all(&state.db).await?;
+        assert_eq!(after, before, "scope pruning must roll back with the final status update");
+        sqlx::query("DROP TRIGGER reject_scoped_finish ON media_organize_history").execute(&state.db).await?;
+        history::finish_moviepilot(&state, &event, &context, &result).await?;
+        Ok(json!({"message":"事务回滚及重试验证完成"}))
+    }).await.unwrap();
+    let finished = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let result = f.state.jobs.result(&task).await.unwrap();
+            if result["is_running"] == false { return result; }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.unwrap();
+    assert_eq!(finished["state"], "completed", "{finished}");
+    let rows = f.rows().await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["status"], "success");
+    assert_eq!(rows[0]["file_name"], "ep200.strm");
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL in DATABASE_URL; upstream is localhost"]
+async fn moviepilot_scoped_finish_preserves_a_pending_emby_admission_even_if_ids_are_mixed() {
+    let f = Fixture::new().await;
+    let foreign = history::begin_emby(&f.state, "item.add", &episode("ep200"), "/media/ep200.strm", None).await.unwrap();
+    let before = f.rows().await[0].clone();
+    let mut event = json!({"source":"moviepilot","media_type":"tv","files":["/media/ep200.strm"]});
+    event["history_ids"] = json!(history::begin_moviepilot(&f.state, &event).await.unwrap());
+    event["history_ids"].as_array_mut().unwrap().push(json!(foreign[0]));
+    let plans = json!({"moviepilot_file:200":{"identity":{"path":"/media/ep200.strm"}}});
+    finish_moviepilot_with_plans(&f, &event, plans, Ok(json!({"updated":1,"awaiting_emby":false})), false).await;
+    let rows = f.rows().await;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.iter().find(|row| row["id"] == foreign[0]).unwrap(), &before);
+    assert_eq!(rows.iter().filter(|row| row["status"] == "success").count(), 1);
+    f.close().await;
 }
 
 #[tokio::test]
@@ -353,6 +526,86 @@ async fn history_pages_and_filters_real_records_without_querying_the_library() {
     assert!(!failed.to_string().contains("should-hide"));
     assert!(failed["tracking_since"].as_str().is_some());
     assert_eq!(failed["legacy_records_available"], false);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL in DATABASE_URL; upstream is localhost"]
+async fn history_supports_mp_page_sizes_without_losing_the_last_records() {
+    let f = Fixture::new().await;
+    sqlx::query("INSERT INTO media_organize_history(id,source,source_identity,item_id,item_json,status,created_at) SELECT '00000000-0000-4000-8000-' || lpad(n::text,12,'0'),'emby','scope-' || n,'ep-' || n,jsonb_build_object('name','分页记录 ' || n),'success',TIMESTAMPTZ '2026-11-01 00:00:00Z' + n * INTERVAL '1 second' FROM generate_series(1,1003) AS numbers(n)")
+        .execute(&f.state.db).await.unwrap();
+    let cookie = f.cookie();
+    let (status, default) = f.request("", &cookie).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(default["page_size"], 50);
+    assert_eq!(default["items"].as_array().unwrap().len(), 50);
+    for size in [25, 50, 100, 500, 1000] {
+        let (status, page) = f.request(&format!("?page_size={size}"), &cookie).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["total"], 1003);
+        assert_eq!(page["page"], 1);
+        assert_eq!(page["page_size"], size);
+        let rows = page["items"].as_array().unwrap();
+        assert_eq!(rows.len(), size as usize);
+        assert_eq!(rows.first().unwrap()["item_id"], "ep-1003");
+        assert_eq!(
+            rows.last().unwrap()["item_id"],
+            format!("ep-{}", 1004 - size)
+        );
+    }
+    let (_, first) = f.request("?page_size=1000", &cookie).await;
+    let (_, last) = f.request("?page=2&page_size=1000", &cookie).await;
+    assert_eq!(last["total"], 1003);
+    assert_eq!(last["items"].as_array().unwrap().len(), 3);
+    assert_eq!(last["items"][0]["item_id"], "ep-3");
+    assert_eq!(last["items"][2]["item_id"], "ep-1");
+    let ids = first["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(last["items"].as_array().unwrap())
+        .map(|row| row["id"].as_str().unwrap())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(ids.len(), 1003);
+    let record_ids = first["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    let media_ids = first["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["item_id"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    let selected = json!({"history_ids":record_ids});
+    assert_eq!(
+        history::selected_history(&f.state, &selected, &media_ids)
+            .await
+            .unwrap(),
+        record_ids
+    );
+    let mut too_many = record_ids.clone();
+    too_many.push(last["items"][0]["id"].as_str().unwrap().to_owned());
+    assert!(
+        history::selected_history(&f.state, &json!({"history_ids":too_many}), &media_ids)
+            .await
+            .is_err()
+    );
+    let (_, beyond) = f.request("?page=3&page_size=1000", &cookie).await;
+    assert_eq!(beyond["total"], 1003);
+    assert!(beyond["items"].as_array().unwrap().is_empty());
+    let (_, bounded) = f.request("?page_size=1001", &cookie).await;
+    assert_eq!(bounded["page_size"], 1000);
+    assert_eq!(bounded["items"].as_array().unwrap().len(), 1000);
+    assert_eq!(
+        f.request("?page=9223372036854775807&page_size=1000", &cookie)
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
     f.close().await;
 }
 
@@ -602,7 +855,8 @@ async fn service_restart_marks_only_unfinished_admissions_for_retry_and_keeps_th
     let row = &f.rows().await[0];
     assert_eq!(row["status"], "failed");
     assert_eq!(row["created_at"], original);
-    assert!(row["message"].as_str().unwrap().contains("重启"));
+    let message = row["message"].as_str().unwrap();
+    assert!(!message.trim().is_empty() && message.contains("核对") && message.contains("重新整理"));
     assert_eq!(
         history::selected_history(&f.state, &json!({"history_ids":ids}), &["ep1".into()])
             .await
@@ -732,6 +986,11 @@ async fn failed_admissions_keep_real_reasons_and_notify_once_without_blocking_co
     .await
     .unwrap()
     .unwrap();
+    assert_eq!(f.state.notifications.pending().await, 1);
+    let delivery_state = f.state.clone();
+    let delivery = tokio::spawn(async move {
+        emby_toolkit::notifications::flush(&delivery_state).await;
+    });
     tokio::time::timeout(Duration::from_secs(2), started.notified())
         .await
         .unwrap();
@@ -759,6 +1018,10 @@ async fn failed_admissions_keep_real_reasons_and_notify_once_without_blocking_co
     );
     assert_eq!(received.lock().await.len(), 1);
     release.notify_one();
+    tokio::time::timeout(Duration::from_secs(2), delivery)
+        .await
+        .unwrap()
+        .unwrap();
     history::begin_reorganize(&f.state, &ids, "ep-failure")
         .await
         .unwrap();
@@ -786,6 +1049,22 @@ async fn failed_admissions_keep_real_reasons_and_notify_once_without_blocking_co
         received.lock().await.len(),
         1,
         "a repeated finish must not notify again"
+    );
+    history::begin_reorganize(&f.state, &ids, "ep-failure")
+        .await
+        .unwrap();
+    history::finish_reorganize(
+        &f.state,
+        &ids,
+        "ep-failure",
+        &Err(ApiError::bad("任务已取消")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        f.state.notifications.pending().await,
+        0,
+        "an explicit stop must not enqueue a recognition failure"
     );
     server.abort();
     f.close().await;

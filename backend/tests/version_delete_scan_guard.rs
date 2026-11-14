@@ -264,9 +264,16 @@ impl Fixture {
             .await
             .unwrap()
     }
-    async fn wait_accepted(&self) {
+    async fn wait_accepted(&self, id: &str) {
         tokio::time::timeout(Duration::from_secs(10), async {
             while !self.host.accepted.load(Ordering::SeqCst) {
+                let result = self.state.jobs.result(id).await.unwrap();
+                assert_ne!(
+                    result["is_running"],
+                    false,
+                    "delete ended before accepting scan: {result}; host events: {:?}",
+                    self.host.events.lock().await
+                );
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
@@ -339,7 +346,7 @@ impl Fixture {
 async fn delete_keeps_original_allow_flags_and_waits_for_actual_scan_completion() {
     let f = Fixture::new("hold").await;
     let task = f.start().await;
-    f.wait_accepted().await;
+    f.wait_accepted(&task).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(
         f.state.jobs.result(&task).await.unwrap()["is_running"],
@@ -380,7 +387,7 @@ async fn delete_keeps_original_allow_flags_and_waits_for_actual_scan_completion(
 async fn interrupted_delete(mode: &str, cancel: bool) {
     let f = Fixture::new(mode).await;
     let task = f.start().await;
-    f.wait_accepted().await;
+    f.wait_accepted(&task).await;
     if cancel {
         f.state.jobs.control(Some(&task), "stop").await.unwrap();
     }

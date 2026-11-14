@@ -279,10 +279,8 @@ pub async fn prepare_batch(
     let mut result = json!({"prepared":0,"failed":0,"failed_groups":[],"cache_hits":0,"nfo_written":0,"images_downloaded":0,"warnings":0,"warning_details":[]});
     let mut notify = BTreeSet::new();
     let mut directories = BTreeSet::new();
+    let mut revisions = vec![];
     for (index, group) in groups.iter().enumerate() {
-        if index > 0 {
-            state.item_delay(context).await?;
-        }
         let mut ignored = false;
         for path in group {
             if crate::emby::path_ignored(state, path.to_str().unwrap_or("")).await? {
@@ -294,12 +292,27 @@ pub async fn prepare_batch(
             continue;
         }
         check_active(state, group, context, cancel, true).await?;
+        let revision = crate::monitor_persistence::revision(group).await?;
+        let key = {
+            use sha2::Digest;
+            format!(
+                "monitor-group:{:x}",
+                sha2::Sha256::digest(json!(group).to_string().as_bytes())
+            )
+        };
+        let saved = context
+            .completed(&key)
+            .await?
+            .filter(|saved| saved["revision"] == revision);
+        let reused = saved.is_some();
+        revisions.push(revision.clone());
         context
             .update(
-                (index * 90 / groups.len().max(1)) as u64,
+                ((index + usize::from(reused)) * 90 / groups.len().max(1)) as u64,
                 "预入库刮削",
                 &format!(
-                    "正在处理 {}（同组 {} 个文件） · {}/{}",
+                    "{} {}（同组 {} 个文件） · {}/{}",
+                    if reused { "已处理" } else { "正在处理" },
                     group
                         .first()
                         .map(|path| path.file_name().unwrap_or_default().to_string_lossy())
@@ -310,8 +323,31 @@ pub async fn prepare_batch(
                 ),
             )
             .await;
-        match prepare_group(state, group, roots, context, cancel).await {
+        let prepared = if let Some(saved) = saved {
+            if let Some(error) = saved["error"].as_str() {
+                Err(ApiError::bad(error))
+            } else {
+                serde_json::from_value(saved["prepared"].clone())
+                    .map_err(|_| ApiError::bad("实时监控预处理检查点无效"))
+            }
+        } else {
+            if index > 0 {
+                state.item_delay(context).await?;
+            }
+            prepare_group(state, group, roots, context, cancel).await
+        };
+        match prepared {
             Ok(data) => {
+                if !reused {
+                    if crate::monitor_persistence::revision(group).await? != revision {
+                        return Err(ApiError::bad(
+                            "实时监控输入文件在处理期间变化，未记录本组完成",
+                        ));
+                    }
+                    context
+                        .complete(&key, &json!({"revision":revision,"prepared":data}))
+                        .await?;
+                }
                 for path in data.notify {
                     notify.insert(path);
                 }
@@ -334,6 +370,11 @@ pub async fn prepare_batch(
             }
             Err(error) => {
                 check_active(state, group, context, cancel, true).await?;
+                if !reused {
+                    context
+                        .complete(&key, &json!({"revision":revision,"error":error.1}))
+                        .await?;
+                }
                 result["failed"] = json!(result["failed"].as_u64().unwrap() + 1);
                 result["failed_groups"]
                     .as_array_mut()
@@ -342,7 +383,13 @@ pub async fn prepare_batch(
             }
         }
     }
-    if !notify.is_empty() {
+    let revision = json!(revisions);
+    if !notify.is_empty()
+        && !context
+            .completed("monitor-notify-refresh")
+            .await?
+            .is_some_and(|saved| saved == revision)
+    {
         refresh_files(
             state,
             &notify.into_iter().collect::<Vec<_>>(),
@@ -352,8 +399,16 @@ pub async fn prepare_batch(
             cancel,
         )
         .await?;
+        context
+            .complete("monitor-notify-refresh", &revision)
+            .await?;
     }
-    if !directories.is_empty() {
+    if !directories.is_empty()
+        && !context
+            .completed("monitor-metadata-refresh")
+            .await?
+            .is_some_and(|saved| saved == revision)
+    {
         refresh_files(
             state,
             &directories.into_iter().collect::<Vec<_>>(),
@@ -363,6 +418,9 @@ pub async fn prepare_batch(
             cancel,
         )
         .await?;
+        context
+            .complete("monitor-metadata-refresh", &revision)
+            .await?;
     }
     if let Some(reason) = result["warning_details"]
         .as_array()
@@ -376,6 +434,7 @@ pub async fn prepare_batch(
     }
     Ok(result)
 }
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Prepared {
     notify: Vec<PathBuf>,
     metadata_dirs: Vec<PathBuf>,

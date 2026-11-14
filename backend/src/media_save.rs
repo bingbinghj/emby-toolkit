@@ -2,7 +2,7 @@ use crate::{
     AppState,
     error::{ApiError, Result},
     identity,
-    jobs::JobContext,
+    jobs::{JobContext, JobSpec},
     media_display,
     media_edit::{self, Target},
     media_info,
@@ -14,6 +14,7 @@ use axum::{
     http::StatusCode,
 };
 use reqwest::Method;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -45,15 +46,25 @@ pub async fn submit(
     }
     let manager = state.jobs.clone();
     let task = manager
-        .submit_response("保存媒体信息", move |context| async move {
-            save(&state, &id, &body, &context).await
-        })
+        .submit_persistent_response(
+            "保存媒体信息",
+            JobSpec::new("media_save", json!({"id":id,"body":body})),
+            move |context| async move { save(&state, &id, &body, &context).await },
+        )
         .await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({"task_id":task,"message":"保存媒体信息已提交，可在通知中心查看实时日志"})),
     ))
 }
+pub(crate) async fn execute_persisted(
+    state: &AppState,
+    payload: &Value,
+    context: &JobContext,
+) -> Result<(u16, Value)> {
+    save(state, &string(payload, "id"), &payload["body"], context).await
+}
+#[derive(Serialize, Deserialize)]
 struct Prepared {
     target: Target,
     info: Value,
@@ -66,11 +77,21 @@ struct Prepared {
     multipart: bool,
     has_streams: bool,
     preserve_streams: bool,
+    #[serde(default)]
+    observation: Value,
+}
+#[derive(Serialize, Deserialize)]
+struct SavePreparation {
+    restore: BTreeMap<String, Prepared>,
+    groups: BTreeSet<Vec<String>>,
+    failures: Vec<String>,
+    reports: Vec<Value>,
+    saved: Vec<String>,
 }
 fn failed(message: &str, failures: &[String], status: u16) -> Result<(u16, Value)> {
     Ok((status, json!({"error":message,"failures":failures})))
 }
-fn protected(state_config: &Value, path: &str) -> bool {
+pub(crate) fn protected(state_config: &Value, path: &str) -> bool {
     let normalized = path.trim().replace('\\', "/").to_lowercase();
     let root = string(state_config, "cd2_media_root")
         .trim_end_matches('/')
@@ -179,6 +200,7 @@ async fn prepare(
         expected_json,
         chapters,
         multipart: item["PartCount"].as_u64().unwrap_or(0) > 1,
+        observation: item,
     })
 }
 async fn stage_all(
@@ -203,7 +225,7 @@ async fn stage_all(
         let current = media_edit::details(
             state,
             &item.target.id,
-            "Id,Path,Size,MediaSources,MediaStreams,Chapters",
+            "Id,Path,Size,Type,ParentId,PartCount,ExtraType,MediaSources,MediaStreams,Chapters",
         )
         .await?;
         if current["Id"] != item.target.id || string(&current, "Path") != item.path {
@@ -226,6 +248,7 @@ async fn stage_all(
         item.chapters = media_info::recovery_chapters(&item.info, &current, &paths)?;
         media_info::preserve_chapters(&mut item.info, &item.chapters)?;
         identity::verify(&item.target.asset, &item.info)?;
+        item.observation = current;
         let filename = item
             .final_path
             .file_name()
@@ -349,7 +372,7 @@ pub(crate) async fn cache_saved(state: &AppState, sha: Option<&str>, info: &Valu
     }
     Ok(())
 }
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct SavedTarget {
     pub id: String,
     pub path: String,
@@ -360,6 +383,11 @@ pub(crate) struct SavedTarget {
     pub refresh_required: bool,
 }
 pub(crate) async fn saved_details(state: &AppState, target: &SavedTarget) -> Result<Value> {
+    if protected(&*state.config.read().await, &target.path) {
+        return Err(ApiError::bad(
+            "原保存目标现已位于 115 源目录，已停止恢复写入",
+        ));
+    }
     if let Some(asset) = &target.asset {
         let current = media_edit::repair_target(state, &target.id).await?;
         if current.path != target.path || current.sha != target.sha || current.asset != *asset {
@@ -519,14 +547,69 @@ where
 {
     use std::sync::atomic::{AtomicBool, Ordering};
     let confirmed = AtomicBool::new(true);
-    let recovery = state
-        .data_dir
-        .join("backups/media-info-reload")
-        .join(format!("saved-{}", uuid::Uuid::new_v4()));
+    let root = state.data_dir.join("backups/media-info-reload");
+    let recovery = if let Some(original) = context.plan("saved-refresh-directory").await? {
+        let directory: PathBuf =
+            serde_json::from_value(original).map_err(|_| ApiError::bad("原保存恢复目录无效"))?;
+        if directory.parent() != Some(root.as_path())
+            || !directory
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("saved-"))
+        {
+            return Err(ApiError::bad("原保存恢复目录不在固定备份根目录内"));
+        }
+        directory
+    } else {
+        let directory = root.join(format!("saved-{}", uuid::Uuid::new_v4()));
+        context
+            .save_plan("saved-refresh-directory", &json!(directory))
+            .await?;
+        directory
+    };
+    if let Some(previous) = context.completed("saved-refresh-report").await? {
+        let mut report = previous["report"].clone();
+        if previous["cleanup_allowed"] == true {
+            let _ = cleanup_recovery(&recovery, &mut report).await;
+        }
+        return Ok(report);
+    }
+    let recovering = context.scoped("saved-refresh-recovery");
+    let pending = tokio::fs::try_exists(recovery.join("media-reload.json")).await?
+        || tokio::fs::try_exists(recovery.join("pending-scan.json")).await?
+        || recovering
+            .completed("media_recovery_verified")
+            .await?
+            .is_some();
+    if pending {
+        let id = format!("media:{}", recovery.file_name().unwrap().to_string_lossy());
+        crate::media_recovery::execute_persisted(
+            state,
+            &json!({"recovery_id":id,"current_json_hashes":{}}),
+            &recovering,
+        )
+        .await?;
+        context
+            .complete("saved-refresh-native-import", &json!([]))
+            .await?;
+    } else if tokio::fs::try_exists(recovery.join("original-settings.json")).await? {
+        restore_saved_settings(state, &recovery).await?;
+    }
+    let imported = context.completed("saved-refresh-native-import").await?;
+    let original_targets = context.plan("saved-refresh-targets").await?;
     let mut report = json!({"state":"not_requested","requested_ids":[],"verified_ids":[],"failed_ids":[],"failures":[],"warning_details":[]});
     let mut targets = vec![];
     let outcome = crate::strm::with_settings_guarded(state, "restore_media_info", || async {
-        targets = prepare().await?;
+        context.save_plan("saved-refresh-settings", &json!({
+            "original":crate::media_recovery::read_json(&recovery.join("original-settings.json")).await?,
+            "applied":crate::media_recovery::read_json(&recovery.join("applied-settings.json")).await?
+        })).await?;
+        targets = if let Some(previous) = original_targets {
+            serde_json::from_value(previous).map_err(|_| ApiError::bad("原保存目标计划无效"))?
+        } else {
+            let targets = prepare().await?;
+            context.save_plan("saved-refresh-targets", &json!(targets)).await?;
+            targets
+        };
         // Every JSON is already saved. Reload only the protected native versions.
         let mut reload = vec![];
         for target in &targets {
@@ -537,9 +620,17 @@ where
             }
             if !target.refresh_required { continue; }
             report["requested_ids"].as_array_mut().unwrap().push(json!(target.id));
+            context.save_plan(&format!("saved-formal-json:{}", target.id), &target.info).await?;
             reload.push(target.clone());
         }
-        report["warning_details"] = json!(crate::media_reload::reload(state, &reload, context, &confirmed, &recovery).await?);
+        let warnings = if let Some(previous) = imported {
+            previous
+        } else {
+            let warnings = json!(crate::media_reload::reload(state, &reload, context, &confirmed, &recovery).await?);
+            context.complete("saved-refresh-native-import", &warnings).await?;
+            warnings
+        };
+        report["warning_details"] = warnings;
         let mut pending = targets.iter().map(|target| (target.id.clone(), "尚未完成媒体流和章节回读".to_string())).collect::<BTreeMap<_, _>>();
         let mut deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         while !pending.is_empty() && tokio::time::Instant::now() < deadline {
@@ -607,6 +698,11 @@ where
             error.1
         );
         if context.is_cancelled() {
+            if confirmed.load(Ordering::Acquire) && !keep_recovery {
+                context
+                    .complete("saved-refresh-settings-restored", &json!(true))
+                    .await?;
+            }
             if confirmed.load(Ordering::Acquire)
                 && !keep_recovery
                 && let Some(warning) = cleanup_recovery(&recovery, &mut report).await
@@ -640,9 +736,326 @@ where
         }
     }
     if confirmed.load(Ordering::Acquire) && !keep_recovery {
+        context
+            .complete(
+                "saved-refresh-report",
+                &json!({"report":report,"cleanup_allowed":true}),
+            )
+            .await?;
+    }
+    if confirmed.load(Ordering::Acquire) && !keep_recovery {
         let _ = cleanup_recovery(&recovery, &mut report).await;
     }
     Ok(report)
+}
+async fn restore_saved_settings(state: &AppState, recovery: &std::path::Path) -> Result<()> {
+    let original =
+        crate::media_recovery::read_json(&recovery.join("original-settings.json")).await?;
+    let applied = crate::strm::recovery_applied_settings(recovery, &original).await?;
+    crate::strm::finish_media_recovery(state, &original, applied.as_ref(), || async { Ok(()) })
+        .await
+}
+fn legacy_identity(id: &str, item: &Prepared) -> Value {
+    json!({"id":id,"path":item.path,"source":item.source,"sha":item.target.sha,"asset":item.target.asset})
+}
+async fn legacy_clear_candidates(
+    restore: &BTreeMap<String, Prepared>,
+    context: &JobContext,
+) -> Result<BTreeSet<String>> {
+    let allowed = restore.keys().cloned().collect::<BTreeSet<_>>();
+    let mut started = BTreeSet::new();
+    for (id, item) in restore {
+        if let Some(proof) = context.plan(&format!("legacy-clear-intent:{id}")).await? {
+            let affected: BTreeSet<String> = serde_json::from_value(proof["affected_ids"].clone())
+                .map_err(|_| ApiError::bad("原清理目标范围无效"))?;
+            if proof["target"] != legacy_identity(id, item)
+                || affected.is_empty()
+                || !affected.is_subset(&allowed)
+            {
+                return Err(ApiError::bad("原清理意图与保存范围不一致，未扩大恢复范围"));
+            }
+            started.extend(affected);
+        }
+    }
+    Ok(started)
+}
+async fn legacy_current_empty(state: &AppState, item: &Prepared) -> Result<bool> {
+    let target = SavedTarget {
+        id: item.target.id.clone(),
+        path: item.path.clone(),
+        source: item.source.clone(),
+        sha: item.target.sha.clone(),
+        asset: (!item.target.kind.is_empty()).then(|| item.target.asset.clone()),
+        info: item.info.clone(),
+        refresh_required: true,
+    };
+    let live = saved_details(state, &target).await?;
+    Ok(live["MediaStreams"].as_array().is_some_and(Vec::is_empty)
+        && live["MediaSources"].as_array().is_some_and(|sources| {
+            sources
+                .iter()
+                .all(|source| source["MediaStreams"].as_array().is_some_and(Vec::is_empty))
+        }))
+}
+async fn legacy_current_restored(state: &AppState, item: &Prepared) -> Result<bool> {
+    let target = SavedTarget {
+        id: item.target.id.clone(),
+        path: item.path.clone(),
+        source: item.source.clone(),
+        sha: item.target.sha.clone(),
+        asset: (!item.target.kind.is_empty()).then(|| item.target.asset.clone()),
+        info: item.info.clone(),
+        refresh_required: true,
+    };
+    let live = saved_details(state, &target).await?;
+    let paths = [item.path.as_str(), item.source.as_deref().unwrap_or("")];
+    Ok(
+        media_info::stream_differences(&item.info, &live, &paths).is_empty()
+            && media_info::chapters_restored(&item.chapters, &live["Chapters"]),
+    )
+}
+async fn validate_legacy_scope(
+    state: &AppState,
+    restore: &BTreeMap<String, Prepared>,
+) -> Result<()> {
+    let paths = restore
+        .values()
+        .flat_map(|item| std::iter::once(item.path.clone()).chain(item.source.clone()))
+        .collect::<BTreeSet<_>>();
+    for item in restore.values() {
+        let target = SavedTarget {
+            id: item.target.id.clone(),
+            path: item.path.clone(),
+            source: item.source.clone(),
+            sha: item.target.sha.clone(),
+            asset: (!item.target.kind.is_empty()).then(|| item.target.asset.clone()),
+            info: item.info.clone(),
+            refresh_required: true,
+        };
+        let live = saved_details(state, &target).await?;
+        if media_edit::list(&live["MediaSources"])
+            .iter()
+            .any(|source| {
+                source["Path"]
+                    .as_str()
+                    .is_some_and(|path| !path.is_empty() && !paths.contains(path))
+            })
+        {
+            return Err(ApiError::bad(
+                "原保存范围之外出现新的关联版本，未清理任何媒体",
+            ));
+        }
+    }
+    Ok(())
+}
+pub(crate) async fn resume_cleanup(state: &AppState, context: &JobContext) -> Result<()> {
+    let root = state.data_dir.join("backups/media-info-reload");
+    for (key, value) in context.saved_plans().await? {
+        if let Some(prefix) = key.strip_suffix("legacy-restore-settings") {
+            let scoped = context.scoped(prefix.trim_end_matches(':'));
+            if scoped.completed("media-save-result").await?.is_some() {
+                continue;
+            }
+            scoped.ensure_server(state).await?;
+            if let Some(plan) = scoped.plan("media-save-plan").await? {
+                let preparation: SavePreparation = serde_json::from_value(plan)
+                    .map_err(|_| ApiError::bad("原媒体恢复准备计划无效"))?;
+                let candidates = legacy_clear_candidates(&preparation.restore, &scoped).await?;
+                let mut cleared = vec![];
+                for id in candidates {
+                    if legacy_current_empty(state, &preparation.restore[&id]).await? {
+                        cleared.push(id);
+                    }
+                }
+                if !cleared.is_empty() {
+                    validate_legacy_scope(state, &preparation.restore).await?;
+                    crate::strm::with_changes(state, &value["applied"], || async {
+                        for id in &cleared {
+                            let item = &preparation.restore[id];
+                            let expected = serde_json::to_vec_pretty(&item.info)
+                                .map_err(|_| ApiError::bad("原恢复 JSON 无效"))?;
+                            let current = tokio::fs::read(&item.final_path).await.ok();
+                            if current.as_deref() != Some(expected.as_slice()) {
+                                if current.is_some() && current != item.expected_json {
+                                    return Err(ApiError(
+                                        StatusCode::CONFLICT,
+                                        "已清理目标的 JSON 在重启期间被修改，保留当前文件及原计划"
+                                            .into(),
+                                    ));
+                                }
+                                let stage = item
+                                    .stage
+                                    .as_ref()
+                                    .ok_or_else(|| ApiError::bad("原恢复暂存路径缺失"))?;
+                                if !tokio::fs::try_exists(stage).await? {
+                                    tokio::fs::create_dir_all(
+                                        stage
+                                            .parent()
+                                            .ok_or_else(|| ApiError::bad("原恢复暂存路径无效"))?,
+                                    )
+                                    .await?;
+                                    tokio::fs::write(stage, &expected).await?;
+                                    tokio::fs::File::open(stage).await?.sync_all().await?;
+                                }
+                                if tokio::fs::read(stage).await? != expected {
+                                    return Err(ApiError(
+                                        StatusCode::CONFLICT,
+                                        "原恢复 JSON 暂存内容已变化，未覆盖当前文件".into(),
+                                    ));
+                                }
+                                commit_json_stage_guarded(
+                                    stage,
+                                    &item.final_path,
+                                    current.as_deref(),
+                                )
+                                .await?;
+                            }
+                            if let Err(error) =
+                                cache_saved(state, item.target.sha.as_deref(), &item.info).await
+                            {
+                                tracing::warn!(
+                                    "[重启恢复] 原 JSON 已恢复，缓存同步未完成：{}",
+                                    error.1
+                                );
+                            }
+                            scoped
+                                .complete(
+                                    &format!("legacy-json:{id}"),
+                                    &json!({"path":item.final_path,"info":item.info}),
+                                )
+                                .await?;
+                        }
+                        for group in &preparation.groups {
+                            let key = group.join(",");
+                            if scoped
+                                .completed(&format!("legacy-ungroup:{key}"))
+                                .await?
+                                .is_some()
+                                && scoped
+                                    .completed(&format!("legacy-merge:{key}"))
+                                    .await?
+                                    .is_none()
+                            {
+                                emby_post(state, "Videos/MergeVersions", &[("Ids", key.clone())])
+                                    .await?;
+                                scoped
+                                    .complete(&format!("legacy-merge:{key}"), &json!(group))
+                                    .await?;
+                            }
+                        }
+                        let all_prepared = preparation
+                            .restore
+                            .keys()
+                            .all(|id| preparation.restore[id].final_path.is_file());
+                        let original_import = scoped.scoped("legacy-all-import");
+                        let native_key = "native-task:MediaInfoExtractTask";
+                        let original_started = original_import.plan(native_key).await?.is_some()
+                            || original_import.completed(native_key).await?.is_some();
+                        let phase = if original_started
+                            || (all_prepared && cleared.len() == preparation.restore.len())
+                        {
+                            "legacy-all-import".to_string()
+                        } else {
+                            format!("legacy-cleared-import:{}", cleared.join(","))
+                        };
+                        crate::emby::scheduled(
+                            state,
+                            "MediaInfoExtractTask",
+                            &scoped.scoped(&phase),
+                        )
+                        .await?;
+                        for id in &cleared {
+                            let item = &preparation.restore[id];
+                            let target = SavedTarget {
+                                id: id.clone(),
+                                path: item.path.clone(),
+                                source: item.source.clone(),
+                                sha: item.target.sha.clone(),
+                                asset: (!item.target.kind.is_empty())
+                                    .then(|| item.target.asset.clone()),
+                                info: item.info.clone(),
+                                refresh_required: true,
+                            };
+                            let live = saved_details(state, &target).await?;
+                            let paths = [item.path.as_str(), item.source.as_deref().unwrap_or("")];
+                            if !media_info::stream_differences(&item.info, &live, &paths).is_empty()
+                                || !media_info::chapters_restored(&item.chapters, &live["Chapters"])
+                            {
+                                return Err(ApiError::bad(
+                                    "已清理子集的原媒体流或章节恢复尚未通过验收",
+                                ));
+                            }
+                        }
+                        Ok(())
+                    })
+                    .await?;
+                }
+            }
+            crate::strm::restore_media_save_settings(state, &value["original"], &value["applied"])
+                .await?;
+            continue;
+        }
+        let Some(prefix) = key.strip_suffix("saved-refresh-directory") else {
+            continue;
+        };
+        let scoped = context.scoped(prefix.trim_end_matches(':'));
+        let recovery: PathBuf =
+            serde_json::from_value(value).map_err(|_| ApiError::bad("原保存恢复目录无效"))?;
+        if recovery.parent() != Some(root.as_path()) {
+            return Err(ApiError::bad("原保存恢复目录不在固定备份根目录内"));
+        }
+        if let Some(completed) = scoped.completed("saved-refresh-report").await? {
+            if completed["cleanup_allowed"] == true {
+                let mut report = completed["report"].clone();
+                let _ = cleanup_recovery(&recovery, &mut report).await;
+            }
+            continue;
+        }
+        let original_settings = recovery.join("original-settings.json");
+        if tokio::fs::try_exists(&original_settings).await? {
+            scoped.ensure_server(state).await?;
+            let original = crate::media_recovery::read_json(&original_settings).await?;
+            let applied = crate::strm::recovery_applied_settings(&recovery, &original).await?;
+            let pending = tokio::fs::try_exists(recovery.join("media-reload.json")).await?
+                || tokio::fs::try_exists(recovery.join("pending-scan.json")).await?;
+            if pending {
+                crate::strm::finish_media_recovery_rearmed(
+                    state,
+                    &original,
+                    applied.as_ref(),
+                    || async {
+                        crate::media_reload::recover_started_record(state, &recovery, &scoped)
+                            .await?;
+                        Ok(())
+                    },
+                )
+                .await?;
+            } else {
+                crate::strm::finish_media_recovery(state, &original, applied.as_ref(), || async {
+                    Ok(())
+                })
+                .await?;
+            }
+        } else if scoped
+            .completed("saved-refresh-settings-restored")
+            .await?
+            .is_none()
+            && let Some(settings) = scoped.plan("saved-refresh-settings").await?
+        {
+            scoped.ensure_server(state).await?;
+            crate::strm::finish_media_recovery(
+                state,
+                &settings["original"],
+                Some(&settings["applied"]),
+                || async { Ok(()) },
+            )
+            .await?;
+        }
+        scoped
+            .complete("saved-refresh-settings-restored", &json!(true))
+            .await?;
+    }
+    Ok(())
 }
 async fn cleanup_recovery(recovery: &std::path::Path, report: &mut Value) -> Option<String> {
     match tokio::fs::remove_dir_all(recovery).await {
@@ -910,6 +1323,17 @@ async fn save_inner(
     context: Option<&JobContext>,
     file_refresh: bool,
 ) -> Result<(u16, Value)> {
+    let owned_context =
+        context.map(|context| context.scoped(&format!("media-save:{id}:{file_refresh}")));
+    let context = owned_context.as_ref();
+    if let Some(context) = context
+        && let Some(result) = context.completed("media-save-result").await?
+    {
+        return Ok((
+            result["status"].as_u64().unwrap_or(500) as u16,
+            result["result"].clone(),
+        ));
+    }
     let mut ids = vec![id.to_string()];
     for value in body["target_item_ids"].as_array().into_iter().flatten() {
         if let Some(value) = value.as_str().filter(|s| !s.trim().is_empty())
@@ -926,25 +1350,41 @@ async fn save_inner(
         targets = ids.len(),
         "[媒体信息保存] 开始核对文件身份、轨道与关联版本"
     );
-    let mut prepared = BTreeMap::new();
-    let mut groups = BTreeSet::new();
-    let mut failures = vec![];
-    let mut reports = vec![];
-    let mut saved = vec![];
-    for (index, target_id) in ids.iter().enumerate() {
-        if let Some(context) = context {
-            context.checkpoint().await?;
-        }
-        if let Some(context) = context {
-            context
-                .update(
-                    5 + 20 * index as u64 / ids.len() as u64,
-                    "核对媒体信息",
-                    &format!("核对媒体信息 {}/{}", index + 1, ids.len()),
-                )
-                .await;
-        }
-        let result=async {
+    let original_plan = if let Some(context) = context {
+        context.plan("media-save-plan").await?
+    } else {
+        None
+    };
+    let resuming_preparation = original_plan.is_some();
+    let SavePreparation {
+        mut restore,
+        groups,
+        mut failures,
+        reports,
+        mut saved,
+    } = if let Some(plan) = original_plan {
+        serde_json::from_value(plan)
+            .map_err(|_| ApiError::bad("原媒体保存计划无效，已保留现有媒体和恢复材料"))?
+    } else {
+        let mut prepared = BTreeMap::new();
+        let mut groups = BTreeSet::new();
+        let mut failures = vec![];
+        let mut reports = vec![];
+        let mut saved = vec![];
+        for (index, target_id) in ids.iter().enumerate() {
+            if let Some(context) = context {
+                context.checkpoint().await?;
+            }
+            if let Some(context) = context {
+                context
+                    .update(
+                        5 + 20 * index as u64 / ids.len() as u64,
+                        "核对媒体信息",
+                        &format!("核对媒体信息 {}/{}", index + 1, ids.len()),
+                    )
+                    .await;
+            }
+            let result=async {
             let target=if rebuilt.is_empty(){media_edit::target(state,target_id).await?}else{media_edit::repair_target(state,target_id).await?};
             let original=if let Some(info)=rebuilt.get(target_id){info.clone()}else{media_edit::load(state,&target).await?};
             if file_refresh { crate::media_reload::ensure_single_bundle(&original)?; }
@@ -980,97 +1420,108 @@ async fn save_inner(
             groups.insert(group.into_iter().collect::<Vec<_>>());
             Ok::<_,ApiError>(Some((target,info)))
         }.await;
-        match result {
-            Ok(Some((target, info))) => {
-                saved.push(target_id.clone());
-                prepared.insert(target_id.clone(), (target, info));
-            }
-            Ok(None) => {}
-            Err(error) => {
-                failures.push(format!("{target_id}: {}", error.1));
-                if target_id == id {
-                    break;
+            match result {
+                Ok(Some((target, info))) => {
+                    saved.push(target_id.clone());
+                    prepared.insert(target_id.clone(), (target, info));
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    failures.push(format!("{target_id}: {}", error.1));
+                    if target_id == id {
+                        break;
+                    }
                 }
             }
         }
-    }
-    if saved.is_empty() {
-        let message = failures.first().map_or_else(
-            || "没有可安全恢复的媒体信息，已停止保存，未清理 Emby 数据".into(),
-            |reason| format!("{reason}；已停止保存，未清理 Emby 数据"),
-        );
-        return failed(&message, &failures, 409);
-    }
-    for group in &groups {
-        for linked in group {
-            if prepared.contains_key(linked) {
-                continue;
-            }
-            let result = async {
-                let target = if rebuilt.is_empty() {
-                    media_edit::target(state, linked).await?
-                } else {
-                    media_edit::repair_target(state, linked).await?
-                };
-                let info = if let Some(info) = rebuilt.get(linked) {
-                    info.clone()
-                } else {
-                    media_edit::load(state, &target).await?
-                };
-                identity::verify(&target.asset, &info)?;
-                Ok::<_, ApiError>((target, info))
-            }
-            .await;
-            match result {
-                Ok(item) => {
-                    prepared.insert(linked.clone(), item);
+        if saved.is_empty() {
+            let message = failures.first().map_or_else(
+                || "没有可安全恢复的媒体信息，已停止保存，未清理 Emby 数据".into(),
+                |reason| format!("{reason}；已停止保存，未清理 Emby 数据"),
+            );
+            return failed(&message, &failures, 409);
+        }
+        for group in &groups {
+            for linked in group {
+                if prepared.contains_key(linked) {
+                    continue;
                 }
-                Err(error) => {
-                    failures.push(format!("{linked}: {}", error.1));
+                let result = async {
+                    let target = if rebuilt.is_empty() {
+                        media_edit::target(state, linked).await?
+                    } else {
+                        media_edit::repair_target(state, linked).await?
+                    };
+                    let info = if let Some(info) = rebuilt.get(linked) {
+                        info.clone()
+                    } else {
+                        media_edit::load(state, &target).await?
+                    };
+                    identity::verify(&target.asset, &info)?;
+                    Ok::<_, ApiError>((target, info))
+                }
+                .await;
+                match result {
+                    Ok(item) => {
+                        prepared.insert(linked.clone(), item);
+                    }
+                    Err(error) => {
+                        failures.push(format!("{linked}: {}", error.1));
+                        return failed(
+                            "关联版本媒体信息不完整，已停止保存，未清理 Emby 数据",
+                            &failures,
+                            409,
+                        );
+                    }
+                }
+            }
+        }
+        let mut restore = BTreeMap::new();
+        let mut prepared = prepared.into_iter().collect::<Vec<_>>();
+        prepared.sort_by_cached_key(|(id, _)| order.get(id).cloned());
+        for (id, (target, info)) in prepared {
+            if let Some(context) = context {
+                context.checkpoint().await?;
+            }
+            let prepared = prepare(state, target, info, !saved.contains(&id)).await?;
+            if prepared.multipart {
+                let details =
+                    media_edit::details(state, &id, "Id,Path,PartCount,MediaSources").await?;
+                let parts = media_edit::additional_parts(state, &id, &details).await?;
+                if parts.is_empty() {
                     return failed(
-                        "关联版本媒体信息不完整，已停止保存，未清理 Emby 数据",
+                        "分段电影额外分段不可读取，已停止保存，未清理 Emby 数据",
                         &failures,
                         409,
                     );
                 }
-            }
-        }
-    }
-    let mut restore = BTreeMap::new();
-    let mut prepared = prepared.into_iter().collect::<Vec<_>>();
-    prepared.sort_by_cached_key(|(id, _)| order.get(id).cloned());
-    for (id, (target, info)) in prepared {
-        if let Some(context) = context {
-            context.checkpoint().await?;
-        }
-        let prepared = prepare(state, target, info, !saved.contains(&id)).await?;
-        if prepared.multipart {
-            let details = media_edit::details(state, &id, "Id,Path,PartCount,MediaSources").await?;
-            let parts = media_edit::additional_parts(state, &id, &details).await?;
-            if parts.is_empty() {
-                return failed(
-                    "分段电影额外分段不可读取，已停止保存，未清理 Emby 数据",
-                    &failures,
-                    409,
-                );
-            }
-            for part in parts {
-                let part_id = string(&part, "Id");
-                if part_id.is_empty() || string(&part, "Path").is_empty() {
-                    return failed("额外分段缺少可恢复路径，已停止保存", &failures, 409);
+                for part in parts {
+                    let part_id = string(&part, "Id");
+                    if part_id.is_empty() || string(&part, "Path").is_empty() {
+                        return failed("额外分段缺少可恢复路径，已停止保存", &failures, 409);
+                    }
+                    if restore.contains_key(&part_id) {
+                        continue;
+                    }
+                    let source = part["Path"].as_str().unwrap_or("");
+                    let target = media_edit::build(state, &part_id, source, None, None).await?;
+                    let info = media_edit::load(state, &target).await?;
+                    restore.insert(part_id, prepare(state, target, info, true).await?);
                 }
-                if restore.contains_key(&part_id) {
-                    continue;
-                }
-                let source = part["Path"].as_str().unwrap_or("");
-                let target = media_edit::build(state, &part_id, source, None, None).await?;
-                let info = media_edit::load(state, &target).await?;
-                restore.insert(part_id, prepare(state, target, info, true).await?);
             }
+            restore.insert(id, prepared);
         }
-        restore.insert(id, prepared);
-    }
-    if let Some(context) = context {
+        SavePreparation {
+            restore,
+            groups,
+            failures,
+            reports,
+            saved,
+        }
+    };
+    if let Some(context) = context
+        && !resuming_preparation
+    {
         context.update(35, "暂存", "暂存媒体信息和当前章节").await;
     }
     if file_refresh {
@@ -1093,17 +1544,43 @@ async fn save_inner(
                 crate::media_reload::ensure_single_bundle(&original)?;
             }
         }
-        crate::media_reload::preflight_file_imports(state, &file_targets, context).await?;
-        let staged = stage_all(state, &mut restore, &order).await;
-        if let Err(error) = staged {
-            cleanup_stages(&restore).await;
-            return Err(error);
+        if !resuming_preparation {
+            crate::media_reload::preflight_file_imports(state, &file_targets, context).await?;
+            let staged = stage_all(state, &mut restore, &order).await;
+            if let Err(error) = staged {
+                cleanup_stages(&restore).await;
+                return Err(error);
+            }
+            context.save_plan("media-save-plan", &json!({"restore":restore,"saved":saved,"groups":groups,"failures":failures,"reports":reports})).await?;
         }
         let mut warning_details = vec![];
         let mut written_ids = vec![];
+        let json_result = context.completed("saved-json-results").await?;
+        let json_prepared = json_result.is_some();
+        if let Some(previous) = json_result {
+            written_ids = serde_json::from_value(previous["written_ids"].clone())
+                .map_err(|_| ApiError::bad("原 JSON 保存结果无效"))?;
+            warning_details = serde_json::from_value(previous["warning_details"].clone())
+                .map_err(|_| ApiError::bad("原 JSON 保存提醒无效"))?;
+            failures = serde_json::from_value(previous["failures"].clone())
+                .map_err(|_| ApiError::bad("原 JSON 保存失败结果无效"))?;
+            saved = serde_json::from_value(previous["saved"].clone())
+                .map_err(|_| ApiError::bad("原 JSON 保存目标无效"))?;
+        }
+        for id in restore.keys() {
+            if !json_prepared
+                && context
+                    .completed(&format!("saved-json:{id}"))
+                    .await?
+                    .is_some()
+            {
+                written_ids.push(id.clone());
+            }
+        }
         let refresh_outcome = refresh_saved(state, context, || async {
             let mut items = restore.iter().collect::<Vec<_>>();
             items.sort_by_cached_key(|(id, _)| order.get(*id).cloned());
+            if !json_prepared {
             for (id, item) in items {
                 if let Some(stage) = &item.stage {
                     let saved = SavedTarget {
@@ -1116,17 +1593,29 @@ async fn save_inner(
                         refresh_required: true,
                     };
                     saved_details(state, &saved).await?;
-                    if let Err(error) = commit_json_stage_guarded(
-                        stage,
-                        &item.final_path,
-                        item.expected_json.as_deref(),
-                    )
-                    .await
-                    {
+                    let expected = serde_json::to_vec_pretty(&item.info).map_err(|_| ApiError::bad("原保存 JSON 无效"))?;
+                    let written = if tokio::fs::read(&item.final_path).await.ok().as_deref() == Some(expected.as_slice()) {
+                        validate_json_destination(&item.final_path, Some(&expected)).await
+                    } else if written_ids.contains(id) {
+                        Err(ApiError(StatusCode::CONFLICT, "已保存 JSON 在重启期间变化，已保留用户文件和原恢复计划".into()))
+                    } else {
+                        if !tokio::fs::try_exists(stage).await? {
+                            tokio::fs::create_dir_all(stage.parent().ok_or_else(|| ApiError::bad("原保存暂存路径无效"))?).await?;
+                            tokio::fs::write(stage, &expected).await?;
+                            tokio::fs::File::open(stage).await?.sync_all().await?;
+                        }
+                        if tokio::fs::read(stage).await? != expected {
+                            return Err(ApiError(StatusCode::CONFLICT, "原 JSON 暂存内容已变化，保留当前文件及原计划".into()));
+                        }
+                        commit_json_stage_guarded(stage, &item.final_path, item.expected_json.as_deref()).await
+                    };
+                    if let Err(error) = written {
+                        written_ids.retain(|written| written != id);
                         failures.push(format!("{id}：媒体信息 JSON 保存失败：{}", error.1));
                         continue;
                     }
-                    written_ids.push(id.clone());
+                    context.complete(&format!("saved-json:{id}"), &json!({"path":item.final_path,"info":item.info})).await?;
+                    if !written_ids.contains(id) { written_ids.push(id.clone()); }
                     if let Err(error) =
                         cache_saved(state, item.target.sha.as_deref(), &item.info).await
                     {
@@ -1137,6 +1626,7 @@ async fn save_inner(
                     }
                 }
             }
+            }
             if written_ids.is_empty() {
                 return Err(ApiError::bad("媒体信息 JSON 未能保存，未通知 Emby 刷新"));
             }
@@ -1146,6 +1636,7 @@ async fn save_inner(
                     "编辑目标的媒体信息 JSON 未能保存，已保留关联版本文件",
                 ));
             }
+            context.complete("saved-json-results", &json!({"written_ids":written_ids,"saved":saved,"failures":failures,"warning_details":warning_details})).await?;
             context.checkpoint().await?;
             context
                 .activity("通知Emby刷新", "媒体信息 JSON 已保存，通知 Emby 重新读取")
@@ -1169,6 +1660,7 @@ async fn save_inner(
         .await;
         cleanup_stages(&restore).await;
         let metadata_refresh = refresh_outcome?;
+        saved.retain(|id| written_ids.contains(id));
         warning_details.extend(
             media_edit::list(&metadata_refresh["warning_details"])
                 .iter()
@@ -1194,8 +1686,14 @@ async fn save_inner(
                 string(&failure, "reason")
             ));
         }
-        let video_thumbnails = if metadata_refresh["state"] == "verified" {
-            thumbnails_after_save(state, &restore, &saved, context).await?
+        let video_thumbnails = if let Some(previous) =
+            context.completed("saved-video-thumbnails").await?
+        {
+            previous
+        } else if metadata_refresh["state"] == "verified" {
+            let report = thumbnails_after_save(state, &restore, &saved, context).await?;
+            context.complete("saved-video-thumbnails", &report).await?;
+            report
         } else {
             json!({"state":"not_requested","reason":"媒体流和章节尚未通过回读，未继续缩略图任务"})
         };
@@ -1221,7 +1719,7 @@ async fn save_inner(
             .get(id)
             .filter(|_| saved.iter().any(|saved_id| saved_id == id))
             .map(|item| &item.info);
-        return Ok((
+        let outcome = (
             if failures.is_empty() { 200 } else { 207 },
             json!({
                 "message":message,"saved_item_ids":saved,"media_info_saved":true,"saved_mediainfo":saved_mediainfo,
@@ -1229,18 +1727,56 @@ async fn save_inner(
                 "metadata_refresh":metadata_refresh,
                 "video_thumbnails":video_thumbnails
             }),
-        ));
+        );
+        context
+            .complete(
+                "media-save-result",
+                &json!({"status":outcome.0,"result":outcome.1}),
+            )
+            .await?;
+        return Ok(outcome);
     }
     let targets = restore
         .values()
         .map(|item| (item.target.id.clone(), item.path.clone()))
         .collect::<Vec<_>>();
-    let settings =
-        restoration_settings(state, &targets, restore.values().any(|item| item.multipart)).await?;
-    let result = stage_all(state, &mut restore, &order).await;
-    if let Err(error) = result {
-        cleanup_stages(&restore).await;
-        return Err(error);
+    let legacy_settings = if let Some(context) = context {
+        context.plan("legacy-restore-settings").await?
+    } else {
+        None
+    };
+    let settings = if let Some(previous) = legacy_settings {
+        previous["applied"].clone()
+    } else {
+        let settings =
+            restoration_settings(state, &targets, restore.values().any(|item| item.multipart))
+                .await?;
+        if let Some(context) = context {
+            let current = crate::strm::config(state).await?;
+            let original = settings
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(|key| (key.clone(), current[key].clone()))
+                .collect::<serde_json::Map<_, _>>();
+            context
+                .save_plan(
+                    "legacy-restore-settings",
+                    &json!({"original":original,"applied":settings}),
+                )
+                .await?;
+        }
+        settings
+    };
+    if !resuming_preparation {
+        let result = stage_all(state, &mut restore, &order).await;
+        if let Err(error) = result {
+            cleanup_stages(&restore).await;
+            return Err(error);
+        }
+        if let Some(context) = context {
+            context.save_plan("media-save-plan", &json!({"restore":restore,"saved":saved,"groups":groups,"failures":failures,"reports":reports})).await?;
+        }
     }
     if let Some(context) = context
         && let Err(error) = context.checkpoint().await
@@ -1250,7 +1786,39 @@ async fn save_inner(
     }
     let mut ordered_restore = restore.iter().collect::<Vec<_>>();
     ordered_restore.sort_by_cached_key(|(id, _)| order.get(*id).cloned());
-    let outcome = crate::strm::with_changes(state, &settings, || async {
+    if resuming_preparation && let Some(context) = context {
+        let started = legacy_clear_candidates(&restore, context).await?;
+        for (id, item) in &ordered_restore {
+            let current = tokio::fs::read(&item.final_path).await.ok();
+            let requested_matches = current.as_ref().is_some_and(|bytes| {
+                serde_json::from_slice::<Value>(bytes).is_ok_and(|actual| actual == item.info)
+            });
+            let completed = context
+                .completed(&format!("legacy-json:{id}"))
+                .await?
+                .is_some();
+            let known_missing = current.is_none()
+                && started.contains(*id)
+                && legacy_current_empty(state, item).await?;
+            if !requested_matches
+                && (completed || (current != item.expected_json && !known_missing))
+            {
+                return Err(ApiError(
+                    StatusCode::CONFLICT,
+                    "原恢复 JSON 在暂停期间被修改，未重新清理或覆盖当前文件".into(),
+                ));
+            }
+        }
+    }
+    let imported = if let Some(context) = context {
+        context.completed("legacy-import").await?
+    } else {
+        None
+    };
+    let outcome = if let Some(previous) = imported {
+        Ok(serde_json::from_value(previous).map_err(|_| ApiError::bad("原恢复任务结果无效"))?)
+    } else {
+        crate::strm::with_changes(state, &settings, || async {
     if let Some(context) = context {
         context.update(50, "清理缓存", "清理旧媒体信息缓存").await;
     }
@@ -1258,12 +1826,15 @@ async fn save_inner(
     let mut ungrouped = vec![];
     let mut operation_failures = vec![];
     let mut clear_attempted = false;
+    let mut started = if let Some(context) = context { legacy_clear_candidates(&restore, context).await? } else { BTreeSet::new() };
+    validate_legacy_scope(state, &restore).await?;
     for group in &groups {
         let multipart = group
             .iter()
             .any(|id| restore.get(id).is_some_and(|p| p.multipart));
         if multipart && group.len() > 1 {
-            if let Err(error) = emby_post(
+            let ungrouped_before = if let Some(context) = context { context.completed(&format!("legacy-ungroup:{}", group.join(","))).await?.is_some() } else { false };
+            if !ungrouped_before && let Err(error) = emby_post(
                 state,
                 &format!("Videos/{}/AlternateSources/Delete", group[0]),
                 &[],
@@ -1273,17 +1844,31 @@ async fn save_inner(
                 operation_failures.push(error.1);
                 break;
             }
+            if let Some(context) = context {
+                context.complete(&format!("legacy-ungroup:{}", group.join(",")), &json!(group)).await?;
+            }
             ungrouped.push(group.clone());
         }
         // ETK bindings may contain versions that Emby has not merged. Clear each
         // prepared item instead of assuming the first ID clears the entire group.
         for id in group {
+            if started.contains(id) && (legacy_current_empty(state, &restore[id]).await?
+                || legacy_current_restored(state, &restore[id]).await?) {
+                continue;
+            }
             if restore.get(id).is_some_and(|item| !item.has_streams) {
                 tracing::info!(
                     "[媒体信息保存] 媒体ID {id}：当前没有音视频流，保留现有备份直接恢复，不重复清理"
                 );
                 continue;
             }
+            let affected = group.iter().cloned().chain(restore.iter().filter_map(|(member, item)| {
+                group.contains(&string(&item.observation, "ParentId")).then(|| member.clone())
+            })).collect::<BTreeSet<_>>();
+            if let Some(context) = context {
+                context.save_plan(&format!("legacy-clear-intent:{id}"), &json!({"target":legacy_identity(id, &restore[id]),"affected_ids":affected})).await?;
+            }
+            started.extend(affected);
             clear_attempted = true;
             if let Err(error) = emby_post(state, &format!("Items/{id}/ClearMediaInfo"), &[]).await {
                 operation_failures.push(format!("{id}: {}", error.1));
@@ -1304,9 +1889,29 @@ async fn save_inner(
     }
     for (id, item) in &ordered_restore {
         if let Some(stage) = &item.stage {
-            if let Err(error) = commit_json_stage(stage, &item.final_path).await {
+            let expected = serde_json::to_vec_pretty(&item.info).map_err(|_| ApiError::bad("原恢复 JSON 无效"))?;
+            if !tokio::fs::try_exists(stage).await? {
+                tokio::fs::create_dir_all(stage.parent().ok_or_else(|| ApiError::bad("原暂存恢复路径无效"))?).await?;
+                tokio::fs::write(stage, &expected).await?;
+                tokio::fs::File::open(stage).await?.sync_all().await?;
+            }
+            if tokio::fs::read(stage).await? != expected {
+                return Err(ApiError(StatusCode::CONFLICT, "原恢复 JSON 暂存内容已变化，保留全部恢复材料".into()));
+            }
+            let current = tokio::fs::read(&item.final_path).await.ok();
+            let already_saved = if let Some(context) = context { context.completed(&format!("legacy-json:{id}")).await?.is_some() } else { false };
+            let requested_matches = current.as_ref().is_some_and(|bytes| serde_json::from_slice::<Value>(bytes).is_ok_and(|actual| actual == item.info));
+            let restored = if requested_matches {
+                validate_json_destination(&item.final_path, current.as_deref()).await
+            } else if already_saved || (current != item.expected_json && (current.is_some() || !started.contains(*id))) {
+                Err(ApiError(StatusCode::CONFLICT, "恢复 JSON 在任务中断后发生变化，保留用户新文件与原持久请求".into()))
+            } else { commit_json_stage_guarded(stage, &item.final_path, current.as_deref()).await };
+            if let Err(error) = restored {
                 operation_failures.push(format!("{id}: 无法恢复 JSON: {}", error.1));
                 continue;
+            }
+            if let Some(context) = context {
+                context.complete(&format!("legacy-json:{id}"), &json!({"path":item.final_path,"info":item.info})).await?;
             }
             match tokio::fs::read(&item.final_path).await {
                 Ok(bytes)
@@ -1330,10 +1935,13 @@ async fn save_inner(
         }
     }
     for group in ungrouped {
-        if let Err(error) =
+        let merged_before = if let Some(context) = context { context.completed(&format!("legacy-merge:{}", group.join(","))).await?.is_some() } else { false };
+        if !merged_before && let Err(error) =
             emby_post(state, "Videos/MergeVersions", &[("Ids", group.join(","))]).await
         {
             operation_failures.push(format!("恢复版本组 {} 失败: {}", group.join(","), error.1));
+        } else if let Some(context) = context {
+            context.complete(&format!("legacy-merge:{}", group.join(",")), &json!(group)).await?;
         }
     }
     for (_, item) in &ordered_restore {
@@ -1350,11 +1958,19 @@ async fn save_inner(
         context.update(75, "恢复媒体信息", "等待神医原生任务从 JSON 恢复媒体流、标题和章节").await;
     }
     let recovery_context = JobContext::for_recovery(context).await;
-    crate::emby::scheduled(state, "MediaInfoExtractTask", &recovery_context).await?;
+    if let Some(context) = context {
+        let recovery_context = context.for_resume_cleanup().await.scoped("legacy-all-import");
+        crate::emby::scheduled(state, "MediaInfoExtractTask", &recovery_context).await?;
+        context.complete("legacy-import", &json!(operation_failures)).await?;
+    } else {
+        crate::emby::scheduled(state, "MediaInfoExtractTask", &recovery_context).await?;
+    }
     Ok(operation_failures)
-    }).await;
+    }).await
+    };
     cleanup_stages(&restore).await;
     let operation_failures = outcome?;
+    validate_legacy_scope(state, &restore).await?;
     let mut deadline = tokio::time::Instant::now() + Duration::from_secs(120);
     if let Some(context) = context {
         context
@@ -1496,10 +2112,19 @@ async fn save_inner(
         skipped_tracks,
         "[媒体信息保存] JSON、媒体流和章节回读验收结束"
     );
-    Ok((
+    let result = (
         if failures.is_empty() { 200 } else { 207 },
         json!({"message":format!("媒体信息已更新，已恢复 {} 个版本 JSON，Emby 媒体流、标题和章节已通过回读验收",restore.len()),"saved_mediainfo":restore.get(id).map(|item| &item.info),"failures":failures,"batch_reports":reports,"warnings":skipped_tracks,"warning_details":[],"metadata_refresh":{"state":"not_requested","requested_ids":[],"failed_ids":[]},"video_thumbnails":{"state":"not_requested"}}),
-    ))
+    );
+    if let Some(context) = context {
+        context
+            .complete(
+                "media-save-result",
+                &json!({"status":result.0,"result":result.1}),
+            )
+            .await?;
+    }
+    Ok(result)
 }
 
 async fn thumbnails_after_save(

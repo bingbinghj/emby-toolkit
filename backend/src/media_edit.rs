@@ -44,6 +44,7 @@ async fn fill_titles(
         json!({"streams":filled["MediaStreams"],"report":report}),
     ))
 }
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Target {
     pub id: String,
     pub top_id: String,
@@ -310,6 +311,12 @@ pub async fn repair_target(state: &AppState, id: &str) -> Result<Target> {
     Ok(target)
 }
 pub async fn load(state: &AppState, target: &Target) -> Result<Value> {
+    if target.asset["moviepilot_media_pending"] == true {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            "当前版本的媒体信息尚未验收，请重试入库提取，已拒绝读取旧版媒体信息".into(),
+        ));
+    }
     if target.asset["fingerprint_pending"] == true {
         return Err(ApiError(
             StatusCode::CONFLICT,

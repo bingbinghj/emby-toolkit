@@ -19,16 +19,24 @@ use std::{
 };
 use tokio::sync::Mutex;
 
-struct EnhancedItem {
-    top_id: String,
-    path: String,
-    expires: Instant,
+fn scope_key(value: &Value) -> String {
+    use sha2::Digest;
+    format!("{:x}", sha2::Sha256::digest(value.to_string().as_bytes()))
 }
-type MovieNotices = BTreeMap<(String, String), (Value, Vec<Value>, BTreeMap<String, Value>)>;
-fn collect_movie_notice(notices: &mut MovieNotices, item: &Value, report: &Value) {
+
+type IngestNotices =
+    BTreeMap<(String, String), (Value, Vec<Value>, BTreeMap<String, Value>, Vec<String>)>;
+fn collect_ingest_notice(
+    notices: &mut IngestNotices,
+    item: &Value,
+    report: &Value,
+    episode_ids: &[String],
+) {
     let tmdb = string(&item["ProviderIds"], "Tmdb");
     let name = string(item, "Name");
-    let key = if !tmdb.trim().is_empty() {
+    let key = if item["Type"] == "Series" {
+        format!("series:{}", string(item, "Id"))
+    } else if !tmdb.trim().is_empty() {
         format!("tmdb:{}", tmdb.trim())
     } else if !name.trim().is_empty() {
         format!("name:{}", name.trim())
@@ -42,43 +50,134 @@ fn collect_movie_notice(notices: &mut MovieNotices, item: &Value, report: &Value
         .unwrap_or_else(|| string(item, "ProductionYear"));
     let notice = notices
         .entry((key, year.trim().to_string()))
-        .or_insert_with(|| (item.clone(), vec![], BTreeMap::new()));
+        .or_insert_with(|| (item.clone(), vec![], BTreeMap::new(), vec![]));
     notice.1.extend(list(&report["pending"]));
     notice.2.insert(string(item, "Id"), item.clone());
+    let ids = if item["Type"] == "Series" {
+        episode_ids.to_vec()
+    } else {
+        vec![string(item, "Id")]
+    };
+    for id in ids {
+        if !notice.3.contains(&id) {
+            notice.3.push(id);
+        }
+    }
+}
+
+async fn deliver_notices(
+    state: &AppState,
+    notices: IngestNotices,
+    updated: bool,
+    identities: &[crate::moviepilot_ingest::Identity],
+    context: &crate::jobs::JobContext,
+    warnings: &mut Value,
+) -> Result<()> {
+    for (item, pending, native, ids) in notices.into_values() {
+        let key = format!(
+            "ingest_notified:{}",
+            scope_key(&json!({"id":item["Id"],"ids":ids}))
+        );
+        if context.completed(&key).await?.is_some() {
+            continue;
+        }
+        for identity in identities
+            .iter()
+            .filter(|identity| ids.contains(&identity.id))
+        {
+            crate::moviepilot_ingest::unchanged(state, identity, context).await?;
+        }
+        context.checkpoint().await?;
+        let result = crate::notifications::media(
+            state,
+            &item,
+            updated,
+            &ids,
+            &json!({"pending":pending}),
+            &native.into_values().collect::<Vec<_>>(),
+            Some(context),
+        )
+        .await;
+        if let Err(error) = result {
+            if context.is_cancelled() {
+                return Err(error);
+            }
+            let reason = format!("《{}》入库通知失败：{}", string(&item, "Name"), error.1);
+            tracing::warn!("{reason}");
+            add_report_warnings(warnings, &json!({"warnings":1,"warning_details":[reason]}));
+        } else {
+            context.complete(&key, &json!({"queued":true})).await?;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Default)]
 pub struct Service {
     pending: Mutex<BTreeMap<String, Value>>,
     batches: Mutex<BTreeMap<String, Instant>>,
-    enhanced: Mutex<BTreeMap<String, EnhancedItem>>,
     manual_deletes: Mutex<BTreeMap<String, Instant>>,
     draining: std::sync::atomic::AtomicBool,
 }
 impl Service {
-    async fn mark_enhanced(&self, top_id: &str, members: &BTreeMap<String, String>) {
-        let now = Instant::now();
-        let mut enhanced = self.enhanced.lock().await;
-        enhanced.retain(|_, item| item.expires > now);
+    async fn mark_enhanced(
+        &self,
+        state: &AppState,
+        top_id: &str,
+        members: &BTreeMap<String, String>,
+        identities: &[crate::moviepilot_ingest::Identity],
+    ) -> Result<()> {
+        let mut transaction = state.db.begin().await?;
         for (id, path) in members
             .iter()
             .filter(|(id, path)| !id.is_empty() && !path.is_empty())
         {
-            enhanced.insert(
-                id.clone(),
-                EnhancedItem {
-                    top_id: top_id.into(),
-                    path: path.clone(),
-                    expires: now + Duration::from_secs(3600),
-                },
-            );
+            let identity = identities
+                .iter()
+                .find(|identity| identity.id == *id)
+                .ok_or_else(|| ApiError::bad("预增强成员缺少原文件版本记录"))?;
+            sqlx::query("INSERT INTO webhook_prepared(item_id,top_id,path,revision_json,expires_at) VALUES($1,$2,$3,$4,NOW()+INTERVAL '1 hour') ON CONFLICT(item_id) DO UPDATE SET top_id=EXCLUDED.top_id,path=EXCLUDED.path,revision_json=EXCLUDED.revision_json,expires_at=EXCLUDED.expires_at")
+                .bind(id).bind(top_id).bind(path).bind(identity.revision()).execute(&mut *transaction).await?;
         }
+        transaction.commit().await?;
+        Ok(())
     }
-    async fn take_enhanced(&self, top_id: &str, members: &[Value]) -> BTreeSet<String> {
-        let now = Instant::now();
-        let mut enhanced = self.enhanced.lock().await;
-        enhanced.retain(|_, item| item.expires > now);
+    async fn take_enhanced(
+        &self,
+        state: &AppState,
+        top_id: &str,
+        members: &[Value],
+        context: &crate::jobs::JobContext,
+    ) -> Result<BTreeSet<String>> {
+        let key = format!("emby_prepared:{top_id}");
+        if let Some(saved) = context.completed(&key).await? {
+            let covered: BTreeSet<String> = serde_json::from_value(saved["ids"].clone())
+                .map_err(|_| ApiError::bad("预增强成员的持久记录无效"))?;
+            for member in members {
+                let id = string(member, "Id");
+                if covered.contains(&id)
+                    && crate::moviepilot_ingest::observe(state, member, context)
+                        .await?
+                        .revision()
+                        != saved["revisions"][&id]
+                {
+                    return Err(ApiError::bad(
+                        "已预增强的文件在中断期间换版，请重新提交当前文件入库",
+                    ));
+                }
+            }
+            return Ok(covered);
+        }
+        let ids = members
+            .iter()
+            .map(|member| string(member, "Id"))
+            .collect::<Vec<_>>();
+        let mut transaction = state.db.begin().await?;
+        let enhanced: BTreeMap<String,(String,Value)> = sqlx::query_as::<_,(String,String,Value)>(
+            "SELECT p.item_id,p.path,COALESCE(p.revision_json,'null'::jsonb) FROM webhook_prepared p WHERE p.top_id=$1 AND p.item_id=ANY($2) AND (p.expires_at>NOW() OR EXISTS(SELECT 1 FROM media_organize_history h WHERE h.source='moviepilot' AND h.status='processing' AND h.item_id=p.item_id)) FOR UPDATE")
+            .bind(top_id).bind(&ids).fetch_all(&mut *transaction).await?.into_iter().map(|(id,path,revision)|(id,(path,revision))).collect();
         let mut covered = BTreeSet::new();
+        let mut revisions = BTreeMap::new();
         for member in members {
             let id = string(member, "Id");
             let path = string(member, "Path");
@@ -93,13 +192,40 @@ impl Service {
             if owner == top_id
                 && enhanced
                     .get(&id)
-                    .is_some_and(|item| item.top_id == top_id && item.path == path)
+                    .is_some_and(|(prepared_path, _)| prepared_path == &path)
             {
-                enhanced.remove(&id);
+                let revision = &enhanced[&id].1;
+                if revision.is_null()
+                    || crate::moviepilot_ingest::observe(state, member, context)
+                        .await?
+                        .revision()
+                        != *revision
+                {
+                    return Err(ApiError::bad(
+                        "预增强原文件版本与当前来源不一致，请重新提交当前文件入库",
+                    ));
+                }
+                revisions.insert(id.clone(), revision.clone());
                 covered.insert(id);
             }
         }
-        covered
+        sqlx::query("DELETE FROM webhook_prepared WHERE top_id=$1 AND item_id=ANY($2)")
+            .bind(top_id)
+            .bind(covered.iter().cloned().collect::<Vec<_>>())
+            .execute(&mut *transaction)
+            .await?;
+        context
+            .complete_in_tx(
+                &mut transaction,
+                &key,
+                &json!({"ids":covered,"revisions":revisions}),
+            )
+            .await?;
+        transaction.commit().await?;
+        context
+            .complete(&key, &json!({"ids":covered,"revisions":revisions}))
+            .await?;
+        Ok(covered)
     }
     pub async fn mark_manual_delete(&self, ids: &[String]) {
         let now = Instant::now();
@@ -178,95 +304,95 @@ fn merge_pending_event(old: &mut Value, event: &Value) {
             .collect::<Vec<_>>()
     );
 }
-async fn submit_queued_event(state: &AppState, key: String, event: Value) {
-    let work = state.clone();
-    let retry_event = event.clone();
-    match state
-        .jobs
-        .submit("Webhook 入库", move |context| async move {
-            tracing::info!(
-                "Webhook 任务处理开始：来源 {}，Emby {}，目标分集 {} 个",
-                string(&event, "source"),
-                string(&event, "id"),
-                list(&event["episode_ids"]).len()
-            );
-            let mut result = std::panic::AssertUnwindSafe(async {
-                if event["source"] == "moviepilot" {
-                    let result = process_moviepilot(&work, &event, &context).await;
-                    if let Err(error) = &result {
-                        tracing::error!("MoviePilot Webhook 任务失败：{}", error.1);
-                    }
-                    result
-                } else {
-                    process_emby(&work, &event, &context)
-                        .await
-                        .inspect_err(|error| {
-                            tracing::error!(
-                                "Emby Webhook 任务失败：Emby {}，{}",
-                                string(&event, "id"),
-                                error.1
-                            )
-                        })
-                }
-            })
-            .catch_unwind()
-            .await
-            .unwrap_or_else(|_| {
-                Err(ApiError(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "任务执行异常".into(),
-                ))
-            });
-            if let Err(error) = crate::media_organize_history::finish(&work, &event, &result).await
-            {
-                tracing::error!("入库处理记录未能保存：{}", error.1);
-                if result.is_ok() {
-                    result = Err(error);
-                }
-            }
-            if event["source"] == "moviepilot"
-                && result.as_ref().map_or(true, |v| {
-                    v["failures"].as_array().is_some_and(|f| !f.is_empty())
-                })
-                && let Some(key) = event["batch_key"].as_str()
-            {
-                work.webhooks.batches.lock().await.remove(key);
-            }
-            result
-        })
-        .await
-    {
-        Ok(_) => (),
-        Err(error) => {
-            state
-                .webhooks
-                .pending
-                .lock()
-                .await
-                .entry(key)
-                .and_modify(|old| merge_pending_event(old, &retry_event))
-                .or_insert(retry_event);
-            tracing::warn!("Webhook 等待任务调度：{}", error.1);
+pub(crate) async fn execute_persisted(
+    state: &AppState,
+    payload: &Value,
+    context: &crate::jobs::JobContext,
+) -> Result<(u16, Value)> {
+    let event = &payload["event"];
+    if !event.is_object() {
+        return Err(ApiError::bad("持久 Webhook 事件无效"));
+    }
+    if let Some(result) = context.completed("webhook_result").await? {
+        return Ok((200, result));
+    }
+    tracing::info!(
+        "Webhook 任务处理开始：来源 {}，Emby {}，目标分集 {} 个",
+        string(event, "source"),
+        string(event, "id"),
+        list(&event["episode_ids"]).len()
+    );
+    let mut result = std::panic::AssertUnwindSafe(async {
+        if event["source"] == "moviepilot" {
+            process_moviepilot(state, event, context).await
+        } else {
+            process_emby(state, event, context).await
+        }
+    })
+    .catch_unwind()
+    .await
+    .unwrap_or_else(|_| {
+        Err(ApiError(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "任务执行异常".into(),
+        ))
+    });
+    if context.is_interrupted() {
+        return result.map(|value| (200, value));
+    }
+    let history_result = if event["source"] == "moviepilot" {
+        crate::media_organize_history::finish_moviepilot(state, event, context, &result).await
+    } else {
+        crate::media_organize_history::finish(state, event, &result).await
+    };
+    if let Err(error) = history_result {
+        tracing::error!("入库处理记录未能保存：{}", error.1);
+        if result.is_ok() {
+            result = Err(error);
         }
     }
-}
-async fn enqueue(state: &AppState, key: String, event: Value) {
-    let mut pending = state.webhooks.pending.lock().await;
-    if let Some(old) = pending.get_mut(&key) {
-        merge_pending_event(old, &event);
-        tracing::info!(
-            "Webhook 排队合并：任务 {key}，目标分集 {} 个",
-            list(&old["episode_ids"]).len()
-        );
-    } else {
-        tracing::info!(
-            "Webhook 排队：任务 {key}，来源 {}，目标分集 {} 个",
-            string(&event, "source"),
-            list(&event["episode_ids"]).len()
-        );
-        pending.insert(key, event);
+    if event["source"] == "moviepilot"
+        && result.as_ref().map_or(true, |value| {
+            value["failures"]
+                .as_array()
+                .is_some_and(|failures| !failures.is_empty())
+        })
+        && let Some(key) = event["batch_key"].as_str()
+    {
+        state.webhooks.batches.lock().await.remove(key);
     }
-    drop(pending);
+    let result = result?;
+    context.complete("webhook_result", &result).await?;
+    Ok((200, result))
+}
+
+async fn registered_event(state: &AppState, pending_id: &str) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM durable_jobs WHERE spec_json->>'kind'='webhook' AND spec_json#>>'{payload,event,_pending_id}'=$1)")
+        .bind(pending_id).fetch_one(&state.db).await?)
+}
+
+async fn submit_queued_event(state: &AppState, key: &str, event: &Value) -> Result<()> {
+    if !registered_event(state, &string(event, "_pending_id")).await? {
+        let payload = json!({"event":event});
+        let spec = crate::jobs::JobSpec::new("webhook", payload.clone());
+        let work = state.clone();
+        state
+            .jobs
+            .submit_persistent_response("Webhook 入库", spec, move |context| async move {
+                execute_persisted(&work, &payload, &context).await
+            })
+            .await?;
+    }
+    sqlx::query("DELETE FROM webhook_pending WHERE event_key=$1 AND event_json=$2")
+        .bind(key)
+        .bind(event)
+        .execute(&state.db)
+        .await?;
+    Ok(())
+}
+
+fn start_draining(state: &AppState) {
     if state
         .webhooks
         .draining
@@ -278,24 +404,144 @@ async fn enqueue(state: &AppState, key: String, event: Value) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
+            if state.jobs.is_shutting_down().await {
+                state
+                    .webhooks
+                    .draining
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                break;
+            }
             if state.jobs.status().await["is_running"] == true {
                 continue;
             }
-            let next = state.webhooks.pending.lock().await.pop_first();
-            let Some((key, event)) = next else {
-                let pending = state.webhooks.pending.lock().await;
-                if pending.is_empty() {
-                    state
-                        .webhooks
-                        .draining
-                        .store(false, std::sync::atomic::Ordering::SeqCst);
-                    break;
-                }
-                continue;
+            // Enqueue and registration share this lock so a merged member
+            // cannot be lost between the durable task insert and pending delete.
+            let mut pending = state.webhooks.pending.lock().await;
+            let Some((key, event)) = pending
+                .first_key_value()
+                .map(|(key, event)| (key.clone(), event.clone()))
+            else {
+                state
+                    .webhooks
+                    .draining
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
+                break;
             };
-            submit_queued_event(&state, key, event).await;
+            match submit_queued_event(&state, &key, &event).await {
+                Ok(()) => {
+                    pending.remove(&key);
+                }
+                Err(error) => tracing::warn!("Webhook 等待任务调度：{}", error.1),
+            }
         }
     });
+}
+
+async fn enqueue(state: &AppState, key: String, mut event: Value) -> Result<()> {
+    let mut pending = state.webhooks.pending.lock().await;
+    let previous: Option<Value> =
+        sqlx::query_scalar("SELECT event_json FROM webhook_pending WHERE event_key=$1")
+            .bind(&key)
+            .fetch_optional(&state.db)
+            .await?;
+    let previous = if let Some(old) = previous {
+        if registered_event(state, &string(&old, "_pending_id")).await? {
+            None
+        } else {
+            Some(old)
+        }
+    } else {
+        None
+    };
+    let event = if let Some(mut old) = previous {
+        merge_pending_event(&mut old, &event);
+        old
+    } else {
+        event["_pending_id"] = json!(uuid::Uuid::new_v4().to_string());
+        event["_queue_key"] = json!(key);
+        event
+    };
+    sqlx::query("INSERT INTO webhook_pending(event_key,event_json) VALUES($1,$2) ON CONFLICT(event_key) DO UPDATE SET event_json=EXCLUDED.event_json,updated_at=NOW()")
+        .bind(&key).bind(&event).execute(&state.db).await?;
+    tracing::info!(
+        "Webhook 排队已持久保存：任务 {key}，来源 {}，目标分集 {} 个",
+        string(&event, "source"),
+        list(&event["episode_ids"]).len()
+    );
+    pending.insert(key, event);
+    drop(pending);
+    start_draining(state);
+    Ok(())
+}
+
+pub async fn resume_pending_with_retry(
+    state: &AppState,
+    cancel: &tokio_util::sync::CancellationToken,
+) {
+    let mut delay = 1_u64;
+    loop {
+        let result = tokio::select! {
+            _ = cancel.cancelled() => return,
+            result = resume_pending(state) => result,
+        };
+        match result {
+            Ok(()) => return,
+            Err(error) => tracing::warn!("待入库事件恢复尚未完成，保留原事件并自动重试：{}", error.1),
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tokio::time::sleep(Duration::from_secs(delay)) => {},
+        }
+        delay = (delay * 2).min(8);
+    }
+}
+
+pub async fn resume_pending(state: &AppState) -> Result<()> {
+    let rows: Vec<(String, Value)> = sqlx::query_as(
+        "SELECT event_key,event_json FROM webhook_pending ORDER BY updated_at,event_key",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    let mut pending = state.webhooks.pending.lock().await;
+    pending.extend(rows);
+    drop(pending);
+    start_draining(state);
+    let prepared:Vec<(String,String,String,Value,Vec<String>)>=sqlx::query_as(
+        "SELECT p.top_id,p.item_id,p.path,COALESCE(p.revision_json,'null'::jsonb),array_agg(h.id ORDER BY h.id) FROM webhook_prepared p JOIN media_organize_history h ON h.item_id=p.item_id AND h.source='moviepilot' AND h.status='processing' GROUP BY p.top_id,p.item_id,p.path,p.revision_json ORDER BY p.top_id,p.item_id")
+        .fetch_all(&state.db).await?;
+    let mut groups = BTreeMap::<String, (Vec<Value>, BTreeSet<String>)>::new();
+    for (top, id, path, revision, history) in prepared {
+        let group = groups.entry(top).or_default();
+        group
+            .0
+            .push(json!({"id":id,"path":path,"revision":revision}));
+        group.1.extend(history);
+    }
+    for (top, (members, history_ids)) in groups {
+        let hash = scope_key(&json!(members));
+        let registered:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM durable_jobs WHERE spec_json->>'kind'='webhook' AND spec_json#>>'{payload,event,_resume_prepared}'=$1 UNION ALL SELECT 1 FROM webhook_pending WHERE event_json->>'_resume_prepared'=$1)")
+            .bind(&hash).fetch_one(&state.db).await?;
+        if registered {
+            continue;
+        }
+        let first = &members[0];
+        let episodes = members
+            .iter()
+            .filter(|member| member["id"] != top)
+            .map(|member| member["id"].clone())
+            .collect::<Vec<_>>();
+        enqueue(
+            state,
+            format!("emby:{top}:item.add"),
+            json!({"source":"emby","id":top,
+            "episode_ids":episodes,"event":"item.add","history_ids":history_ids,
+            "original":{"Id":first["id"],"Path":first["path"],
+                "Type":if episodes.is_empty(){"Movie"}else{"Episode"},"SeriesId":top},
+            "_resume_prepared":hash}),
+        )
+        .await?;
+    }
+    Ok(())
 }
 async fn emby(
     State(state): State<AppState>,
@@ -405,7 +651,7 @@ async fn emby(
         format!("emby:{queue_id}:{event}"),
         json!({"source":"emby","id":top,"episode_ids":ids,"event":event,"original":item,"history_ids":history_ids}),
     )
-    .await;
+    .await?;
     Ok((StatusCode::ACCEPTED, Json(json!({"status":"accepted"}))))
 }
 
@@ -463,46 +709,87 @@ fn delete_slots(row: &Value) -> Vec<DeleteSlot> {
         })
         .collect()
 }
-async fn delete_fid(state: &AppState, slot: &DeleteSlot, config: &Value) -> Result<Option<String>> {
+async fn delete_fid(state: &AppState, slot: &DeleteSlot) -> Result<Option<String>> {
     if !matches!(slot.kind.as_str(), "Movie" | "Episode")
         || (!string(&slot.asset, "emby_item_id").is_empty()
             && string(&slot.asset, "emby_item_id") != slot.id)
     {
         return Ok(None);
     }
-    if slot.asset["fingerprint_pending"] == true {
+    if slot.asset["fingerprint_pending"] == true || slot.asset["moviepilot_media_pending"] == true {
         return Err(ApiError::bad("文件身份待校验，停止 115 联动删除"));
     }
-    let cached: Vec<String> = if !slot.pc.is_empty() {
+    if slot.pc.is_empty() {
+        // A final path can already refer to the replacement while its old
+        // deletion event is still in flight. Only a recorded entity is usable.
+        tracing::warn!(
+            "[深度删除] Item {} 缺少旧文件 PickCode，保留云端文件。",
+            slot.id
+        );
+        return Ok(None);
+    }
+    let cached: Vec<String> =
         sqlx::query_scalar("SELECT id FROM p115_filesystem_cache WHERE pick_code=$1")
             .bind(&slot.pc)
             .fetch_all(&state.db)
-            .await?
-    } else {
-        let path = string(&slot.asset, "path");
-        let target = crate::media_paths::strm_target(&path)
-            .await
-            .unwrap_or_default();
-        let paths = crate::media_paths::local_candidates(
-            &path,
-            &target,
-            &[
-                &string(config, "local_strm_root"),
-                &string(config, "cd2_media_root"),
-            ],
-        );
-        sqlx::query_scalar("SELECT id FROM p115_filesystem_cache WHERE trim(both '/' from replace(local_path,chr(92),'/'))=ANY($1)")
-            .bind(paths).fetch_all(&state.db).await?
-    };
+            .await?;
     let fid = match cached.as_slice() {
         [fid] => Some(fid.clone()),
-        [] if !slot.pc.is_empty() => {
-            crate::fingerprints::file_id(&slot.pc).map(|id| id.to_string())
-        }
+        [] => crate::fingerprints::file_id(&slot.pc).map(|id| id.to_string()),
         _ => None,
     };
     Ok(fid.filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit())))
 }
+async fn delete_path_reused(state: &AppState, path: &str) -> Result<bool> {
+    if path.is_empty() {
+        return Err(ApiError::bad(
+            "深度删除缺少可核验的原文件路径，保留云端文件",
+        ));
+    }
+    if std::path::Path::new(path).is_absolute() {
+        match tokio::fs::symlink_metadata(path).await {
+            Ok(_) => return Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let response = state
+        .emby(
+            reqwest::Method::GET,
+            "Items",
+            &[
+                ("Path", path.into()),
+                ("Recursive", "true".into()),
+                (
+                    "IncludeItemTypes",
+                    "Movie,Episode,Video,MusicVideo,Audio".into(),
+                ),
+                ("Fields", "Id,Path".into()),
+                ("EnableImages", "false".into()),
+                ("EnableUserData", "false".into()),
+                ("GroupItemsIntoCollections", "false".into()),
+            ],
+            None,
+        )
+        .await?;
+    let items = response["Items"]
+        .as_array()
+        .ok_or_else(|| ApiError::bad("深度删除路径查询返回无效媒体列表，保留云端文件"))?;
+    let total = response["TotalRecordCount"]
+        .as_u64()
+        .or_else(|| response["TotalRecordCount"].as_str()?.parse().ok());
+    if total != Some(items.len() as u64)
+        || items
+            .iter()
+            .any(|item| string(item, "Id").is_empty() || item["Path"] != path)
+    {
+        return Err(ApiError::bad(
+            "深度删除路径查询未证明当前归属，保留云端文件",
+        ));
+    }
+    Ok(!items.is_empty())
+}
+
 pub async fn deep_delete(state: &AppState, item: &Value) -> Result<Value> {
     let id = string(item, "Id");
     if id.is_empty() {
@@ -514,6 +801,13 @@ pub async fn deep_delete(state: &AppState, item: &Value) -> Result<Value> {
     }
     let config = state.config.read().await.clone();
     let kind = string(item, "Type");
+    if crate::versions::existing(state, std::slice::from_ref(&id))
+        .await?
+        .contains(&id)
+    {
+        tracing::warn!("[深度删除] Item {id} 仍在 Emby 中，保留当前媒体和云端文件。");
+        return Ok(json!({"status":"deep_delete_ignored_live"}));
+    }
     let rows: Vec<Value> = sqlx::query_scalar(
         "SELECT to_jsonb(m) FROM media_metadata m WHERE emby_item_ids_json @> $1",
     )
@@ -603,12 +897,16 @@ pub async fn deep_delete(state: &AppState, item: &Value) -> Result<Value> {
             removed.push(id);
         }
     }
+    let existing = crate::versions::existing(state, &removed).await?;
+    removed.retain(|id| !existing.contains(id));
     if config["p115_enable_sync_delete"] == true {
         let mut fids = BTreeSet::new();
         let mut retained_fids = BTreeSet::new();
         for slot in &slots {
-            if let Some(fid) = delete_fid(state, slot, &config).await? {
-                if removed.contains(&slot.id) {
+            if let Some(fid) = delete_fid(state, slot).await? {
+                if removed.contains(&slot.id)
+                    && !delete_path_reused(state, &string(&slot.asset, "path")).await?
+                {
                     fids.insert(fid);
                 } else {
                     retained_fids.insert(fid);
@@ -640,6 +938,8 @@ pub async fn deep_delete(state: &AppState, item: &Value) -> Result<Value> {
         "[深度删除] 开始清理本地数据库与缓存: {} ({kind})",
         string(item, "Name")
     );
+    let existing = crate::versions::existing(state, &removed).await?;
+    removed.retain(|id| !existing.contains(id));
     crate::versions::unbind(state, &removed).await?;
     Ok(json!({"status":"deep_delete_processed"}))
 }
@@ -772,7 +1072,9 @@ async fn moviepilot(
     };
     let mut batches = state.webhooks.batches.lock().await;
     batches.retain(|_, time| time.elapsed() < Duration::from_secs(3600));
-    if batches.contains_key(&key) {
+    let persisted: bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM webhook_pending WHERE event_json->>'batch_key'=$1 UNION ALL SELECT 1 FROM durable_jobs WHERE spec_json->>'kind'='webhook' AND spec_json#>>'{payload,event,batch_key}'=$1 AND state_json->>'state' NOT IN ('failed','cancelled') AND (state_json->>'state' IN ('running','interrupted','paused','pausing') OR updated_at>NOW()-INTERVAL '1 hour'))")
+        .bind(&key).fetch_one(&state.db).await?;
+    if batches.contains_key(&key) || persisted {
         tracing::info!("MoviePilot Webhook 跳过：重复批次 {key}");
         return Ok((
             StatusCode::OK,
@@ -796,7 +1098,10 @@ async fn moviepilot(
         "MoviePilot Webhook 已接受：批次 {key}，有效文件 {} 个，根路径 {root}",
         files.len()
     );
-    enqueue(&state, key.clone(), body).await;
+    if let Err(error) = enqueue(&state, key.clone(), body).await {
+        state.webhooks.batches.lock().await.remove(&key);
+        return Err(error);
+    }
     Ok((
         StatusCode::ACCEPTED,
         Json(json!({"status":"accepted","batch_key":key,"file_count":files.len(),"group_count":1})),
@@ -808,11 +1113,24 @@ pub async fn process_emby(
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
     context.checkpoint().await?;
+    if event["_resume_prepared"].is_string() {
+        let ids = list(&event["history_ids"])
+            .into_iter()
+            .filter_map(|id| id.as_str().map(str::to_string))
+            .collect::<Vec<_>>();
+        let remaining:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM media_organize_history WHERE id=ANY($1) AND status='processing')")
+            .bind(&ids).fetch_one(&state.db).await?;
+        if !remaining {
+            return Ok(
+                json!({"updated":0,"status":"already_completed","message":"原批次已由Emby回流完成"}),
+            );
+        }
+    }
     let id = string(event, "id");
     let item = details(
         state,
         &id,
-        "Id,Type,Name,Path,ImageTags,ProductionYear,MediaSources,MediaStreams",
+        "Id,Type,Name,Path,DateCreated,ImageTags,ProductionYear,MediaSources,MediaStreams",
     )
     .await?;
     let media_name = string(&item, "Name");
@@ -823,7 +1141,9 @@ pub async fn process_emby(
         "Emby 入库处理开始：《{media_name}》，Emby {id}，事件 {}",
         string(event, "event")
     );
-    let episodes = list(&event["episode_ids"])
+    let episode_batch = !list(&event["episode_ids"]).is_empty();
+    let saved_scope = context.plan("emby_scope").await?;
+    let mut episodes = list(&event["episode_ids"])
         .iter()
         .filter_map(Value::as_str)
         .map(str::to_string)
@@ -835,6 +1155,18 @@ pub async fn process_emby(
     if event["event"] == "image.update" {
         return Ok(json!({"message":"图片更新已接收"}));
     }
+    if let Some(scope) = &saved_scope {
+        episodes = serde_json::from_value(scope["episodes"].clone())
+            .map_err(|_| ApiError::bad("Emby原入库分集范围记录无效"))?;
+    } else if item["Type"] == "Series" && episodes.is_empty() {
+        episodes = crate::emby::items(state, &id, "Id,Type,Path", context)
+            .await?
+            .into_iter()
+            .filter(|child| child["Type"] == "Episode")
+            .map(|child| string(&child, "Id"))
+            .filter(|id| !id.is_empty())
+            .collect();
+    }
     let mut members = vec![];
     if episodes.is_empty() {
         let original_id = string(&event["original"], "Id");
@@ -843,7 +1175,7 @@ pub async fn process_emby(
                 details(
                     state,
                     &original_id,
-                    "Id,Type,Name,Path,SeriesId,SeriesName,SeriesPrimaryImageTag,ImageTags,ProductionYear,ParentIndexNumber,IndexNumber,ParentId,ExtraType,MediaSources,MediaStreams",
+                    "Id,Type,Name,Path,DateCreated,SeriesId,SeriesName,SeriesPrimaryImageTag,ImageTags,ProductionYear,ParentIndexNumber,IndexNumber,ParentId,ExtraType,MediaSources,MediaStreams",
                 )
                 .await?,
             );
@@ -857,11 +1189,29 @@ pub async fn process_emby(
                 details(
                     state,
                     episode,
-                    "Id,Type,Name,Path,SeriesId,SeriesName,SeriesPrimaryImageTag,ImageTags,ProductionYear,ParentIndexNumber,IndexNumber,ParentId,ExtraType,MediaSources,MediaStreams",
+                    "Id,Type,Name,Path,DateCreated,SeriesId,SeriesName,SeriesPrimaryImageTag,ImageTags,ProductionYear,ParentIndexNumber,IndexNumber,ParentId,ExtraType,MediaSources,MediaStreams",
                 )
                 .await?,
             );
         }
+    }
+    let identities = members
+        .iter()
+        .map(|member| {
+            json!({"id":member["Id"],"path":member["Path"],
+        "created":member["DateCreated"],"sources":list(&member["MediaSources"]).iter()
+            .map(|source|crate::media_paths::clean(&string(source,"Path"))).collect::<Vec<_>>()})
+        })
+        .collect::<Vec<_>>();
+    let scope = json!({"id":id,"path":item["Path"],"created":item["DateCreated"],"episodes":episodes,"members":identities});
+    if let Some(original) = &saved_scope {
+        if original != &scope {
+            return Err(ApiError::bad(
+                "Emby原入库ID、路径或文件范围在中断期间变化，未扩大处理范围",
+            ));
+        }
+    } else {
+        context.save_plan("emby_scope", &scope).await?;
     }
     for member in &members {
         crate::media_organize_history::bind_item(state, event, &string(member, "Path"), member)
@@ -869,66 +1219,123 @@ pub async fn process_emby(
     }
     // A prepared member is consumed once. Different batches in the same series
     // cannot inherit its shortcut, and a failed finalization leaves no claimed marker.
-    let covered = state.webhooks.take_enhanced(&id, &members).await;
+    let covered = state
+        .webhooks
+        .take_enhanced(state, &id, &members, context)
+        .await?;
     let enhanced = !members.is_empty()
         && members
             .iter()
             .all(|member| covered.contains(&string(member, "Id")));
     if !enhanced && event["source"] == "emby" {
-        crate::media_preflight::run(state, &item, context).await?;
+        let key = format!("emby_preflight:{id}");
+        if context.completed(&key).await?.is_none() {
+            let report = crate::media_preflight::run(state, &item, &context.scoped(&key)).await?;
+            context.complete(&key, &report).await?;
+        }
         for member in &members {
             if string(member, "Id") != id && !covered.contains(&string(member, "Id")) {
                 context.checkpoint().await?;
-                crate::media_preflight::run(state, member, context).await?;
+                let key = format!("emby_preflight:{}", string(member, "Id"));
+                if context.completed(&key).await?.is_none() {
+                    let report =
+                        crate::media_preflight::run(state, member, &context.scoped(&key)).await?;
+                    context.complete(&key, &report).await?;
+                }
             }
         }
     }
-    let mut result = match crate::ingest::feedback(state, &id, &episodes, false, context).await {
-        Ok(result) => Ok(result),
-        Err(error) => {
-            if enhanced {
-                tracing::error!(
-                    "已预增强项目缓存回流失败：《{media_name}》，Emby {id}，{}",
+    let mut result = if let Some(report) = context.completed("emby_feedback").await? {
+        report
+    } else {
+        let report = match crate::ingest::feedback(state, &id, &episodes, false, context).await {
+            Ok(result) => Ok(result),
+            Err(error) => {
+                if enhanced {
+                    tracing::error!(
+                        "已预增强项目缓存回流失败：《{media_name}》，Emby {id}，{}",
+                        error.1
+                    );
+                    return Err(error);
+                }
+                tracing::info!(
+                    "缓存回流不可用，执行完整刮削：《{media_name}》，Emby {id}，{}",
                     error.1
                 );
-                return Err(error);
+                let item = details(
+                    state,
+                    &id,
+                    "Id,Type,Name,Path,People,Genres,ProviderIds,MediaSources,DateCreated",
+                )
+                .await?;
+                let group =
+                    crate::metadata::row(state, &string(&item["ProviderIds"], "Tmdb"), "Series")
+                        .await?
+                        .map(|r| string(&r, "episode_group_id"));
+                crate::ingest::scrape_for_ingest(state, &item, &episodes, group.as_deref(), context)
+                    .await
             }
-            tracing::info!(
-                "缓存回流不可用，执行完整刮削：《{media_name}》，Emby {id}，{}",
-                error.1
-            );
-            let item = details(
-                state,
-                &id,
-                "Id,Type,Name,Path,People,Genres,ProviderIds,MediaSources,DateCreated",
-            )
-            .await?;
-            let group =
-                crate::metadata::row(state, &string(&item["ProviderIds"], "Tmdb"), "Series")
-                    .await?
-                    .map(|r| string(&r, "episode_group_id"));
-            crate::ingest::scrape_for_ingest(state, &item, &episodes, group.as_deref(), context)
-                .await
-        }
-    }?;
-    let finalization = finalize(state, &id, &episodes, !episodes.is_empty(), context).await?;
+        }?;
+        context.complete("emby_feedback", &report).await?;
+        report
+    };
+    let mut notices = IngestNotices::new();
+    let mut finalization = if let Some(report) = context.completed("emby_finalized").await? {
+        let current = details(
+            state,
+            &id,
+            "Id,Type,Name,Path,ProductionYear,ProviderIds,ImageTags,MediaSources,MediaStreams",
+        )
+        .await?;
+        collect_ingest_notice(&mut notices, &current, &report["title_fill"], &episodes);
+        report
+    } else {
+        let report = finalize_inner(
+            state,
+            &id,
+            &episodes,
+            !episodes.is_empty(),
+            context,
+            Some(&mut notices),
+            None,
+        )
+        .await?;
+        context.complete("emby_finalized", &report).await?;
+        report
+    };
     let extraction_ready = extraction_ready(&finalization);
-    add_report_warnings(&mut result, &finalization);
-    result["finalization"] = finalization;
     tracing::info!(
         "Emby 入库处理完成：《{media_name}》，Emby {id}，更新 {} 条记录",
         result["updated"].as_u64().unwrap_or(0)
     );
-    let automatic = automatic_extraction(
+    let automatic = if let Some(report) = context.completed("emby_automatic").await? {
+        report
+    } else {
+        let automatic_context = context.scoped(&format!("emby_automatic:{}", scope_key(&scope)));
+        let report = automatic_extraction(
+            state,
+            item["Type"] == "Series" && episode_batch,
+            item["Type"] == "Movie" || item["Type"] == "Series" && episode_batch,
+            &episodes,
+            extraction_ready,
+            &format!("《{media_name}》"),
+            &automatic_context,
+        )
+        .await?;
+        context.complete("emby_automatic", &report).await?;
+        report
+    };
+    deliver_notices(
         state,
-        item["Type"] == "Series" && !episodes.is_empty(),
-        item["Type"] == "Movie" || item["Type"] == "Series" && !episodes.is_empty(),
-        &episodes,
-        extraction_ready,
-        &format!("《{media_name}》"),
+        notices,
+        !episodes.is_empty(),
+        &[],
         context,
+        &mut finalization,
     )
     .await?;
+    add_report_warnings(&mut result, &finalization);
+    result["finalization"] = finalization;
     add_automatic_result(&mut result, automatic);
     if result["warnings"].as_u64().unwrap_or(0) > 0 {
         result["message"] = json!(format!(
@@ -1002,16 +1409,17 @@ mod warning_tests {
 
     #[test]
     fn movie_notice_groups_merge_versions_and_keep_years_and_pending_separate() {
-        let mut notices = MovieNotices::new();
+        let mut notices = IngestNotices::new();
         for (id, name, year) in [
             ("1", "译名", 1998),
             ("2", "原名", 1998),
             ("3", "译名", 1999),
         ] {
-            collect_movie_notice(
+            collect_ingest_notice(
                 &mut notices,
                 &json!({"Id":id,"Name":name,"ProductionYear":year,"ProviderIds":{"Tmdb":"4426"}}),
                 &json!({"pending":[{"item_id":id,"reason":"待回读"}]}),
+                &[],
             );
         }
         assert_eq!(notices.len(), 2);
@@ -1026,15 +1434,17 @@ mod warning_tests {
             notices[&("tmdb:4426".into(), "1999".into())].1[0]["item_id"],
             "3"
         );
-        collect_movie_notice(
+        collect_ingest_notice(
             &mut notices,
             &json!({"Id":"4","Name":"4426","ProductionYear":1998}),
             &json!({}),
+            &[],
         );
-        collect_movie_notice(
+        collect_ingest_notice(
             &mut notices,
             &json!({"Id":"4426","ProductionYear":1998}),
             &json!({}),
+            &[],
         );
         assert_eq!(
             notices.len(),
@@ -1628,11 +2038,20 @@ pub async fn process_moviepilot(
     event: &Value,
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
-    let awaiting_emby = state.config.read().await["emby_webhook_ingest_enabled"] == true;
-    let mut files = vec![];
-    for file in list(&event["files"]) {
-        if !crate::emby::path_ignored(state, file.as_str().unwrap_or("")).await? {
-            files.push(file);
+    let saved_scope = context.plan("moviepilot_scope").await?;
+    let awaiting_emby = saved_scope
+        .as_ref()
+        .and_then(|scope| scope["awaiting_emby"].as_bool())
+        .unwrap_or(state.config.read().await["emby_webhook_ingest_enabled"] == true);
+    let mut files = saved_scope
+        .as_ref()
+        .map(|scope| list(&scope["files"]))
+        .unwrap_or_default();
+    if saved_scope.is_none() {
+        for file in list(&event["files"]) {
+            if !crate::emby::path_ignored(state, file.as_str().unwrap_or("")).await? {
+                files.push(file);
+            }
         }
     }
     if files.is_empty() {
@@ -1648,7 +2067,7 @@ pub async fn process_moviepilot(
     let mut updated = 0;
     let mut failures = vec![];
     let mut finalizations = vec![];
-    let mut movie_notices = MovieNotices::new();
+    let mut notices = IngestNotices::new();
     let mut postprocessing = json!({});
     let mut automatic_series = false;
     let mut automatic_videos = false;
@@ -1660,37 +2079,48 @@ pub async fn process_moviepilot(
     } else {
         sqlx::query_scalar("SELECT asset_details_json FROM media_metadata WHERE in_library=true AND ((tmdb_id=$1 AND item_type='Movie') OR (parent_series_tmdb_id=$1 AND item_type='Episode'))").bind(&tmdb).fetch_all(&state.db).await?
     };
-    let known = rows
+    let mut known = rows
         .iter()
         .flat_map(list)
-        .filter_map(|asset| {
-            let path = string(&asset, "path");
-            std::path::Path::new(&path)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .map(|s| s.to_lowercase())
-        })
-        .collect::<std::collections::BTreeSet<_>>();
+        .map(|asset| crate::media_paths::clean(&string(&asset, "path")))
+        .filter(|path| !path.is_empty())
+        .collect::<BTreeSet<_>>();
+    if let Some(scope) = &saved_scope {
+        known = serde_json::from_value(scope["known"].clone())
+            .map_err(|_| ApiError::bad("MoviePilot原媒体范围记录无效"))?;
+    }
     let new_files = files
         .iter()
-        .filter(|file| {
-            let stem = std::path::Path::new(file.as_str().unwrap_or(""))
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_lowercase();
-            !known.contains(&stem)
-        })
+        .filter(|file| !known.contains(&crate::media_paths::clean(file.as_str().unwrap_or(""))))
         .cloned()
         .collect::<Vec<_>>();
-    let retry_files = crate::media_organize_history::retry_files(state, event).await?;
+    let retry_files = if let Some(scope) = &saved_scope {
+        serde_json::from_value(scope["retry_files"].clone())
+            .map_err(|_| ApiError::bad("MoviePilot重试范围记录无效"))?
+    } else {
+        crate::media_organize_history::retry_files(state, event).await?
+    };
+    if saved_scope.is_none() {
+        context
+            .save_plan(
+                "moviepilot_scope",
+                &json!({"files":files,"known":known,
+            "retry_files":retry_files,"awaiting_emby":awaiting_emby}),
+            )
+            .await?;
+    }
     tracing::info!(
         "MoviePilot 新文件核对完成：TMDb {tmdb}，有效文件 {} 个，新增 {} 个，已关联 {} 个",
         files.len(),
         new_files.len(),
         files.len() - new_files.len()
     );
-    if !new_files.is_empty() {
+    if !new_files.is_empty()
+        && context
+            .completed("moviepilot_library_scan")
+            .await?
+            .is_none()
+    {
         let mut libraries = std::collections::BTreeSet::new();
         for file in &new_files {
             let library = crate::emby::library_for_path(state, file.as_str().unwrap_or(""))
@@ -1703,13 +2133,22 @@ pub async fn process_moviepilot(
             crate::emby::refresh_item(state, &library, true, context).await?;
         }
         crate::emby::idle(state, context).await?;
+        context
+            .complete("moviepilot_library_scan", &json!({"completed":true}))
+            .await?;
     }
     let mut groups = BTreeMap::<String, Vec<String>>::new();
     let mut prepared_members = BTreeMap::<String, BTreeMap<String, String>>::new();
     let mut current = vec![];
+    let mut changed = Vec::new();
+    let mut initial_files = Vec::new();
     for file in &files {
         context.checkpoint().await?;
         let path = file.as_str().unwrap_or("");
+        let attempt_key = format!("moviepilot_attempt:{}", scope_key(&json!(path)));
+        context
+            .save_plan(&attempt_key, &json!({"path":path,"skipped":false}))
+            .await?;
         let mut found = None;
         for attempt in 0..90 {
             context.checkpoint().await?;
@@ -1718,7 +2157,7 @@ pub async fn process_moviepilot(
                 break;
             }
             if attempt < 89 {
-                tokio::time::sleep(Duration::from_secs(2)).await;
+                context.sleep(Duration::from_secs(2)).await?;
             }
         }
         let Some(item) = found else {
@@ -1742,9 +2181,57 @@ pub async fn process_moviepilot(
                 .to_string_lossy()
         );
         current.push(string(&item, "Id"));
-        if !new_files.contains(file) && !retry_files.contains(path) {
+        let identity = crate::moviepilot_ingest::observe(state, &item, context).await?;
+        let file_key = format!("moviepilot_file:{}", scope_key(&json!(path)));
+        let original = context.plan(&file_key).await?;
+        if let Some(original) = &original {
+            let expected: crate::moviepilot_ingest::Identity =
+                serde_json::from_value(original["identity"].clone())
+                    .map_err(|_| ApiError::bad("MoviePilot原文件实体记录无效"))?;
+            if identity.revision() != expected.revision() {
+                return Err(ApiError::bad(
+                    "媒体在任务中断期间变化，已停止原任务，请重新提交当前文件",
+                ));
+            }
+        }
+        if crate::moviepilot_ingest::completed(state, &identity).await?
+            && !retry_files.contains(path)
+            && original.is_none()
+        {
+            context
+                .save_plan(&attempt_key, &json!({"path":path,"skipped":true}))
+                .await?;
             continue;
         }
+        let initial = if let Some(original) = &original {
+            original["initial"]
+                .as_bool()
+                .ok_or_else(|| ApiError::bad("MoviePilot原提取阶段记录无效"))?
+        } else {
+            identity.cloud.is_none()
+                && item["Type"] != "Video"
+                && list(&item["MediaSources"]).len() == 1
+                && new_files.contains(file)
+                && !tokio::fs::try_exists(std::path::Path::new(path).with_file_name(format!(
+                    "{}-mediainfo.json",
+                    std::path::Path::new(path)
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                )))
+                .await?
+        };
+        if original.is_none() {
+            context
+                .save_plan(&file_key, &json!({"identity":identity,"initial":initial}))
+                .await?;
+        }
+        if initial {
+            initial_files.push(file.clone());
+        } else {
+            crate::moviepilot_ingest::ensure_media(state, &identity, context).await?;
+        }
+        changed.push(identity);
         let id = if item["Type"] == "Episode" {
             string(&item, "SeriesId")
         } else if item["Type"] == "Video" {
@@ -1769,12 +2256,26 @@ pub async fn process_moviepilot(
             }
         }
     }
-    if !new_files.is_empty() {
+    if !initial_files.is_empty()
+        && context
+            .completed("moviepilot_initial_media")
+            .await?
+            .is_none()
+    {
         tracing::info!(
             "MoviePilot 媒体信息提取开始：新增文件 {} 个",
-            new_files.len()
+            initial_files.len()
         );
-        crate::emby::scheduled(state, "MediaInfoExtractTask", context).await?;
+        let revisions = changed
+            .iter()
+            .filter(|identity| initial_files.contains(&json!(identity.path)))
+            .map(crate::moviepilot_ingest::Identity::revision)
+            .collect::<Vec<_>>();
+        let initial_context = context.scoped(&format!(
+            "mp_initial_media:{}",
+            scope_key(&json!(revisions))
+        ));
+        crate::emby::scheduled(state, "MediaInfoExtractTask", &initial_context).await?;
         let tasks = state
             .emby(reqwest::Method::GET, "ScheduledTasks", &[], None)
             .await?;
@@ -1786,11 +2287,21 @@ pub async fn process_moviepilot(
             tracing::error!("MoviePilot 媒体信息提取失败：Emby 任务未成功完成");
             return Err(ApiError::bad("MoviePilot 媒体信息提取任务未成功完成"));
         }
-        ensure_moviepilot_media_info(state, &new_files, context).await?;
+        ensure_moviepilot_media_info(state, &initial_files, context).await?;
         tracing::info!(
             "MoviePilot 媒体信息提取完成：新增文件 {} 个",
-            new_files.len()
+            initial_files.len()
         );
+    }
+    for identity in &changed {
+        if initial_files.iter().any(|file| file == &identity.path) {
+            crate::moviepilot_ingest::remember_initial(state, identity, context).await?;
+        }
+    }
+    if !initial_files.is_empty() {
+        context
+            .complete("moviepilot_initial_media", &json!({"files":initial_files}))
+            .await?;
     }
     if groups.is_empty() {
         crate::versions::reconcile(state, &current).await?;
@@ -1819,17 +2330,28 @@ pub async fn process_moviepilot(
             "MoviePilot 单组增强开始：《{media_name}》，Emby {id}，目标分集 {} 个",
             episodes.len()
         );
-        let prepared = crate::ingest::prepare_cached_report(
-            state,
-            &item,
-            &episodes,
-            event["episode_group"].as_str().filter(|s| !s.is_empty()),
-            context,
-        )
-        .await;
-        let preparation = match prepared {
-            Ok(Some(report)) => Ok(report),
-            Ok(None) => {
+        for identity in changed
+            .iter()
+            .filter(|identity| identity.id == id || episodes.contains(&identity.id))
+        {
+            crate::moviepilot_ingest::unchanged(state, identity, context).await?;
+        }
+        let preparation = async {
+            let key = format!("moviepilot_prepared:{id}");
+            if let Some(report) = context.completed(&key).await? {
+                return Ok(report);
+            }
+            let prepared = crate::ingest::prepare_cached_report(
+                state,
+                &item,
+                &episodes,
+                event["episode_group"].as_str().filter(|s| !s.is_empty()),
+                context,
+            )
+            .await?;
+            let report = if let Some(report) = prepared {
+                report
+            } else {
                 crate::ingest::prepare_new(
                     state,
                     &item,
@@ -1837,42 +2359,81 @@ pub async fn process_moviepilot(
                     event["episode_group"].as_str().filter(|s| !s.is_empty()),
                     context,
                 )
-                .await
-            }
-            Err(error) => Err(error),
+                .await?
+            };
+            context.complete(&key, &report).await?;
+            Ok::<Value, ApiError>(report)
         }
+        .await
         .map(|report| add_report_warnings(&mut postprocessing, &report));
         match preparation {
-            Ok(()) => match crate::ingest::feedback(state, &id, &episodes, true, context).await {
+            Ok(()) => match async {
+                let key = format!("moviepilot_feedback:{id}");
+                if let Some(result) = context.completed(&key).await? {
+                    return Ok(result);
+                }
+                for identity in changed
+                    .iter()
+                    .filter(|identity| identity.id == id || episodes.contains(&identity.id))
+                {
+                    crate::moviepilot_ingest::unchanged(state, identity, context).await?;
+                }
+                let current = if episodes.is_empty() {
+                    vec![id.clone()]
+                } else {
+                    episodes.clone()
+                };
+                crate::versions::reconcile(state, &current).await?;
+                let result = crate::ingest::feedback(state, &id, &episodes, true, context).await?;
+                crate::versions::reconcile(state, &current).await?;
+                if awaiting_emby && let Some(members) = prepared_members.get(&id) {
+                    state
+                        .webhooks
+                        .mark_enhanced(state, &id, members, &changed)
+                        .await?;
+                }
+                context.complete(&key, &result).await?;
+                Ok::<Value, ApiError>(result)
+            }
+            .await
+            {
                 Ok(result) => {
                     updated += result["updated"].as_u64().unwrap_or(0);
                     add_report_warnings(&mut postprocessing, &result);
-                    if awaiting_emby && let Some(members) = prepared_members.get(&id) {
-                        state.webhooks.mark_enhanced(&id, members).await;
-                    }
-                    let current = if episodes.is_empty() {
-                        vec![id.clone()]
-                    } else {
-                        episodes.clone()
-                    };
-                    if let Err(error) = crate::versions::reconcile(state, &current).await {
-                        tracing::warn!(
-                            "MoviePilot 版本核对失败：《{media_name}》，Emby {id}，{}",
-                            error.1
-                        );
-                        failures.push(error.1);
-                    }
                     if !awaiting_emby {
-                        match finalize_inner(
-                            state,
-                            &id,
-                            &episodes,
-                            !known.is_empty(),
-                            context,
-                            Some(&mut movie_notices),
-                        )
-                        .await
+                        for identity in changed
+                            .iter()
+                            .filter(|identity| identity.id == id || episodes.contains(&identity.id))
                         {
+                            crate::moviepilot_ingest::unchanged(state, identity, context).await?;
+                        }
+                        let key = format!("moviepilot_finalized:{id}");
+                        let finalized = if let Some(report) = context.completed(&key).await? {
+                            let current=details(state,&id,"Id,Type,Name,Path,ProviderIds,ProductionYear,ImageTags,MediaSources,MediaStreams").await?;
+                            collect_ingest_notice(
+                                &mut notices,
+                                &current,
+                                &report["title_fill"],
+                                &episodes,
+                            );
+                            Ok(report)
+                        } else {
+                            let report = finalize_inner(
+                                state,
+                                &id,
+                                &episodes,
+                                !known.is_empty(),
+                                context,
+                                Some(&mut notices),
+                                Some(&changed),
+                            )
+                            .await;
+                            if let Ok(report) = &report {
+                                context.complete(&key, report).await?;
+                            }
+                            report
+                        };
+                        match finalized {
                             Ok(report) => {
                                 if item["Type"] == "Movie"
                                     || item["Type"] == "Series" && !episodes.is_empty()
@@ -1921,29 +2482,8 @@ pub async fn process_moviepilot(
             }
         }
     }
-    for (item, pending, native) in movie_notices.into_values() {
-        context.checkpoint().await?;
-        if let Err(error) = crate::notifications::media(
-            state,
-            &item,
-            !known.is_empty(),
-            &native.keys().cloned().collect::<Vec<_>>(),
-            &json!({"pending":pending}),
-            &native.into_values().collect::<Vec<_>>(),
-            Some(context),
-        )
-        .await
-        {
-            if context.is_cancelled() {
-                return Err(error);
-            }
-            let reason = format!("《{}》入库通知失败：{}", string(&item, "Name"), error.1);
-            tracing::warn!("{reason}");
-            add_report_warnings(
-                &mut postprocessing,
-                &json!({"warnings":1,"warning_details":[reason]}),
-            );
-        }
+    for identity in &changed {
+        crate::moviepilot_ingest::unchanged(state, identity, context).await?;
     }
     tracing::info!(
         "MoviePilot 后置增强处理结束：TMDb {tmdb}，更新 {updated} 条，入库失败 {} 项，后处理警告 {} 条",
@@ -1960,19 +2500,53 @@ pub async fn process_moviepilot(
         )
     };
     let automatic = if failures.is_empty() {
-        automatic_extraction(
-            state,
-            automatic_series,
-            automatic_videos,
-            &automatic_episode_ids,
-            extraction_ready_for_batch,
-            "本批媒体",
-            context,
-        )
-        .await?
+        if let Some(report) = context.completed("moviepilot_automatic").await? {
+            report
+        } else {
+            let revisions = changed
+                .iter()
+                .map(crate::moviepilot_ingest::Identity::revision)
+                .collect::<Vec<_>>();
+            let automatic_context =
+                context.scoped(&format!("mp_automatic:{}", scope_key(&json!(revisions))));
+            let report = automatic_extraction(
+                state,
+                automatic_series,
+                automatic_videos,
+                &automatic_episode_ids,
+                extraction_ready_for_batch,
+                "本批媒体",
+                &automatic_context,
+            )
+            .await?;
+            context.complete("moviepilot_automatic", &report).await?;
+            report
+        }
     } else {
         Value::Null
     };
+    if failures.is_empty() {
+        for identity in &changed {
+            let key = format!("moviepilot_finished:{}", identity.id);
+            if context.completed(&key).await?.is_none() {
+                crate::moviepilot_ingest::finish(state, identity, context).await?;
+                context.complete(&key, &identity.revision()).await?;
+            } else if !crate::moviepilot_ingest::completed(state, identity).await? {
+                return Err(ApiError::bad(
+                    "重启后已完成文件的媒体回读不一致，未发送成功通知",
+                ));
+            }
+        }
+        deliver_notices(
+            state,
+            notices,
+            !known.is_empty(),
+            &changed,
+            context,
+            &mut postprocessing,
+        )
+        .await?;
+    }
     let mut result = json!({"updated":updated,"failures":failures,"finalizations":finalizations,"awaiting_emby":awaiting_emby,"message":message});
     add_report_warnings(&mut result, &postprocessing);
     add_automatic_result(&mut result, automatic);
@@ -1992,7 +2566,7 @@ pub async fn finalize(
     updated: bool,
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
-    finalize_inner(state, id, episode_ids, updated, context, None).await
+    finalize_inner(state, id, episode_ids, updated, context, None, None).await
 }
 async fn finalize_inner(
     state: &AppState,
@@ -2000,7 +2574,8 @@ async fn finalize_inner(
     episode_ids: &[String],
     updated: bool,
     context: &crate::jobs::JobContext,
-    movie_notices: Option<&mut MovieNotices>,
+    notices: Option<&mut IngestNotices>,
+    identities: Option<&[crate::moviepilot_ingest::Identity]>,
 ) -> Result<Value> {
     tracing::info!(
         "入库收尾开始：Emby {id}，目标分集 {} 个，更新模式 {updated}",
@@ -2122,9 +2697,10 @@ async fn finalize_inner(
             "入库最终元数据刷新开始：Emby {id}，名称 {}",
             string(refresh_item, "Name")
         );
-        let protection = crate::media_reload::ingest_preservation::capture(
+        let protection = crate::media_reload::ingest_preservation::capture_targets(
             state,
             refresh_item,
+            episode_ids,
             context,
             refresh_guard.1,
         )
@@ -2135,16 +2711,18 @@ async fn finalize_inner(
             // correctly refuses unresolved recovery records from earlier work.
             protection.publish().await?;
             if guarded || protection.protected() {
-                crate::emby::finalize_refresh_guarded(
+                crate::emby::finalize_refresh_targets_guarded(
                     state,
                     refresh_item,
+                    episode_ids,
                     context,
                     refresh_guard.0,
                     refresh_guard.1,
                 )
                 .await?;
             } else {
-                crate::emby::finalize_refresh(state, refresh_item, context).await?;
+                crate::emby::finalize_refresh_targets(state, refresh_item, episode_ids, context)
+                    .await?;
             }
             if protection.protected() {
                 // A completion log establishes that native refresh ended; it
@@ -2332,8 +2910,16 @@ async fn finalize_inner(
         tracing::warn!("{reason}");
         warning_details.push(reason);
     }
-    let notification = if let Some(notices) = movie_notices.filter(|_| item["Type"] == "Movie") {
-        collect_movie_notice(notices, &item, &title_report);
+    if let Some(identities) = identities {
+        for identity in identities
+            .iter()
+            .filter(|identity| identity.id == id || episode_ids.contains(&identity.id))
+        {
+            crate::moviepilot_ingest::unchanged(state, identity, context).await?;
+        }
+    }
+    let notification = if let Some(notices) = notices {
+        collect_ingest_notice(notices, &item, &title_report, episode_ids);
         Ok(())
     } else {
         crate::notifications::media(

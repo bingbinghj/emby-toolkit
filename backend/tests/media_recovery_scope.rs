@@ -154,8 +154,104 @@ async fn status(state: AppState) -> Value {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap()).unwrap()
+    let status = response.status();
+    let result: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+            .unwrap();
+    assert_eq!(status, StatusCode::OK, "{result}");
+    result
+}
+
+#[tokio::test]
+async fn database_unavailable_keeps_local_scope_visible_and_blocks_recovery() {
+    let f = Fixture::new(episode_record()).await;
+    let before = std::fs::read(f.material()).unwrap();
+    let result = f.status().await;
+    let unknown = result["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|record| record["kind"] == "database-unavailable")
+        .unwrap();
+    assert_eq!(unknown["can_recover"], false);
+    assert_eq!(unknown["target_ids"], json!([]));
+    assert!(unknown["reason"].as_str().unwrap().contains("数据库"));
+    scope(&result, json!([TARGET]), json!(["61788", "61789", TARGET]));
+    let response = media_edit::router()
+        .with_state(f.state.clone())
+        .oneshot(
+            Request::post("/api/media_info/recovery")
+                .header("Content-Type", "application/json")
+                .body(Body::from(json!({"recovery_id":"media:scope"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(std::fs::read(f.material()).unwrap(), before);
+    assert_ne!(f.state.jobs.status().await["is_running"], true);
+}
+
+#[tokio::test]
+async fn database_unavailable_cannot_save_media_after_status_display() {
+    let f = Fixture::new(episode_record()).await;
+    let path = f.directory.path().join("episode.strm");
+    let source = f.directory.path().join("episode.mkv");
+    std::fs::write(&source, [0_u8; 1000]).unwrap();
+    std::fs::write(&path, source.to_string_lossy().as_bytes()).unwrap();
+    let original = json!([{"MediaSourceInfo":{"Container":"mkv","Size":1000,
+        "MediaStreams":[{"Type":"Video","Codec":"h264","Width":1920,"Height":1080}]},"Chapters":[]}]);
+    let sidecar = f.directory.path().join("episode-mediainfo.json");
+    std::fs::write(&sidecar, original.to_string()).unwrap();
+    f.state.config.write().await["local_strm_root"] = json!(f.directory.path());
+    f.native.write().await.get_mut(TARGET).unwrap()["Path"] = json!(path);
+    let result = f.status().await;
+    assert!(
+        result["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|record| record["kind"] == "database-unavailable")
+    );
+    let mut requested = original.clone();
+    requested[0]["MediaSourceInfo"]["MediaStreams"][0]["Title"] = json!("不应保存");
+    let response = media_edit::router()
+        .with_state(f.state.clone())
+        .oneshot(
+            Request::post(format!("/api/media_info/edit/{TARGET}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(json!({"mediainfo":requested}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let result: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+            .unwrap();
+    if status == StatusCode::ACCEPTED {
+        let task = result["task_id"].as_str().unwrap();
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let outcome = f.state.jobs.result(task).await.unwrap();
+                if outcome["is_running"] == false {
+                    break outcome;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(outcome["state"], "failed", "{outcome}");
+        assert!(outcome["result_status"].as_u64().unwrap() >= 400);
+    } else {
+        assert!(status.is_server_error(), "{status}: {result}");
+    }
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(sidecar).unwrap()).unwrap(),
+        original
+    );
+    assert_eq!(std::fs::read(source).unwrap(), [0_u8; 1000]);
 }
 
 fn scope(result: &Value, targets: Value, related: Value) {

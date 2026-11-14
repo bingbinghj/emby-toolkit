@@ -24,6 +24,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/media_rename/{id}/execute", post(submit))
         .route("/api/config/rename_preview", post(sample))
 }
+#[derive(serde::Serialize, serde::Deserialize)]
 struct Source {
     target: media_edit::Target,
     item: Value,
@@ -311,7 +312,7 @@ async fn submit_probe(
     Json(body): Json<Value>,
 ) -> Result<(StatusCode, Json<Value>)> {
     let work = state.clone();
-    let task=state.jobs.submit("探测媒体命名信息",move|context|async move{
+    let task=state.jobs.submit_persistent("探测媒体命名信息",crate::jobs::JobSpec::new("media_rename",json!({"operation":"probe","id":id,"body":body})),move|context|async move{
         context.checkpoint().await?;let source=source(&work,&id).await?;let fields=probe_fields(&work,&source,Some(&context)).await;
         let name=body["custom_name"].as_str().filter(|s|!s.is_empty()).unwrap_or(&source.source);
         Ok(json!({"suggested_name":rename::supplement(name,&fields,&source.ext)?,"fields":fields,"message":"ffprobe命名补充完成"}))
@@ -347,7 +348,7 @@ async fn submit(
     let work = state.clone();
     let id = state
         .jobs
-        .submit("重命名媒体", move |context| async move {
+        .submit_persistent("重命名媒体", crate::jobs::JobSpec::new("media_rename", json!({"operation":"rename","id":id,"body":body})), move |context| async move {
             execute(&work, &id, &body, &context).await
         })
         .await?;
@@ -356,6 +357,36 @@ async fn submit(
         Json(json!({"task_id":id,"message":"重命名媒体已提交"})),
     ))
 }
+pub(crate) async fn execute_persisted(state: &AppState, payload: &Value, context: &JobContext) -> Result<(u16, Value)> {
+    context.checkpoint().await?;
+    let id = string(payload, "id");
+    let body = &payload["body"];
+    let value = match payload["operation"].as_str() {
+        Some("rename") => execute(state, &id, body, context).await?,
+        Some("probe") => {
+            let source = source(state, &id).await?;
+            let fields = probe_fields(state, &source, Some(context)).await;
+            let name = body["custom_name"].as_str().filter(|name| !name.is_empty()).unwrap_or(&source.source);
+            json!({"suggested_name":rename::supplement(name,&fields,&source.ext)?,"fields":fields,"message":"ffprobe命名补充完成"})
+        }
+        _ => return Err(ApiError::bad("未知的媒体命名操作")),
+    };
+    Ok((200, value))
+}
+pub(crate) async fn resume_cleanup(state: &AppState, context: &JobContext) -> Result<()> {
+    if context.completed("rename-finished").await?.is_some() { return Ok(()); }
+    if let Some(committed) = context.completed("rename-committed").await? {
+        if context.is_terminal_cleanup() {
+            finish_rename_settings(state,&PathBuf::from(string(&committed,"recovery"))).await?;
+        } else { finish_rename_resume(state, context, &committed).await?; }
+    } else if let Some(journal) = context.plan("rename-journal").await? {
+        if !journal.is_null() { restore_rename_journal(state, context, &journal).await?; }
+    } else {
+        finish_rename_settings(state, &state.data_dir.join("rename-recovery").join(&context.id)).await?;
+    }
+    Ok(())
+}
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Changes {
     moves: Vec<(PathBuf, PathBuf)>,
     contents: Vec<(PathBuf, Vec<u8>)>,
@@ -430,6 +461,24 @@ fn references(
 }
 
 impl Changes {
+    async fn record(&self, context: &JobContext) -> Result<()> {
+        let mut journal = context.plan("rename-journal").await?.unwrap_or(json!({}));
+        journal["changes"] = serde_json::to_value(self).unwrap();
+        context.save_plan("rename-journal", &journal).await
+    }
+    async fn move_recorded(&mut self, old: PathBuf, new: PathBuf, context: &JobContext) -> Result<()> {
+        if old == new { return Ok(()); }
+        if tokio::fs::try_exists(&new).await? { return Err(ApiError::bad("重命名目标已存在")); }
+        let identity = local_identity(&old).await?;
+        let mut journal = context.plan("rename-journal").await?.unwrap_or(json!({}));
+        let mut pending = self.clone();
+        pending.moves.push((old.clone(), new.clone()));
+        journal["changes"] = serde_json::to_value(pending).unwrap();
+        journal["move_identities"][new.to_string_lossy().as_ref()] = identity;
+        context.save_plan("rename-journal", &journal).await?;
+        self.move_path(old, new).await?;
+        self.record(context).await
+    }
     async fn rollback(&self, state: &AppState) -> Vec<String> {
         let mut failures = vec![];
         for (id, name) in self.cloud.iter().rev() {
@@ -689,6 +738,7 @@ async fn renamed_scan(
         .await;
     }
 }
+#[derive(serde::Serialize, serde::Deserialize)]
 struct CapturedSidecar {
     old: PathBuf,
     new: PathBuf,
@@ -860,9 +910,117 @@ async fn cleanup_stale_sidecars(
     }
     warnings
 }
+pub(crate) async fn local_identity(path: &std::path::Path) -> Result<Value> {
+    let metadata = tokio::fs::symlink_metadata(path).await?;
+    if !metadata.file_type().is_file() && !metadata.file_type().is_dir() {
+        return Err(ApiError::bad("改名恢复目标不是普通文件或目录"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(json!({"device":metadata.dev(),"inode":metadata.ino(),"directory":metadata.is_dir(),"size":metadata.is_file().then(||metadata.len())}))
+    }
+    #[cfg(not(unix))]
+    Ok(json!({"size":metadata.len(),"modified":metadata.modified()?.duration_since(std::time::UNIX_EPOCH).map_err(|_|ApiError::bad("文件时间无效"))?.as_nanos().to_string(),"directory":metadata.is_dir()}))
+}
+async fn record_content(context: &JobContext, changes: &Changes, path: &std::path::Path, replacement: &[u8]) -> Result<()> {
+    let mut journal = context.plan("rename-journal").await?.unwrap_or(json!({}));
+    journal["changes"] = serde_json::to_value(changes).unwrap();
+    journal["content_hashes"][path.to_string_lossy().as_ref()] = json!(format!("{:x}",Sha256::digest(replacement)));
+    context.save_plan("rename-journal", &journal).await
+}
+async fn finish_rename_settings(state: &AppState, recovery: &std::path::Path) -> Result<()> {
+    if tokio::fs::try_exists(recovery.join("original-settings.json")).await? {
+        let original = crate::media_recovery::read_json(&recovery.join("original-settings.json")).await?;
+        let applied = crate::strm::recovery_applied_settings(recovery, &original).await?;
+        crate::strm::finish_media_recovery(state, &original, applied.as_ref(), || async { Ok(()) }).await?;
+    }
+    Ok(())
+}
+async fn restore_rename_journal(state: &AppState, context: &JobContext, journal: &Value) -> Result<()> {
+    let origin = context.plan("rename-origin").await?.ok_or_else(||ApiError::bad("改名恢复缺少原文件身份"))?;
+    let changes: Changes = serde_json::from_value(journal["changes"].clone()).map_err(|_|ApiError::bad("改名恢复步骤无效"))?;
+    let root = PathBuf::from(string(&origin,"local_root"));
+    for (id, name) in changes.cloud.iter().rev() {
+        let current = crate::p115::file_info(state,id.parse().map_err(|_|ApiError::bad("改名恢复云文件ID无效"))?).await?;
+        let expected = &journal["cloud_identities"][id];
+        for field in ["sha1","pick_code","size","parent_id"] {
+            if !expected[field].is_null() && current[field] != expected[field] { return Err(ApiError::bad("云文件身份在改名中断后变化，未自动改名")); }
+        }
+        if current["name"] != name.as_str() && current["name"] != journal["cloud_names"][id] { return Err(ApiError::bad("云文件名称在改名中断后变化，未覆盖新名称")); }
+        if current["name"] != name.as_str() { crate::p115::rename(state,id,name).await?; }
+    }
+    for (path, bytes) in changes.contents.iter().rev() {
+        if !path.starts_with(&root) || !tokio::fs::symlink_metadata(path).await?.is_file() { return Err(ApiError::bad("改名内容恢复路径越界或类型变化")); }
+        let current = tokio::fs::read(path).await?;
+        let actual = format!("{:x}",Sha256::digest(&current));
+        if current != *bytes && journal["content_hashes"][path.to_string_lossy().as_ref()] != actual { return Err(ApiError::bad("改名后文件出现新内容，已保留当前文件")); }
+        if current != *bytes { tokio::fs::write(path,bytes).await?; }
+    }
+    for (old,new) in changes.moves.iter().rev() {
+        if !old.starts_with(&root) || !new.starts_with(&root) { return Err(ApiError::bad("改名恢复路径越界")); }
+        let old_exists = tokio::fs::try_exists(old).await?;
+        let new_exists = tokio::fs::try_exists(new).await?;
+        if old_exists && !new_exists { continue; }
+        if old_exists || !new_exists { return Err(ApiError::bad("改名恢复路径被占用或目标缺失，未覆盖当前文件")); }
+        if local_identity(new).await? != journal["move_identities"][new.to_string_lossy().as_ref()] { return Err(ApiError::bad("改名恢复文件身份变化，已保留当前文件")); }
+        tokio::fs::rename(new,old).await?;
+    }
+    finish_rename_settings(state,&PathBuf::from(string(&origin,"recovery"))).await?;
+    context.save_plan("rename-journal", &Value::Null).await?;
+    Ok(())
+}
+async fn finish_rename_resume(state: &AppState, context: &JobContext, committed: &Value) -> Result<Value> {
+    let source: Source = serde_json::from_value(committed["source"].clone()).map_err(|_|ApiError::bad("改名收尾原文件身份无效"))?;
+    let target = PathBuf::from(string(committed,"target"));
+    let root = PathBuf::from(string(committed,"local_root"));
+    let recovery = PathBuf::from(string(committed,"recovery"));
+    if recovery != state.data_dir.join("rename-recovery").join(&context.id) || !target.starts_with(&root) || !rename::exact_entry(&target).await {
+        return Err(ApiError::bad("改名收尾目标不在原计划内"));
+    }
+    if local_identity(&target).await? != committed["target_identity"] {
+        return Err(ApiError::bad("改名收尾文件已被替换，未刷新新文件"));
+    }
+    if let Some(cache) = &source.cache {
+        let file = crate::p115::file_info(state,string(cache,"id").parse().map_err(|_|ApiError::bad("改名原云文件ID无效"))?).await?;
+        for field in ["sha1","pick_code","size"] {
+            if !cache[field].is_null() && file[field] != cache[field] { return Err(ApiError::bad("改名收尾云文件身份变化，已停止刷新")); }
+        }
+    }
+    let sidecars: Vec<CapturedSidecar> = serde_json::from_value(committed["captured_sidecars"].clone()).map_err(|_|ApiError::bad("改名旁车恢复计划无效"))?;
+    if context.completed("rename-scanned").await?.is_none() {
+        let position = crate::media_extra::log_position(state).await?;
+        write_recovery(&recovery.join("pending-scan.json"), &json!({"position":position,"ids":null})).await?;
+        let ids = crate::media_save::refresh_with_ids(state,&[source.target.path.clone(), target.to_string_lossy().into_owned()]).await?;
+        write_recovery(&recovery.join("pending-scan.json"), &json!({"position":position,"ids":ids})).await?;
+        renamed_scan(state,&ids,position,context).await?;
+        context.complete("rename-scanned",&json!(true)).await?;
+    }
+    let found = renamed_id(state,&target,&source.item["Type"]).await?;
+    let mut warnings = cleanup_stale_sidecars(&root,&source.local.file_stem().unwrap_or_default().to_string_lossy(),&sidecars).await;
+    if let Some(new_id) = &found {
+        let mut transaction = state.db.begin().await?;
+        sqlx::query("UPDATE media_metadata SET emby_item_ids_json=(SELECT jsonb_agg(CASE WHEN eid=$1 THEN to_jsonb($2::text) ELSE to_jsonb(eid) END ORDER BY idx) FROM jsonb_array_elements_text(emby_item_ids_json) WITH ORDINALITY arr(eid,idx)),asset_details_json=(SELECT jsonb_agg(CASE WHEN a->>'emby_item_id'=$1 THEN jsonb_set(a,'{emby_item_id}',to_jsonb($2::text)) ELSE a END ORDER BY idx) FROM jsonb_array_elements(asset_details_json) WITH ORDINALITY arr(a,idx)) WHERE emby_item_ids_json @> $3")
+            .bind(&source.target.id).bind(new_id).bind(json!([source.target.id])).execute(&mut *transaction).await?;
+        if new_id != &source.target.id { crate::orphans::migrate_item_logs(&mut transaction,&source.target.id,new_id).await?; }
+        transaction.commit().await?;
+    } else { warnings.push("45秒内未关联到唯一新Emby条目，请同步媒体数据".into()); }
+    finish_rename_settings(state,&recovery).await?;
+    let result = json!({"message":if warnings.is_empty(){"媒体已重命名，路径与Emby关联已通过验收"}else{"媒体已重命名，目录扫描已完成，但Emby关联仍需处理"},"source_name":source.source,"target_name":committed["filename"],"target_cloud_path":committed["plan"]["cloud_path"],"target_local_path":target,"item_id":found,"association_pending":found.is_none(),"warnings":warnings.len(),"warning_details":warnings,"recovery_path":recovery});
+    context.complete("rename-finished",&result).await?;
+    if warnings.is_empty() { let _ = tokio::fs::remove_dir_all(recovery).await; }
+    Ok(result)
+}
 async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext) -> Result<Value> {
     use std::sync::atomic::{AtomicBool, Ordering};
     context.checkpoint().await?;
+    if let Some(result) = context.completed("rename-finished").await? { return Ok(result); }
+    if let Some(committed) = context.completed("rename-committed").await? {
+        return finish_rename_resume(state, context, &committed).await;
+    }
+    if let Some(journal) = context.plan("rename-journal").await? {
+        if !journal.is_null() { restore_rename_journal(state, context, &journal).await?; }
+    }
     let source = source(state, id).await?;
     let plan = plan(state, &source, body).await?;
     if body["preview_token"].as_str() != Some(&token(id, &source, &plan)) {
@@ -981,19 +1139,26 @@ async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext)
             }
         }
         write_recovery(&recovery.join("metadata-original.json"), &json!(original_json)).await?;
+        context.save_plan("rename-origin", &json!({"source":source,"recovery":recovery,"local_root":local_root})).await?;
         let mut changes = Changes { moves: vec![], contents: vec![], cloud: vec![] };
         let result = async {
             let mut current = source.local.parent().unwrap().to_path_buf();
             for name in directories.iter().rev() {
                 let new = current.with_file_name(name);
-                changes.move_path(current.clone(), new).await?;
+                changes.move_recorded(current.clone(), new, context).await?;
                 current = current.parent().unwrap().to_path_buf();
             }
-            changes.move_path(PathBuf::from(remap(source.local.to_str().unwrap(), &changes.moves)), target.clone()).await?;
-            for (old, new) in &sidecars { changes.move_path(PathBuf::from(remap(old.to_str().unwrap(), &changes.moves)), new.clone()).await?; }
+            changes.move_recorded(PathBuf::from(remap(source.local.to_str().unwrap(), &changes.moves)), target.clone(), context).await?;
+            for (old, new) in &sidecars { changes.move_recorded(PathBuf::from(remap(old.to_str().unwrap(), &changes.moves)), new.clone(), context).await?; }
             for (node, old, new) in &operations {
-                crate::p115::rename(state, node, new).await?;
+                let current = crate::p115::file_info(state, node.parse().map_err(|_|ApiError::bad("115改名目标无效"))?).await?;
+                let mut journal = context.plan("rename-journal").await?.unwrap_or(json!({}));
+                journal["cloud_identities"][node] = current;
+                journal["cloud_names"][node] = json!(new);
+                context.save_plan("rename-journal", &journal).await?;
                 changes.cloud.push((node.clone(), old.clone()));
+                changes.record(context).await?;
+                crate::p115::rename(state, node, new).await?;
             }
             let mut exact = HashMap::new();
             for old in &tree_files {
@@ -1021,7 +1186,12 @@ async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext)
                 let mut info: Value = serde_json::from_slice(&bytes).map_err(|_| ApiError::bad("媒体信息JSON无效"))?;
                 let previous = info.clone();
                 references(&mut info, &changes.moves, &reference_cloud, file);
-                if info != previous { changes.contents.push((path.clone(), bytes)); tokio::fs::write(&path, serde_json::to_vec_pretty(&info).unwrap()).await?; }
+                if info != previous {
+                    let replacement = serde_json::to_vec_pretty(&info).unwrap();
+                    changes.contents.push((path.clone(), bytes));
+                    record_content(context, &changes, &path, &replacement).await?;
+                    tokio::fs::write(&path, replacement).await?;
+                }
                 updated_json.push(json!({"path":path,"mediainfo":info}));
             }
             if let Some(new) = plan["cloud_path"].as_str() {
@@ -1030,7 +1200,12 @@ async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext)
                     let path = PathBuf::from(remap(old.to_str().unwrap(), &changes.moves));
                     let Some(previous) = rename::stream_target(&path).await else { continue; };
                     let destination = if old == &source.local { new.into() } else { remap_cloud_directory(&previous, &cloud_directories) };
-                    if previous != destination { changes.contents.push((path.clone(), tokio::fs::read(&path).await?)); tokio::fs::write(&path, format!("{destination}\n")).await?; }
+                    if previous != destination {
+                        let replacement = format!("{destination}\n").into_bytes();
+                        changes.contents.push((path.clone(), tokio::fs::read(&path).await?));
+                        record_content(context, &changes, &path, &replacement).await?;
+                        tokio::fs::write(&path, replacement).await?;
+                    }
                 }
             }
             let mut paths = exact.keys().cloned().chain(file.map(|(old, _)| old.to_string())).chain(reference_cloud.iter().map(|(old, _)| old.to_string_lossy().to_string())).collect::<Vec<_>>();
@@ -1082,6 +1257,7 @@ async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext)
                 }
             }
             write_recovery(&recovery.join("metadata-updated.json"), &json!(updated_json)).await?;
+            context.complete_in_tx(&mut transaction, "rename-committed", &json!({"source":source,"plan":plan,"target":target,"target_identity":local_identity(&target).await?,"filename":filename,"local_root":local_root,"captured_sidecars":captured_sidecars,"recovery":recovery})).await?;
             transaction.commit().await?;
             Ok::<_,ApiError>(())
         }.await;
@@ -1108,6 +1284,7 @@ async fn execute(state: &AppState, id: &str, body: &Value, context: &JobContext)
         } else { warnings.push("45秒内未关联到唯一新Emby条目；目录扫描已确认，改名文件和路径已保留，请同步媒体数据".into()); }
         Ok(json!({"message":if warnings.is_empty(){"媒体已重命名，路径与Emby关联已通过验收"}else{"媒体已重命名，目录扫描已完成，但Emby关联仍需处理"},"source_name":source.source,"target_name":filename,"target_cloud_path":plan["cloud_path"],"target_local_path":target,"item_id":found,"association_pending":found.is_none(),"warnings":warnings.len(),"warning_details":warnings,"recovery_path":recovery}))
     }, &confirmed, &recovery).await;
+    if let Ok(result) = &outcome { context.complete("rename-finished", result).await?; }
     if outcome
         .as_ref()
         .is_ok_and(|value| value["warnings"].as_u64() == Some(0))
@@ -1321,6 +1498,100 @@ mod rollback_tests {
             douban: Arc::default(),
             docker: Arc::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn interrupted_rename_restores_only_its_recorded_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = state(directory.path());
+        let old = directory.path().join("Old.strm");
+        let new = directory.path().join("New.strm");
+        tokio::fs::write(&old, b"original playback").await.unwrap();
+        let work = state.clone();
+        let id = state.jobs.submit("改名恢复测试", move |context| async move {
+            context.save_plan("rename-origin", &json!({"local_root":work.data_dir,"recovery":work.data_dir.join("recovery")})).await?;
+            let mut changes = Changes { moves:vec![], contents:vec![], cloud:vec![] };
+            changes.move_recorded(old.clone(), new.clone(), &context).await?;
+            let journal = context.plan("rename-journal").await?.unwrap();
+            restore_rename_journal(&work,&context,&journal).await?;
+            assert_eq!(tokio::fs::read(&old).await?, b"original playback");
+            assert!(!new.exists());
+            Ok(json!({"success":true}))
+        }).await.unwrap();
+        state.jobs.wait_idle().await.unwrap();
+        assert_eq!(state.jobs.result(&id).await.unwrap()["state"], "completed");
+    }
+
+    #[tokio::test]
+    async fn interrupted_rename_keeps_a_new_file_at_the_original_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = state(directory.path());
+        let old = directory.path().join("Old.strm");
+        let new = directory.path().join("New.strm");
+        tokio::fs::write(&old, b"original playback").await.unwrap();
+        let work = state.clone();
+        let id = state.jobs.submit("改名冲突测试", move |context| async move {
+            context.save_plan("rename-origin", &json!({"local_root":work.data_dir,"recovery":work.data_dir.join("recovery")})).await?;
+            let mut changes = Changes { moves:vec![], contents:vec![], cloud:vec![] };
+            changes.move_recorded(old.clone(),new.clone(),&context).await?;
+            tokio::fs::write(&old,b"new version").await?;
+            let journal = context.plan("rename-journal").await?.unwrap();
+            assert!(restore_rename_journal(&work,&context,&journal).await.is_err());
+            assert_eq!(tokio::fs::read(&old).await?, b"new version");
+            assert_eq!(tokio::fs::read(&new).await?, b"original playback");
+            Ok(json!({"success":true}))
+        }).await.unwrap();
+        state.jobs.wait_idle().await.unwrap();
+        assert_eq!(state.jobs.result(&id).await.unwrap()["state"], "completed");
+    }
+
+    #[tokio::test]
+    async fn interrupted_rename_does_not_overwrite_later_sidecar_edits() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = state(directory.path());
+        let sidecar = directory.path().join("Episode-mediainfo.json");
+        tokio::fs::write(&sidecar,b"original metadata").await.unwrap();
+        let work = state.clone();
+        let id = state.jobs.submit("旁车恢复测试", move |context| async move {
+            context.save_plan("rename-origin",&json!({"local_root":work.data_dir,"recovery":work.data_dir.join("recovery")})).await?;
+            let changes = Changes { moves:vec![], contents:vec![(sidecar.clone(),b"original metadata".to_vec())], cloud:vec![] };
+            record_content(&context,&changes,&sidecar,b"renamed metadata").await?;
+            tokio::fs::write(&sidecar,b"later user edit").await?;
+            let journal = context.plan("rename-journal").await?.unwrap();
+            assert!(restore_rename_journal(&work,&context,&journal).await.is_err());
+            assert_eq!(tokio::fs::read(&sidecar).await?, b"later user edit");
+            Ok(json!({"success":true}))
+        }).await.unwrap();
+        state.jobs.wait_idle().await.unwrap();
+        assert_eq!(state.jobs.result(&id).await.unwrap()["state"], "completed");
+    }
+
+    #[tokio::test]
+    async fn resumed_backup_clear_preserves_new_files_and_changed_original_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = state(directory.path());
+        let root = directory.path().join("backups/truehd-core-shift");
+        let reports = directory.path().join("reports/truehd-core-repair");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        tokio::fs::create_dir_all(&reports).await.unwrap();
+        tokio::fs::write(root.join("original.json"),b"original").await.unwrap();
+        tokio::fs::write(root.join("changed.json"),b"before").await.unwrap();
+        let work = state.clone();
+        let id = state.jobs.submit("清理恢复测试",move|context|async move {
+            let inventory = crate::audio_tasks::clear_inventory(&[root.clone(),reports],&context).await?;
+            context.save_plan("audio-clear",&inventory).await?;
+            tokio::fs::write(root.join("created-later.json"),b"later backup").await?;
+            tokio::fs::write(root.join("changed.json"),b"later user edit").await?;
+            let report = crate::audio_tasks::clear(&work,&context).await?;
+            assert_eq!(report["deleted_files"],1);
+            assert_eq!(report["warnings"],1);
+            assert!(!root.join("original.json").exists());
+            assert_eq!(tokio::fs::read(root.join("created-later.json")).await?,b"later backup");
+            assert_eq!(tokio::fs::read(root.join("changed.json")).await?,b"later user edit");
+            Ok(json!({"success":true}))
+        }).await.unwrap();
+        state.jobs.wait_idle().await.unwrap();
+        assert_eq!(state.jobs.result(&id).await.unwrap()["state"],"completed");
     }
 
     #[tokio::test]

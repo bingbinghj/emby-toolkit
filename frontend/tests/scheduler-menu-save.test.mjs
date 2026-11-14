@@ -25,7 +25,8 @@ async function fixture(options = {}) {
     return { config, data, status: 200, statusText: 'OK', headers: {} };
   };
   const config = useConfig(); await config.fetchConfigData();
-  const context = vm.createContext({ ref, computed, nextTick, axios, useConfig: () => config,
+  const context = vm.createContext({ ref, computed, nextTick, axios, AbortController, useConfig: () => config,
+    useAuthStore: () => ({ isLoggedIn: true, isAdmin: true, user: { id: 'scheduler-admin' } }),
     watch: (...args) => { const stop = watch(...args); stops.push(stop); return stop; },
     onMounted: () => {}, onBeforeUnmount: fn => unmount.push(fn), useDisplay: () => ({ mdAndUp: ref(true) }), useContextSearch: () => {},
     useMessage: () => Object.fromEntries(['success', 'error', 'info', 'warning'].map(type => [type, message => messages.push({ type, message })])),

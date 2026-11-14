@@ -1,58 +1,70 @@
 <template>
-  <div class="mp-page media-organize-page">
-    <VCard class="mb-4">
-      <VCardText>
-        <div class="organize-toolbar">
-          <VTextField v-model="search" label="搜索入库记录" aria-label="搜索入库记录" placeholder="按名称查找" prepend-inner-icon="mdi-magnify" clearable variant="solo" flat rounded="pill" hide-details density="compact" class="organize-search" :disabled="processing" @keyup.enter="searchItems" @click:clear="clearSearch" @compositionstart="searchComposing = true" @compositionend="finishSearchComposition">
-            <template #append-inner><VBtn icon="mdi-magnify" variant="text" size="small" aria-label="搜索" :loading="loadingItems" :disabled="processing" @click.stop="searchItems" /></template>
-          </VTextField>
-          <VMenu location="bottom end">
-            <template #activator="{ props }"><VBtn v-bind="props" icon="mdi-filter-multiple-outline" :variant="statusFilter === 'all' ? 'text' : 'tonal'" :color="statusFilter === 'all' ? 'default' : 'primary'" aria-label="处理状态筛选" title="处理状态筛选" :disabled="processing" data-testid="organize-status-filter" /></template>
-            <VList min-width="200" class="px-2">
-              <VListSubheader>处理状态</VListSubheader>
-              <VListItem v-for="option in statusOptions" :key="option.value" :title="option.title" :active="statusFilter === option.value" @click="statusFilter = option.value">
-                <template #append><VIcon v-if="statusFilter === option.value" icon="mdi-check" color="primary" /></template>
-              </VListItem>
-            </VList>
-          </VMenu>
-          <VBtn icon="mdi-refresh" variant="text" color="default" aria-label="刷新入库记录" :loading="loadingItems" :disabled="processing" @click="loadItems" />
-          <VBtn color="primary" variant="tonal" prepend-icon="mdi-refresh" :disabled="!canReorganize" :loading="processing" data-testid="organize-selected" @click="openConfirmation">重新整理 {{ selectedMediaCount || '' }}</VBtn>
-        </div>
-      </VCardText>
-    </VCard>
+  <div ref="pageElement" class="mp-page media-organize-page" :class="{ 'media-organize-page--desktop': !smAndDown }" :style="smAndDown ? undefined : { blockSize: `${desktopPageHeight}px` }">
+    <div class="organize-controls">
+      <VCard class="mb-4">
+        <VCardText>
+          <div class="organize-toolbar">
+            <VTextField v-model="search" label="搜索入库记录" aria-label="搜索入库记录" placeholder="按名称查找" prepend-inner-icon="mdi-magnify" clearable variant="solo" flat rounded="pill" hide-details density="compact" class="organize-search" :disabled="processing" @keyup.enter="searchItems" @click:clear="clearSearch" @compositionstart="searchComposing = true" @compositionend="finishSearchComposition">
+              <template #append-inner><VBtn icon="mdi-magnify" variant="text" size="small" aria-label="搜索" :loading="loadingItems" :disabled="processing" @click.stop="searchItems" /></template>
+            </VTextField>
+            <VMenu location="bottom end">
+              <template #activator="{ props }"><VBtn v-bind="props" icon="mdi-filter-multiple-outline" :variant="statusFilter === 'all' ? 'text' : 'tonal'" :color="statusFilter === 'all' ? 'default' : 'primary'" aria-label="处理状态筛选" title="处理状态筛选" :disabled="processing" data-testid="organize-status-filter" /></template>
+              <VList min-width="200" class="px-2">
+                <VListSubheader>处理状态</VListSubheader>
+                <VListItem v-for="option in statusOptions" :key="option.value" :title="option.title" :active="statusFilter === option.value" @click="statusFilter = option.value">
+                  <template #append><VIcon v-if="statusFilter === option.value" icon="mdi-check" color="primary" /></template>
+                </VListItem>
+              </VList>
+            </VMenu>
+            <VBtn icon="mdi-refresh" variant="text" color="default" aria-label="刷新入库记录" :loading="loadingItems" :disabled="processing" @click="loadItems" />
+            <VBtn color="primary" variant="tonal" prepend-icon="mdi-refresh" :disabled="!canReorganize" :loading="processing" data-testid="organize-selected" @click="openConfirmation">媒体整理 {{ selectedMediaCount || '' }}</VBtn>
+          </div>
+        </VCardText>
+      </VCard>
 
-    <VAlert v-if="selectedItems.length" type="info" variant="tonal" class="mb-4" data-testid="organize-selection">
-      <div class="d-flex flex-wrap align-center ga-3"><span>已选择 {{ selectedItems.length }} 条记录，对应 {{ selectedMediaCount }} 项媒体，跨分页保留选择。</span><VBtn size="small" variant="text" :disabled="processing" @click="selectedItems = []">清空选择</VBtn></div>
-      <div class="d-flex flex-wrap ga-2 mt-2"><VChip v-for="item in selectedItems" :key="item.id" size="small" closable :disabled="processing" @click:close="removeSelection(item.id)">{{ itemTitle(item) }}{{ episodeLabel(item) ? ` · ${episodeLabel(item)}` : '' }} · {{ statusPresentation(item).title }}</VChip></div>
-    </VAlert>
+      <VAlert v-if="selectedItems.length" type="info" variant="tonal" class="mb-4" data-testid="organize-selection">
+        <div class="d-flex flex-wrap align-center ga-3"><span>已选择 {{ selectedItems.length }} 条记录，对应 {{ selectedMediaCount }} 项媒体，跨分页保留选择。</span><VBtn size="small" variant="text" :disabled="processing" @click="selectedItems = []">清空选择</VBtn></div>
+        <VVirtualScroll v-if="selectedItems.length > 100" :items="selectedItems" :height="160" :item-height="38" class="mt-2" tabindex="0" aria-label="已选择的入库记录" data-testid="organize-selected-scroll">
+          <template #default="{ item }"><div class="pb-2"><VChip size="small" closable :disabled="processing" @click:close="removeSelection(item.id)">{{ itemTitle(item) }}{{ episodeLabel(item) ? ` · ${episodeLabel(item)}` : '' }} · {{ statusPresentation(item).title }}</VChip></div></template>
+        </VVirtualScroll>
+        <div v-else class="d-flex flex-wrap ga-2 mt-2"><VChip v-for="item in selectedItems" :key="item.id" size="small" closable :disabled="processing" @click:close="removeSelection(item.id)">{{ itemTitle(item) }}{{ episodeLabel(item) ? ` · ${episodeLabel(item)}` : '' }} · {{ statusPresentation(item).title }}</VChip></div>
+      </VAlert>
 
-    <VAlert v-if="itemsError" type="error" variant="tonal" class="mb-4" data-testid="organize-load-error">{{ itemsError }}<VBtn variant="text" :loading="loadingItems" @click="loadItems">重新读取</VBtn></VAlert>
-    <VAlert v-if="feedback" :type="feedback.type" :title="feedback.message" variant="tonal" class="mb-4" data-testid="organize-result">
-      <div v-for="(detail, index) in feedback.details" :key="index" class="text-wrap">{{ detail }}</div>
-    </VAlert>
+      <VAlert v-if="itemsError" type="error" variant="tonal" class="mb-4" data-testid="organize-load-error">{{ itemsError }}<VBtn variant="text" :loading="loadingItems" @click="loadItems">重新读取</VBtn></VAlert>
+      <VAlert v-if="feedback" :type="feedback.type" :title="feedback.message" variant="tonal" class="mb-4" data-testid="organize-result">
+        <div v-for="(detail, index) in feedback.details" :key="index" class="text-wrap">{{ detail }}</div>
+      </VAlert>
 
-    <VCard>
+    </div>
+
+    <VCard class="organize-history-card">
       <div v-if="smAndDown" class="history-cards pa-3" data-testid="organize-items-mobile">
         <VProgressLinear v-if="loadingItems" indeterminate />
-        <VCard v-for="item in items" :key="item.id" variant="outlined" class="history-card">
-          <VCardText class="history-card-body">
-            <VCheckboxBtn :model-value="selectedIds.includes(item.id)" :disabled="!canSelectRecord(item)" :aria-label="`选择 ${itemTitle(item)}`" @update:model-value="toggleSelection(item, $event)" />
-            <VAvatar rounded width="48" height="72"><VImg v-if="poster(item)" :src="poster(item)" :alt="itemTitle(item)" cover /><VIcon v-else icon="mdi-movie-open-outline" /></VAvatar>
-            <div class="organize-media-copy">
-              <VBtn v-if="item.item_id" variant="text" color="default" class="media-title text-none px-0" :to="`/edit-media/${encodeURIComponent(item.item_id)}`">{{ itemTitle(item) }}</VBtn>
-              <div v-else class="font-weight-medium">{{ itemTitle(item) }}</div>
-              <div v-if="episodeLabel(item)" class="text-caption text-medium-emphasis">{{ episodeLabel(item) }}</div>
-              <div class="text-caption text-medium-emphasis mt-1">{{ formatDate(item.created_at) }}</div>
-              <div class="text-caption text-medium-emphasis">{{ item.library_name || '—' }} · {{ item.item_type === 'Movie' ? '电影' : '剧集' }}</div>
-              <VChip size="small" variant="tonal" :color="statusPresentation(item).color" class="mt-2">{{ statusPresentation(item).title }}</VChip>
-              <div v-if="item.message" class="text-body-2 mt-2 history-message">{{ item.message }}</div>
-              <div v-if="!item.item_id" class="text-caption text-medium-emphasis mt-1">尚未关联媒体，暂不能重新整理。</div>
+        <VVirtualScroll :key="loadedQuery" :items="items" :item-height="160" :height="largePage ? listHeight : undefined" :renderless="!largePage" class="history-card-scroll">
+          <template #default="{ item, itemRef }">
+            <div :ref="itemRef" class="history-card-wrapper">
+              <VCard variant="outlined" class="history-card">
+                <VCardText class="history-card-body">
+                  <VCheckboxBtn :model-value="selectedIds.includes(item.id)" :disabled="!canSelectRecord(item)" :aria-label="`选择 ${itemTitle(item)}`" @update:model-value="toggleSelection(item, $event)" />
+                  <VAvatar rounded width="48" height="72"><VImg v-if="poster(item)" :src="poster(item)" :alt="itemTitle(item)" cover /><VIcon v-else icon="mdi-movie-open-outline" /></VAvatar>
+                  <div class="organize-media-copy">
+                    <VBtn v-if="item.item_id" variant="text" color="default" class="media-title text-none px-0" :to="`/edit-media/${encodeURIComponent(item.item_id)}`">{{ itemTitle(item) }}</VBtn>
+                    <div v-else class="font-weight-medium">{{ itemTitle(item) }}</div>
+                    <div v-if="episodeLabel(item)" class="text-caption text-medium-emphasis">{{ episodeLabel(item) }}</div>
+                    <div class="text-caption text-medium-emphasis mt-1">{{ formatDate(item.created_at) }}</div>
+                    <div class="text-caption text-medium-emphasis">{{ item.library_name || '—' }} · {{ item.item_type === 'Movie' ? '电影' : '剧集' }}</div>
+                    <VChip size="small" variant="tonal" :color="statusPresentation(item).color" class="mt-2">{{ statusPresentation(item).title }}</VChip>
+                    <div v-if="item.message" class="text-body-2 mt-2 history-message">{{ item.message }}</div>
+                    <div v-if="!item.item_id" class="text-caption text-medium-emphasis mt-1">尚未关联媒体，暂不能重新整理。</div>
+                  </div>
+                </VCardText>
+              </VCard>
             </div>
-          </VCardText>
-        </VCard>
+          </template>
+        </VVirtualScroll>
         <div v-if="!items.length && !loadingItems" class="py-8 text-center text-medium-emphasis">{{ emptyText }}</div>
       </div>
-      <VDataTable v-else :headers="headers" :items="items" item-value="id" show-select :model-value="selectedIds" :items-per-page="pageSize" :loading="loadingItems" :item-selectable="canSelectRecord" hide-default-footer data-testid="organize-items" @update:model-value="updateSelection">
+      <VDataTableVirtual v-else :key="loadedQuery" :headers="headers" :items="items" item-value="id" show-select :model-value="selectedIds" :loading="loadingItems" :item-selectable="canSelectRecord" height="100%" :item-height="96" fixed-header class="organize-items-desktop" hide-default-footer data-testid="organize-items" @update:model-value="updateSelection">
         <template #item.name="{ item }">
           <div class="d-flex align-center ga-3 py-2"><VAvatar rounded width="42" height="63"><VImg v-if="poster(item)" :src="poster(item)" :alt="itemTitle(item)" cover /><VIcon v-else icon="mdi-movie-open-outline" /></VAvatar><div class="organize-media-copy"><VBtn v-if="item.item_id" variant="text" color="default" class="media-title text-none px-0" :to="`/edit-media/${encodeURIComponent(item.item_id)}`">{{ itemTitle(item) }}</VBtn><div v-else class="font-weight-medium">{{ itemTitle(item) }}</div><div v-if="episodeLabel(item)" class="text-caption text-medium-emphasis">{{ episodeLabel(item) }}</div><div v-if="!item.item_id" class="text-caption text-medium-emphasis">尚未关联媒体</div></div></div>
         </template>
@@ -60,45 +72,80 @@
         <template #item.created_at="{ item }">{{ formatDate(item.created_at) }}</template>
         <template #item.status="{ item }"><VChip size="small" variant="tonal" :color="statusPresentation(item).color">{{ statusPresentation(item).title }}</VChip><div v-if="item.message" class="text-body-2 mt-1 history-message">{{ item.message }}</div></template>
         <template #no-data><div class="py-8 text-medium-emphasis">{{ emptyText }}</div></template>
-      </VDataTable>
-      <VCardActions class="d-flex flex-wrap justify-space-between"><span class="text-body-2 text-medium-emphasis">{{ total === null ? '总数未确认' : `共 ${total} 条记录` }}</span><VPagination v-if="pages > 1" v-model="page" :length="pages" :total-visible="5" :disabled="loadingItems || processing" @update:model-value="loadItems" /></VCardActions>
+      </VDataTableVirtual>
+      <VCardActions class="organize-pagination">
+        <VSelect :model-value="pageSize" :items="pageSizeOptions" density="compact" variant="solo" flat rounded="pill" hide-details aria-label="每页条数" title="每页条数" class="organize-page-size" :disabled="processing" data-testid="organize-page-size" @update:model-value="changePageSize" />
+        <span class="organize-pagination-info text-medium-emphasis" :aria-label="total === null ? '总数未确认' : `第 ${pageTip.begin} 至 ${pageTip.end} 条，共 ${total} 条记录`" data-testid="organize-page-info">{{ total === null ? '总数未确认' : `${pageTip.begin} - ${pageTip.end} / ${total}` }}</span>
+        <VPagination v-if="pages > 1" v-model="page" show-first-last-page :length="pages" :total-visible="smAndDown ? 3 : 7" :disabled="loadingItems || processing" data-testid="organize-pagination" @update:model-value="loadItems" />
+      </VCardActions>
     </VCard>
 
     <VDialog v-model="confirmationOpen" max-width="640" :persistent="processing">
       <VCard>
-        <VCardTitle class="text-wrap">确认重新整理 {{ confirmationMediaCount }} 项媒体</VCardTitle>
+        <VCardTitle class="text-wrap">确认{{ operationLabel(confirmationMode) }} {{ confirmationMediaCount }} 项媒体</VCardTitle>
         <VCardText>
-          <p>将重新执行媒体信息重建、回读验收和元数据增强。电影包含关联版本，剧集只处理所选单集。同一媒体的多条记录合并为一次整理。</p>
-          <VList bg-color="transparent" density="compact"><VListItem v-for="item in confirmationItems" :key="item.id" :title="itemTitle(item)" :subtitle="`${episodeLabel(item) || (item.item_type === 'Movie' ? '电影' : '剧集')} · ${item.item_id}`" /></VList>
+          <VRadioGroup v-model="confirmationMode" inline :disabled="processing" label="整理操作" data-testid="organize-mode"><VRadio label="重新整理入库" value="reprocess" /><VRadio label="重新刮削" value="rescrape" /></VRadioGroup>
+          <p v-if="confirmationMode === 'rescrape'">更新元数据、NFO 和图片，保留已有媒体信息、音轨和章节。剧集只处理所选单集，同一媒体的多条记录合并为一次刮削。</p>
+          <p v-else>将重新执行媒体信息重建、回读验收和元数据增强。电影包含关联版本，剧集只处理所选单集。同一媒体的多条记录合并为一次整理。</p>
+          <VList bg-color="transparent" density="compact">
+            <VVirtualScroll v-if="confirmationItems.length > 100" :items="confirmationItems" :height="Math.min(listHeight, 384)" :item-height="64" tabindex="0" aria-label="本次整理的媒体" data-testid="organize-confirmation-scroll">
+              <template #default="{ item }"><VListItem :title="itemTitle(item)" :subtitle="`${episodeLabel(item) || (item.item_type === 'Movie' ? '电影' : '剧集')} · ${item.item_id}`" /></template>
+            </VVirtualScroll>
+            <template v-else><VListItem v-for="item in confirmationItems" :key="item.id" :title="itemTitle(item)" :subtitle="`${episodeLabel(item) || (item.item_type === 'Movie' ? '电影' : '剧集')} · ${item.item_id}`" /></template>
+          </VList>
         </VCardText>
-        <VCardActions><VSpacer /><VBtn variant="text" :disabled="processing" @click="confirmationOpen = false">取消</VBtn><VBtn color="primary" variant="flat" :loading="processing" data-testid="organize-confirm" @click="reorganize">开始重新整理</VBtn></VCardActions>
+        <VCardActions><VSpacer /><VBtn variant="text" :disabled="processing" @click="confirmationOpen = false">取消</VBtn><VBtn color="primary" variant="flat" :loading="processing" data-testid="organize-confirm" @click="reorganize">加入{{ operationLabel(confirmationMode) }}队列</VBtn></VCardActions>
       </VCard>
     </VDialog>
+    <MediaOrganizeQueueDialog v-model="queueOpen" :queue="queue" />
+    <Teleport to="body">
+      <div class="compact-fab-stack compact-fab-stack--history organize-queue-fab">
+        <VBadge :content="pendingQueueCount" :model-value="pendingQueueCount > 0" color="error">
+          <VBtn icon="mdi-timer-sand-paused" color="primary" size="large" class="compact-fab compact-fab--primary" aria-label="整理队列" title="整理队列" data-testid="organize-queue-open" @click="openQueue" />
+        </VBadge>
+      </div>
+    </Teleport>
   </div>
 </template>
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { useElementBounding } from '@vueuse/core';
 import { useContextSearch } from '@/composables/useContextSearch';
 import { useDisplay } from 'vuetify';
+import { VDataTableVirtual } from 'vuetify/components';
 import axios from 'axios';
 import { useMessage } from '@/composables/useFeedback';
+import { queueReceiptMatches, useMediaOrganizeQueue } from '@/composables/useMediaOrganizeQueue';
+import MediaOrganizeQueueDialog from '@/components/MediaOrganizeQueueDialog.vue';
 
 const message = useMessage();
-const { smAndDown } = useDisplay();
+const { smAndDown, height: viewportHeight, width: viewportWidth } = useDisplay();
 const items = ref([]), search = ref(''), appliedSearch = ref(''), statusFilter = ref('all'), page = ref(1), total = ref(null), searchComposing = ref(false);
 const statusOptions = [{ title: '全部状态', value: 'all' }, { title: '成功', value: 'success' }, { title: '失败', value: 'failed' }, { title: '有提醒', value: 'warning' }, { title: '正在处理', value: 'processing' }];
-const pageSize = 24;
-const selectedItems = ref([]), confirmationItems = ref([]), confirmationOpen = ref(false);
+const pageSizeOptions = [25, 50, 100, 500, 1000];
+const pageSize = ref(50);
+const largePage = computed(() => pageSize.value >= 500);
+const listHeight = computed(() => Math.min(640, Math.max(240, viewportHeight.value * 0.65)));
+const pageElement = ref(null), contentBottomInset = ref(24);
+const { top: pageTop } = useElementBounding(pageElement);
+const desktopPageHeight = computed(() => Math.max(0, viewportHeight.value - Math.max(0, pageTop.value) - contentBottomInset.value));
+// 布局已为 Dock 和安全区域预留底部 padding，按实际值计算，避免重复扣除。
+watch([pageElement, viewportWidth, viewportHeight], () => {
+  const layout = pageElement.value?.closest('.layout-page-content');
+  if (layout) contentBottomInset.value = parseFloat(getComputedStyle(layout).paddingBottom) || 0;
+}, { flush: 'post' });
+const selectedItems = ref([]), confirmationItems = ref([]), confirmationOpen = ref(false), confirmationMode = ref('reprocess'), queueOpen = ref(false);
 const loadingItems = ref(false), itemsError = ref(''), processing = ref(false), feedback = ref(null);
 let active = true, itemSequence = 0, searchTimer;
 const loadedQuery = ref('');
-const queryKey = () => JSON.stringify([page.value, appliedSearch.value, statusFilter.value]);
+const queryKey = () => JSON.stringify([page.value, pageSize.value, appliedSearch.value, statusFilter.value]);
 const selectedIds = computed(() => selectedItems.value.map(item => item.id));
 const selectedMediaCount = computed(() => new Set(selectedItems.value.filter(item => item.item_id).map(item => item.item_id)).size);
 const canReorganize = computed(() => !processing.value && selectedItems.value.length > 0 && selectedItems.value.every(isReadyRecord));
 const confirmationMediaCount = computed(() => new Set(confirmationItems.value.map(item => item.item_id)).size);
-const pages = computed(() => Math.max(1, Math.ceil((total.value || 0) / pageSize)));
+const pages = computed(() => Math.max(1, Math.ceil((total.value || 0) / pageSize.value)));
+const pageTip = computed(() => ({ begin: total.value ? pageSize.value * (page.value - 1) + 1 : 0, end: Math.min(pageSize.value * page.value, total.value || 0) }));
 const emptyText = computed(() => itemsError.value ? '入库处理记录尚未读取成功' : '当前条件下没有入库处理记录');
 const canSelectItems = () => !processing.value && !loadingItems.value && !itemsError.value && loadedQuery.value === queryKey();
 const isReadyRecord = item => ['Movie', 'Episode'].includes(item.item_type) && typeof item.item_id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(item.item_id) && ['success', 'warning', 'failed'].includes(item.status);
@@ -128,12 +175,18 @@ const loadItems = async () => {
   loadingItems.value = true;
   try {
     const { data } = await axios.get('/api/media_organize/history', {
-      params: { page: page.value, page_size: pageSize, search: appliedSearch.value, status: statusFilter.value },
+      params: { page: page.value, page_size: pageSize.value, search: appliedSearch.value, status: statusFilter.value },
     });
     if (!active || sequence !== itemSequence || targetQuery !== queryKey()) return;
     if (!Array.isArray(data?.items) || !Number.isInteger(data?.total) || data.total < data.items.length) throw new Error('入库处理记录或分页总数无效');
     const validItems = data.items.every(item => ((typeof item.id === 'string' && item.id.length > 0) || Number.isSafeInteger(item.id)) && ['Movie', 'Episode'].includes(item.item_type));
     if (!validItems || new Set(data.items.map(item => item.id)).size !== data.items.length) throw new Error('入库处理记录身份或类型无效');
+    const lastPage = Math.max(1, Math.ceil(data.total / pageSize.value));
+    if (page.value > lastPage) {
+      page.value = lastPage;
+      await loadItems();
+      return;
+    }
     items.value = data.items;
     const refreshed = new Map(data.items.map(item => [item.id, item]));
     selectedItems.value = selectedItems.value.map(item => refreshed.get(item.id) || item);
@@ -146,6 +199,18 @@ const loadItems = async () => {
     if (active && sequence === itemSequence) loadingItems.value = false;
   }
 };
+
+const changePageSize = async value => {
+  if (processing.value || !pageSizeOptions.includes(value) || value === pageSize.value) return;
+  pageSize.value = value;
+  page.value = 1;
+  await loadItems();
+};
+
+const queue = useMediaOrganizeQueue({ onSettled: loadItems });
+const pendingQueueCount = computed(() => queue.queuedCount + queue.runningCount);
+const operationLabel = mode => mode === 'rescrape' ? '重新刮削' : '重新整理入库';
+const openQueue = () => { queueOpen.value = true; void queue.refresh(); };
 
 const searchItems = () => { clearTimeout(searchTimer); if (searchComposing.value || processing.value) return; appliedSearch.value = search.value?.trim() || ''; page.value = 1; loadItems(); };
 const clearSearch = () => { search.value = ''; searchItems(); };
@@ -170,14 +235,25 @@ const openConfirmation = () => {
   confirmationOpen.value = true;
 };
 const reorganize = async () => {
-  if (processing.value || !confirmationItems.value.length) return;
+  if (processing.value || !confirmationItems.value.length || !['reprocess', 'rescrape'].includes(confirmationMode.value)) return;
+  const mode = confirmationMode.value;
   const ids = [...new Set(confirmationItems.value.map(item => item.item_id))];
   const historyIds = confirmationItems.value.map(item => item.id);
   processing.value = true;
   try {
-    const response = await axios.post('/api/actions/reorganize', { item_ids: ids, history_ids: historyIds });
+    const response = await axios.post('/api/actions/reorganize', { item_ids: ids, history_ids: historyIds, mode });
     if (!active) return;
     const result = response.data || {};
+    if (response.status === 202) {
+      const accepted = queueReceiptMatches(result, ids, mode);
+      feedback.value = { type: accepted ? 'info' : 'warning', message: accepted ? result.message || '媒体已加入整理队列' : '整理队列提交结果尚未确认', details: accepted ? (result.duplicate_count ? ['队列中已有 ' + result.duplicate_count + ' 项任务，本次不重复提交。'] : []) : ['请打开整理队列核对所选媒体的状态。'] };
+      message[feedback.value.type](feedback.value.message);
+      confirmationOpen.value = false;
+      queueOpen.value = true;
+      void queue.refresh();
+      if (accepted) void loadItems();
+      return;
+    }
     const failures = Array.isArray(result.failures) ? result.failures : [];
     const warnings = Array.isArray(result.warning_details) ? result.warning_details : [];
     const details = [...failures, ...warnings].map(detail => typeof detail === 'string' ? detail : JSON.stringify(detail));
@@ -206,12 +282,17 @@ const reorganize = async () => {
 watch(search, scheduleSearch);
 watch(statusFilter, () => { clearTimeout(searchTimer); appliedSearch.value = search.value?.trim() || ''; page.value = 1; loadItems(); });
 useContextSearch({ label: '搜索入库记录', query: search, submit: searchItems, clear: clearSearch, composing: searchComposing, compositionEnd: finishSearchComposition, disabled: processing, loading: loadingItems });
-onMounted(loadItems);
-onBeforeUnmount(() => { active = false; ++itemSequence; clearTimeout(searchTimer); });
+onMounted(() => { queue.start(); void loadItems(); });
+onBeforeUnmount(() => { active = false; ++itemSequence; clearTimeout(searchTimer); queue.stop(); });
 </script>
 
 <style scoped>
 .media-organize-page { width: 100%; min-width: 0; }
+.media-organize-page--desktop { display: flex; flex-direction: column; min-block-size: 0; overflow: hidden; }
+.media-organize-page--desktop .organize-controls { flex: 0 1 auto; min-block-size: 0; max-block-size: 50%; overflow: auto; overscroll-behavior: contain; }
+.media-organize-page--desktop .organize-history-card { display: flex; flex-direction: column; flex: 1 1 0; min-block-size: 0; }
+.organize-items-desktop { flex: 1 1 0; min-block-size: 0; }
+.organize-queue-fab { z-index: 1100; }
 .organize-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .organize-search { flex: 1 1 280px; min-width: 0; }
 .organize-media-copy { min-width: 0; flex: 1; }
@@ -222,9 +303,15 @@ onBeforeUnmount(() => { active = false; ++itemSequence; clearTimeout(searchTimer
 .media-organize-page :deep(.v-data-table__td) { padding-block: 12px; }
 .media-organize-page :deep(.v-alert-title), .media-organize-page :deep(.v-chip__content) { white-space: normal; overflow-wrap: anywhere; }
 .media-organize-page :deep(.v-chip) { height: auto; min-height: 26px; padding-block: 4px; }
-.history-cards { display: grid; gap: 12px; }
+.history-cards { min-width: 0; }
 .history-card { min-width: 0; }
 .history-card-body { display: flex; align-items: flex-start; gap: 12px; }
 .history-card-body > .v-selection-control { flex: 0 0 auto; }
+.history-card-wrapper { padding-bottom: 12px; }
+.history-card-scroll { min-width: 0; }
+.organize-pagination { display: flex; flex-wrap: wrap; flex: 0 0 auto; align-items: center; gap: 12px; }
+.organize-page-size { flex: 0 0 100px; }
+.organize-pagination-info { font-size: 0.8rem; }
+.organize-pagination :deep(.v-pagination) { margin-inline-start: auto; }
 @media (max-width: 540px) { .media-organize-page :deep(.v-card-actions .v-pagination) { width: 100%; } }
 </style>

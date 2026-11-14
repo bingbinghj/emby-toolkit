@@ -23,6 +23,7 @@ struct Host {
     empty_people: bool,
     mode: usize,
     ai_calls: Arc<AtomicUsize>,
+    ai_inputs: Arc<Mutex<Vec<Vec<String>>>>,
     second_after_writes: Arc<AtomicUsize>,
     fallback_starts: Arc<Mutex<Vec<usize>>>,
     writes: Arc<Mutex<Vec<String>>>,
@@ -81,7 +82,7 @@ async fn save_person(
         writes.push(id);
         writes.len()
     };
-    if host.mode == 2 && count == 50 {
+    if (host.mode == 2 && count == 50) || (host.mode == 4 && count == 1) {
         host.first_batch_written.notify_one();
         host.release_write.notified().await;
     }
@@ -95,11 +96,17 @@ async fn translate(State(host): State<Host>, Json(body): Json<Value>) -> Respons
         if host.mode == 1 {
             return StatusCode::BAD_GATEWAY.into_response();
         }
+        if host.mode == 3 {
+            host.first_batch_written.notify_one();
+            host.release_write.notified().await;
+        }
     }
     let input: Vec<String> =
         serde_json::from_str(body["messages"][1]["content"].as_str().unwrap()).unwrap();
+    host.ai_inputs.lock().await.push(input.clone());
     let output = input
         .into_iter()
+        .filter(|name| !(host.mode == 4 && call == 1 && name == "Actor000"))
         .map(|name| (name.clone(), format!("译名{name}")))
         .collect::<BTreeMap<_, _>>();
     Json(json!({"choices":[{"message":{"content":json!(output).to_string()}}]})).into_response()
@@ -146,6 +153,7 @@ impl Fixture {
             empty_people,
             mode,
             ai_calls: Arc::default(),
+            ai_inputs: Arc::default(),
             second_after_writes: Arc::default(),
             fallback_starts: Arc::default(),
             writes: Arc::default(),
@@ -213,6 +221,48 @@ impl Fixture {
             .unwrap();
         self.wait_job(&id).await
     }
+    async fn restart(&mut self) {
+        self.state = AppState::new(self.state.db.clone(), self.state.data_dir.clone())
+            .await
+            .unwrap();
+        self.state
+            .jobs
+            .clone()
+            .resume_pending(
+                self.state.clone(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+    }
+    async fn interrupt_second_batch(&self, task: &str, stop: bool) {
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            self.host.first_batch_written.notified(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(self.host.writes.lock().await.len(), 50);
+        if stop {
+            self.state.jobs.control(Some(task), "stop").await.unwrap();
+            self.host.release_write.notify_one();
+            return;
+        }
+        let manager = self.state.jobs.clone();
+        let shutdown = tokio::spawn(async move { manager.shutdown().await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if self.state.jobs.status().await["state"] == "interrupted" {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        self.host.release_write.notify_one();
+        shutdown.await.unwrap();
+    }
     async fn close(self) {
         self.state.jobs.shutdown().await;
         self.server.abort();
@@ -279,6 +329,431 @@ async fn stopping_after_first_batch_preserves_writes_without_requesting_later_tr
         "stop must prevent the next outer translation batch"
     );
     assert_eq!(writes, 50);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby and AI are localhost"]
+async fn restarting_translation_keeps_its_id_and_completed_people_without_duplicate_writes() {
+    let mut f = Fixture::new(60, false, 3).await;
+    let task = f.start_translation().await;
+    f.interrupt_second_batch(&task, false).await;
+    let interrupted = f.wait_job(&task).await;
+    assert_eq!(interrupted["state"], "interrupted", "{interrupted}");
+    assert_eq!(interrupted["completed"], 50);
+    assert_eq!(interrupted["stop_requested"], false);
+    f.restart().await;
+    let result = f.wait_job(&task).await;
+    assert_eq!(result["state"], "completed", "{result}");
+    assert_eq!(result["task_id"], task);
+    assert_eq!(result["result"]["updated"], 60);
+    let writes = f.host.writes.lock().await.clone();
+    assert_eq!(writes.len(), 60);
+    assert_eq!(
+        writes
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        60
+    );
+    assert_eq!(f.host.ai_calls.load(Ordering::SeqCst), 2);
+    f.state.jobs.shutdown().await;
+    f.restart().await;
+    assert_eq!(f.wait_job(&task).await["state"], "completed");
+    assert_eq!(f.host.writes.lock().await.len(), 60);
+    assert_eq!(f.host.ai_calls.load(Ordering::SeqCst), 2);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby and AI are localhost"]
+async fn restarting_partial_translation_requests_only_missing_valid_names() {
+    let mut f = Fixture::new(3, false, 4).await;
+    let task = f.start_translation().await;
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        f.host.first_batch_written.notified(),
+    )
+    .await
+    .unwrap();
+    let completed: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM durable_job_steps WHERE job_id=$1 AND step_key IN ('completed:tasks:actor-translation:person:p000','completed:tasks:actor-translation:batch:0'))")
+        .bind(&task).fetch_one(&f.state.db).await.unwrap();
+    assert!(
+        !completed,
+        "a missing translation must not complete its person or batch"
+    );
+    let manager = f.state.jobs.clone();
+    let shutdown = tokio::spawn(async move { manager.shutdown().await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while f.state.jobs.status().await["state"] != "interrupted" {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    f.host.release_write.notify_one();
+    shutdown.await.unwrap();
+    f.restart().await;
+    let result = f.wait_job(&task).await;
+    assert!(
+        matches!(
+            result["state"].as_str(),
+            Some("completed" | "completed_with_warnings")
+        ),
+        "{result}"
+    );
+    assert_eq!(
+        f.host.ai_inputs.lock().await.clone(),
+        vec![vec!["Actor000", "Actor001", "Actor002"], vec!["Actor000"]]
+    );
+    assert!(
+        f.host
+            .people
+            .lock()
+            .await
+            .values()
+            .all(|person| person["Name"].as_str().unwrap().starts_with("译名"))
+    );
+    let writes = f.host.writes.lock().await.clone();
+    assert_eq!(writes.len(), 3);
+    assert_eq!(
+        writes
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        3
+    );
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby and AI are localhost"]
+async fn restarting_a_stopped_translation_never_revives_its_remaining_people() {
+    let mut f = Fixture::new(60, false, 3).await;
+    let task = f.start_translation().await;
+    f.interrupt_second_batch(&task, true).await;
+    assert_eq!(f.wait_job(&task).await["state"], "cancelled");
+    f.state.jobs.shutdown().await;
+    f.restart().await;
+    assert_eq!(f.wait_job(&task).await["state"], "cancelled");
+    assert_eq!(f.host.writes.lock().await.len(), 50);
+    assert_eq!(f.host.ai_calls.load(Ordering::SeqCst), 2);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby and AI are localhost"]
+async fn restarting_a_paused_translation_keeps_pause_even_if_translation_was_disabled() {
+    let mut f = Fixture::new(60, false, 3).await;
+    let task = f.start_translation().await;
+    tokio::time::timeout(
+        Duration::from_secs(15),
+        f.host.first_batch_written.notified(),
+    )
+    .await
+    .unwrap();
+    f.state.jobs.control(Some(&task), "pause").await.unwrap();
+    f.host.release_write.notify_one();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while f.state.jobs.status().await["state"] != "paused" {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    f.state
+        .save_config(&json!({"ai_translate_actor_role":false}))
+        .await
+        .unwrap();
+    f.state.jobs.shutdown().await;
+    assert_eq!(f.wait_job(&task).await["pause_requested"], true);
+    f.state = AppState::new(f.state.db.clone(), f.state.data_dir.clone())
+        .await
+        .unwrap();
+    let work = f.state.clone();
+    let manager = work.jobs.clone();
+    let recovery = tokio::spawn(async move {
+        manager
+            .resume_pending(work, tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while f.state.jobs.status().await["state"] != "paused" {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let status = f.state.jobs.status().await;
+    assert_eq!(status["state"], "paused", "{status}");
+    assert_eq!(status["task_id"], task);
+    assert_eq!(f.host.writes.lock().await.len(), 50);
+    f.state.jobs.control(Some(&task), "resume").await.unwrap();
+    recovery.await.unwrap();
+    assert_eq!(f.wait_job(&task).await["state"], "completed");
+    assert_eq!(f.host.writes.lock().await.len(), 50);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all media endpoints are localhost"]
+async fn restarting_after_a_committed_cache_clear_keeps_new_cache_rows_and_original_result() {
+    let mut f = Fixture::new(0, false, 0).await;
+    sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2)")
+        .bind("A".repeat(40))
+        .bind(json!({"fixture":"before"}))
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    let task = tasks::submit_task(&f.state, "clear-mediainfo", false)
+        .await
+        .unwrap()["task_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(f.wait_job(&task).await["result"]["deleted"], 1);
+    sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2)")
+        .bind("B".repeat(40))
+        .bind(json!({"fixture":"after"}))
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    // Replay the crash window after the clear transaction commits, before the
+    // job's terminal state is persisted. The committed step must win.
+    sqlx::query(
+        "UPDATE durable_jobs SET state_json=(state_json-'result'-'finished_at') || $2 WHERE id=$1",
+    )
+    .bind(&task)
+    .bind(json!({"state":"running","is_running":true,"stop_requested":false}))
+    .execute(&f.state.db)
+    .await
+    .unwrap();
+    f.state.jobs.shutdown().await;
+    f.restart().await;
+    let result = f.wait_job(&task).await;
+    assert_eq!(result["state"], "completed", "{result}");
+    assert_eq!(result["result"]["deleted"], 1);
+    let remaining: Vec<String> = sqlx::query_scalar("SELECT sha1 FROM p115_mediainfo_cache")
+        .fetch_all(&f.state.db)
+        .await
+        .unwrap();
+    assert_eq!(remaining, vec!["B".repeat(40)]);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all media endpoints are localhost"]
+async fn resumed_full_role_translation_does_not_clear_logs_written_after_its_reset() {
+    let mut f = Fixture::new(0, false, 0).await;
+    sqlx::query("INSERT INTO processed_log(item_id) VALUES('before-reset')")
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    let work = f.state.clone();
+    let ready = Arc::new(Notify::new());
+    let reached = ready.clone();
+    let spec = emby_toolkit::jobs::JobSpec::new(
+        "tasks",
+        json!({"task":"role-translation","full":true,"batch_size":10,"unsupported":[]}),
+    );
+    // Arrange the persisted boundary immediately after a full run resets logs,
+    // then restore through the real task dispatcher rather than this fixture.
+    let task = f
+        .state
+        .jobs
+        .submit_persistent("角色中文化", spec, move |context| async move {
+            context
+                .save_plan(
+                    "tasks:role-translation:plan",
+                    &json!({"media":[],"ignored_ids":[]}),
+                )
+                .await?;
+            let mut transaction = work.db.begin().await?;
+            sqlx::query("DELETE FROM processed_log")
+                .execute(&mut *transaction)
+                .await?;
+            context
+                .complete_in_tx(
+                    &mut transaction,
+                    "tasks:role-translation:reset",
+                    &json!({"done":true}),
+                )
+                .await?;
+            transaction.commit().await?;
+            reached.notify_one();
+            context.cancelled().await;
+            context.checkpoint().await?;
+            Ok(json!({}))
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), ready.notified())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO processed_log(item_id) VALUES('after-reset')")
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    f.state.jobs.shutdown().await;
+    assert_eq!(f.wait_job(&task).await["state"], "interrupted");
+    f.restart().await;
+    assert_eq!(f.wait_job(&task).await["state"], "completed");
+    let ids: Vec<String> = sqlx::query_scalar("SELECT item_id FROM processed_log")
+        .fetch_all(&f.state.db)
+        .await
+        .unwrap();
+    assert_eq!(ids, vec!["after-reset"]);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all media endpoints are localhost"]
+async fn role_translation_keeps_each_movies_webhook_checkpoint_scope_separate() {
+    let mut f = Fixture::new(0, false, 0).await;
+    let items = [
+        json!({"Id":"m1","Type":"Movie","Name":"电影一","Path":"/fixture/one.mkv","ProviderIds":{"Tmdb":"1"},"MediaSources":[]}),
+        json!({"Id":"m2","Type":"Movie","Name":"电影二","Path":"/fixture/two.mkv","ProviderIds":{"Tmdb":"2"},"MediaSources":[]}),
+    ];
+    for item in &items {
+        f.host
+            .people
+            .lock()
+            .await
+            .insert(item["Id"].as_str().unwrap().into(), item.clone());
+    }
+    let ready = Arc::new(Notify::new());
+    let reached = ready.clone();
+    let spec = emby_toolkit::jobs::JobSpec::new(
+        "tasks",
+        json!({"task":"role-translation","full":false,"batch_size":10,"unsupported":[]}),
+    );
+    let task = f
+        .state
+        .jobs
+        .submit_persistent("角色中文化", spec, move |context| async move {
+            context
+                .save_plan(
+                    "tasks:role-translation:plan",
+                    &json!({"media":items,"ignored_ids":[]}),
+                )
+                .await?;
+            context
+                .complete(
+                    "tasks:role-translation:cleanup",
+                    &json!({"warnings":0,"warning_details":[]}),
+                )
+                .await?;
+            let phases = [
+                ("emby_feedback", json!({"updated":1,"warnings":0})),
+                (
+                    "emby_finalized",
+                    json!({"title_fill":{"state":"disabled","pending":[]},"warnings":0}),
+                ),
+                ("emby_automatic", json!({"state":"skipped","failed":0})),
+            ];
+            for (key, report) in &phases {
+                context.complete(key, report).await?;
+            }
+            for item in &items {
+                let item_context = context.scoped(&format!(
+                    "tasks:role-translation:work:{}",
+                    item["Id"].as_str().unwrap()
+                ));
+                for (key, report) in &phases {
+                    item_context.complete(key, report).await?;
+                }
+            }
+            reached.notify_one();
+            context.cancelled().await;
+            context.checkpoint().await?;
+            Ok(json!({}))
+        })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), ready.notified())
+        .await
+        .unwrap();
+    f.state.jobs.shutdown().await;
+    f.restart().await;
+    let result = f.wait_job(&task).await;
+    assert_eq!(result["result"]["updated"], 2, "{result}");
+    assert_eq!(result["result"]["failures"], json!([]), "{result}");
+    let scopes: Vec<Value> = sqlx::query_scalar("SELECT value_json FROM durable_job_steps WHERE job_id=$1 AND step_key LIKE 'plans:tasks:role-translation:work:%:emby_scope' ORDER BY step_key")
+        .bind(&task).fetch_all(&f.state.db).await.unwrap();
+    assert_eq!(scopes.len(), 2);
+    assert_eq!(scopes[0]["id"], "m1");
+    assert_eq!(scopes[1]["id"], "m2");
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all media endpoints are localhost"]
+async fn resumed_nfo_restore_rejects_rebound_paths_and_preserves_other_movies_files() {
+    for update_cache in [false, true] {
+        let mut f = Fixture::new(0, false, 0).await;
+        let old_path = f.state.data_dir.join("A.mkv");
+        let new_path = f.state.data_dir.join("B.mkv");
+        tokio::fs::write(&old_path, b"a").await.unwrap();
+        tokio::fs::write(&new_path, b"b").await.unwrap();
+        let other_nfo = "<movie><title>另一部作品</title><plot>必须保留</plot></movie>".as_bytes();
+        let nfo_path = old_path.with_extension("nfo");
+        tokio::fs::write(&nfo_path, other_nfo).await.unwrap();
+        sqlx::query("INSERT INTO media_metadata(tmdb_id,item_type,title,in_library,emby_item_ids_json,asset_details_json) VALUES('42','Movie','旧缓存作品',true,$1,$2)")
+            .bind(json!(["movie"])).bind(json!([{"emby_item_id":"movie","path":old_path}])).execute(&f.state.db).await.unwrap();
+        let row: Value =
+            sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE tmdb_id='42'")
+                .fetch_one(&f.state.db)
+                .await
+                .unwrap();
+        let ready = Arc::new(Notify::new());
+        let reached = ready.clone();
+        let spec = emby_toolkit::jobs::JobSpec::new(
+            "tasks",
+            json!({"task":"restore-nfo-and-images","full":false,"batch_size":10,"unsupported":[]}),
+        );
+        let task = f
+            .state
+            .jobs
+            .submit_persistent("恢复NFO和封面", spec, move |context| async move {
+                context
+                    .save_plan("tasks:restore-nfo-and-images:plan", &json!([row]))
+                    .await?;
+                reached.notify_one();
+                context.cancelled().await;
+                context.checkpoint().await?;
+                Ok(json!({}))
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), ready.notified())
+            .await
+            .unwrap();
+        if update_cache {
+            sqlx::query("UPDATE media_metadata SET asset_details_json=$1 WHERE tmdb_id='42'")
+                .bind(json!([{"emby_item_id":"movie","path":new_path}]))
+                .execute(&f.state.db)
+                .await
+                .unwrap();
+        }
+        f.host.people.lock().await.insert("movie".into(),json!({"Id":"movie","Type":"Movie","Name":"旧缓存作品","Path":new_path,"ProviderIds":{"Tmdb":"42"}}));
+        f.state.jobs.shutdown().await;
+        f.restart().await;
+        let result = f.wait_job(&task).await;
+        assert_eq!(result["state"], "failed", "{result}");
+        assert!(
+            result["result"]["failures"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|failure| failure.as_str().unwrap().contains("绑定已变化")
+                    || failure.as_str().unwrap().contains("路径")),
+            "{result}"
+        );
+        assert_eq!(tokio::fs::read(&nfo_path).await.unwrap(), other_nfo);
+        assert!(!new_path.with_extension("nfo").exists());
+        f.close().await;
+    }
 }
 
 #[tokio::test]

@@ -219,6 +219,30 @@ pub async fn resolve(
 ) -> Result<(Value, Option<String>)> {
     resolve_with_reader(state, target, path, None).await
 }
+
+/// Admission checks the occupant of the final path, including HTTP STRM whose
+/// old PickCode can remain alive after MP has replaced the same cloud filename.
+pub(crate) async fn resolve_ingest(
+    state: &AppState,
+    target: &str,
+    path: &str,
+    context: &JobContext,
+) -> Result<(Value, Option<String>)> {
+    let config = state.config.read().await.clone();
+    let parts = relative(target, &config).or_else(|_| relative(path, &config))?;
+    let mut resolver = Resolver::new(None);
+    resolver.context = Some(context);
+    resolver.allow_search = false;
+    let result = locate(state, &config, &parts, &mut resolver).await?;
+    if let Some(pc) = fingerprints::pickcode(target)
+        && result.0["pick_code"] != pc
+    {
+        return Err(ApiError::bad(
+            "STRM 与最终云端文件身份不一致，请等待当前 STRM 更新后重试",
+        ));
+    }
+    Ok(result)
+}
 pub async fn resolve_with_reader(
     state: &AppState,
     target: &str,
@@ -606,7 +630,7 @@ pub async fn write(
     info: &Value,
     relative: Option<String>,
 ) -> Result<()> {
-    write_resolved(state, snapshot, index, info, relative, false).await
+    write_resolved(state, snapshot, index, info, relative, false, None).await
 }
 async fn write_resolved(
     state: &AppState,
@@ -615,6 +639,7 @@ async fn write_resolved(
     info: &Value,
     relative: Option<String>,
     fill_only: bool,
+    completion: Option<(&JobContext, &str, &Value)>,
 ) -> Result<()> {
     let mut transaction = state.db.begin().await?;
     versions::lock(
@@ -666,6 +691,11 @@ async fn write_resolved(
     if !fill_only || need_sha1 || need_pc {
         sqlx::query("UPDATE media_metadata SET asset_details_json=$1,file_sha1_json=$2,file_pickcode_json=$3,last_updated_at=NOW() WHERE tmdb_id=$4 AND item_type=$5").bind(json!(assets)).bind(json!(hashes)).bind(json!(pcs)).bind(string(snapshot,"tmdb_id")).bind(string(snapshot,"item_type")).execute(&mut *transaction).await?;
     }
+    if let Some((context, key, result)) = completion {
+        context
+            .complete_in_tx(&mut transaction, key, result)
+            .await?;
+    }
     transaction.commit().await?;
     if !fill_only || need_sha1 || need_pc {
         snapshot["asset_details_json"] = json!(assets);
@@ -679,6 +709,7 @@ async fn write_cached(
     snapshot: &mut Value,
     index: usize,
     info: &Value,
+    completion: (&JobContext, &str, &Value),
 ) -> Result<()> {
     let mut transaction = state.db.begin().await?;
     versions::lock(
@@ -716,6 +747,10 @@ async fn write_cached(
     }
     sqlx::query("UPDATE media_metadata SET file_sha1_json=$1,file_pickcode_json=$2,last_updated_at=NOW() WHERE tmdb_id=$3 AND item_type=$4")
         .bind(json!(hashes)).bind(json!(pcs)).bind(string(snapshot,"tmdb_id")).bind(string(snapshot,"item_type")).execute(&mut *transaction).await?;
+    completion
+        .0
+        .complete_in_tx(&mut transaction, completion.1, completion.2)
+        .await?;
     transaction.commit().await?;
     snapshot["file_sha1_json"] = json!(hashes);
     snapshot["file_pickcode_json"] = json!(pcs);
@@ -790,6 +825,70 @@ fn repair_size(asset: &Value) -> Option<u64> {
         .find_map(|key| identity::size(&asset[*key]))
 }
 
+fn resume_key(operation: &str, ids: Option<&[String]>) -> String {
+    use sha2::Digest;
+    let scope = ids.map_or_else(
+        || "all".into(),
+        |ids| {
+            let mut ids = ids.to_vec();
+            ids.sort();
+            format!(
+                "{:x}",
+                sha2::Sha256::digest(json!(ids).to_string().as_bytes())
+            )
+        },
+    );
+    format!("revalidation:{operation}:{scope}")
+}
+
+async fn resume_rows(
+    state: &AppState,
+    ids: Option<&[String]>,
+    context: &JobContext,
+    key: &str,
+) -> Result<(Vec<Value>, bool)> {
+    if let Some(rows) = context.plan(key).await? {
+        return Ok((list(&rows), true));
+    }
+    let rows = fingerprint_rows(state, ids).await?;
+    context.save_plan(key, &json!(rows)).await?;
+    Ok((rows, false))
+}
+
+async fn reload_resume_row(state: &AppState, row: &mut Value) -> Result<()> {
+    let current: Option<Value> = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE tmdb_id=$1 AND item_type=$2 AND in_library=true")
+        .bind(string(row,"tmdb_id")).bind(string(row,"item_type")).fetch_optional(&state.db).await?;
+    let mut current =
+        current.ok_or_else(|| ApiError::bad("原计划中的媒体已不在库，未扩大校验范围"))?;
+    current["series_title"] = row["series_title"].clone();
+    *row = current;
+    Ok(())
+}
+
+fn resume_asset_index(row: &Value, planned: &Value) -> Result<usize> {
+    let id = text(planned, &["emby_item_id"]);
+    if !id.is_empty() && !list(&row["emby_item_ids_json"]).contains(&json!(id)) {
+        return Err(ApiError::bad(
+            "原计划中的媒体已不属于当前版本绑定，未写入指纹",
+        ));
+    }
+    let indices = list(&row["asset_details_json"])
+        .iter()
+        .enumerate()
+        .filter_map(|(index, asset)| {
+            (text(asset, &["emby_item_id"]) == id
+                && string(asset, "path") == string(planned, "path"))
+            .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if indices.len() != 1 {
+        return Err(ApiError::bad(
+            "原计划中的媒体版本绑定已变化，未处理其它版本",
+        ));
+    }
+    Ok(indices[0])
+}
+
 pub async fn repair(state: &AppState, context: &JobContext) -> Result<Value> {
     repair_selected(state, None, context).await
 }
@@ -806,7 +905,9 @@ async fn repair_selected(
     context
         .activity("扫描在库视频", "正在扫描缺失 PC/SHA1 的在库视频...")
         .await;
-    let mut rows = fingerprint_rows(state, ids).await?;
+    let prefix = resume_key("repair", ids);
+    let (mut rows, resumed_plan) =
+        resume_rows(state, ids, context, &format!("{prefix}:plan")).await?;
     let config = state.config.read().await.clone();
     let requested: Option<HashSet<_>> = ids.map(|ids| ids.iter().collect());
     let eligible = |asset: &Value| {
@@ -843,22 +944,47 @@ async fn repair_selected(
     let mut resolver = Resolver::new(None);
     resolver.context = Some(context);
     tracing::info!("[补齐115指纹] 开始检查 {total} 个在库视频，优先使用 115 本地缓存");
-    context
-        .update_counted(
-            0,
-            total as u64,
-            "补齐115指纹",
-            &format!("正在检查 {total} 个在库视频..."),
-        )
-        .await;
+    if !context.is_resuming() {
+        context
+            .update_counted(
+                0,
+                total as u64,
+                "补齐115指纹",
+                &format!("正在检查 {total} 个在库视频..."),
+            )
+            .await;
+    }
     for row in &mut rows {
-        for (index, asset) in list(&row["asset_details_json"])
+        let planned_assets = list(&row["asset_details_json"]);
+        let mut reload = resumed_plan;
+        for (planned_index, planned_asset) in planned_assets
             .iter()
             .enumerate()
             .filter(|(_, asset)| eligible(asset))
         {
             context.checkpoint().await?;
-            let label = media_label(row, asset, index);
+            let key = format!(
+                "{prefix}:{}:{}:{planned_index}",
+                string(row, "item_type"),
+                string(row, "tmdb_id")
+            );
+            let label = media_label(row, planned_asset, planned_index);
+            if let Some(result) = context.completed(&key).await? {
+                checked += 1;
+                scanned += 1;
+                let needs_fields = result["needs_fields"] == true;
+                missing += usize::from(needs_fields);
+                api_fixed += usize::from(result["used_api"] == true);
+                cache_updates += usize::from(result["updated_cache"] == true);
+                if needs_fields {
+                    fixed += 1;
+                    cache_fixed += usize::from(result["used_cache"] == true);
+                    updated_rows.insert((string(row, "tmdb_id"), string(row, "item_type")));
+                } else if result["updated_cache"] != true {
+                    skipped += 1;
+                }
+                continue;
+            }
             context
                 .update_counted(
                     checked,
@@ -868,9 +994,19 @@ async fn repair_selected(
                 )
                 .await;
             checked += 1;
+            if reload {
+                reload_resume_row(state, row).await?;
+                reload = false;
+            }
+            let index = if resumed_plan {
+                resume_asset_index(row, planned_asset)?
+            } else {
+                planned_index
+            };
+            let asset = list(&row["asset_details_json"])[index].clone();
             if asset["fingerprint_pending"] == true {
                 failed += 1;
-                failed_ids.push(string(asset, "emby_item_id"));
+                failed_ids.push(string(&asset, "emby_item_id"));
                 let message = format!("{label} 文件身份待校验，跳过旧缓存补齐");
                 tracing::warn!("[补齐115指纹] {message}");
                 context
@@ -892,7 +1028,7 @@ async fn repair_selected(
             let needs_fields = need_pc || need_sha1;
             missing += usize::from(needs_fields);
             let result = async {
-                let path = media_paths::clean(&text(asset, &["path", "Path"]));
+                let path = media_paths::clean(&text(&asset, &["path", "Path"]));
                 let strm_target = media_paths::strm_target(&path).await;
                 let target = strm_target.as_deref().unwrap_or(&path);
                 let candidates = media_paths::local_candidates(
@@ -926,7 +1062,7 @@ async fn repair_selected(
                     if let Some(pc) = pc {
                         effective["pick_code"] = json!(pc);
                     }
-                    if let Some(size) = repair_size(asset) {
+                    if let Some(size) = repair_size(&asset) {
                         effective["size"] = json!(size);
                     }
                     if !path.to_lowercase().ends_with(".strm")
@@ -945,7 +1081,8 @@ async fn repair_selected(
                                 &format!("{label} 命中 115 本地缓存，正在补齐 PC/SHA1"),
                             )
                             .await;
-                        write_cached(state, row, index, info).await?;
+                        let result = json!({"needs_fields":needs_fields,"used_cache":needs_fields,"used_api":false,"updated_cache":false});
+                        write_cached(state, row, index, info, (context, &key, &result)).await?;
                     }
                     return Ok((needs_fields, false, false));
                 }
@@ -999,7 +1136,7 @@ async fn repair_selected(
                     });
                     (info, relative)
                 } else {
-                    resolve_current(state, target, &path, repair_size(asset), &mut resolver).await?
+                    resolve_current(state, target, &path, repair_size(&asset), &mut resolver).await?
                 };
                 tracing::info!(
                     "[补齐115指纹] 通过 115 {} 命中 {label}：{}",
@@ -1017,7 +1154,7 @@ async fn repair_selected(
                 if let Some(pc) = pc {
                     values["pick_code"] = json!(pc);
                 }
-                if let Some(size) = repair_size(asset) {
+                if let Some(size) = repair_size(&asset) {
                     values["size"] = json!(size);
                 }
                 for key in ["parent_id", "sha1", "pick_code", "size"] {
@@ -1033,12 +1170,14 @@ async fn repair_selected(
                         &format!("正在保存 {label} 的指纹补齐结果和115缓存"),
                     )
                     .await;
-                write_resolved(state, row, index, &values, relative, true).await?;
+                let result = json!({"needs_fields":needs_fields,"used_cache":false,"used_api":true,"updated_cache":true});
+                write_resolved(state, row, index, &values, relative, true, Some((context, &key, &result))).await?;
                 Ok::<_, ApiError>((false, true, true))
             }
             .await;
             let message = match result {
                 Ok((used_cache, used_api, updated_cache)) => {
+                    context.complete(&key, &json!({"needs_fields":needs_fields,"used_cache":used_cache,"used_api":used_api,"updated_cache":updated_cache})).await?;
                     api_fixed += usize::from(used_api);
                     cache_updates += usize::from(updated_cache);
                     if needs_fields {
@@ -1065,7 +1204,7 @@ async fn repair_selected(
                 Err(error) if context.is_cancelled() => return Err(error),
                 Err(error) => {
                     failed += 1;
-                    failed_ids.push(string(asset, "emby_item_id"));
+                    failed_ids.push(string(&asset, "emby_item_id"));
                     let message = format!("暂无法补齐 {label}：{}", error.1);
                     tracing::warn!("[补齐115指纹] {message}");
                     message
@@ -1089,7 +1228,9 @@ async fn repair_selected(
 }
 
 pub async fn ids(state: &AppState, ids: &[String], context: &JobContext) -> Result<Value> {
-    let mut rows = fingerprint_rows(state, Some(ids)).await?;
+    let prefix = resume_key("ids", Some(ids));
+    let (mut rows, resumed_plan) =
+        resume_rows(state, Some(ids), context, &format!("{prefix}:plan")).await?;
     let requested: HashSet<_> = ids.iter().collect();
     let mut counts = BTreeMap::<String, usize>::new();
     for row in &rows {
@@ -1118,25 +1259,50 @@ pub async fn ids(state: &AppState, ids: &[String], context: &JobContext) -> Resu
         };
         tracing::warn!("[指纹重新校验] Item {id} 未更新：{reason}");
     }
-    context
-        .update_counted(
-            checked as u64,
-            total as u64,
-            "指纹校验",
-            &format!("开始校验 {total} 个媒体项，绑定异常 {failed} 项"),
-        )
-        .await;
+    if !context.is_resuming() {
+        context
+            .update_counted(
+                checked as u64,
+                total as u64,
+                "指纹校验",
+                &format!("开始校验 {total} 个媒体项，绑定异常 {failed} 项"),
+            )
+            .await;
+    }
     let mut resolver = Resolver::new(None);
     resolver.context = Some(context);
     resolver.allow_search = false;
     for row in &mut rows {
-        for (index, asset) in list(&row["asset_details_json"]).iter().enumerate() {
-            let id = string(asset, "emby_item_id");
+        let planned_assets = list(&row["asset_details_json"]);
+        let mut reload = resumed_plan;
+        for (planned_index, planned_asset) in planned_assets.iter().enumerate() {
+            let id = string(planned_asset, "emby_item_id");
             if !requested.contains(&id) || counts.get(&id) != Some(&1) {
                 continue;
             }
             context.checkpoint().await?;
-            let label = media_label(row, asset, index);
+            let key = format!(
+                "{prefix}:{}:{}:{planned_index}",
+                string(row, "item_type"),
+                string(row, "tmdb_id")
+            );
+            if let Some(result) = context.completed(&key).await? {
+                checked += 1;
+                updated += result["updated"].as_u64().unwrap_or(0) as usize;
+                skipped += result["skipped"].as_u64().unwrap_or(0) as usize;
+                continue;
+            }
+            if reload {
+                reload_resume_row(state, row).await?;
+                reload = false;
+            }
+            let index = if resumed_plan {
+                resume_asset_index(row, planned_asset)?
+            } else {
+                planned_index
+            };
+            let asset = list(&row["asset_details_json"])[index].clone();
+            let label = media_label(row, &asset, index);
             context
                 .update_counted(
                     checked as u64,
@@ -1146,8 +1312,11 @@ pub async fn ids(state: &AppState, ids: &[String], context: &JobContext) -> Resu
                 )
                 .await;
             checked += 1;
-            if crate::emby::path_ignored(state, &string(asset, "path")).await? {
+            if crate::emby::path_ignored(state, &string(&asset, "path")).await? {
                 skipped += 1;
+                context
+                    .complete(&key, &json!({"updated":0,"skipped":1}))
+                    .await?;
                 let message = format!("已跳过 {label}：路径在忽略范围内");
                 tracing::info!("[指纹重新校验] {message}");
                 context
@@ -1159,7 +1328,7 @@ pub async fn ids(state: &AppState, ids: &[String], context: &JobContext) -> Resu
                 mark_pending(state, row, index, None).await?;
                 let item = details(state, &id, "Id,Type,Name,Path,Size,MediaSources").await?;
                 let observed = observation(state, &item).await;
-                if observed.0 != string(asset, "path") {
+                if observed.0 != string(&asset, "path") {
                     return Err(ApiError::bad("Emby 路径已变化，请先同步媒体数据"));
                 }
                 context
@@ -1196,7 +1365,17 @@ pub async fn ids(state: &AppState, ids: &[String], context: &JobContext) -> Resu
                     )
                     .await;
                 mark_pending(state, row, index, Some(&observed.1)).await?;
-                write(state, row, index, &info, relative).await
+                let result = json!({"updated":1,"skipped":0});
+                write_resolved(
+                    state,
+                    row,
+                    index,
+                    &info,
+                    relative,
+                    false,
+                    Some((context, &key, &result)),
+                )
+                .await
             }
             .await;
             let message = match result {
@@ -1271,15 +1450,38 @@ async fn submit(
 ) -> Result<(axum::http::StatusCode, axum::Json<Value>)> {
     let id = crate::orphans::current_id(&state, &id).await?;
     let work = state.clone();
+    let payload = json!({"id":id});
+    let spec = crate::jobs::JobSpec::new("revalidation", payload.clone());
     let task = state
         .jobs
-        .submit("重新校验当前媒体指纹", move |context| async move {
-            let scope = scope(&work, &id, &context).await?;
-            ids(&work, &scope, &context).await
+        .submit_persistent_response("重新校验当前媒体指纹", spec, move |context| async move {
+            execute_persisted(&work, &payload, &context).await
         })
         .await?;
     Ok((
         axum::http::StatusCode::ACCEPTED,
         axum::Json(json!({"message":"指纹校验任务已提交","task_id":task})),
     ))
+}
+
+pub(crate) async fn execute_persisted(
+    state: &AppState,
+    payload: &Value,
+    context: &JobContext,
+) -> Result<(u16, Value)> {
+    let id = payload["id"]
+        .as_str()
+        .ok_or_else(|| ApiError::bad("指纹校验原任务参数无效"))?;
+    let key = "revalidation:requested-scope";
+    let planned = if let Some(plan) = context.plan(key).await? {
+        plan
+    } else {
+        let ids = scope(state, id, context).await?;
+        let plan = json!(ids);
+        context.save_plan(key, &plan).await?;
+        plan
+    };
+    let selected: Vec<String> =
+        serde_json::from_value(planned).map_err(|_| ApiError::bad("指纹校验原媒体范围无效"))?;
+    Ok((200, ids(state, &selected, context).await?))
 }

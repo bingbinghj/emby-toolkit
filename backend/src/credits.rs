@@ -39,39 +39,8 @@ async fn submit(
     let task = state
         .jobs
         .clone()
-        .submit(action, move |context| async move {
-            let live = details(&state, &id, FIELDS).await?;
-            if scope_action(&live, &id)? != action {
-                return Err(ApiError::bad("媒体类型在任务开始前变化，未提取片尾"));
-            }
-            if live["Type"] == "Episode" {
-                return extract_items(&state, vec![live], &context).await;
-            }
-            context
-                .activity("提取片尾", "正在读取所选范围的电视剧分集")
-                .await;
-            let mut items = crate::emby::query_items(
-                &state,
-                &[
-                    ("ParentId", id.clone()),
-                    ("Recursive", "true".into()),
-                    ("IncludeItemTypes", "Episode".into()),
-                    ("Fields", FIELDS.into()),
-                ],
-                &context,
-            )
-            .await?;
-            if items
-                .iter()
-                .any(|candidate| !in_scope(candidate, &live, &id))
-            {
-                return Err(ApiError::bad("Emby 返回了所选剧或季以外的媒体，未提取片尾"));
-            }
-            if items.is_empty() {
-                return Err(ApiError::bad("所选剧或季没有可提取片尾的分集"));
-            }
-            crate::media_order::sort(&mut items);
-            extract_items(&state, items, &context).await
+        .submit_persistent(action, crate::jobs::JobSpec::new("credits", json!({"id":id,"action":action})), move |context| async move {
+            Ok(execute_persisted(&state, &json!({"id":id,"action":action}), &context).await?.1)
         })
         .await?;
     Ok((
@@ -228,6 +197,9 @@ async fn season_items(state: &AppState, item: &Value, context: &JobContext) -> R
 }
 
 pub async fn extract_all(state: &AppState, context: &JobContext) -> Result<Value> {
+    if let Some(items) = context.plan("credits-all").await? {
+        return extract_items(state, list(&items), context).await;
+    }
     context
         .activity("提取片尾", "正在扫描电视剧分集，电影不参与片尾提取")
         .await;
@@ -242,6 +214,7 @@ pub async fn extract_all(state: &AppState, context: &JobContext) -> Result<Value
     )
     .await?;
     crate::media_order::sort(&mut items);
+    context.save_plan("credits-all", &json!(items)).await?;
     extract_items(state, items, context).await
 }
 
@@ -265,6 +238,10 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
     for item in items {
         context.checkpoint().await?;
         let id = string(&item, "Id");
+        if let Some(report) = context.completed(&format!("credits:{id}")).await? {
+            reports.push(report);
+            continue;
+        }
         if item["Type"] != "Episode"
             || crate::emby::path_ignored(state, &string(&item, "Path")).await?
         {
@@ -327,6 +304,9 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
             }
         }
         for report in &reports {
+            if report["status"] != "failed" && context.completed(&format!("credits:{}", string(report, "item_id"))).await?.is_none() {
+                context.complete(&format!("credits:{}", string(report, "item_id")), report).await?;
+            }
             selected_ids.remove(&string(report, "item_id"));
         }
         if selected_ids.is_empty() {
@@ -419,6 +399,9 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
             }.await;
             match outcome {
                 Ok(report) => {
+                    if report["status"] != "failed" {
+                        context.complete(&format!("credits:{}", reference.target.id), &report).await?;
+                    }
                     tracing::info!(
                         "[片尾提取] {}：{}",
                         reference.label,
@@ -996,4 +979,50 @@ mod tests {
         actual["MediaStreams"] = json!([]);
         assert!(verify_readback(&before, &actual, 11_100_000_000).is_err());
     }
+}
+
+pub(crate) async fn execute_persisted(state: &AppState, payload: &Value, context: &JobContext) -> Result<(u16, Value)> {
+    let id = string(payload, "id");
+    let action = payload["action"].as_str().ok_or_else(||ApiError::bad("片尾任务范围无效"))?;
+
+            let live = details(&state, &id, FIELDS).await?;
+            if scope_action(&live, &id)? != action {
+                return Err(ApiError::bad("媒体类型在任务开始前变化，未提取片尾"));
+            }
+            if live["Type"] == "Episode" {
+                return Ok((200, extract_items(&state, vec![live], &context).await?));
+            }
+            context
+                .activity("提取片尾", "正在读取所选范围的电视剧分集")
+                .await;
+            let plan_key = format!("credits-scope:{id}");
+            let mut items = if let Some(items) = context.plan(&plan_key).await? {
+                list(&items)
+            } else {
+                let mut items = crate::emby::query_items(
+                &state,
+                &[
+                    ("ParentId", id.clone()),
+                    ("Recursive", "true".into()),
+                    ("IncludeItemTypes", "Episode".into()),
+                    ("Fields", FIELDS.into()),
+                ],
+                &context,
+            )
+            .await?;
+                crate::media_order::sort(&mut items);
+                context.save_plan(&plan_key, &json!(items)).await?;
+                items
+            };
+            if items
+                .iter()
+                .any(|candidate| !in_scope(candidate, &live, &id))
+            {
+                return Err(ApiError::bad("Emby 返回了所选剧或季以外的媒体，未提取片尾"));
+            }
+            if items.is_empty() {
+                return Err(ApiError::bad("所选剧或季没有可提取片尾的分集"));
+            }
+            crate::media_order::sort(&mut items);
+            Ok((200, extract_items(&state, items, &context).await?))
 }

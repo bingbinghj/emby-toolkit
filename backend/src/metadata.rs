@@ -1,6 +1,7 @@
 use crate::{
     AppState,
     error::{ApiError, Result},
+    jobs::JobContext,
     media_edit::list,
     state::string,
     versions,
@@ -23,12 +24,12 @@ pub async fn upsert(
     records: &mut [Value],
     preserve_top_title: bool,
 ) -> Result<()> {
-    write(state, records, preserve_top_title, false)
+    write(state, records, preserve_top_title, false, None)
         .await
         .map(|_| ())
 }
 pub async fn ingest(state: &AppState, records: &mut [Value], replace_children: bool) -> Result<()> {
-    write(state, records, false, replace_children)
+    write(state, records, false, replace_children, None)
         .await
         .map(|_| ())
 }
@@ -36,16 +37,36 @@ pub async fn ingest(state: &AppState, records: &mut [Value], replace_children: b
 pub(crate) struct WriteReport {
     pub written: usize,
     pub failures: Vec<String>,
+    pub written_works: BTreeMap<(String, String), usize>,
+    pub failed_works: BTreeSet<(String, String)>,
 }
 
 pub(crate) async fn sync_upsert(state: &AppState, records: &mut [Value]) -> Result<WriteReport> {
-    write(state, records, true, true).await
+    write(state, records, true, true, None).await
+}
+pub(crate) async fn prepare_sync_records(
+    state: &AppState,
+    records: &[Value],
+) -> Result<Vec<Value>> {
+    let mut transaction = state.db.begin().await?;
+    let records = preserve_sync_child_keys(&mut transaction, records).await?;
+    transaction.commit().await?;
+    Ok(records)
+}
+pub(crate) async fn sync_upsert_with_context(
+    state: &AppState,
+    records: &mut [Value],
+    context: &JobContext,
+    resuming: bool,
+) -> Result<WriteReport> {
+    write(state, records, true, true, Some((context, resuming))).await
 }
 async fn write(
     state: &AppState,
     records: &mut [Value],
     preserve_top_title: bool,
     replace_children: bool,
+    context: Option<(&JobContext, bool)>,
 ) -> Result<WriteReport> {
     tracing::info!(
         "元数据库写入开始：记录 {} 条，顶层标题处理 {}，子项绑定处理 {}",
@@ -63,6 +84,8 @@ async fn write(
     );
     let mut written_records = 0;
     let mut failures = vec![];
+    let mut written_works = BTreeMap::new();
+    let mut failed_works = BTreeSet::new();
     let mut transaction = state.db.begin().await?;
     let columns = sqlx::query("SELECT column_name,data_type FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='media_metadata'").fetch_all(&mut *transaction).await?;
     let allowed = columns
@@ -178,7 +201,7 @@ async fn write(
         versions::lock(&mut transaction, &kind, &id, "").await?;
     }
     let mut sync_records;
-    let records = if replace_children && preserve_top_title {
+    let records = if replace_children && preserve_top_title && context.is_none() {
         sync_records = preserve_sync_child_keys(&mut transaction, records).await?;
         sync_records.as_mut_slice()
     } else {
@@ -191,6 +214,33 @@ async fn write(
         tracing::info!("元数据库子项绑定迁移完成：记录 {record_count} 条");
     }
     for record in records {
+        let id = string(record, "tmdb_id");
+        let kind = string(record, "item_type");
+        let owner = if matches!(kind.as_str(), "Season" | "Episode")
+            && !string(record, "parent_series_tmdb_id").is_empty()
+        {
+            (string(record, "parent_series_tmdb_id"), "Series".into())
+        } else {
+            (id.clone(), kind.clone())
+        };
+        if !written_works.contains_key(&owner) {
+            let previous = if let Some((context, true)) = context {
+                context
+                    .completed(&format!("sync-written:{}:{}", owner.1, owner.0))
+                    .await?
+                    .and_then(|result| result["updated"].as_u64())
+                    .unwrap_or(0) as usize
+            } else {
+                0
+            };
+            written_works.insert(owner.clone(), previous);
+        }
+        let checkpoint = format!("sync-record:{kind}:{id}");
+        if let Some((context, true)) = context
+            && context.completed(&checkpoint).await?.is_some()
+        {
+            continue;
+        }
         if preserve_top_title {
             sqlx::query("SAVEPOINT sync_record")
                 .execute(&mut *transaction)
@@ -200,8 +250,6 @@ async fn write(
                 replace_child_bindings(&mut transaction, std::slice::from_mut(record)).await?;
             }
         }
-        let id = string(record, "tmdb_id");
-        let kind = string(record, "item_type");
         let type_label = match kind.as_str() {
             "Series" => "电视剧",
             "Movie" => "电影",
@@ -285,6 +333,7 @@ async fn write(
             );
             tracing::error!("{reason}，继续本批其他媒体项。");
             failures.push(reason);
+            failed_works.insert(owner.clone());
         }
         if preserve_top_title {
             sqlx::query("RELEASE SAVEPOINT sync_record")
@@ -292,10 +341,27 @@ async fn write(
                 .await?;
         }
         if written {
+            if let Some((context, _)) = context {
+                context
+                    .complete_in_tx(&mut transaction, &checkpoint, &json!({"written":1}))
+                    .await?;
+            }
             written_records += 1;
+            *written_works.entry(owner).or_insert(0) += 1;
             tracing::debug!(
                 "元数据库记录已写入事务：《{media_name}》，类型 {type_label}，TMDb {id}"
             );
+        }
+    }
+    if let Some((context, _)) = context {
+        for (work, written) in &written_works {
+            context
+                .complete_in_tx(
+                    &mut transaction,
+                    &format!("sync-written:{}:{}", work.1, work.0),
+                    &json!({"updated":written}),
+                )
+                .await?;
         }
     }
     transaction
@@ -307,8 +373,10 @@ async fn write(
         record_count - written_records
     );
     Ok(WriteReport {
-        written: written_records,
+        written: written_works.values().sum(),
         failures,
+        written_works,
+        failed_works,
     })
 }
 

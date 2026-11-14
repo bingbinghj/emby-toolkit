@@ -399,10 +399,29 @@ async fn submit(
     if kind.is_empty() || bytes.is_empty() && url.is_empty() {
         return Err(ApiError::bad("必须提供image_type及图片URL或file"));
     }
+    let payload = json!({"id":id,"kind":kind,"url":url,"bytes":base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes)});
     let work = state.clone();
-    let task = state
-        .jobs
-        .submit("替换媒体图片", move |context| async move {
+    let task = state.jobs.submit_persistent("替换媒体图片", crate::jobs::JobSpec::new("media_images", payload.clone()), move |context| async move {
+        Ok(execute_persisted(&work, &payload, &context).await?.1)
+    }).await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"task_id":task,"message":"替换媒体图片已提交"})),
+    ))
+}
+
+pub(crate) async fn execute_persisted(work: &AppState, payload: &Value, context: &crate::jobs::JobContext) -> Result<(u16, Value)> {
+    if let Some(result) = context.completed("image-done").await? { return Ok((200,result)); }
+    let id = string(payload, "id");
+    let kind = string(payload, "kind");
+    let url = string(payload, "url");
+    let mut bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, string(payload, "bytes"))
+        .map_err(|_| ApiError::bad("图片任务数据无效"))?;
+    if let Some(saved) = context.plan("image-bytes").await? {
+        bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, saved.as_str().ok_or_else(||ApiError::bad("图片恢复数据无效"))?)
+            .map_err(|_|ApiError::bad("图片恢复数据无效"))?;
+    }
+
             context.checkpoint().await?;
             let item = details(&work, &id, "Type,Path,IndexNumber").await?;
             let (path, image_type) = destination(&item, &kind)?;
@@ -425,6 +444,7 @@ async fn submit(
             // Validate the actual bytes before replacing either the local or native image.
             image::load_from_memory(&bytes)
                 .map_err(|_| ApiError::bad("图片内容无法解码，原图未修改"))?;
+            context.save_plan("image-bytes", &json!(base64::Engine::encode(&base64::engine::general_purpose::STANDARD,&bytes))).await?;
             let content_type = image::guess_format(&bytes)
                 .map_err(|_| ApiError::bad("图片格式不支持，原图未修改"))?
                 .to_mime_type();
@@ -435,17 +455,36 @@ async fn submit(
                 string(&config, "emby_server_url").trim_end_matches('/')
             );
             let key = string(&config, "emby_api_key");
-            let native = read_image(&work, &url, &key).await?;
-            let local = match tokio::fs::read(&path).await {
+            let mut native = read_image(&work, &url, &key).await?;
+            let mut local = match tokio::fs::read(&path).await {
                 Ok(bytes) => Some(bytes),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(error) => return Err(error.into()),
             };
+            if native.as_deref() == Some(bytes.as_slice()) && local.as_deref() == Some(bytes.as_slice()) {
+                let result = json!({"message":format!("{kind} 替换成功！")});
+                context.complete("image-done",&result).await?;
+                let backup = work.data_dir.join("backups/image-replacement").join(&context.id);
+                if tokio::fs::try_exists(backup.join("manifest.json")).await? { let _ = tokio::fs::remove_dir_all(backup).await; }
+                return Ok((200,result));
+            }
             let backup = work
                 .data_dir
                 .join("backups/image-replacement")
-                .join(uuid::Uuid::new_v4().simple().to_string());
+                .join(if context.id.is_empty() { uuid::Uuid::new_v4().simple().to_string() } else { context.id.clone() });
             tokio::fs::create_dir_all(&backup).await?;
+            if tokio::fs::try_exists(backup.join("manifest.json")).await? {
+                let manifest: Value = serde_json::from_slice(&tokio::fs::read(backup.join("manifest.json")).await?)
+                    .map_err(|_| ApiError::bad("图片任务恢复记录无效"))?;
+                if manifest["id"] != id || manifest["path"] != json!(path) || manifest["image_type"] != image_type {
+                    return Err(ApiError::bad("图片任务恢复范围与当前媒体不一致"));
+                }
+                local = if manifest["local_existed"] == true { Some(tokio::fs::read(backup.join("local-original")).await?) } else { None };
+                native = if manifest["native_existed"] == true { Some(tokio::fs::read(backup.join("native-original")).await?) } else { None };
+                if tokio::fs::read(backup.join("replacement")).await? != bytes {
+                    return Err(ApiError::bad("图片任务恢复数据发生变化"));
+                }
+            } else {
             for (name, original) in [("local-original", &local), ("native-original", &native)] {
                 if let Some(original) = original {
                     save_image(&backup.join(name), original).await?;
@@ -461,6 +500,7 @@ async fn submit(
                 .unwrap(),
             )
             .await?;
+            }
             let finishing = crate::jobs::JobContext::for_recovery(Some(&context)).await;
             context.checkpoint().await?;
             let mut local_changed = false;
@@ -530,14 +570,56 @@ async fn submit(
                     ),
                 ));
             }
+            let result = json!({"message":format!("{kind} 替换成功！")});
+            context.complete("image-done",&result).await?;
             if let Err(error) = tokio::fs::remove_dir_all(&backup).await {
                 tracing::warn!(%error, path=%backup.display(), "图片验收成功，旧图备份暂未清理");
             }
-            Ok(json!({"message":format!("{kind} 替换成功！")}))
-        })
-        .await?;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(json!({"task_id":task,"message":"替换媒体图片已提交"})),
-    ))
+            Ok((200, result))
+}
+
+pub(crate) async fn resume_cleanup(state: &AppState, context: &crate::jobs::JobContext) -> Result<()> {
+    let backup = state.data_dir.join("backups/image-replacement").join(&context.id);
+    if !tokio::fs::try_exists(backup.join("manifest.json")).await? { return Ok(()); }
+    if context.completed("image-done").await?.is_some() { let _ = tokio::fs::remove_dir_all(&backup).await; return Ok(()); }
+    let manifest: Value = serde_json::from_slice(&tokio::fs::read(backup.join("manifest.json")).await?)
+        .map_err(|_|ApiError::bad("图片恢复记录无效"))?;
+    let id = string(&manifest,"id");
+    let kind = string(&manifest,"image_type");
+    let path = std::path::PathBuf::from(string(&manifest,"path"));
+    let item = details(state,&id,"Id,Path,Type,IndexNumber").await?;
+    let (expected_path,expected_kind) = destination(&item,&kind)?;
+    if item["Id"] != id || path != expected_path || kind != expected_kind {
+        return Err(ApiError::bad("图片恢复所属媒体身份或路径变化"));
+    }
+    let config = state.config.read().await.clone();
+    let url = format!("{}/Items/{id}/Images/{kind}",string(&config,"emby_server_url").trim_end_matches('/'));
+    let key = string(&config,"emby_api_key");
+    let replacement = tokio::fs::read(backup.join("replacement")).await?;
+    let original_local = if manifest["local_existed"] == true { Some(tokio::fs::read(backup.join("local-original")).await?) } else { None };
+    let original_native = if manifest["native_existed"] == true { Some(tokio::fs::read(backup.join("native-original")).await?) } else { None };
+    let current_local = match tokio::fs::read(&path).await {
+        Ok(bytes)=>Some(bytes), Err(error) if error.kind()==std::io::ErrorKind::NotFound=>None, Err(error)=>return Err(error.into()),
+    };
+    let current_native = read_image(state,&url,&key).await?;
+    if current_local.as_deref() == Some(replacement.as_slice()) && current_native.as_deref() == Some(replacement.as_slice()) { return Ok(()); }
+    if current_local.as_ref().is_some_and(|bytes|bytes != &replacement && Some(bytes) != original_local.as_ref())
+        || current_native.as_ref().is_some_and(|bytes|bytes != &replacement && Some(bytes) != original_native.as_ref()) {
+        return Err(ApiError::bad("图片中断后出现新内容，原图备份保留，未覆盖当前图片"));
+    }
+    match &original_local {
+        Some(bytes)=>save_image(&path,bytes).await?,
+        None=>match tokio::fs::remove_file(&path).await { Ok(())=>(), Err(error) if error.kind()==std::io::ErrorKind::NotFound=>(), Err(error)=>return Err(error.into()) },
+    }
+    if current_native != original_native {
+        delete_image(state,&url,&key).await?;
+        if let Some(bytes) = &original_native {
+            let mime = image::guess_format(bytes).map_err(|_|ApiError::bad("原图备份不能解码"))?.to_mime_type();
+            upload_image(state,&url,&key,mime,bytes).await?;
+        }
+        let finishing = crate::jobs::JobContext::for_recovery(Some(context)).await;
+        crate::emby::refresh_item(state,&id,false,&finishing).await?;
+    }
+    verify_image(state,&url,&key,original_native.as_deref(),Some(&replacement)).await?;
+    Ok(())
 }
