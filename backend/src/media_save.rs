@@ -426,12 +426,13 @@ pub(crate) async fn reload_filled_titles(
     recovery: &std::path::Path,
 ) -> Result<Vec<String>> {
     let mut pending = ids.iter().cloned().collect::<BTreeSet<_>>();
+    let mut visited = BTreeSet::new();
     let mut saved = BTreeMap::new();
     let mappings = crate::db::setting(&state.db, "language_mapping")
         .await?
         .unwrap_or(json!([]));
     while let Some(id) = pending.pop_first() {
-        if saved.contains_key(&id) {
+        if !visited.insert(id.clone()) {
             continue;
         }
         context.checkpoint().await?;
@@ -514,19 +515,19 @@ pub(crate) async fn reload_filled_titles(
                     .filter(|v| !v.is_empty()),
             );
         }
-        saved.insert(
-            id.clone(),
-            SavedTarget {
-                id,
-                path: target.path,
-                source,
-                sha: target.sha,
-                asset: (!target.kind.is_empty()).then_some(target.asset),
-                info,
-                refresh_required: true,
-            },
-        );
+        let prepared = SavedTarget {
+            id: id.clone(), path: target.path, source, sha: target.sha,
+            asset: (!target.kind.is_empty()).then_some(target.asset), info,
+            refresh_required: true,
+        };
+        let paths = [prepared.path.as_str(), prepared.source.as_deref().unwrap_or("")];
+        let unchanged = crate::media_reload::differences(&prepared,&live).is_empty()
+            && media_info::container(&prepared.info).zip(media_info::item_source(&live,&paths))
+                .is_some_and(|(expected,actual)| ["Size","RunTimeTicks"].iter().all(|field|
+                    expected[*field].is_null() || crate::identity::size(&expected[*field])==crate::identity::size(&actual[*field])));
+        if !unchanged { saved.insert(id,prepared); }
     }
+    if saved.is_empty() { return Ok(vec![]); }
     crate::media_reload::reload(
         state,
         &saved.into_values().collect::<Vec<_>>(),

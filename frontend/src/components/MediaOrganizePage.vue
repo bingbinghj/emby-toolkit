@@ -1,9 +1,10 @@
+<!-- 布局参考 MoviePilot-Frontend v3 TransferHistoryView/ReorganizeDialog（MIT），许可证见 frontend/third-party/MoviePilot-LICENSE。 -->
 <template>
   <div ref="pageElement" class="mp-page media-organize-page" :class="{ 'media-organize-page--desktop': !smAndDown }" :style="smAndDown ? undefined : { blockSize: `${desktopPageHeight}px` }">
     <div class="organize-controls">
-      <VCard class="mb-4">
-        <VCardText>
-          <div class="organize-toolbar">
+          <header class="organize-toolbar">
+            <h2 class="text-h5 organize-page-title">媒体整理</h2>
+            <div class="organize-toolbar-actions">
             <VTextField v-model="search" label="搜索入库记录" aria-label="搜索入库记录" placeholder="按名称查找" prepend-inner-icon="mdi-magnify" clearable variant="solo" flat rounded="pill" hide-details density="compact" class="organize-search" :disabled="processing" @keyup.enter="searchItems" @click:clear="clearSearch" @compositionstart="searchComposing = true" @compositionend="finishSearchComposition">
               <template #append-inner><VBtn icon="mdi-magnify" variant="text" size="small" aria-label="搜索" :loading="loadingItems" :disabled="processing" @click.stop="searchItems" /></template>
             </VTextField>
@@ -17,18 +18,27 @@
               </VList>
             </VMenu>
             <VBtn icon="mdi-refresh" variant="text" color="default" aria-label="刷新入库记录" :loading="loadingItems" :disabled="processing" @click="loadItems" />
-            <VBtn color="primary" variant="tonal" prepend-icon="mdi-refresh" :disabled="!canReorganize" :loading="processing" data-testid="organize-selected" @click="openConfirmation">媒体整理 {{ selectedMediaCount || '' }}</VBtn>
-          </div>
-        </VCardText>
-      </VCard>
+            </div>
+          </header>
 
-      <VAlert v-if="selectedItems.length" type="info" variant="tonal" class="mb-4" data-testid="organize-selection">
-        <div class="d-flex flex-wrap align-center ga-3"><span>已选择 {{ selectedItems.length }} 条记录，对应 {{ selectedMediaCount }} 项媒体，跨分页保留选择。</span><VBtn size="small" variant="text" :disabled="processing" @click="selectedItems = []">清空选择</VBtn></div>
+      <VCard v-if="selectedItems.length" class="organize-selection" role="group" aria-label="批量选择" data-testid="organize-selection">
+        <div class="organize-selection-actions">
+          <VCheckbox :model-value="allPageSelected" :indeterminate="pageSelectedCount > 0 && !allPageSelected" label="全选本页" density="compact" hide-details :disabled="!canSelectItems() || !selectablePageItems.length" data-testid="organize-select-page" @update:model-value="selectPage" />
+          <span class="text-caption text-medium-emphasis">已选择 {{ selectedItems.length }} 条记录，对应 {{ selectedMediaCount }} 项媒体</span>
+          <VBtn size="small" color="primary" variant="tonal" prepend-icon="mdi-redo-variant" :disabled="!canReorganize" :loading="processing" data-testid="organize-selected" @click="openReprocessConfirmation">重新整理</VBtn>
+          <VBtn size="small" color="info" variant="tonal" prepend-icon="mdi-movie-search-outline" :disabled="!canReorganize" data-testid="organize-selected-rescrape" @click="openRescrapeConfirmation">重新刮削</VBtn>
+          <VBtn size="small" variant="text" :disabled="processing" @click="selectedItems = []">取消选择</VBtn>
+          <VBtn size="small" variant="text" :append-icon="selectionDetails ? 'mdi-chevron-up' : 'mdi-chevron-down'" data-testid="organize-selection-details" @click="selectionDetails = !selectionDetails">已选记录</VBtn>
+        </div>
+        <div v-if="selectionDetails" class="organize-selection-records">
+        <div class="text-caption text-medium-emphasis">跨分页保留选择。</div>
         <VVirtualScroll v-if="selectedItems.length > 100" :items="selectedItems" :height="160" :item-height="38" class="mt-2" tabindex="0" aria-label="已选择的入库记录" data-testid="organize-selected-scroll">
           <template #default="{ item }"><div class="pb-2"><VChip size="small" closable :disabled="processing" @click:close="removeSelection(item.id)">{{ itemTitle(item) }}{{ episodeLabel(item) ? ` · ${episodeLabel(item)}` : '' }} · {{ statusPresentation(item).title }}</VChip></div></template>
         </VVirtualScroll>
         <div v-else class="d-flex flex-wrap ga-2 mt-2"><VChip v-for="item in selectedItems" :key="item.id" size="small" closable :disabled="processing" @click:close="removeSelection(item.id)">{{ itemTitle(item) }}{{ episodeLabel(item) ? ` · ${episodeLabel(item)}` : '' }} · {{ statusPresentation(item).title }}</VChip></div>
-      </VAlert>
+        </div>
+      </VCard>
+      <div v-else class="organize-summary text-medium-emphasis">{{ total === null ? '正在读取入库记录' : `共 ${total} 条记录，${pages} 页` }}</div>
 
       <VAlert v-if="itemsError" type="error" variant="tonal" class="mb-4" data-testid="organize-load-error">{{ itemsError }}<VBtn variant="text" :loading="loadingItems" @click="loadItems">重新读取</VBtn></VAlert>
       <VAlert v-if="feedback" :type="feedback.type" :title="feedback.message" variant="tonal" class="mb-4" data-testid="organize-result">
@@ -37,7 +47,7 @@
 
     </div>
 
-    <VCard class="organize-history-card">
+    <div class="organize-history-card">
       <div v-if="smAndDown" class="history-cards pa-3" data-testid="organize-items-mobile">
         <VProgressLinear v-if="loadingItems" indeterminate />
         <VVirtualScroll :key="loadedQuery" :items="items" :item-height="160" :height="largePage ? listHeight : undefined" :renderless="!largePage" class="history-card-scroll">
@@ -57,6 +67,7 @@
                     <div v-if="item.message" class="text-body-2 mt-2 history-message">{{ item.message }}</div>
                     <div v-if="!item.item_id" class="text-caption text-medium-emphasis mt-1">尚未关联媒体，暂不能重新整理。</div>
                   </div>
+                  <VMenu location="bottom end"><template #activator="{ props }"><VBtn v-bind="props" icon="mdi-dots-vertical" variant="text" color="default" size="small" :aria-label="`${itemTitle(item)} 操作`" /></template><VList min-width="180"><VListItem title="重新整理" prepend-icon="mdi-redo-variant" :disabled="!canSelectRecord(item)" @click="openRecordConfirmation(item, 'reprocess')" /><VListItem title="重新刮削" prepend-icon="mdi-movie-search-outline" :disabled="!canSelectRecord(item)" @click="openRecordConfirmation(item, 'rescrape')" /><VListItem v-if="item.item_id" title="媒体信息编辑" prepend-icon="mdi-pencil-outline" :to="`/edit-media/${encodeURIComponent(item.item_id)}`" /></VList></VMenu>
                 </VCardText>
               </VCard>
             </div>
@@ -64,29 +75,40 @@
         </VVirtualScroll>
         <div v-if="!items.length && !loadingItems" class="py-8 text-center text-medium-emphasis">{{ emptyText }}</div>
       </div>
-      <VDataTableVirtual v-else :key="loadedQuery" :headers="headers" :items="items" item-value="id" show-select :model-value="selectedIds" :loading="loadingItems" :item-selectable="canSelectRecord" height="100%" :item-height="96" fixed-header class="organize-items-desktop" hide-default-footer data-testid="organize-items" @update:model-value="updateSelection">
-        <template #item.name="{ item }">
-          <div class="d-flex align-center ga-3 py-2"><VAvatar rounded width="42" height="63"><VImg v-if="poster(item)" :src="poster(item)" :alt="itemTitle(item)" cover /><VIcon v-else icon="mdi-movie-open-outline" /></VAvatar><div class="organize-media-copy"><VBtn v-if="item.item_id" variant="text" color="default" class="media-title text-none px-0" :to="`/edit-media/${encodeURIComponent(item.item_id)}`">{{ itemTitle(item) }}</VBtn><div v-else class="font-weight-medium">{{ itemTitle(item) }}</div><div v-if="episodeLabel(item)" class="text-caption text-medium-emphasis">{{ episodeLabel(item) }}</div><div v-if="!item.item_id" class="text-caption text-medium-emphasis">尚未关联媒体</div></div></div>
+      <VDataTableVirtual v-else :key="loadedQuery" :headers="headers" :items="items" item-value="id" :loading="loadingItems" density="compact" height="100%" :item-height="100" class="organize-items-desktop" hide-default-header hide-default-footer data-testid="organize-items">
+        <template #item="{ item, columns, itemRef }">
+          <tr :ref="itemRef" class="organize-record-row"><td :colspan="columns.length">
+            <VCard class="organize-record" :class="{ 'organize-record--selected': selectedIds.includes(item.id) }">
+              <VCheckbox :model-value="selectedIds.includes(item.id)" :disabled="!canSelectRecord(item)" :aria-label="`选择 ${itemTitle(item)}`" density="compact" hide-details @update:model-value="toggleSelection(item, $event)" />
+              <VAvatar rounded width="42" height="63"><VImg v-if="poster(item)" :src="poster(item)" :alt="itemTitle(item)" cover /><VIcon v-else icon="mdi-movie-open-outline" /></VAvatar>
+              <div class="organize-media-copy"><VBtn v-if="item.item_id" variant="text" color="default" class="media-title text-none px-0" :to="`/edit-media/${encodeURIComponent(item.item_id)}`">{{ itemTitle(item) }}</VBtn><div v-else class="font-weight-medium">{{ itemTitle(item) }}</div><div class="text-caption text-medium-emphasis">{{ episodeLabel(item) || (item.item_type === 'Movie' ? '电影' : '剧集') }}</div><div v-if="!item.item_id" class="text-caption text-medium-emphasis">尚未关联媒体</div></div>
+              <div class="organize-record-meta text-caption text-medium-emphasis"><div>{{ item.library_name || '—' }}</div><div v-if="item.file_name" :title="item.file_name" class="organize-file-name">{{ item.file_name }}</div><div>{{ formatDate(item.created_at) }}</div></div>
+              <div class="organize-record-status"><VChip size="small" variant="tonal" :color="statusPresentation(item).color">{{ statusPresentation(item).title }}</VChip><div v-if="item.message" class="text-body-2 mt-1 history-message">{{ item.message }}</div></div>
+              <VMenu location="bottom end"><template #activator="{ props }"><VBtn v-bind="props" icon="mdi-dots-vertical" variant="text" color="default" :aria-label="`${itemTitle(item)} 操作`" /></template><VList min-width="180"><VListItem title="重新整理" prepend-icon="mdi-redo-variant" :disabled="!canSelectRecord(item)" @click="openRecordConfirmation(item, 'reprocess')" /><VListItem title="重新刮削" prepend-icon="mdi-movie-search-outline" :disabled="!canSelectRecord(item)" @click="openRecordConfirmation(item, 'rescrape')" /><VListItem v-if="item.item_id" title="媒体信息编辑" prepend-icon="mdi-pencil-outline" :to="`/edit-media/${encodeURIComponent(item.item_id)}`" /></VList></VMenu>
+            </VCard>
+          </td></tr>
         </template>
-        <template #item.item_type="{ item }"><VChip size="small" variant="tonal" :color="item.item_type === 'Movie' ? 'primary' : 'success'">{{ item.item_type === 'Movie' ? '电影' : '剧集' }}</VChip></template>
-        <template #item.created_at="{ item }">{{ formatDate(item.created_at) }}</template>
-        <template #item.status="{ item }"><VChip size="small" variant="tonal" :color="statusPresentation(item).color">{{ statusPresentation(item).title }}</VChip><div v-if="item.message" class="text-body-2 mt-1 history-message">{{ item.message }}</div></template>
         <template #no-data><div class="py-8 text-medium-emphasis">{{ emptyText }}</div></template>
       </VDataTableVirtual>
-      <VCardActions class="organize-pagination">
+      <footer ref="paginationElement" class="organize-pagination" data-testid="organize-footer">
         <VSelect :model-value="pageSize" :items="pageSizeOptions" density="compact" variant="solo" flat rounded="pill" hide-details aria-label="每页条数" title="每页条数" class="organize-page-size" :disabled="processing" data-testid="organize-page-size" @update:model-value="changePageSize" />
         <span class="organize-pagination-info text-medium-emphasis" :aria-label="total === null ? '总数未确认' : `第 ${pageTip.begin} 至 ${pageTip.end} 条，共 ${total} 条记录`" data-testid="organize-page-info">{{ total === null ? '总数未确认' : `${pageTip.begin} - ${pageTip.end} / ${total}` }}</span>
-        <VPagination v-if="pages > 1" v-model="page" show-first-last-page :length="pages" :total-visible="smAndDown ? 3 : 7" :disabled="loadingItems || processing" data-testid="organize-pagination" @update:model-value="loadItems" />
-      </VCardActions>
-    </VCard>
+        <VPagination v-model="page" show-first-last-page :length="pages" :total-visible="smAndDown ? 3 : 7" :disabled="loadingItems || processing" data-testid="organize-pagination" @update:model-value="loadItems" />
+      </footer>
+    </div>
 
-    <VDialog v-model="confirmationOpen" max-width="640" :persistent="processing">
-      <VCard>
-        <VCardTitle class="text-wrap">确认{{ operationLabel(confirmationMode) }} {{ confirmationMediaCount }} 项媒体</VCardTitle>
+    <VDialog v-model="confirmationOpen" max-width="720" scrollable :fullscreen="smAndDown" :persistent="processing">
+      <VCard class="organize-confirmation-card">
+        <VCardItem class="py-2">
+          <template #prepend><VIcon icon="mdi-folder-move" class="me-2" /></template>
+          <VCardTitle>确认{{ operationLabel(confirmationMode) }}</VCardTitle>
+          <VCardSubtitle>{{ confirmationItems.length }} 条记录，{{ confirmationMediaCount }} 项媒体</VCardSubtitle>
+          <template #append><VBtn icon="mdi-close" variant="text" aria-label="关闭整理确认" :disabled="processing" @click="confirmationOpen = false" /></template>
+        </VCardItem>
+        <VDivider />
         <VCardText>
-          <VRadioGroup v-model="confirmationMode" inline :disabled="processing" label="整理操作" data-testid="organize-mode"><VRadio label="重新整理入库" value="reprocess" /><VRadio label="重新刮削" value="rescrape" /></VRadioGroup>
-          <p v-if="confirmationMode === 'rescrape'">更新元数据、NFO 和图片，保留已有媒体信息、音轨和章节。剧集只处理所选单集，同一媒体的多条记录合并为一次刮削。</p>
-          <p v-else>将重新执行媒体信息重建、回读验收和元数据增强。电影包含关联版本，剧集只处理所选单集。同一媒体的多条记录合并为一次整理。</p>
+          <VSelect v-model="confirmationMode" :items="operationOptions" :disabled="processing" label="整理方式" prepend-inner-icon="mdi-swap-horizontal" :hint="confirmationMode === 'rescrape' ? '更新元数据、NFO 和图片，保留已有媒体信息、音轨和章节。' : '从所选媒体重新执行完整入库流程，包括媒体信息重建、回读验收和元数据增强。'" persistent-hint data-testid="organize-mode" />
+          <VAlert type="info" variant="tonal" density="compact" class="my-4">电影包含关联版本，剧集只处理所选单集。同一媒体的多条记录合并为一次{{ confirmationMode === 'rescrape' ? '刮削' : '整理' }}。</VAlert>
           <VList bg-color="transparent" density="compact">
             <VVirtualScroll v-if="confirmationItems.length > 100" :items="confirmationItems" :height="Math.min(listHeight, 384)" :item-height="64" tabindex="0" aria-label="本次整理的媒体" data-testid="organize-confirmation-scroll">
               <template #default="{ item }"><VListItem :title="itemTitle(item)" :subtitle="`${episodeLabel(item) || (item.item_type === 'Movie' ? '电影' : '剧集')} · ${item.item_id}`" /></template>
@@ -94,12 +116,12 @@
             <template v-else><VListItem v-for="item in confirmationItems" :key="item.id" :title="itemTitle(item)" :subtitle="`${episodeLabel(item) || (item.item_type === 'Movie' ? '电影' : '剧集')} · ${item.item_id}`" /></template>
           </VList>
         </VCardText>
-        <VCardActions><VSpacer /><VBtn variant="text" :disabled="processing" @click="confirmationOpen = false">取消</VBtn><VBtn color="primary" variant="flat" :loading="processing" data-testid="organize-confirm" @click="reorganize">加入{{ operationLabel(confirmationMode) }}队列</VBtn></VCardActions>
+        <VDivider /><VCardActions><VSpacer /><VBtn variant="tonal" color="secondary" :disabled="processing" @click="confirmationOpen = false">取消</VBtn><VBtn color="primary" variant="flat" :loading="processing" data-testid="organize-confirm" @click="reorganize">加入{{ operationLabel(confirmationMode) }}队列</VBtn></VCardActions>
       </VCard>
     </VDialog>
     <MediaOrganizeQueueDialog v-model="queueOpen" :queue="queue" />
     <Teleport to="body">
-      <div class="compact-fab-stack compact-fab-stack--history organize-queue-fab">
+      <div class="compact-fab-stack compact-fab-stack--history organize-queue-fab" :class="{ 'organize-queue-fab--desktop': !smAndDown }" :style="smAndDown ? undefined : { insetBlockEnd: `${desktopFabBottom}px` }">
         <VBadge :content="pendingQueueCount" :model-value="pendingQueueCount > 0" color="error">
           <VBtn icon="mdi-timer-sand-paused" color="primary" size="large" class="compact-fab compact-fab--primary" aria-label="整理队列" title="整理队列" data-testid="organize-queue-open" @click="openQueue" />
         </VBadge>
@@ -127,15 +149,17 @@ const pageSizeOptions = [25, 50, 100, 500, 1000];
 const pageSize = ref(50);
 const largePage = computed(() => pageSize.value >= 500);
 const listHeight = computed(() => Math.min(640, Math.max(240, viewportHeight.value * 0.65)));
-const pageElement = ref(null), contentBottomInset = ref(24);
+const pageElement = ref(null), paginationElement = ref(null), contentBottomInset = ref(24);
 const { top: pageTop } = useElementBounding(pageElement);
+const { top: paginationTop } = useElementBounding(paginationElement);
 const desktopPageHeight = computed(() => Math.max(0, viewportHeight.value - Math.max(0, pageTop.value) - contentBottomInset.value));
+const desktopFabBottom = computed(() => Math.max(72, viewportHeight.value - paginationTop.value + 24));
 // 布局已为 Dock 和安全区域预留底部 padding，按实际值计算，避免重复扣除。
 watch([pageElement, viewportWidth, viewportHeight], () => {
   const layout = pageElement.value?.closest('.layout-page-content');
   if (layout) contentBottomInset.value = parseFloat(getComputedStyle(layout).paddingBottom) || 0;
 }, { flush: 'post' });
-const selectedItems = ref([]), confirmationItems = ref([]), confirmationOpen = ref(false), confirmationMode = ref('reprocess'), queueOpen = ref(false);
+const selectedItems = ref([]), selectionDetails = ref(false), confirmationItems = ref([]), confirmationOpen = ref(false), confirmationMode = ref('reprocess'), queueOpen = ref(false);
 const loadingItems = ref(false), itemsError = ref(''), processing = ref(false), feedback = ref(null);
 let active = true, itemSequence = 0, searchTimer;
 const loadedQuery = ref('');
@@ -151,6 +175,10 @@ const canSelectItems = () => !processing.value && !loadingItems.value && !itemsE
 const isReadyRecord = item => ['Movie', 'Episode'].includes(item.item_type) && typeof item.item_id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(item.item_id) && ['success', 'warning', 'failed'].includes(item.status);
 const canSelectRecord = item => canSelectItems() && isReadyRecord(item);
 const headers = [{ title: '媒体', key: 'name', sortable: false }, { title: '媒体库', key: 'library_name', sortable: false }, { title: '类型', key: 'item_type', sortable: false }, { title: '处理开始时间', key: 'created_at', sortable: false }, { title: '状态', key: 'status', sortable: false }];
+const selectablePageItems = computed(() => items.value.filter(isReadyRecord));
+const pageSelectedCount = computed(() => selectablePageItems.value.filter(item => selectedIds.value.includes(item.id)).length);
+const allPageSelected = computed(() => selectablePageItems.value.length > 0 && pageSelectedCount.value === selectablePageItems.value.length);
+const selectPage = enabled => updateSelection(enabled ? [...selectedIds.value, ...selectablePageItems.value.map(item => item.id)] : selectedIds.value.filter(id => !selectablePageItems.value.some(item => item.id === id)));
 const itemTitle = item => (item.item_type === 'Episode' ? item.series_name || item.name : item.name) || '未知媒体';
 const episodeLabel = item => {
   if (item.item_type !== 'Episode') return '';
@@ -210,6 +238,7 @@ const changePageSize = async value => {
 const queue = useMediaOrganizeQueue({ onSettled: loadItems });
 const pendingQueueCount = computed(() => queue.queuedCount + queue.runningCount);
 const operationLabel = mode => mode === 'rescrape' ? '重新刮削' : '重新整理入库';
+const operationOptions = [{ title: '重新整理入库', value: 'reprocess' }, { title: '重新刮削', value: 'rescrape' }];
 const openQueue = () => { queueOpen.value = true; void queue.refresh(); };
 
 const searchItems = () => { clearTimeout(searchTimer); if (searchComposing.value || processing.value) return; appliedSearch.value = search.value?.trim() || ''; page.value = 1; loadItems(); };
@@ -232,6 +261,14 @@ const toggleSelection = (item, enabled) => updateSelection(enabled ? [...selecte
 const openConfirmation = () => {
   if (processing.value || !selectedItems.value.length || !selectedItems.value.every(isReadyRecord)) return;
   confirmationItems.value = selectedItems.value.map(item => ({ ...item }));
+  confirmationOpen.value = true;
+};
+const openRescrapeConfirmation = () => { if (canReorganize.value) { confirmationMode.value = 'rescrape'; openConfirmation(); } };
+const openReprocessConfirmation = () => { if (canReorganize.value) { confirmationMode.value = 'reprocess'; openConfirmation(); } };
+const openRecordConfirmation = (item, mode) => {
+  if (!canSelectRecord(item)) return;
+  confirmationItems.value = [{ ...item }];
+  confirmationMode.value = mode;
   confirmationOpen.value = true;
 };
 const reorganize = async () => {
@@ -289,12 +326,33 @@ onBeforeUnmount(() => { active = false; ++itemSequence; clearTimeout(searchTimer
 <style scoped>
 .media-organize-page { width: 100%; min-width: 0; }
 .media-organize-page--desktop { display: flex; flex-direction: column; min-block-size: 0; overflow: hidden; }
+.media-organize-page { display: flex; flex-direction: column; gap: 12px; }
 .media-organize-page--desktop .organize-controls { flex: 0 1 auto; min-block-size: 0; max-block-size: 50%; overflow: auto; overscroll-behavior: contain; }
+.organize-controls { display: flex; flex-direction: column; gap: 12px; }
 .media-organize-page--desktop .organize-history-card { display: flex; flex-direction: column; flex: 1 1 0; min-block-size: 0; }
 .organize-items-desktop { flex: 1 1 0; min-block-size: 0; }
 .organize-queue-fab { z-index: 1100; }
-.organize-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
-.organize-search { flex: 1 1 280px; min-width: 0; }
+.organize-queue-fab--desktop { inset-inline-end: max(2rem, calc(env(safe-area-inset-right) + 2rem)); }
+.organize-toolbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; }
+.organize-page-title { margin: 0; flex: 0 0 auto; }
+.organize-toolbar-actions { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.organize-search { inline-size: clamp(12rem, 24vw, 24rem); flex: 0 1 auto; min-width: 0; margin-inline-end: 8px; }
+.organize-search :deep(.v-field), .organize-page-size :deep(.v-field) { border: 0 !important; border-radius: var(--app-vuetify-rounded-pill); background: rgba(var(--v-theme-surface-variant), 0.04) !important; box-shadow: none !important; min-block-size: 42px; }
+.organize-search :deep(.v-field__outline), .organize-search :deep(.v-field__overlay), .organize-page-size :deep(.v-field__outline), .organize-page-size :deep(.v-field__overlay) { display: none; }
+.organize-selection { flex: 0 0 auto; }
+.organize-selection-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 8px 16px; min-block-size: 58px; }
+.organize-selection-actions > .v-input { flex: 0 0 auto; }
+.organize-selection-records { padding: 0 16px 12px; }
+.organize-summary { padding-inline: 16px; font-size: 0.85rem; }
+.organize-record-row > td { padding: 0 0 10px !important; border: 0 !important; }
+.organize-record { display: flex; align-items: center; gap: 12px; min-block-size: 90px; padding: 8px 12px; }
+.organize-record > .v-input { flex: 0 0 auto; }
+.organize-record--selected { outline: 1px solid rgba(var(--v-theme-primary), 0.45); outline-offset: -1px; }
+.organize-record-meta { flex: 0 1 28%; min-width: 0; }
+.organize-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.organize-record-status { flex: 0 1 22%; min-width: 120px; }
+.organize-items-desktop { background: transparent; }
+.organize-items-desktop :deep(.v-table__wrapper) { scrollbar-gutter: stable; }
 .organize-media-copy { min-width: 0; flex: 1; }
 .media-title { max-width: 100%; height: auto; min-height: 36px; padding-block: 4px !important; border-radius: 0; white-space: normal; text-align: start; }
 .media-title :deep(.v-btn__content) { white-space: normal; overflow-wrap: anywhere; }
@@ -313,5 +371,7 @@ onBeforeUnmount(() => { active = false; ++itemSequence; clearTimeout(searchTimer
 .organize-page-size { flex: 0 0 100px; }
 .organize-pagination-info { font-size: 0.8rem; }
 .organize-pagination :deep(.v-pagination) { margin-inline-start: auto; }
-@media (max-width: 540px) { .media-organize-page :deep(.v-card-actions .v-pagination) { width: 100%; } }
+.organize-pagination :deep(.v-pagination__item), .organize-pagination :deep(.v-pagination__first), .organize-pagination :deep(.v-pagination__prev), .organize-pagination :deep(.v-pagination__next), .organize-pagination :deep(.v-pagination__last) { margin-block: 0; }
+@media (max-width: 959px) { .organize-toolbar-actions { flex: 1 1 100%; } .organize-search { flex: 1 1 auto; } }
+@media (max-width: 540px) { .organize-pagination :deep(.v-pagination) { width: 100%; } }
 </style>

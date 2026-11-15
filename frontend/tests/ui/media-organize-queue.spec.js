@@ -19,7 +19,7 @@ const openQueue = async page => {
 const refreshQueue = page => page.getByRole('button', { name: '刷新整理队列', exact: true }).click();
 
 for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 }]) {
-  test(`the queue opens from the lower right at ${viewport.width}px without widening the page`, async ({ page, api }) => {
+  test(`the queue opens above pagination on desktop and above the dock on mobile at ${viewport.width}px without widening the page`, async ({ page, api }) => {
     await page.setViewportSize(viewport);
     api.respond('GET', historyPath, historyPage([]));
     api.respond('GET', queuePath, queuePage([]));
@@ -28,7 +28,13 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     await expect(button).toBeVisible();
     const bounds = await button.boundingBox();
     expect(bounds.x).toBeGreaterThan(viewport.width - 120);
-    expect(bounds.y).toBeGreaterThan(viewport.height - 200);
+    if (viewport.width >= 960) {
+      const footer = await page.getByTestId('organize-footer').boundingBox();
+      expect(bounds.y + bounds.height).toBeLessThanOrEqual(footer.y - 20);
+      expect(viewport.width - bounds.x - bounds.width).toBeGreaterThanOrEqual(30);
+    } else {
+      expect(bounds.y).toBeGreaterThan(viewport.height - 200);
+    }
     expect(bounds.x + bounds.width).toBeLessThanOrEqual(viewport.width);
     await openQueue(page);
     await expect(page.getByTestId('organize-queue-dialog')).toContainText('当前没有整理任务');
@@ -50,7 +56,8 @@ test('rescraping one episode enters the queue immediately without claiming compl
   await page.goto('/media-organize');
   await page.getByTestId('organize-items').locator('tbody tr').filter({ has: page.locator('input[type="checkbox"]') }).first().getByRole('checkbox').check();
   await page.getByTestId('organize-selected').click();
-  await page.getByTestId('organize-mode').getByRole('radio', { name: '重新刮削', exact: true }).check();
+  await page.getByTestId('organize-mode').click();
+  await page.locator('.v-overlay--active').getByRole('option', { name: '重新刮削', exact: true }).click();
   await expect(page.locator('.v-overlay--active').filter({ has: page.getByTestId('organize-confirm') })).toContainText('保留已有媒体信息、音轨和章节');
   await page.getByTestId('organize-confirm').click();
   await expect(page.getByTestId('organize-queue-dialog')).toBeVisible();

@@ -1,10 +1,13 @@
 use crate::{
     AppState,
     error::{ApiError, Result},
+    jobs::JobContext,
     media_edit::list,
     state::string,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 tokio::task_local! { static OPERATOR: String; }
@@ -200,7 +203,24 @@ fn enabled(config: &Value, kind: &str) -> bool {
 
 /// Like MP, automatic admissions without an operating user fall back to administrators.
 /// Emby's configured service account must never be mistaken for that operating user.
-async fn targets(state: &AppState, config: &Value, kind: &str) -> BTreeSet<String> {
+async fn targets(state: &AppState, config: &Value, kind: &str) -> Result<BTreeSet<String>> {
+    let Some(context) = crate::jobs::current_context().filter(JobContext::is_persistent) else {
+        return targets_once(state, config, kind).await;
+    };
+    loop {
+        context.checkpoint().await?;
+        let result = tokio::select! {
+            result = targets_once(state, config, kind) => result,
+            _ = context.cancelled() => return Err(ApiError(reqwest::StatusCode::CONFLICT, "任务已取消".into())),
+        };
+        match result {
+            Err(error) if error.0.is_server_error() => retry_registration(&context, &error).await?,
+            result => return result,
+        }
+    }
+}
+
+async fn targets_once(state: &AppState, config: &Value, kind: &str) -> Result<BTreeSet<String>> {
     let action = config["notification_scope"][kind]
         .as_str()
         .unwrap_or("admin");
@@ -210,8 +230,7 @@ async fn targets(state: &AppState, config: &Value, kind: &str) -> BTreeSet<Strin
         && !sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM emby_users WHERE id=$1)")
             .bind(id)
             .fetch_one(&state.db)
-            .await
-            .unwrap_or(false)
+            .await?
     {
         actor = None;
     }
@@ -222,20 +241,16 @@ async fn targets(state: &AppState, config: &Value, kind: &str) -> BTreeSet<Strin
         "SELECT e.telegram_chat_id FROM emby_users u JOIN emby_users_extended e ON u.id=e.emby_user_id WHERE ($1 OR ($2 AND u.is_administrator=true) OR ($3 AND u.id=$4)) AND e.telegram_chat_id IS NOT NULL AND COALESCE(e.status,'active')='active' AND COALESCE(u.policy_json->>'IsDisabled','false')='false'",
     )
     .bind(all).bind(admin).bind(user).bind(actor.as_deref())
-    .fetch_all(&state.db).await
-    .unwrap_or_else(|error| {
-        tracing::warn!("[通知] 读取用户接收列表失败：{error}");
-        vec![]
-    })
+    .fetch_all(&state.db).await?
     .into_iter().flatten().collect();
     let channel = string(config, "telegram_channel_id");
     if (admin || all) && !channel.trim().is_empty() {
         targets.insert(channel);
     }
     if admin || all {
-        targets.extend(principal_ids(config, "telegram_admins").unwrap_or_default());
+        targets.extend(principal_ids(config, "telegram_admins")?);
     }
-    targets
+    Ok(targets
         .into_iter()
         .filter_map(|target| {
             let target = target.trim();
@@ -247,7 +262,7 @@ async fn targets(state: &AppState, config: &Value, kind: &str) -> BTreeSet<Strin
                 Some(target.to_string())
             }
         })
-        .collect()
+        .collect())
 }
 
 pub struct Service {
@@ -364,6 +379,154 @@ async fn flush_ready(state: &AppState, only: Option<&str>) -> Result<()> {
     }
 }
 
+const REGISTRATION_PREFIX: &str = "notification-intent:";
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RegistrationIntent {
+    id: String,
+    kind: String,
+    method: String,
+    payload: Value,
+    created_at: i64,
+}
+
+fn registration_key(id: &str) -> String {
+    format!("{REGISTRATION_PREFIX}{:x}", Sha256::digest(id.as_bytes()))
+}
+
+fn registration_intent(key: &str, value: Value) -> Result<RegistrationIntent> {
+    let intent: RegistrationIntent = serde_json::from_value(value)
+        .map_err(|_| ApiError::bad("通知恢复计划格式无效，已保留原计划"))?;
+    let fields: &[&str] = match intent.method.as_str() {
+        "sendMessage" => &[
+            "chat_id",
+            "text",
+            "parse_mode",
+            "disable_web_page_preview",
+            "disable_notification",
+        ],
+        "sendPhoto" => &[
+            "chat_id",
+            "photo",
+            "caption",
+            "parse_mode",
+            "disable_notification",
+        ],
+        _ => return Err(ApiError::bad("通知恢复方法无效，已保留原计划")),
+    };
+    let payload = &intent.payload;
+    if intent.id.is_empty()
+        || registration_key(&intent.id) != key
+        || intent.created_at <= 0
+        || !matches!(intent.kind.as_str(), "library_new" | "recognize_fail")
+        || (intent.kind == "recognize_fail" && intent.method != "sendMessage")
+        || !payload
+            .as_object()
+            .is_some_and(|object| object.keys().all(|key| fields.contains(&key.as_str())))
+        || payload["chat_id"]
+            .as_str()
+            .is_none_or(|id| id.trim().is_empty())
+        || payload["parse_mode"] != "MarkdownV2"
+        || payload["disable_notification"] != false
+        || (intent.method == "sendMessage"
+            && (payload["text"].as_str().is_none_or(str::is_empty)
+                || payload["disable_web_page_preview"] != true))
+        || (intent.method == "sendPhoto"
+            && (payload["caption"].as_str().is_none_or(str::is_empty)
+                || payload["photo"]
+                    .as_str()
+                    .filter(|photo| photo.starts_with("https://image.tmdb.org/t/p/w780/"))
+                    .and_then(|photo| url::Url::parse(photo).ok())
+                    .is_none_or(|photo| {
+                        photo.scheme() != "https"
+                            || photo.host_str() != Some("image.tmdb.org")
+                            || !photo.path().starts_with("/t/p/w780/")
+                            || !photo.username().is_empty()
+                            || photo.password().is_some()
+                            || photo.query().is_some()
+                            || photo.fragment().is_some()
+                    })))
+    {
+        return Err(ApiError::bad("通知恢复内容无效，已保留原计划"));
+    }
+    Ok(intent)
+}
+
+async fn retry_registration(context: &JobContext, error: &ApiError) -> Result<()> {
+    if context.is_interrupted() {
+        return Err(ApiError(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "任务已中断，通知登记等待恢复".into(),
+        ));
+    }
+    tracing::warn!(task_id=%context.id, "[通知] 通知登记准备未确认，保留当前任务重试：{}", crate::logs::redact(&error.1));
+    context.sleep(std::time::Duration::from_secs(1)).await
+}
+
+async fn save_registration(
+    context: &JobContext,
+    intent: RegistrationIntent,
+) -> Result<RegistrationIntent> {
+    let key = registration_key(&intent.id);
+    loop {
+        context.checkpoint().await?;
+        let result = tokio::select! {
+            result = async {
+                if let Some(saved) = context.plan(&key).await? {
+                    return registration_intent(&key, saved);
+                }
+                context.save_plan(&key, &json!(intent)).await?;
+                registration_intent(&key, json!(intent))
+            } => result,
+            _ = context.cancelled() => return Err(ApiError(reqwest::StatusCode::CONFLICT, "任务已取消".into())),
+        };
+        match result {
+            Err(error) if error.0.is_server_error() => retry_registration(context, &error).await?,
+            result => return result,
+        }
+    }
+}
+
+async fn register_intent(state: &AppState, intent: &RegistrationIntent) -> Result<()> {
+    sqlx::query("INSERT INTO notification_outbox(id,kind,method,payload_json,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO NOTHING")
+        .bind(&intent.id).bind(&intent.kind).bind(&intent.method).bind(&intent.payload).bind(intent.created_at)
+        .execute(&state.db).await?;
+    Ok(())
+}
+
+pub(crate) async fn has_pending_registration(context: &JobContext) -> Result<bool> {
+    for key in context
+        .saved_plans()
+        .await?
+        .keys()
+        .filter(|key| key.starts_with(REGISTRATION_PREFIX))
+    {
+        if context.completed(key).await?.is_none() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub(crate) async fn resume_registration(state: &AppState, context: &JobContext) -> Result<()> {
+    let mut pending = Vec::new();
+    for (key, value) in context.saved_plans().await? {
+        if key.starts_with(REGISTRATION_PREFIX) && context.completed(&key).await?.is_none() {
+            pending.push((key.clone(), registration_intent(&key, value)?));
+        }
+    }
+    for (key, intent) in pending {
+        context.checkpoint().await?;
+        register_intent(state, &intent).await?;
+        context
+            .complete(&key, &json!({"registered":true,"id":intent.id}))
+            .await?;
+        state.notifications.wake.notify_one();
+    }
+    Ok(())
+}
+
 async fn deliver(
     state: &AppState,
     kind: &str,
@@ -371,7 +534,6 @@ async fn deliver(
     method: &str,
     payload: &Value,
 ) -> Result<bool> {
-    use sha2::{Digest, Sha256};
     state.notifications.bind(&state.db);
     let id = DELIVERY_KEY
         .try_with(|key| {
@@ -379,9 +541,30 @@ async fn deliver(
             format!("{key}:{:x}", Sha256::digest(value.to_string().as_bytes()))
         })
         .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string());
-    sqlx::query("INSERT INTO notification_outbox(id,kind,method,payload_json,created_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(id) DO NOTHING")
-        .bind(&id).bind(kind).bind(method).bind(payload).bind(chrono::Utc::now().timestamp_millis())
-        .execute(&state.db).await?;
+    let context = crate::jobs::current_context().filter(JobContext::is_persistent);
+    let intent = RegistrationIntent {
+        id,
+        kind: kind.into(),
+        method: method.into(),
+        payload: payload.clone(),
+        created_at: chrono::Utc::now().timestamp_millis(),
+    };
+    let intent = if let Some(context) = &context {
+        save_registration(context, intent).await?
+    } else {
+        intent
+    };
+    register_intent(state, &intent).await?;
+    let id = intent.id;
+    if let Some(context) = &context {
+        if let Err(error) = context
+            .complete(&registration_key(&id), &json!({"registered":true,"id":id}))
+            .await
+        {
+            state.notifications.wake.notify_one();
+            tracing::warn!(task_id=%context.id, "[通知] 通知已登记，登记收尾未确认，保留原计划重试：{}", crate::logs::redact(&error.1));
+        }
+    }
     let config = state.config.read().await.clone();
     if QUEUE_ONLY.try_with(|only| *only).unwrap_or(false)
         || !in_send_window(&config, chrono::Local::now().time())
@@ -390,16 +573,33 @@ async fn deliver(
         tracing::info!("[通知] 通知已持久排队，等待发送");
         Ok(false)
     } else {
-        flush_ready(state, Some(&id)).await?;
-        let status: String =
-            sqlx::query_scalar("SELECT status FROM notification_outbox WHERE id=$1")
-                .bind(&id)
-                .fetch_one(&state.db)
-                .await?;
-        if status == "pending" {
-            state.notifications.wake.notify_one();
+        // The intent is durable even when sending or recording its receipt fails.
+        let status: Result<String> = async {
+            flush_ready(state, Some(&id)).await?;
+            Ok(
+                sqlx::query_scalar("SELECT status FROM notification_outbox WHERE id=$1")
+                    .bind(&id)
+                    .fetch_one(&state.db)
+                    .await?,
+            )
         }
-        Ok(status == "sent")
+        .await;
+        match status {
+            Ok(status) => {
+                if status == "pending" {
+                    state.notifications.wake.notify_one();
+                }
+                Ok(status == "sent")
+            }
+            Err(error) => {
+                state.notifications.wake.notify_one();
+                tracing::warn!(
+                    "[通知] 通知已持久保存，发送收尾未确认，保留待重试：{}",
+                    crate::logs::redact(&error.1)
+                );
+                Ok(false)
+            }
+        }
     }
 }
 
@@ -1217,7 +1417,9 @@ pub async fn media(
     let image: Option<String> = sqlx::query_scalar("SELECT COALESCE(NULLIF(m.backdrop_path,''),NULLIF(m.poster_path,''),CASE WHEN m.item_type='Episode' THEN COALESCE(NULLIF(p.backdrop_path,''),NULLIF(p.poster_path,'')) END) FROM media_metadata m LEFT JOIN media_metadata p ON m.parent_series_tmdb_id=p.tmdb_id AND p.item_type='Series' WHERE m.emby_item_ids_json @> $1 LIMIT 1")
         .bind(json!([string(item,"Id")])).fetch_optional(&state.db).await
         .unwrap_or_else(|error| { tracing::warn!("[通知] 《{title}》读取通知图片失败：{error}"); None }).flatten();
-    for target in targets(state, &config, "library_new").await {
+    let registration_context = crate::jobs::current_context().filter(JobContext::is_persistent);
+    let mut registration_error = None;
+    for target in targets(state, &config, "library_new").await? {
         if let Some(context) = context {
             context.checkpoint().await?;
         }
@@ -1242,7 +1444,14 @@ pub async fn media(
                 tracing::info!(item_id = %string(item, "Id"), "[通知] 《{title}》入库结果{result}")
             }
             Err(error) => {
-                tracing::warn!(item_id = %string(item, "Id"), target, "[通知] 《{title}》入库结果发送失败：{}", error.1)
+                tracing::warn!(item_id = %string(item, "Id"), target, "[通知] 《{title}》入库结果未能持久保存：{}", error.1);
+                if registration_context
+                    .as_ref()
+                    .is_none_or(|context| context.is_cancelled() || context.is_interrupted())
+                {
+                    return Err(error);
+                }
+                registration_error.get_or_insert(error);
             }
         }
         for page in &pages {
@@ -1251,10 +1460,14 @@ pub async fn media(
             }
             if let Err(error) = deliver(state, "library_new", &token, "sendMessage", &json!({"chat_id":target,"text":page,"parse_mode":"MarkdownV2","disable_web_page_preview":true,"disable_notification":false})).await {
                 tracing::warn!(item_id = %string(item, "Id"), target, "[通知] 《{title}》后续消息发送失败：{}", error.1);
+                if registration_context.as_ref().is_none_or(|context| context.is_cancelled() || context.is_interrupted()) {
+                    return Err(error);
+                }
+                registration_error.get_or_insert(error);
             }
         }
     }
-    Ok(())
+    registration_error.map_or(Ok(()), Err)
 }
 
 /// A failed admission is a real organization result, independently of success notifications.
@@ -1281,7 +1494,9 @@ pub async fn failure(state: &AppState, item: &Value, reason: &str) -> Result<()>
         markdown_value(name),
         escape(&reason.replace('\\', "\\\\"))
     );
-    for target in targets(state, &config, "recognize_fail").await {
+    let registration_context = crate::jobs::current_context().filter(JobContext::is_persistent);
+    let mut registration_error = None;
+    for target in targets(state, &config, "recognize_fail").await? {
         if let Err(error) = deliver(
             state,
             "recognize_fail",
@@ -1295,9 +1510,16 @@ pub async fn failure(state: &AppState, item: &Value, reason: &str) -> Result<()>
         .await
         {
             tracing::warn!(item_id = %string(item, "Id"), "[通知] 《{name}》整理失败通知发送失败：{}", error.1);
+            if registration_context
+                .as_ref()
+                .is_none_or(|context| context.is_cancelled() || context.is_interrupted())
+            {
+                return Err(error);
+            }
+            registration_error.get_or_insert(error);
         }
     }
-    Ok(())
+    registration_error.map_or(Ok(()), Err)
 }
 
 pub async fn test_message(state: &AppState, token: &str, chat: &str) -> Result<()> {

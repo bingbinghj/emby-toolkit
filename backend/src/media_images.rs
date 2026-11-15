@@ -340,6 +340,136 @@ async fn verify_image(
     Err(ApiError::bad(error))
 }
 
+/// 元数据定点更新后只提交本项目的侧车图片，不调用会展开关联版本的 Refresh。
+pub(crate) async fn sync_local_images(
+    state: &AppState,
+    target: &Value,
+    context: &crate::jobs::JobContext,
+) -> Result<()> {
+    let id = string(target, "Id");
+    let current = details(
+        state,
+        &id,
+        "Id,Type,Path,IndexNumber,MediaSources,MediaStreams,Chapters",
+    )
+    .await?;
+    if ["Id", "Type", "Path"]
+        .iter()
+        .any(|field| current[*field] != target[*field])
+    {
+        return Err(ApiError::bad(
+            "图片定点更新所属媒体身份变化，未提交其他图片",
+        ));
+    }
+    let paths = if current["Type"] == "Episode" {
+        let path = std::path::Path::new(current["Path"].as_str().unwrap_or(""));
+        vec![(
+            path.with_file_name(format!(
+                "{}-thumb.jpg",
+                path.file_stem().unwrap_or_default().to_string_lossy()
+            )),
+            "Primary",
+        )]
+    } else if current["Type"] == "Season" {
+        vec![destination(&current, "poster")?]
+    } else {
+        ["poster", "clearlogo", "fanart", "landscape"]
+            .into_iter()
+            .map(|kind| destination(&current, kind))
+            .collect::<Result<Vec<_>>>()?
+    };
+    let config = state.config.read().await.clone();
+    let key = string(&config, "emby_api_key");
+    for (path, kind) in paths {
+        context.checkpoint().await?;
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        // 缓存中无有效图像的占位文件不属于本次已经下载成功的图片。
+        if image::load_from_memory(&bytes).is_err() {
+            continue;
+        }
+        let scoped = context.scoped(&format!("native-image:{kind}"));
+        let url = format!(
+            "{}/Items/{id}/Images/{kind}",
+            string(&config, "emby_server_url").trim_end_matches('/')
+        );
+        let native = read_image(state, &url, &key).await?;
+        let intent = if let Some(saved) = scoped.plan("intent").await? {
+            if saved["id"] != id
+                || saved["path"] != path.to_string_lossy().as_ref()
+                || base64::Engine::decode(
+                    &base64::engine::general_purpose::STANDARD,
+                    string(&saved, "bytes"),
+                )
+                .ok()
+                .as_deref()
+                    != Some(bytes.as_slice())
+            {
+                return Err(ApiError::bad(
+                    "图片定点更新的原目标或图像在中断期间变化，未覆盖当前图片",
+                ));
+            }
+            saved
+        } else {
+            let intent = json!({"id":id,"path":path,
+                "bytes":base64::Engine::encode(&base64::engine::general_purpose::STANDARD,&bytes),
+                "previous":native.as_ref().map(|bytes|base64::Engine::encode(&base64::engine::general_purpose::STANDARD,bytes))});
+            scoped.save_plan("intent", &intent).await?;
+            intent
+        };
+        let previous = intent["previous"]
+            .as_str()
+            .map(|value| base64::Engine::decode(&base64::engine::general_purpose::STANDARD, value))
+            .transpose()
+            .map_err(|_| ApiError::bad("原图片定点更新记录无效，未覆盖当前图片"))?;
+        let imported = if native.as_deref() == Some(bytes.as_slice()) {
+            true
+        } else if native != previous {
+            verify_image(state, &url, &key, Some(&bytes), previous.as_deref())
+                .await
+                .map_err(|_| {
+                    ApiError::bad("图片定点更新后出现其他新内容，原记录已保留，未覆盖当前图片")
+                })?;
+            true
+        } else {
+            false
+        };
+        if scoped.completed("done").await?.is_none() && !imported {
+            let mime = image::guess_format(&bytes)
+                .map_err(|_| ApiError::bad("缓存图片格式不支持"))?
+                .to_mime_type();
+            upload_image(state, &url, &key, mime, &bytes).await?;
+        }
+        verify_image(state, &url, &key, Some(&bytes), previous.as_deref()).await?;
+        let live = details(
+            state,
+            &id,
+            "Id,Type,Path,MediaSources,MediaStreams,Chapters",
+        )
+        .await?;
+        if [
+            "Id",
+            "Type",
+            "Path",
+            "MediaSources",
+            "MediaStreams",
+            "Chapters",
+        ]
+        .iter()
+        .any(|field| live[*field] != current[*field])
+        {
+            return Err(ApiError::bad(
+                "图片定点更新后原媒体信息发生变化，未记录完整入库成功",
+            ));
+        }
+        scoped.complete("done", &intent).await?;
+    }
+    Ok(())
+}
+
 async fn submit(
     State(state): State<AppState>,
     Path(id): Path<String>,

@@ -19,6 +19,7 @@ type Activity = Arc<std::sync::Mutex<Option<String>>>;
 type ProgressLog = Option<(tokio::time::Instant, Option<u64>, String)>;
 tokio::task_local! {
     static TASK_ACTIVITY: Activity;
+    static TASK_CONTEXT: JobContext;
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -79,6 +80,10 @@ pub(crate) fn record_activity(message: &str) {
         *activity.lock().unwrap_or_else(|error| error.into_inner()) =
             Some(crate::logs::redact(message).chars().take(500).collect());
     });
+}
+
+pub(crate) fn current_context() -> Option<JobContext> {
+    TASK_CONTEXT.try_with(Clone::clone).ok()
 }
 
 #[derive(Clone)]
@@ -1087,15 +1092,18 @@ impl JobManager {
             let task_context = context.clone();
             let work = std::panic::AssertUnwindSafe(TASK_ACTIVITY.scope(
                 context.activity.clone(),
-                crate::notifications::with_delivery_key(context.id.clone(), async move {
-                    task_context.checkpoint().await?;
-                    let future = function(task_context).boxed();
-                    if let Some(operator) = operator {
-                        crate::notifications::with_operator(operator, future).await
-                    } else {
-                        future.await
-                    }
-                }),
+                TASK_CONTEXT.scope(
+                    context.clone(),
+                    crate::notifications::with_delivery_key(context.id.clone(), async move {
+                        task_context.checkpoint().await?;
+                        let future = function(task_context).boxed();
+                        if let Some(operator) = operator {
+                            crate::notifications::with_operator(operator, future).await
+                        } else {
+                            future.await
+                        }
+                    }),
+                ),
             ))
             .catch_unwind();
             tokio::pin!(work);
@@ -1131,6 +1139,17 @@ impl JobManager {
                         "任务执行异常".into(),
                     ))
                 });
+            let pending_notifications = context.is_persistent()
+                && crate::notifications::has_pending_registration(&context)
+                    .await
+                    .unwrap_or_else(|error| {
+                        tracing::warn!(
+                            task_id=%context.id,
+                            "通知登记状态未确认，保留任务收尾：{}",
+                            crate::logs::redact(&error.1)
+                        );
+                        true
+                    });
             let mut state = context.progress.lock().await;
             let keep_paused = state["pause_requested"] == true;
             state["is_running"] = json!(false);
@@ -1226,7 +1245,7 @@ impl JobManager {
                 matches!(
                     state["state"].as_str(),
                     Some("failed" | "completed_with_warnings" | "interrupted" | "paused")
-                ) || cancellation_warning
+                ) || cancellation_warning || pending_notifications
             );
             if let Some(activity) = context
                 .activity

@@ -51,13 +51,29 @@ test('task rows retain the original task identity when its phase changes and sho
 test('single-episode extraction does not claim whole-library task progress', async ({ page, api }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   api.respond('GET', '/api/tasks/available', tasks);
-  api.setTask({ ...active, task_id: 'single-episode-credits', last_action: '提取当前集片尾' });
+  const single = { ...active, task_id: 'single-episode-credits', last_action: '提取当前集片尾', current_action: '提取当前集片尾', message: '正在比较当前集片尾声纹' };
+  api.setTask(single);
   await page.goto('/settings/scheduler');
-  await expect(page.getByTestId('scheduler-current-task')).toContainText('提取当前集片尾');
+  await expect(page.getByTestId('scheduler-current-task')).toHaveCount(0);
+  await expect(page.getByText('Telegram 快捷菜单', { exact: true })).toBeVisible();
+  await expect(page.getByText('全库指纹校验与补齐', { exact: true })).toBeVisible();
   const row = page.getByTestId('scheduler-desktop-tasks').locator('[data-task-key="extract-episode-credits"]');
   await expect(row.getByText('待执行', { exact: true })).toBeVisible();
   await expect(row.locator('.scheduler-progress')).toHaveCount(0);
   await expect(row.getByRole('button', { name: '执行', exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: '查看当前任务', exact: true }).click();
+  const taskMenu = page.locator('.v-menu.v-overlay--active');
+  await expect(taskMenu).toContainText('提取当前集片尾');
+  await expect(taskMenu).toContainText('正在比较当前集片尾声纹');
+  await expect.poll(async () => Number(await taskMenu.getByRole('progressbar').getAttribute('aria-valuenow'))).toBeCloseTo(55, 10);
+  await page.getByRole('button', { name: '查看当前任务', exact: true }).click();
+  const completed = { ...single, is_running: false, state: 'completed', message: '当前集片尾已验收', progress: 100 };
+  api.respond('GET', '/api/tasks/result/single-episode-credits', { ...completed, result_status: 200, result: { message: completed.message } });
+  api.setTask({ ...completed, history: [completed] });
+  await expect(row.getByText('待执行', { exact: true })).toBeVisible();
+  await expect(row.getByRole('button', { name: '查看结果', exact: true })).toHaveCount(0);
+  await page.getByTestId('scheduler-task-history').locator('[data-task-id="single-episode-credits"]').getByRole('button', { name: '查看结果', exact: true }).click();
+  await expect(page.getByTestId('scheduler-task-result')).toContainText('当前集片尾已验收');
 });
 
 test('mobile tasks use MP cards and keep long names, help and rounded controls fully visible', async ({ page, api }) => {

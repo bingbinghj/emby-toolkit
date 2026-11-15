@@ -193,7 +193,7 @@ fn valid_info(info: &Value, identity: &Identity) -> bool {
                 == crate::identity::size(&identity.entity["size"]))
 }
 
-fn readback_matches(info: &Value, live: &Value, identity: &Identity) -> bool {
+pub(crate) fn readback_matches(info: &Value, live: &Value, identity: &Identity) -> bool {
     let target = SavedTarget {
         id: identity.id.clone(),
         path: identity.path.clone(),
@@ -252,7 +252,7 @@ fn readback_matches(info: &Value, live: &Value, identity: &Identity) -> bool {
     matches!((media_info::signature(expected_chapters),media_info::signature(&live["Chapters"])),(Ok(a),Ok(b)) if a==b)
 }
 
-async fn media_ready(state: &AppState, identity: &Identity) -> Result<bool> {
+pub(crate) async fn media_ready(state: &AppState, identity: &Identity) -> Result<bool> {
     let marked = slot(state, &identity.id)
         .await?
         .is_some_and(|(row, index)| {
@@ -621,12 +621,22 @@ async fn resume_media(state: &AppState, identity: &Identity, context: &JobContex
     let mut matching = Vec::new();
     while let Some(entry) = entries.next_entry().await? {
         let marker = entry.path().join("pending-scan.json");
-        if !tokio::fs::try_exists(&marker).await? {
-            continue;
-        }
-        let pending = crate::media_recovery::read_json(&marker).await?;
+        let pending = if tokio::fs::try_exists(&marker).await? {
+            crate::media_recovery::read_json(&marker).await?
+        } else {
+            Value::Null
+        };
         if pending["verification"]["current_entity"] == identity.revision() {
-            matching.push((entry.path(), pending));
+            matching.push((entry.path(), pending, false));
+        } else if (pending["kind"] == "native-sync"
+            || tokio::fs::try_exists(entry.path().join("media-reload.json")).await?)
+            && tokio::fs::try_exists(entry.path().join("identity.json")).await?
+        {
+            let record =
+                crate::media_recovery::read_json(&entry.path().join("identity.json")).await?;
+            if record["current"] == identity.revision() && record["sync_empty"] == true {
+                matching.push((entry.path(), record, true));
+            }
         }
     }
     if matching.len() > 1 {
@@ -634,9 +644,94 @@ async fn resume_media(state: &AppState, identity: &Identity, context: &JobContex
             "当前版本存在多份未确认洗版记录，已保留恢复材料",
         ));
     }
-    let Some((directory, pending)) = matching.pop() else {
+    let Some((directory, pending, sync_empty)) = matching.pop() else {
         return Ok(false);
     };
+    if sync_empty {
+        let info = &pending["info"];
+        if !valid_info(info, identity) {
+            return Err(ApiError::bad(
+                "原单目标同步记录的媒体信息无效，恢复材料已保留",
+            ));
+        }
+        unchanged(state, identity, context).await?;
+        let target = SavedTarget {
+            id: identity.id.clone(),
+            path: identity.path.clone(),
+            source: identity.source.clone(),
+            sha: identity
+                .cloud
+                .as_ref()
+                .map(|cloud| string(cloud, "sha1").to_uppercase()),
+            asset: None,
+            info: info.clone(),
+            refresh_required: true,
+        };
+        let live = details(
+            state,
+            &identity.id,
+            "Id,Path,Size,RunTimeTicks,MediaSources,MediaStreams,Chapters",
+        )
+        .await?;
+        let retry = !readback_matches(info, &live, identity);
+        crate::media_reload::validate_sync_ingest_recovery(&directory, &target, retry).await?;
+        if retry && !crate::media_reload::preflight_ingest_import(state, &target, context).await? {
+            return Err(ApiError::bad(
+                "原单目标同步尚未验收且当前媒体不再为空，恢复材料已保留",
+            ));
+        }
+        let original =
+            crate::media_recovery::read_json(&directory.join("original-settings.json")).await?;
+        let applied = crate::strm::recovery_applied_settings(&directory, &original).await?;
+        crate::strm::finish_media_recovery_rearmed(state, &original, applied.as_ref(), || async {
+            let exported = if retry {
+                let attempt = directory.join(format!("retry-{}", uuid::Uuid::new_v4().simple()));
+                let confirmed = std::sync::atomic::AtomicBool::new(false);
+                Box::pin(crate::media_reload::reload_ingest_sync(
+                    state, &target, identity, context, &confirmed, &attempt, &directory,
+                ))
+                .await?;
+                attempt
+            } else {
+                directory.clone()
+            };
+            let live = details(
+                state,
+                &identity.id,
+                "Id,Path,Size,RunTimeTicks,MediaSources,MediaStreams,Chapters",
+            )
+            .await?;
+            if !readback_matches(info, &live, identity) {
+                return Err(ApiError::bad("重启后的单目标同步尚未通过回读验收"));
+            }
+            unchanged(state, identity, context).await?;
+            Box::pin(crate::media_reload::recover_ingest_sync(
+                state, &target, identity, &directory, &exported, context,
+            ))
+            .await?;
+            let live = details(
+                state,
+                &identity.id,
+                "Id,Path,Size,RunTimeTicks,MediaSources,MediaStreams,Chapters",
+            )
+            .await?;
+            if !readback_matches(info, &live, identity) {
+                return Err(ApiError::bad("重启后的单目标同步尚未通过回读验收"));
+            }
+            unchanged(state, identity, context).await?;
+            write_identity(state, identity, true, false).await
+        })
+        .await?;
+        let marker =
+            crate::media_recovery::mark_verified(&directory, &json!([identity.id])).await?;
+        crate::media_recovery::cleanup_verified(
+            &directory,
+            &marker,
+            &state.data_dir.join("backups/media-info-conflicts"),
+        )
+        .await?;
+        return Ok(true);
+    }
     let targets = list(&pending["verification"]["targets"]);
     if targets.len() != 1 || targets[0]["id"] != identity.id || targets[0]["path"] != identity.path
     {
@@ -750,12 +845,27 @@ pub(crate) async fn ensure_media(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
+    let target = SavedTarget {
+        id: identity.id.clone(),
+        path: identity.path.clone(),
+        source: identity.source.clone(),
+        sha: identity
+            .cloud
+            .as_ref()
+            .map(|cloud| string(cloud, "sha1").to_uppercase()),
+        asset: None,
+        info: info.clone(),
+        refresh_required: true,
+    };
+    // A refused preparation has not published JSON or changed native settings;
+    // do not create recovery material for an operation that never started.
+    let sync_empty = crate::media_reload::preflight_ingest_import(state, &target, context).await?;
     let directory = state
         .data_dir
         .join("backups/media-info-wash")
         .join(uuid::Uuid::new_v4().to_string());
     tokio::fs::create_dir_all(&directory).await?;
-    tokio::fs::write(directory.join("identity.json"),serde_json::to_vec(&json!({"current":identity.revision(),"previous":slot(state,&identity.id).await?.map(|(row,index)|json!({"asset":row["asset_details_json"][index],"sha1":row["file_sha1_json"][index]}))})).unwrap()).await?;
+    tokio::fs::write(directory.join("identity.json"),serde_json::to_vec(&json!({"current":identity.revision(),"sync_empty":sync_empty,"info":if sync_empty{info.clone()}else{Value::Null},"previous":slot(state,&identity.id).await?.map(|(row,index)|json!({"asset":row["asset_details_json"][index],"sha1":row["file_sha1_json"][index]}))})).unwrap()).await?;
     if let Some(bytes) = &expected {
         tokio::fs::write(directory.join("previous-mediainfo.json"), bytes).await?;
     }
@@ -768,16 +878,6 @@ pub(crate) async fn ensure_media(
     file.write_all(&serde_json::to_vec(&info).unwrap()).await?;
     file.sync_all().await?;
     drop(file);
-    let target = SavedTarget {
-        id: identity.id.clone(),
-        path: identity.path.clone(),
-        source: identity.source.clone(),
-        sha: None,
-        asset: None,
-        info: info.clone(),
-        refresh_required: true,
-    };
-    crate::media_reload::preflight_ingest_import(state, &target, context).await?;
     let confirmed = std::sync::atomic::AtomicBool::new(true);
     crate::strm::with_settings_guarded(
         state,
@@ -787,6 +887,30 @@ pub(crate) async fn ensure_media(
             retire_previews(state, identity, &target, &directory, context).await?;
             crate::media_save::commit_json_stage_guarded(&stage, &destination, expected.as_deref())
                 .await?;
+            if sync_empty {
+                // Reuse the guarded Sync transaction, including resource and
+                // persisted-export validation. Its clear fallback still
+                // refuses a nonunique presentation scope.
+                Box::pin(crate::media_reload::reload_ingest_sync(state, &target, identity, context,
+                    &confirmed, &directory, &directory)).await?;
+                confirmed.store(false, std::sync::atomic::Ordering::Release);
+                let live = details(state, &identity.id,
+                    "Id,Path,Size,RunTimeTicks,MediaSources,MediaStreams,Chapters").await?;
+                if !readback_matches(&info, &live, identity) {
+                    return Err(ApiError::bad("单目标同步的新版媒体流或章节未通过回读验收"));
+                }
+                unchanged(state, identity, context).await?;
+                crate::media_reload::claim_ingest_sync_export(
+                    state, &target, identity, &directory, &directory, context,
+                ).await?;
+                if let Some(cloud) = &identity.cloud {
+                    crate::media_save::cache_saved(state,
+                        Some(&string(cloud, "sha1").to_uppercase()), &info).await?;
+                }
+                write_identity(state, identity, true, false).await?;
+                confirmed.store(true, std::sync::atomic::Ordering::Release);
+                return Ok(());
+            }
             let position = crate::media_extra::log_position(state).await?;
             let before = details(state, &identity.id, "DateLastRefreshed").await?;
             tokio::fs::write(

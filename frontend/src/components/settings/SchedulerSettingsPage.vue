@@ -1,31 +1,6 @@
 <template>
   <section class="mp-page scheduler-page">
     <h1 class="sr-only">任务中心</h1>
-    <VCard v-if="backgroundTaskStatus.task_id" class="dashboard-card current-task-card mb-6" data-testid="scheduler-current-task">
-      <VCardItem :title="backgroundTaskStatus.last_action || backgroundTaskStatus.current_action || '当前任务'">
-        <template #append><VChip :color="backgroundTaskStatus.state === 'failed' ? 'error' : backgroundTaskStatus.state === 'completed_with_warnings' ? 'warning' : 'primary'" variant="tonal">{{ currentTaskStateLabel }}</VChip></template>
-      </VCardItem>
-      <VCardText>
-        <VProgressLinear v-if="backgroundTaskStatus.is_running" :model-value="backgroundTaskStatus.progress" :indeterminate="!taskPaused && !taskStopping && !backgroundTaskStatus.progress_known" color="primary" height="4" rounded />
-        <div class="task-status-message mt-3">{{ backgroundTaskStatus.message }}</div>
-        <div v-if="backgroundTaskStatus.progress_known && backgroundTaskStatus.is_running" class="text-caption mt-2">{{ backgroundTaskStatus.progress }}%</div>
-        <template v-if="taskResultTarget?.current && taskResultTarget.task_id === backgroundTaskStatus.task_id && !taskResultOpen">
-          <VProgressLinear v-if="taskResultLoading" indeterminate class="mt-3" aria-label="读取任务结果" />
-          <VAlert v-if="taskResultError" type="error" variant="tonal" class="mt-3">{{ taskResultError }}<VBtn variant="text" :loading="taskResultLoading" @click="readTaskResult">重新读取结果</VBtn></VAlert>
-          <VAlert v-else-if="taskResultFeedback" :type="taskResultFeedback.type" :title="taskResultFeedback.message" variant="tonal" class="mt-3" data-testid="scheduler-restored-result">
-            <div v-for="detail in taskResultFeedback.details" :key="detail" class="text-wrap">{{ detail }}</div>
-          </VAlert>
-        </template>
-      </VCardText>
-      <VCardActions v-if="backgroundTaskStatus.is_running || isTerminalTask(backgroundTaskStatus)">
-        <VSpacer />
-        <VBtn v-if="isTerminalTask(backgroundTaskStatus)" variant="text" prepend-icon="mdi-text-box-search-outline" :disabled="Boolean(isTriggeringTask)" @click="openTaskResult(backgroundTaskStatus)">查看结果</VBtn>
-        <template v-if="backgroundTaskStatus.is_running">
-          <VBtn variant="text" :prepend-icon="taskPaused ? 'mdi-play' : 'mdi-pause'" :loading="taskControlBusy" :disabled="taskStopping || (!taskPaused && taskPausing)" @click="controlTask(taskPaused ? 'resume' : 'pause')">{{ taskPaused ? '继续' : taskPausing ? '暂停中' : '暂停' }}</VBtn>
-          <VBtn color="error" variant="text" prepend-icon="mdi-stop" :disabled="taskStopping || taskControlBusy" @click="confirmStopTask">{{ taskStopping ? '停止中' : '停止' }}</VBtn>
-        </template>
-      </VCardActions>
-    </VCard>
     <div v-if="isLoading" class="center-container"><VProgressCircular indeterminate color="primary" size="48" /></div>
     <VAlert v-if="taskCatalogError" type="error" variant="tonal" class="mb-4">{{ taskCatalogError }}<VBtn variant="text" :loading="taskCatalogLoading" @click="fetchAvailableTasks">重新读取任务</VBtn></VAlert>
     <VAlert v-else-if="configError && !configModel" type="error" variant="tonal">{{ configError }}</VAlert>
@@ -49,7 +24,7 @@
         </VCard>
         <FingerprintAuditPanel class="fingerprint-overview-card" :running="isBackgroundTaskRunning" :task-state="backgroundTaskStatus.state" />
       </div>
-      <VAlert v-if="taskRunFeedback && !taskResultFeedback" :type="taskRunFeedback.type" variant="tonal" :title="taskRunFeedback.message" role="status">
+      <VAlert v-if="taskRunFeedback" :type="taskRunFeedback.type" variant="tonal" :title="taskRunFeedback.message" role="status">
         <div v-for="detail in taskRunFeedback.details" :key="detail">{{ detail }}</div>
       </VAlert>
       <div class="scheduler-category-list" :data-testid="mdAndUp ? 'scheduler-desktop-tasks' : 'scheduler-mobile-tasks'">
@@ -68,9 +43,11 @@
                   <VCardText class="app-card-summary scheduler-task-summary">
                     <div class="app-card-summary__content">
                       <h3 class="temp-task-name text-h6">{{ task.name }}</h3>
-                      <VChip :color="getTaskRowColor(task)" variant="tonal" size="small" class="align-self-start mt-2">{{ getTaskRowState(task) }}</VChip>
+                      <div class="scheduler-task-state-row">
+                        <VChip :color="getTaskRowColor(task)" variant="tonal" size="small">{{ getTaskRowState(task) }}</VChip>
+                        <VIcon :icon="getTaskIcon(task)" color="primary" size="48" aria-hidden="true" />
+                      </div>
                     </div>
-                    <div class="app-card-summary__media" aria-hidden="true"><VIcon :icon="getTaskIcon(task)" color="primary" size="48" /></div>
                   </VCardText>
                   <VCardText class="scheduler-task-details">
                     <p class="temp-task-description">{{ getTaskHelp(task) }}</p>
@@ -149,7 +126,7 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount, watch, nextTick, computed } from 'vue';
 import { useDisplay } from 'vuetify';
-import { useMessage, useDialog } from '@/composables/useFeedback';
+import { useMessage } from '@/composables/useFeedback';
 import { useConfig } from '../../composables/useConfig.js';
 import { useTaskStatus } from '../../composables/useTaskStatus.js';
 import axios from 'axios';
@@ -160,7 +137,6 @@ import { useContextSearch } from '../../composables/useContextSearch.js';
 import { useAuthStore } from '../../stores/auth.js';
 
 const message = useMessage();
-const dialog = useDialog();
 const auth = useAuthStore();
 const { mdAndUp } = useDisplay();
 const manualTaskDragGroup = { pull: false, put: false };
@@ -197,8 +173,7 @@ const {
   configError
 } = useConfig();
 
-const { isBackgroundTaskRunning, backgroundTaskStatus, refreshTaskStatus } = useTaskStatus();
-const taskControlBusy = ref(false);
+const { isBackgroundTaskRunning, backgroundTaskStatus } = useTaskStatus();
 const taskPaused = computed(() => backgroundTaskStatus.value.state === 'paused');
 const taskStopping = computed(() => backgroundTaskStatus.value.stop_requested || backgroundTaskStatus.value.state === 'stopping');
 const taskPausing = computed(() => backgroundTaskStatus.value.pause_requested || backgroundTaskStatus.value.state === 'pausing');
@@ -208,35 +183,6 @@ const currentTaskStateLabel = computed(() => backgroundTaskStatus.value.is_runni
   running: '运行中', pausing: '暂停中', paused: '已暂停', stopping: '停止中', cancelled: '已停止',
   completed: '已完成', completed_with_warnings: '已完成，有提醒', failed: '失败',
 }[backgroundTaskStatus.value.state] || backgroundTaskStatus.value.state || '等待任务'));
-const controlTask = async (action) => {
-  const taskId = backgroundTaskStatus.value.task_id;
-  if (!taskId || !backgroundTaskStatus.value.is_running || taskControlBusy.value || taskStopping.value) return;
-  taskControlBusy.value = true;
-  try {
-    const endpoint = action === 'stop' ? '/api/trigger_stop_task' : `/api/tasks/${action}`;
-    const { data } = await axios.post(endpoint, { task_id: taskId });
-    message.info(data.message || '任务控制请求已发送');
-    await refreshTaskStatus(true);
-  } catch (error) {
-    message.error(error.response?.data?.error || error.message || '任务控制失败');
-  } finally {
-    taskControlBusy.value = false;
-  }
-};
-const confirmStopTask = () => {
-  const taskId = backgroundTaskStatus.value.task_id;
-  if (!taskId || !backgroundTaskStatus.value.is_running || taskStopping.value) return;
-  dialog.warning({ title: '停止当前任务',
-    content: `确定停止“${backgroundTaskStatus.value.current_action || '当前任务'}”吗？任务将在安全停止点结束，并保留恢复和清理结果。`,
-    positiveText: '停止任务', negativeText: '取消', onPositiveClick: () => {
-      if (backgroundTaskStatus.value.task_id !== taskId || !backgroundTaskStatus.value.is_running) {
-        message.warning('当前任务已变化，未执行停止操作。');
-        return;
-      }
-      return controlTask('stop');
-    },
-  });
-};
 
 const availableTasksForManualRun = ref([]);
 const availableTasksForTgMenu = ref([]);
@@ -309,7 +255,7 @@ const readTaskResult = async () => {
 const openTaskResult = task => {
   if (!pageActive || !auth.isLoggedIn || !auth.isAdmin || !isTerminalTask(task)) return;
   closeTaskResult();
-  // 手动查看固定所选任务；只有自动恢复的内联结果跟随当前任务。
+  // 手动查看固定所选任务；自动恢复读取跟随当前任务。
   taskResultTarget.value = { ...task, current: false };
   taskResultOpen.value = true;
   return readTaskResult();
@@ -585,15 +531,15 @@ watch([() => configModel.value?.tg_menu_tasks, availableTasksForTgMenu], ([saved
 .scheduler-task-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 1fr)); gap: 12px; }
 .scheduler-task-card { display: flex; flex-direction: column; min-inline-size: 0; }
 .scheduler-task-summary { block-size: auto; min-block-size: 7.5rem; }
-.scheduler-task-summary .app-card-summary__content { padding-inline-end: 4.5rem; }
+.scheduler-task-summary .app-card-summary__content { padding-inline-end: 0; }
+.scheduler-task-state-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .scheduler-task-details { padding-block-start: 0; }
 .scheduler-task-card :deep(.v-card-actions) { margin-block-start: auto; padding: 16px; }
 .task-drag-handle { position: absolute; inset-block-start: 4px; inset-inline-end: 4px; cursor: grab; touch-action: none; }
 .task-drag-handle:active { cursor: grabbing; }
 .scheduler-task-grid :deep(.sortable-ghost) { opacity: .4; }
-.temp-task-name { margin: 0; line-height: 1.5; overflow-wrap: anywhere; }
+.temp-task-name { margin: 0; padding-inline-end: 2rem; line-height: 1.5; overflow-wrap: anywhere; }
 .temp-task-description { margin: 6px 0 0; font-size: 12px; line-height: 1.6; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); overflow-wrap: anywhere; white-space: normal; }
-.task-status-message { white-space: pre-wrap; overflow-wrap: anywhere; }
 .scheduler-history-list { max-height: 320px; overflow-y: auto; }
 .scheduler-progress { margin-block-start: 8px; max-inline-size: 320px; }
 .scheduler-progress-meta { display: flex; justify-content: space-between; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: 11px; gap: 12px; margin-block-start: 4px; }

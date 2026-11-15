@@ -232,7 +232,7 @@ pub(crate) async fn finish_saved_guard(
             saved["asset"] = json!(checked.asset);
         }
     }
-    let (targets, requested) = prepare_recovery_json(state, recovery, &record).await?;
+    let (targets, requested) = prepare_recovery_json(state, recovery, &record, None).await?;
     let owners = targets
         .iter()
         .map(|target| target.id.clone())

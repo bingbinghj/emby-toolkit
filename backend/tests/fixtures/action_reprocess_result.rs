@@ -33,6 +33,54 @@ fn verified_native_readback_with_cleanup_warning_allows_followup_scrape() {
 }
 
 #[tokio::test]
+#[ignore = "requires disposable PostgreSQL; all unchanged title targets are localhost"]
+async fn unchanged_title_reload_finishes_when_the_bound_version_list_contains_itself() {
+    let f = Fixture::new(false).await;
+    f.single_audio("jpn", "日语").await;
+    let target = crate::media_edit::repair_target(&f.state, "61616")
+        .await
+        .unwrap();
+    assert!(
+        target
+            .versions
+            .iter()
+            .any(|version| version["emby_id"] == "61616"),
+        "must reproduce the self-reinserting version list"
+    );
+    let before = f.host.item.lock().await.clone();
+    let path = f.directory.path().join("61616-mediainfo.json");
+    let original = tokio::fs::read(&path).await.unwrap();
+    let context = crate::jobs::JobContext::for_recovery(None).await;
+    let confirmed = AtomicBool::new(true);
+    let recovery = f.directory.path().join("unchanged-title-recovery");
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        crate::media_save::reload_filled_titles(
+            &f.state,
+            &["61616".into()],
+            true,
+            &context,
+            &confirmed,
+            &recovery,
+        ),
+    )
+    .await
+    .expect("a processed unchanged version must not reinsert itself forever")
+    .unwrap();
+    assert!(result.is_empty(), "{result:?}");
+    assert_eq!(*f.host.item.lock().await, before);
+    assert_eq!(tokio::fs::read(&path).await.unwrap(), original);
+    assert_eq!(f.host.clears.load(Ordering::SeqCst), 0);
+    assert_eq!(f.host.syncs.load(Ordering::SeqCst), 0);
+    assert_eq!(f.host.starts.load(Ordering::SeqCst), 0);
+    assert!(
+        !recovery.exists(),
+        "an unchanged title needs no native recovery operation"
+    );
+    f.close().await;
+}
+
+#[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
 async fn partial_native_restore_keeps_target_failure_and_stops_followup_scrape() {
     let f = Fixture::new(false).await;
@@ -119,7 +167,8 @@ async fn reorganize_proxy(
     }
     if method == axum::http::Method::GET {
         if path == "/swagger.json" {
-            let mut contract: Value = serde_json::from_str(include_str!("pro_sync_contract.json")).unwrap();
+            let mut contract: Value =
+                serde_json::from_str(include_str!("pro_sync_contract.json")).unwrap();
             contract["paths"]["/Items/{Id}/Refresh"] = json!({"post":{"parameters":[
                 {"name":"Id","in":"path","type":"string"},
                 {"name":"MetadataRefreshMode","in":"query","type":"string"},
@@ -205,7 +254,9 @@ async fn reorganize_proxy(
         } else {
             proxy.original.item.lock().await
         };
-        if query["MetadataRefreshMode"] == "Default" && query["ImageRefreshMode"] == "ValidationOnly" {
+        if query["MetadataRefreshMode"] == "Default"
+            && query["ImageRefreshMode"] == "ValidationOnly"
+        {
             assert_eq!(
                 proxy.original.settings.lock().await["PersistMediaInfoMode"],
                 "Restore"
@@ -232,8 +283,26 @@ async fn reorganize_proxy(
             item["MediaSources"] = json!([source]);
             proxy.import_ids.lock().await.push(id.into());
         } else {
-            assert_eq!(query["MetadataRefreshMode"], "Default");
-            assert_eq!(query["ImageRefreshMode"], "Default");
+            assert!(matches!(
+                query["MetadataRefreshMode"].as_str(),
+                "Default" | "FullRefresh"
+            ));
+            assert_eq!(query["ImageRefreshMode"], query["MetadataRefreshMode"]);
+            let nfo = tokio::fs::read_to_string(proxy.original.directory.join(format!("{id}.nfo")))
+                .await
+                .unwrap();
+            let tag = |name: &str| {
+                regex::Regex::new(&format!(r"(?s)<{name}[^>]*>(.*?)</{name}>"))
+                    .unwrap()
+                    .captures(&nfo)
+                    .map(|value| quick_xml::escape::unescape(&value[1]).unwrap().into_owned())
+                    .unwrap_or_default()
+            };
+            item["Name"] = json!(tag("title"));
+            item["Overview"] = json!(tag("plot"));
+            if let Ok(year) = tag("year").parse::<i32>() {
+                item["ProductionYear"] = json!(year);
+            }
         }
         item["DateLastRefreshed"] = json!(format!(
             "after-{id}-{}",

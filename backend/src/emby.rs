@@ -11,6 +11,81 @@ use std::{
     time::Duration,
 };
 
+mod metadata_guard;
+mod metadata_only;
+
+pub(crate) fn requires_metadata_only(error: &ApiError) -> bool {
+    error.0 == reqwest::StatusCode::CONFLICT
+        && error.1 == "神医未导入编辑值，关联清理范围不是唯一当前媒体，未清理任何项目"
+}
+
+pub(crate) async fn finalize_metadata_only_targets(
+    state: &AppState,
+    item: &Value,
+    episode_ids: &[String],
+    context: &JobContext,
+) -> Result<()> {
+    let guard = metadata_guard::RelatedGuard::capture(state, item, episode_ids, context).await?;
+    let mut targets = vec![];
+    if item["Type"] == "Series" && !episode_ids.is_empty() {
+        let mut parents = std::collections::BTreeMap::<
+            String,
+            std::collections::BTreeSet<std::path::PathBuf>,
+        >::new();
+        for id in episode_ids {
+            let episode =
+                crate::media_edit::details(state, id, "Id,Type,Path,SeriesId,ParentId").await?;
+            if episode["Id"] != id.as_str()
+                || episode["Type"] != "Episode"
+                || episode["SeriesId"] != item["Id"]
+            {
+                return Err(ApiError::bad(
+                    "元数据定点更新目标不属于当前电视剧，未扩大处理范围",
+                ));
+            }
+            if let Some(parent) = episode["ParentId"]
+                .as_str()
+                .filter(|parent| !parent.is_empty())
+            {
+                let path = std::path::PathBuf::from(string(&episode, "Path"));
+                if !path.is_absolute() {
+                    return Err(ApiError::bad(
+                        "本次分集的本地 NFO 目录未确认，未扩大季元数据范围",
+                    ));
+                }
+                let directory = path
+                    .parent()
+                    .ok_or_else(|| ApiError::bad("本次分集缺少父目录，未猜测季 NFO"))?;
+                parents
+                    .entry(parent.to_string())
+                    .or_default()
+                    .insert(directory.join("season.nfo"));
+            }
+            targets.push((episode, vec![]));
+        }
+        for (id, nfos) in parents {
+            let parent =
+                crate::media_edit::details(state, &id, "Id,Type,Path,ParentId,IndexNumber").await?;
+            if parent["Id"] != id || parent["Type"] != "Season" || parent["ParentId"] != item["Id"]
+            {
+                return Err(ApiError::bad(
+                    "元数据定点更新的父季身份不一致，未扩大处理范围",
+                ));
+            }
+            targets.push((parent, nfos.into_iter().collect()));
+        }
+    }
+    targets.push((item.clone(), vec![]));
+    for (target, nfos) in targets {
+        context.checkpoint().await?;
+        let scoped = context.scoped(&format!("metadata-only:{}", string(&target, "Id")));
+        metadata_only::apply(state, &target, &scoped, &nfos).await?;
+        crate::media_images::sync_local_images(state, &target, &scoped).await?;
+    }
+    guard.verify(state, context).await?;
+    Ok(())
+}
+
 pub async fn ancestor_context(
     state: &AppState,
     item: &Value,

@@ -85,8 +85,9 @@ test('202 fingerprint task waits for terminal state and displays its warning det
   await expect.poll(() => api.requests.some(request => request.path === '/api/tasks/result/ui-background-task')).toBe(true);
   await expect(page.getByText('101：文件身份尚未确认', { exact: true }).first()).toBeVisible();
   await expect(scan).toBeEnabled();
-  const task = page.getByTestId('scheduler-current-task');
-  await expect(task.getByText('已完成，有提醒', { exact: true })).toBeVisible();
-  await expect(task.getByText('扫描已完成，有未确认项', { exact: true })).toBeVisible();
+  await expect(page.getByTestId('scheduler-current-task')).toHaveCount(0);
+  const audit = page.locator('.fingerprint-audit');
+  await expect(audit.getByText('扫描已完成，有未确认项', { exact: true })).toBeVisible();
+  await expect(audit).toContainText('101：文件身份尚未确认');
   expect(api.requests.filter(request => request.path === '/api/tasks/result/ui-background-task').length).toBeGreaterThanOrEqual(2);
 });

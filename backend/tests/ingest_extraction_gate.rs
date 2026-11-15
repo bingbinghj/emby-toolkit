@@ -135,6 +135,8 @@ struct Host {
     chapter_images: ChapterImages,
     bifs: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
     resource_fault: Arc<Mutex<String>>,
+    metadata_hook_reached: Arc<tokio::sync::Notify>,
+    metadata_hook_release: Arc<tokio::sync::Notify>,
     cover: Arc<Mutex<Option<std::path::PathBuf>>>,
     cloud_files: Arc<Mutex<Vec<Value>>>,
     cloud_file_reads: Arc<AtomicUsize>,
@@ -142,6 +144,10 @@ struct Host {
     cloud_swap_after_import: Arc<Mutex<Option<Value>>>,
     cloud_unavailable: Arc<AtomicBool>,
     file_imports: Arc<Mutex<Vec<String>>>,
+    sync_imports: Arc<Mutex<Vec<String>>>,
+    skip_sync_import: Arc<AtomicBool>,
+    enrich_sync_native: Arc<AtomicBool>,
+    fail_final_sync_readback: Arc<AtomicBool>,
     skip_file_import: Arc<AtomicBool>,
     native_generated_info: Arc<Mutex<HashMap<String, Value>>>,
     probe_downloads: Arc<AtomicUsize>,
@@ -233,6 +239,14 @@ async fn details(
     Path(id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Response {
+    if host.fail_final_sync_readback.load(Ordering::SeqCst)
+        && !host.sync_imports.lock().await.is_empty()
+        && query.get("Fields").is_some_and(|fields| {
+            fields == "Id,Path,Size,RunTimeTicks,MediaSources,MediaStreams,Chapters"
+        })
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     if host.chain_enabled.load(Ordering::SeqCst) {
         if id == "101"
             && query
@@ -270,7 +284,11 @@ async fn details(
         return StatusCode::FORBIDDEN.into_response();
     }
     match host.items.lock().await.get(&id) {
-        Some(item) => Json(item.clone()).into_response(),
+        Some(item) => Json(metadata_only_mock_controls(
+            item,
+            query.get("Fields").map_or("", String::as_str),
+        ))
+        .into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -310,7 +328,10 @@ async fn refresh(
     Path(id): Path<String>,
     Query(query): Query<HashMap<String, String>>,
 ) -> StatusCode {
-    host.refresh_queries.lock().await.push((id.clone(), query.clone()));
+    host.refresh_queries
+        .lock()
+        .await
+        .push((id.clone(), query.clone()));
     let mode = query
         .get("MetadataRefreshMode")
         .cloned()
@@ -433,6 +454,77 @@ async fn clear(State(host): State<Host>, Path(id): Path<String>) -> StatusCode {
     item["MediaSources"][0]["MediaStreams"] = json!([]);
     item["Chapters"] = json!([]);
     StatusCode::NO_CONTENT
+}
+
+async fn sync_empty_media(
+    State(host): State<Host>,
+    Query(query): Query<HashMap<String, String>>,
+    Json(info): Json<Value>,
+) -> Json<Value> {
+    let id = query
+        .get("Id")
+        .expect("Sync must select a native Id")
+        .clone();
+    host.sync_imports.lock().await.push(id.clone());
+    let mut items = host.items.lock().await;
+    let item = items.get_mut(&id).unwrap();
+    let own = item["MediaSources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|source| source["ItemId"] == id)
+        .unwrap();
+    if !host.skip_sync_import.load(Ordering::SeqCst) {
+        assert_eq!(
+            item["Size"], 0,
+            "the verified PRO importer only fills empty media"
+        );
+        let mut source = info[0]["MediaSourceInfo"].clone();
+        source["Id"] = item["MediaSources"][own]["Id"].clone();
+        source["ItemId"] = json!(id);
+        source["Type"] = json!("Default");
+        if host.enrich_sync_native.load(Ordering::SeqCst) {
+            source["IsRemote"] = json!(false);
+            source["MimeType"] = json!("video/x-matroska");
+            source["Chapters"] = info[0]["Chapters"].clone();
+            source["DefaultAudioStreamIndex"] = source["MediaStreams"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|stream| stream["Type"] == "Audio")
+                .map(|stream| stream["Index"].clone())
+                .unwrap_or(Value::Null);
+        }
+        item["MediaStreams"] = source["MediaStreams"].clone();
+        item["Size"] = source["Size"].clone();
+        item["RunTimeTicks"] = source["RunTimeTicks"].clone();
+        item["Chapters"] = info[0]["Chapters"].clone();
+        item["MediaSources"][own] = source;
+    }
+    // PRO ExportDTO removes the native binding fields before returning or
+    // writing the bundle; the native source itself keeps its identity.
+    let mut exported_source = item["MediaSources"][own].clone();
+    for field in ["Id", "ItemId", "Path", "Name"] {
+        exported_source[field] = Value::Null;
+    }
+    if host.enrich_sync_native.load(Ordering::SeqCst) {
+        // The pinned core exporter uses fillChapters=false and its source
+        // constructor has no user-specific default stream selection.
+        exported_source["Chapters"] = json!([]);
+        exported_source["DefaultAudioStreamIndex"] = Value::Null;
+    }
+    let mut exported_chapters = item["Chapters"].clone();
+    for chapter in exported_chapters.as_array_mut().unwrap() {
+        chapter["ImageTag"] = Value::Null;
+    }
+    let exported = json!([{"MediaSourceInfo":exported_source,"Chapters":exported_chapters}]);
+    let path = std::path::Path::new(item["Path"].as_str().unwrap());
+    std::fs::write(
+        path.with_file_name(format!("{id}-mediainfo.json")),
+        serde_json::to_vec(&exported).unwrap(),
+    )
+    .unwrap();
+    Json(exported)
 }
 async fn logs(
     State(host): State<Host>,
@@ -655,6 +747,8 @@ impl Fixture {
             .route("/Items/{id}/Images/Chapter/{index}", get(|State(host): State<Host>, Path((id,index)):Path<(String,u64)>| async move { host.chapter_images.lock().await.get(&(id,index)).cloned().unwrap_or_default() }).delete(delete_chapter_image))
             .route("/Videos/{id}/index.bif", get(|State(host):State<Host>, Path(id):Path<String>| async move { host.bifs.lock().await.get(&id).cloned().unwrap_or_default() }))
             .route("/Items", get(items))
+            .route("/Items/{id}", post(metadata_only_mock_post))
+            .route("/Items/SyncMediaInfo", post(sync_empty_media))
             .route("/Items/{id}/Refresh", post(refresh))
             .route("/Items/{id}/ClearMediaInfo", post(clear))
             .route("/Plugins", get(|| async { Json(json!([{"Id":"63c322b7-a371-41a3-b11f-04f8418b37d8","Name":"Strm Assistant PRO","Version":"3.0.0.57"}])) }))
@@ -2918,9 +3012,14 @@ async fn recursive_ingest_refresh_protects_old_episode_outside_the_selected_inge
         bif(&jpeg([255, 0, 0])),
         jpeg([255, 0, 0]),
     ]) {
-        if !path.exists() { std::fs::write(path, contents).unwrap(); }
+        if !path.exists() {
+            std::fs::write(path, contents).unwrap();
+        }
     }
-    let original_files = old_files.iter().map(|path| std::fs::read(path).unwrap()).collect::<Vec<_>>();
+    let original_files = old_files
+        .iter()
+        .map(|path| std::fs::read(path).unwrap())
+        .collect::<Vec<_>>();
     let job = fixture.run_series(false).await;
     let recovery = media_recovery::status(State(fixture.state.clone()))
         .await
@@ -2932,13 +3031,31 @@ async fn recursive_ingest_refresh_protects_old_episode_outside_the_selected_inge
     );
     assert_eq!(fixture.host.items.lock().await["102"], old_native);
     for (path, original) in old_files.iter().zip(original_files) {
-        assert_eq!(std::fs::read(path).unwrap(), original, "unselected sidecar {}", path.display());
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            original,
+            "unselected sidecar {}",
+            path.display()
+        );
     }
     let refreshes = fixture.host.refresh_queries.lock().await;
     assert!(!refreshes.iter().any(|(id, _)| id == "102"));
-    let full = refreshes.iter().filter(|(_, query)| query.get("MetadataRefreshMode").is_some_and(|mode| mode == "FullRefresh")).collect::<Vec<_>>();
-    assert_eq!(full.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), vec!["101", "302", "301"]);
-    assert!(full.iter().all(|(_, query)| query.get("Recursive").is_some_and(|value| value == "false")));
+    let full = refreshes
+        .iter()
+        .filter(|(_, query)| {
+            query
+                .get("MetadataRefreshMode")
+                .is_some_and(|mode| mode == "FullRefresh")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        full.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+        vec!["101", "302", "301"]
+    );
+    assert!(
+        full.iter()
+            .all(|(_, query)| query.get("Recursive").is_some_and(|value| value == "false"))
+    );
     drop(refreshes);
     assert_eq!(recovery["pending"], false, "{recovery}");
     assert!(recovery["records"].as_array().unwrap().is_empty());
@@ -3100,3 +3217,6 @@ async fn ingest_recovery_post_restores_original_chapter_resources_and_keeps_fina
     );
     fixture.close().await;
 }
+
+include!("fixtures/gaia_empty_ingest.rs");
+include!("fixtures/reorganize_ingest_flow.rs");

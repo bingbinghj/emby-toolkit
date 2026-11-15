@@ -21,6 +21,7 @@ pub(crate) fn prepare_resume<'a>(
         Box::pin(crate::media_rename::resume_cleanup(state, context)).await?;
         Box::pin(crate::media_extra::resume_cleanup(state, context)).await?;
         Box::pin(crate::media_images::resume_cleanup(state, context)).await?;
+        Box::pin(crate::notifications::resume_registration(state, context)).await?;
         Ok(())
     }
     .boxed()

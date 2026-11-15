@@ -680,9 +680,17 @@ struct ReprocessProxy {
     base: String,
     db: sqlx::PgPool,
     host: Host,
-    selected: Vec<String>,
+    selected: Arc<Mutex<Vec<String>>>,
     imports: Arc<Mutex<Vec<String>>>,
     binding_faults: Arc<Mutex<Vec<String>>>,
+}
+
+fn reprocess_sync_export(item: &Value, index: usize) -> Value {
+    let mut source = item["MediaSources"][index].clone();
+    for field in ["Id", "ItemId", "Path", "Name"] {
+        source[field] = Value::Null;
+    }
+    json!([{"MediaSourceInfo":source,"Chapters":item["Chapters"]}])
 }
 
 async fn reprocess_proxy(
@@ -724,11 +732,192 @@ async fn reprocess_proxy(
         }
         if proxy
             .selected
+            .lock()
+            .await
             .iter()
             .any(|id| path == format!("/Items/{id}/ThumbnailSet"))
         {
             return Json(json!({"Thumbnails":[]})).into_response();
         }
+    }
+    if method == axum::http::Method::POST && path == "/Items/SyncMediaInfo" {
+        let id = query.get("Id").expect("Sync must select one native ItemId");
+        assert!(!query.contains_key("Path") && !query.contains_key("Recursive"));
+        assert!(proxy.selected.lock().await.contains(id));
+        let body = to_bytes(request.into_body(), 1024 * 1024).await.unwrap();
+        let info: Value = serde_json::from_slice(&body).unwrap();
+        assert!(info.as_array().is_some_and(|bundles| bundles.len() == 1));
+        assert!(emby_toolkit::media_info::recoverable(&info));
+        let mut items = proxy.host.items.lock().await;
+        let item = items.get_mut(id).expect("Sync target must exist");
+        assert_eq!(item["Id"], *id);
+        let item_path = PathBuf::from(item["Path"].as_str().unwrap());
+        let formal = item_path.with_file_name(format!(
+            "{}-mediainfo.json",
+            item_path.file_stem().unwrap().to_string_lossy()
+        ));
+        let current: Value = serde_json::from_slice(&std::fs::read(&formal).unwrap()).unwrap();
+        assert_eq!(
+            info, current,
+            "Sync must read the actual edited formal JSON"
+        );
+        let owned = item["MediaSources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .filter(|(_, source)| source["ItemId"] == *id)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            owned.len(),
+            1,
+            "Sync must resolve exactly the selected native source"
+        );
+        let index = owned[0];
+        let has_media = !item["RunTimeTicks"].is_null()
+            && item["Size"] != 0
+            && item["MediaStreams"].as_array().is_some_and(|streams| {
+                streams
+                    .iter()
+                    .any(|stream| matches!(stream["Type"].as_str(), Some("Video" | "Audio")))
+            });
+        if has_media {
+            let exported = reprocess_sync_export(item, index);
+            std::fs::write(formal, serde_json::to_vec(&exported).unwrap()).unwrap();
+            proxy
+                .host
+                .writes
+                .lock()
+                .await
+                .push((format!("sync-noop:{id}"), query.clone()));
+            return Json(exported).into_response();
+        }
+        assert_eq!(
+            item["Size"], 0,
+            "only a cleared native target accepts edited information"
+        );
+        assert!(item["MediaStreams"].as_array().unwrap().is_empty());
+        assert!(item["Chapters"].as_array().unwrap().is_empty());
+        let mut source = info[0]["MediaSourceInfo"].clone();
+        if !source["Path"].is_null() {
+            assert_eq!(source["Path"], item["MediaSources"][index]["Path"]);
+        }
+        source["Id"] = item["MediaSources"][index]["Id"].clone();
+        source["ItemId"] = json!(id);
+        source["Path"] = item["MediaSources"][index]["Path"].clone();
+        if let Some(name) = item["MediaSources"][index].get("Name") {
+            source["Name"] = name.clone();
+        } else {
+            source.as_object_mut().unwrap().remove("Name");
+        }
+        if let Some(kind) = item["MediaSources"][index].get("Type") {
+            source["Type"] = kind.clone();
+        } else {
+            source.as_object_mut().unwrap().remove("Type");
+        }
+        item["MediaStreams"] = source["MediaStreams"].clone();
+        item["Size"] = source["Size"].clone();
+        item["RunTimeTicks"] = source["RunTimeTicks"].clone();
+        item["Chapters"] = info[0]["Chapters"].clone();
+        item["Container"] = source["Container"].clone();
+        item["TotalBitrate"] = source["Bitrate"].clone();
+        if let Some(video) = source["MediaStreams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stream| stream["Type"] == "Video")
+        {
+            item["Width"] = video["Width"].clone();
+            item["Height"] = video["Height"].clone();
+        }
+        item["MediaSources"][index] = source;
+        let exported = reprocess_sync_export(item, index);
+        std::fs::write(formal, serde_json::to_vec(&exported).unwrap()).unwrap();
+        proxy.imports.lock().await.push(id.clone());
+        proxy
+            .host
+            .writes
+            .lock()
+            .await
+            .push((format!("sync:{id}"), query.clone()));
+        return Json(exported).into_response();
+    }
+    if method == axum::http::Method::POST
+        && let Some(id) = path
+            .strip_prefix("/Items/")
+            .and_then(|path| path.strip_suffix("/ClearMediaInfo"))
+    {
+        assert!(
+            proxy
+                .selected
+                .lock()
+                .await
+                .iter()
+                .any(|selected| selected == id)
+        );
+        assert!(query.is_empty());
+        let mut items = proxy.host.items.lock().await;
+        let key = items[id]["PresentationUniqueKey"].clone();
+        assert!(key.as_str().is_some_and(|key| !key.is_empty()));
+        let related = items
+            .values()
+            .filter(|item| item["PresentationUniqueKey"] == key)
+            .map(|item| item["Id"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            related,
+            vec![id.to_string()],
+            "Clear was submitted without proving its native association scope"
+        );
+        let item = items.get_mut(id).unwrap();
+        assert!(
+            item["MediaSources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|source| source["ItemId"] == id)
+        );
+        let item_path = PathBuf::from(item["Path"].as_str().unwrap());
+        let stem = item_path.file_stem().unwrap().to_string_lossy();
+        let formal = item_path.with_file_name(format!("{stem}-mediainfo.json"));
+        if formal.exists() {
+            std::fs::remove_file(formal).unwrap();
+        }
+        let bif = item_path.with_file_name(format!("{stem}-320-4.bif"));
+        if bif.exists() {
+            std::fs::remove_file(bif).unwrap();
+        }
+        let original_chapter = proxy.host.chapter_path.lock().await.clone();
+        let library = original_chapter.ancestors().nth(4).unwrap();
+        let guid = item["Guid"].as_str().unwrap();
+        assert!(uuid::Uuid::parse_str(guid).is_ok());
+        let chapters = library.join(&guid[..2]).join(guid).join("chapters");
+        if chapters.exists() {
+            std::fs::remove_dir_all(chapters).unwrap();
+        }
+        item["MediaStreams"] = json!([]);
+        item["Chapters"] = json!([]);
+        item["Size"] = json!(0);
+        item["RunTimeTicks"] = Value::Null;
+        item["Container"] = Value::Null;
+        item["Width"] = json!(0);
+        item["Height"] = json!(0);
+        item["TotalBitrate"] = json!(0);
+        for source in item["MediaSources"].as_array_mut().unwrap() {
+            source["MediaStreams"] = json!([]);
+            source["Chapters"] = json!([]);
+            source["Size"] = json!(0);
+            source["RunTimeTicks"] = Value::Null;
+            source["Container"] = Value::Null;
+        }
+        proxy
+            .host
+            .writes
+            .lock()
+            .await
+            .push((format!("clear:{id}"), query.clone()));
+        return StatusCode::NO_CONTENT.into_response();
     }
     if method == axum::http::Method::POST
         && let Some(id) = path
@@ -1004,7 +1193,7 @@ async fn reprocess_fixture(
             .to_string(),
         db: f.state.db.clone(),
         host: f.host.clone(),
-        selected: ids.iter().map(|id| id.to_string()).collect(),
+        selected: Arc::new(Mutex::new(ids.iter().map(|id| id.to_string()).collect())),
         imports: Arc::default(),
         binding_faults: Arc::default(),
     };
@@ -1041,18 +1230,41 @@ async fn single_episode_reprocess_rejects_asset_sha_drift_after_metadata_refresh
     *f.host.fault.lock().await = "binding-sha".into();
     let row = f.run_scope("101", "reprocess").await;
     assert_eq!(row["status"], "failed", "{row}");
-    assert!(row["message"].as_str().unwrap().contains("媒体资产身份变化"), "{row}");
+    assert!(
+        row["message"]
+            .as_str()
+            .unwrap()
+            .contains("媒体资产身份变化"),
+        "{row}"
+    );
     assert_eq!(*proxy.imports.lock().await, vec!["101"]);
-    assert_eq!(*proxy.binding_faults.lock().await, vec!["101"], "identity drift must occur after the real metadata refresh");
+    assert_eq!(
+        *proxy.binding_faults.lock().await,
+        vec!["101"],
+        "identity drift must occur after the real metadata refresh"
+    );
     for (id, before) in ["102", "103"].into_iter().zip(other_native) {
         assert_eq!(f.host.items.lock().await[id], before);
     }
     for (path, bytes) in f.protected_files.iter().skip(2).filter(|(path, _)| {
-        !matches!(path.file_name().and_then(|name| name.to_str()), Some("tvshow.nfo" | "season.nfo"))
+        !matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("tvshow.nfo" | "season.nfo")
+        )
     }) {
-        assert_eq!(std::fs::read(path).unwrap(), *bytes, "unselected resource {}", path.display());
+        assert_eq!(
+            std::fs::read(path).unwrap(),
+            *bytes,
+            "unselected resource {}",
+            path.display()
+        );
     }
-    assert!(std::fs::read_dir(f.state.data_dir.join("backups/media-info-reload")).unwrap().next().is_some());
+    assert!(
+        std::fs::read_dir(f.state.data_dir.join("backups/media-info-reload"))
+            .unwrap()
+            .next()
+            .is_some()
+    );
     server.abort();
     f.close().await;
 }
@@ -1185,6 +1397,243 @@ async fn single_episode_reprocess_preserves_other_episode_and_other_version() {
     );
     server.abort();
     f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; actual media probing and native title imports stay localhost"]
+async fn single_episode_reprocess_runs_configured_title_fill_and_preserves_unselected_versions() {
+    let (f, proxy, server) = reprocess_fixture(&["101"], true).await;
+    let unselected = {
+        let items = f.host.items.lock().await;
+        [items["102"].clone(), items["103"].clone()]
+    };
+    emby_toolkit::db::save_setting(
+        &f.state.db,
+        "language_mapping",
+        &json!([{"label":"日语定制","value":"jpn","aliases":["日语"]}]),
+    )
+    .await
+    .unwrap();
+    f.state
+        .save_config(&json!({"auto_fill_language_titles_on_ingest":true,
+        "monitor_sha1_pc_search":false,"auto_repair_truehd_core_on_ingest":true}))
+        .await
+        .unwrap();
+    let row = f.run_scope("101", "reprocess").await;
+    assert_eq!(row["status"], "completed", "{row}");
+    let finalization = &row["result"]["finalization"];
+    assert_eq!(finalization["metadata_refresh"]["completed"], true, "{row}");
+    assert_eq!(finalization["title_fill"]["completed"], true, "{row}");
+    assert!(
+        finalization["title_fill"]["changed_streams"]
+            .as_u64()
+            .unwrap()
+            > 0,
+        "{row}"
+    );
+    assert_eq!(finalization["audio_repair"]["scanned"], 1, "{row}");
+    let items = f.host.items.lock().await;
+    assert!(
+        items["101"]["MediaStreams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|stream| stream["Type"] == "Audio"
+                && stream["Title"]
+                    .as_str()
+                    .is_some_and(|title| title.contains("日语定制"))),
+        "{row}"
+    );
+    for (id, before) in ["102", "103"].into_iter().zip(unselected) {
+        assert_eq!(items[id], before, "unselected native {id}");
+    }
+    drop(items);
+    assert!(
+        proxy.imports.lock().await.len() >= 2,
+        "media import and the actual edited title import are both required"
+    );
+    assert!(proxy.imports.lock().await.iter().all(|id| id == "101"));
+    let sync_stages = f
+        .host
+        .writes
+        .lock()
+        .await
+        .iter()
+        .filter(|(action, _)| matches!(action.as_str(), "sync-noop:101" | "clear:101" | "sync:101"))
+        .map(|(action, _)| action.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sync_stages,
+        vec!["sync-noop:101", "clear:101", "sync:101"],
+        "edited titles must come from the actual import into the proven empty target"
+    );
+    for (path, bytes) in f.protected_files.iter().skip(2).filter(|(path, _)| {
+        !matches!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("tvshow.nfo" | "season.nfo")
+        )
+    }) {
+        assert_eq!(std::fs::read(path).unwrap(), *bytes, "{}", path.display());
+    }
+    assert!(
+        row["result"]["automatic_extraction"].is_null(),
+        "disabled automatic extraction must stay disabled: {row}"
+    );
+    server.abort();
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; both linked movie versions use real ffprobe and localhost imports"]
+async fn movie_reprocess_keeps_its_confirmed_linked_version_scope() {
+    use sha1::{Digest, Sha1};
+    let (f, proxy, server) = reprocess_fixture(&["101"], false).await;
+    proxy.selected.lock().await.push("103".into());
+    let source = actual_episode_source(f._directory.path(), "103", "blue").await;
+    let bytes = std::fs::read(&source).unwrap();
+    let sha = format!("{:X}", Sha1::digest(&bytes));
+    let path = f.target_path.parent().unwrap().join("Movie.Extended.strm");
+    std::fs::write(&path, source.to_string_lossy().as_bytes()).unwrap();
+    let mut items = f.host.items.lock().await;
+    let item = items.get_mut("101").unwrap();
+    item["Type"] = json!("Movie");
+    item["ProviderIds"] = json!({"Tmdb":"500"});
+    let mut version = item.clone();
+    version["Id"] = json!("103");
+    version["Name"] = json!("电影关联版本");
+    version["Path"] = json!(path);
+    version["Guid"] = json!(uuid::Uuid::new_v4().simple().to_string());
+    version["PresentationUniqueKey"] = json!("unique-103");
+    version["Size"] = json!(bytes.len());
+    version["MediaSources"][0]["Id"] = json!("mediasource_103");
+    version["MediaSources"][0]["ItemId"] = json!("103");
+    version["MediaSources"][0]["Path"] = json!(source);
+    version["MediaSources"][0]["Size"] = json!(bytes.len());
+    let mut info_source = version["MediaSources"][0].clone();
+    for field in ["Id", "ItemId"] {
+        info_source.as_object_mut().unwrap().remove(field);
+    }
+    std::fs::write(
+        path.with_file_name("Movie.Extended-mediainfo.json"),
+        json!([{"MediaSourceInfo":info_source,"Chapters":[]}]).to_string(),
+    )
+    .unwrap();
+    items.insert("103".into(), version);
+    drop(items);
+    sqlx::query("UPDATE media_metadata SET tmdb_id='500',item_type='Movie',parent_series_tmdb_id=NULL,season_number=NULL,episode_number=NULL,emby_item_ids_json=emby_item_ids_json||'[\"103\"]'::jsonb,asset_details_json=asset_details_json||$1::jsonb,file_sha1_json=file_sha1_json||$2::jsonb,file_pickcode_json=file_pickcode_json||'[\"pc103\"]'::jsonb WHERE tmdb_id='50011' AND item_type='Episode'")
+        .bind(json!([{"emby_item_id":"103","path":path,"size_bytes":bytes.len()}])).bind(json!([sha])).execute(&f.state.db).await.unwrap();
+    let row = f.run_scope("101", "reprocess").await;
+    assert_eq!(row["status"], "completed", "{row}");
+    let imported = proxy.imports.lock().await.clone();
+    assert!(
+        imported.iter().any(|id| id == "101") && imported.iter().any(|id| id == "103"),
+        "{imported:?}: {row}"
+    );
+    let marked: Value = sqlx::query_scalar(
+        "SELECT asset_details_json FROM media_metadata WHERE tmdb_id='500' AND item_type='Movie'",
+    )
+    .fetch_one(&f.state.db)
+    .await
+    .unwrap();
+    for id in ["101", "103"] {
+        assert!(
+            marked
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|asset| asset["emby_item_id"] == id
+                    && asset["moviepilot_ingest_identity"]["id"] == id),
+            "{marked}"
+        );
+    }
+    let versions = row["result"]["finalization"]["versions"]
+        .as_array()
+        .unwrap();
+    assert_eq!(versions.len(), 2, "{row}");
+    for id in ["101", "103"] {
+        assert!(
+            versions.iter().any(|version| version["item_id"] == id
+                && version["report"]["metadata_refresh"]["completed"] == true),
+            "{row}"
+        );
+        assert!(
+            f.host
+                .writes
+                .lock()
+                .await
+                .iter()
+                .any(|(action, _)| action == &format!("refresh:{id}")),
+            "{row}"
+        );
+        assert_eq!(
+            f.host.items.lock().await[id]["Name"],
+            "新电影标题",
+            "each linked version must actually load the fresh NFO"
+        );
+    }
+    server.abort();
+    f.close().await;
+}
+
+async fn verify_failed_first_admission_reprocess(kind: &str) {
+    let (f, proxy, server) = reprocess_fixture(&["101"], false).await;
+    if kind == "Movie" {
+        let mut items = f.host.items.lock().await;
+        items.get_mut("101").unwrap()["Type"] = json!("Movie");
+        items.get_mut("101").unwrap()["ProviderIds"] = json!({"Tmdb":"500"});
+    }
+    sqlx::query("DELETE FROM media_metadata WHERE emby_item_ids_json @> '[\"101\"]'::jsonb")
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    f.state
+        .save_config(
+            &json!({"monitor_sha1_pc_search":false,"auto_repair_truehd_core_on_ingest":false}),
+        )
+        .await
+        .unwrap();
+    let row = f.run_scope("101", "reprocess").await;
+    assert_eq!(
+        row["status"], "completed",
+        "first-admission retry {kind}: {row}"
+    );
+    assert_eq!(
+        *proxy.imports.lock().await,
+        vec!["101"],
+        "the verified media must only be imported once"
+    );
+    let bound: Value = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE emby_item_ids_json @> '[\"101\"]'::jsonb AND item_type=$1")
+        .bind(kind).fetch_one(&f.state.db).await.unwrap();
+    assert_eq!(
+        bound["asset_details_json"][0]["moviepilot_media_pending"], false,
+        "{bound}"
+    );
+    assert_eq!(
+        bound["asset_details_json"][0]["moviepilot_media_identity"]["id"], "101",
+        "{bound}"
+    );
+    assert_eq!(
+        bound["asset_details_json"][0]["moviepilot_ingest_identity"]["id"], "101",
+        "{bound}"
+    );
+    assert_eq!(
+        row["result"]["finalization"]["metadata_refresh"]["completed"], true,
+        "{row}"
+    );
+    server.abort();
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; first Movie admission retry probes actual media and imports only localhost"]
+async fn failed_first_movie_admission_reprocess_creates_a_verified_local_binding() {
+    verify_failed_first_admission_reprocess("Movie").await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; first Episode admission retry probes actual media and imports only localhost"]
+async fn failed_first_episode_admission_reprocess_creates_a_verified_local_binding() {
+    verify_failed_first_admission_reprocess("Episode").await;
 }
 
 #[tokio::test]

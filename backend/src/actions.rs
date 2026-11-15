@@ -238,7 +238,15 @@ async fn reprocess_inner(
     if matches!(requested["Type"].as_str(), Some("Series" | "Season")) && ids.is_empty() {
         return Err(ApiError::bad("无法确定在库季集范围，禁止全季处理"));
     }
-    if requested["Type"] == "Movie" {
+    let bound_movie = requested["Type"] == "Movie"
+        && (!file_refresh
+            || sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM media_metadata WHERE emby_item_ids_json @> $1::jsonb)",
+            )
+            .bind(json!([id]))
+            .fetch_one(&state.db)
+            .await?);
+    if bound_movie {
         let target = crate::media_edit::target(state, id).await?;
         for version in target.versions {
             let version = string(&version, "emby_id");
@@ -265,11 +273,30 @@ async fn reprocess_inner(
                 return Err(ApiError::bad("重新整理的原生媒体身份或类型未确认"));
             }
             let identity = crate::moviepilot_ingest::observe(state, &current, context).await?;
+            current_identities.push(identity);
+        }
+        let selection = json!(
+            current_identities
+                .iter()
+                .map(|identity| (identity.id.clone(), identity.revision()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        );
+        if let Some(original) = context.plan("organize-current-identities").await? {
+            if original != selection {
+                return Err(ApiError::bad(
+                    "重新整理的原文件实体在中断期间变化，未继续原入库流程",
+                ));
+            }
+        } else {
+            context
+                .save_plan("organize-current-identities", &selection)
+                .await?;
+        }
+        for identity in &current_identities {
             Box::pin(crate::moviepilot_ingest::ensure_media(
-                state, &identity, context,
+                state, identity, context,
             ))
             .await?;
-            current_identities.push(identity);
         }
     } else {
         for asset in &ids {
@@ -377,38 +404,62 @@ async fn reprocess_inner(
     } else {
         vec![]
     };
-    let refresh_position = if file_refresh && !single_episode {
-        Some(crate::media_extra::log_position(state).await?)
+    let completed_metadata = if file_refresh {
+        context.completed("organize-metadata-result").await?
     } else {
         None
     };
-    let mut result = if single_episode {
-        Box::pin(scrape_episode_scope(state, &item, &episodes, context)).await?
+    let mut result = if let Some(report) = completed_metadata {
+        report
+    } else if single_episode {
+        Box::pin(scrape_episode_scope(
+            state,
+            &item,
+            &episodes,
+            context,
+            !file_refresh,
+        ))
+        .await?
+    } else if file_refresh {
+        Box::pin(crate::ingest::scrape_for_ingest(
+            state, &item, &episodes, None, context,
+        ))
+        .await?
     } else {
         Box::pin(crate::ingest::scrape(
             state, &item, &episodes, None, context,
         ))
         .await?
     };
-    if let Some(position) = refresh_position {
-        let finishing = JobContext::for_recovery(Some(context)).await;
-        if result["status"] != "ignored_library" {
-            crate::emby::wait_item_refresh(
-                state,
-                &string(&item, "Id"),
-                None,
-                Some(crate::media_extra::RefreshTrace::new(position)),
-                &finishing,
-                "重新整理元数据刷新验收",
-                &string(&item, "Name"),
-            )
+    if file_refresh {
+        context
+            .complete("organize-metadata-result", &result)
             .await?;
-        }
-    }
-    if !current_identities.is_empty() {
-        let finishing = JobContext::for_recovery(Some(context)).await;
-        for identity in &current_identities {
-            crate::moviepilot_ingest::finish(state, identity, &finishing).await?;
+        if result["status"] != "ignored_library" {
+            for identity in &current_identities {
+                crate::moviepilot_ingest::remember_initial(state, identity, context).await?;
+            }
+            let finalization = Box::pin(crate::webhook::finalize_reorganize_ingest(
+                state,
+                &item,
+                &episodes,
+                &current_identities,
+                context,
+            ))
+            .await?;
+            let warnings = result["warnings"].as_u64().unwrap_or(0)
+                + finalization["warnings"].as_u64().unwrap_or(0);
+            let mut details = crate::media_edit::list(&result["warning_details"]);
+            details.extend(crate::media_edit::list(&finalization["warning_details"]));
+            result["finalization"] = finalization["finalization"].clone();
+            result["automatic_extraction"] = finalization["automatic_extraction"].clone();
+            result["warnings"] = json!(warnings);
+            result["warning_details"] = json!(details);
+            result["message"] = json!(if warnings == 0 {
+                "重新整理入库完成，媒体信息、元数据及入库收尾已验收".to_string()
+            } else {
+                format!("重新整理入库完成，有 {warnings} 条后处理提醒，请查看任务结果")
+            });
         }
     }
     if rebuild_warnings > 0 || !rebuild_warning_details.is_empty() {
@@ -429,6 +480,7 @@ async fn scrape_episode_scope(
     series: &Value,
     episode_ids: &[String],
     context: &JobContext,
+    refresh_metadata: bool,
 ) -> Result<Value> {
     if episode_ids.is_empty() {
         return Err(ApiError::bad("目标分集范围为空，未扩大到整剧"));
@@ -451,7 +503,23 @@ async fn scrape_episode_scope(
         &context,
         &recovery,
     ))
-    .await?;
+    .await;
+    let protection = match protection {
+        Ok(protection) => protection,
+        Err(error) if !refresh_metadata && crate::emby::requires_metadata_only(&error) => {
+            // 此阶段仅写所选元数据/NFO/图片，定点原生更新由入库收尾负责。
+            tokio::fs::remove_dir_all(&recovery).await?;
+            return Box::pin(crate::ingest::scrape_for_ingest(
+                state,
+                series,
+                episode_ids,
+                None,
+                &context,
+            ))
+            .await;
+        }
+        Err(error) => return Err(error),
+    };
     protection.check(state, &context).await?;
     protection.publish().await?;
     let confirmed = std::sync::atomic::AtomicBool::new(true);
@@ -468,7 +536,7 @@ async fn scrape_episode_scope(
                 &context,
             ))
             .await?;
-            if report["status"] != "ignored_library" {
+            if refresh_metadata && report["status"] != "ignored_library" {
                 crate::emby::finalize_refresh_targets_guarded(
                     state,
                     series,

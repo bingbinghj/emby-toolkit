@@ -6,6 +6,7 @@ import { computed, nextTick, reactive, ref, watch } from 'vue';
 import { compileScript, compileTemplate, parse } from '@vue/compiler-sfc';
 
 const source = readFileSync(new URL('../src/components/settings/SchedulerSettingsPage.vue', import.meta.url), 'utf8');
+const shellSource = readFileSync(new URL('../src/MainLayout.vue', import.meta.url), 'utf8');
 const script = source.match(/<script setup>([\s\S]*?)<\/script>/)[1].replace(/^import[^\n]+\n/gm, '');
 const terminal = (taskId = 'original-task', state = 'failed') => ({
   task_id: taskId, state, is_running: false, last_action: '翻译演员', current_action: '空闲',
@@ -296,10 +297,10 @@ for (const [name, flags, label, disabled, indeterminate] of [
   test(`control flags show ${name} with the correct button and held progress`, t => {
     const f = fixture(t, { status: { task_id: 'flag-task', is_running: true, progress: 42, progress_known: false, ...flags } });
     assert.equal(f.api.label.value, label);
-    const pause = source.match(/<VBtn\b[^>]*:prepend-icon="taskPaused[^>]*:disabled="([^"]+)"/)[1];
+    const pause = shellSource.match(/<VBtn\b[^>]*:prepend-icon="taskPaused[^>]*:disabled="([^"]+)"/)[1];
     assert.equal(taskBinding(pause, f), disabled);
     const bars = [...source.matchAll(/<VProgressLinear\b[^>]*:indeterminate="([^"]+)"/g)];
-    assert.equal(bars.length, 2, 'both current-task and task-card progress must use this state');
+    assert.equal(bars.length, 1, 'the remaining task-card progress must use this state');
     for (const bar of bars) assert.equal(taskBinding(bar[1], f), indeterminate);
     f.background.value.progress_known = true;
     for (const bar of bars) {

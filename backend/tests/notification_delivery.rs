@@ -2,7 +2,13 @@ use axum::{Json, Router, extract::State, routing::post};
 use chrono::{NaiveTime, Timelike};
 use emby_toolkit::{AppState, notifications};
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 use tokio::sync::Mutex;
 
 #[test]
@@ -114,6 +120,8 @@ struct Fixture {
     _directory: tempfile::TempDir,
     server: tokio::task::JoinHandle<()>,
     sent: Arc<Mutex<Vec<Value>>>,
+    native_calls: Arc<AtomicUsize>,
+    remote_failed: Arc<AtomicBool>,
 }
 impl Fixture {
     async fn new() -> Self {
@@ -157,12 +165,28 @@ impl Fixture {
                 .bind(id).bind(status).bind(target).execute(&state.db).await.unwrap();
         }
         let sent = Arc::new(Mutex::new(vec![]));
+        let native_calls = Arc::new(AtomicUsize::new(0));
+        let observed_native = native_calls.clone();
+        let remote_failed = Arc::new(AtomicBool::new(false));
+        let reject_send = remote_failed.clone();
         let app = Router::new().route("/botfixture/sendMessage", post(
-            |State(sent): State<Arc<Mutex<Vec<Value>>>>, Json(body): Json<Value>| async move {
-                sent.lock().await.push(body);
-                Json(json!({"ok":true,"result":{"message_id":1}}))
+            move |State(sent): State<Arc<Mutex<Vec<Value>>>>, Json(body): Json<Value>| {
+                let rejected = reject_send.clone();
+                async move {
+                    if rejected.load(Ordering::SeqCst) {
+                        return (axum::http::StatusCode::BAD_GATEWAY, Json(json!({"ok":false,"description":"temporary fixture failure"})));
+                    }
+                    sent.lock().await.push(body);
+                    (axum::http::StatusCode::OK, Json(json!({"ok":true,"result":{"message_id":1}})))
+                }
             }
-        )).with_state(sent.clone());
+        )).fallback(move || {
+            let calls = observed_native.clone();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Json(json!({"ok":true}))
+            }
+        }).with_state(sent.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let api_base = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -180,6 +204,8 @@ impl Fixture {
             _directory: directory,
             server,
             sent,
+            native_calls,
+            remote_failed,
         }
     }
     async fn failure(&self) {
@@ -192,6 +218,7 @@ impl Fixture {
         .unwrap();
     }
     async fn cleanup(self) {
+        self.state.jobs.shutdown().await;
         self.server.abort();
         self.state.db.close().await;
         sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
@@ -200,6 +227,675 @@ impl Fixture {
             .unwrap();
         self.root.close().await;
     }
+    async fn restarted(&self) -> AppState {
+        let mut state = AppState::new(self.state.db.clone(), self._directory.path().into())
+            .await
+            .unwrap();
+        state.notifications = Arc::new(notifications::Service::with_api_base(
+            self.state.notifications.api_base.clone(),
+        ));
+        state
+    }
+}
+
+async fn task_ended(state: &AppState, id: &str) -> Value {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let result = state.jobs.result(id).await.unwrap();
+            if result["is_running"] != true {
+                return result;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all upstream writes are localhost"]
+async fn warning_completion_recovers_original_notifications_without_repeating_native_work() {
+    let f = Fixture::new().await;
+    sqlx::query("ALTER TABLE notification_outbox RENAME TO unavailable_notification_outbox")
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    let work = f.state.clone();
+    let id = f.state.jobs.submit_owned("通知登记恢复", json!({"kind":"notification_registration_test"}), None,
+        move |context| async move {
+            work.http.post(format!("{}/native-write", work.notifications.api_base))
+                .send().await?.error_for_status()?;
+            let movie = json!({"Id":"movie","Type":"Movie","Name":"原入库结果",
+                "Path":"/media/movie.mkv","MediaSources":[{"Id":"source","Path":"/media/movie.mkv",
+                "Size":1024,"Container":"mkv","MediaStreams":[{"Type":"Video","Codec":"h264"}]}]});
+            let report = json!({"pending":(1..=12).map(|episode| json!({"season":1,"episode":episode,
+                "type":"Audio","ordinal":1,"language":"zh","reason":"需要人工检查".repeat(30)})).collect::<Vec<_>>()});
+            let success = notifications::media(&work, &movie, true, &[], &report, &[], Some(&context)).await;
+            let failure = notifications::enqueue_failure(&work, &movie, "原失败原因").await;
+            Ok(json!({"updated":1,"warnings":usize::from(success.is_err())+usize::from(failure.is_err()),
+                "message":"业务已完成，通知登记错误仅作为提醒"}))
+        }).await.unwrap();
+    let result = task_ended(&f.state, &id).await;
+    assert_eq!(result["state"], "completed_with_warnings", "{result}");
+    assert_eq!(result["result"]["warnings"], 2);
+    assert_eq!(result["cleanup_pending"], true);
+    assert_eq!(f.native_calls.load(Ordering::SeqCst), 1);
+    assert!(f.sent.lock().await.is_empty());
+    let originals: Vec<Value> = sqlx::query_scalar("SELECT value_json FROM durable_job_steps WHERE job_id=$1 AND step_key LIKE 'plans:notification-intent:%' ORDER BY value_json->>'id'")
+        .bind(&id).fetch_all(&f.state.db).await.unwrap();
+    assert_eq!(
+        originals.len(),
+        6,
+        "both original targets and the separate title page must be planned"
+    );
+    assert!(
+        originals
+            .iter()
+            .all(|intent| !intent.to_string().contains("fixture"))
+    );
+    let completed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM durable_job_steps WHERE job_id=$1 AND step_key LIKE 'completed:notification-intent:%'")
+        .bind(&id).fetch_one(&f.state.db).await.unwrap();
+    assert_eq!(completed, 0);
+    sqlx::query("ALTER TABLE unavailable_notification_outbox RENAME TO notification_outbox")
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE emby_users_extended SET telegram_chat_id='999'")
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    f.state.save_config(&json!({"telegram_channel_id":"@changed","notification_scope":{"library_new":"all","recognize_fail":"all"}}))
+        .await.unwrap();
+    let restarted = f.restarted().await;
+    sqlx::query("ALTER TABLE emby_users_extended RENAME TO unavailable_notification_recipients")
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    restarted
+        .jobs
+        .resume_pending(
+            restarted.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    sqlx::query("ALTER TABLE unavailable_notification_recipients RENAME TO emby_users_extended")
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    assert!(
+        f.sent.lock().await.is_empty(),
+        "startup recovery registers only; the sender owns Telegram delivery"
+    );
+    let registered: Vec<(String, Value, i64)> =
+        sqlx::query_as("SELECT id,payload_json,created_at FROM notification_outbox ORDER BY id")
+            .fetch_all(&f.state.db)
+            .await
+            .unwrap();
+    let expected = originals
+        .iter()
+        .map(|intent| {
+            (
+                intent["id"].as_str().unwrap().to_string(),
+                intent["payload"].clone(),
+                intent["created_at"].as_i64().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        registered, expected,
+        "the saved id, target, content and timestamp must be reused verbatim"
+    );
+    let settled = restarted.jobs.result(&id).await.unwrap();
+    assert_eq!(settled["task_id"], id);
+    assert_eq!(settled["state"], "completed_with_warnings");
+    assert_eq!(settled["cleanup_pending"], false);
+    assert_eq!(settled["result"], result["result"]);
+    notifications::flush(&restarted).await;
+    assert_eq!(f.sent.lock().await.len(), originals.len());
+    restarted
+        .jobs
+        .resume_pending(
+            restarted.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    notifications::flush(&restarted).await;
+    assert_eq!(
+        f.sent.lock().await.len(),
+        originals.len(),
+        "restart must not create or send a second intent"
+    );
+    assert_eq!(f.native_calls.load(Ordering::SeqCst), 1);
+    restarted.jobs.shutdown().await;
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Telegram is localhost"]
+async fn registered_remote_and_ack_failures_do_not_fail_a_persistent_media_job() {
+    for ack_failure in [false, true] {
+        let f = Fixture::new().await;
+        f.state
+            .save_config(&json!({"notification_scope":{"recognize_fail":"user"}}))
+            .await
+            .unwrap();
+        if ack_failure {
+            sqlx::query("CREATE FUNCTION fail_notification_update() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'simulated notification acknowledgement persistence failure'; END;$$")
+                .execute(&f.state.db).await.unwrap();
+            sqlx::query("CREATE TRIGGER fail_notification_update BEFORE UPDATE ON notification_outbox FOR EACH ROW EXECUTE FUNCTION fail_notification_update()")
+                .execute(&f.state.db).await.unwrap();
+        } else {
+            f.remote_failed.store(true, Ordering::SeqCst);
+        }
+        let work = f.state.clone();
+        let id = f
+            .state
+            .jobs
+            .submit_owned(
+                "已登记通知故障",
+                json!({"kind":"notification_registered_test"}),
+                None,
+                move |_| async move {
+                    notifications::with_operator(
+                        "member",
+                        notifications::failure(
+                            &work,
+                            &json!({"Id":"movie","Name":"已登记媒体"}),
+                            "原失败原因",
+                        ),
+                    )
+                    .await?;
+                    Ok(json!({"updated":1}))
+                },
+            )
+            .await
+            .unwrap();
+        let result = task_ended(&f.state, &id).await;
+        assert_eq!(
+            result["state"], "completed",
+            "ack_failure={ack_failure}: {result}"
+        );
+        assert_eq!(
+            result["cleanup_pending"], false,
+            "the outbox already owns retry"
+        );
+        let (status, row_id): (String, String) =
+            sqlx::query_as("SELECT status,id FROM notification_outbox")
+                .fetch_one(&f.state.db)
+                .await
+                .unwrap();
+        assert_eq!(status, "pending");
+        let registered: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM durable_job_steps WHERE job_id=$1 AND step_key LIKE 'completed:notification-intent:%' AND value_json->>'registered'='true'")
+            .bind(&id).fetch_one(&f.state.db).await.unwrap();
+        assert_eq!(registered, 1);
+        if ack_failure {
+            sqlx::query("DROP TRIGGER fail_notification_update ON notification_outbox")
+                .execute(&f.state.db)
+                .await
+                .unwrap();
+            sqlx::query("DROP FUNCTION fail_notification_update()")
+                .execute(&f.state.db)
+                .await
+                .unwrap();
+        } else {
+            f.remote_failed.store(false, Ordering::SeqCst);
+        }
+        sqlx::query("UPDATE notification_outbox SET next_attempt_at=0")
+            .execute(&f.state.db)
+            .await
+            .unwrap();
+        let restarted = f.restarted().await;
+        restarted
+            .jobs
+            .resume_pending(
+                restarted.clone(),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        notifications::flush(&restarted).await;
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT id,status FROM notification_outbox")
+                .fetch_all(&f.state.db)
+                .await
+                .unwrap();
+        assert_eq!(rows, vec![(row_id, "sent".into())]);
+        assert_eq!(
+            f.sent.lock().await.len(),
+            if ack_failure { 2 } else { 1 },
+            "an unconfirmed remote receipt may be sent again, but no new outbox intent is created"
+        );
+        assert_eq!(f.native_calls.load(Ordering::SeqCst), 0);
+        restarted.jobs.shutdown().await;
+        f.cleanup().await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Telegram is localhost"]
+async fn persistent_recipient_lookup_retries_the_same_job_and_remains_stoppable() {
+    let f = Fixture::new().await;
+    f.state
+        .save_config(&json!({"notification_scope":{"recognize_fail":"user"}}))
+        .await
+        .unwrap();
+    for (table, stop) in [("emby_users", false), ("emby_users_extended", true)] {
+        sqlx::query(&format!(
+            "ALTER TABLE {table} RENAME TO unavailable_notification_recipients"
+        ))
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let work = f.state.clone();
+        let id = f
+            .state
+            .jobs
+            .submit_owned(
+                "收件人故障等待",
+                json!({"kind":"notification_recipient_test"}),
+                None,
+                move |_| async move {
+                    started.send(()).unwrap();
+                    notifications::with_operator(
+                        "member",
+                        notifications::enqueue_failure(
+                            &work,
+                            &json!({"Id":"movie","Name":"原收件人"}),
+                            "原失败原因",
+                        ),
+                    )
+                    .await?;
+                    Ok(json!({"updated":1}))
+                },
+            )
+            .await
+            .unwrap();
+        ready.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            f.state.jobs.result(&id).await.unwrap()["is_running"],
+            true,
+            "lookup failure must retain the active job instead of treating it as an empty selection"
+        );
+        let registered: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notification_outbox")
+            .fetch_one(&f.state.db)
+            .await
+            .unwrap();
+        assert_eq!(registered, if stop { 1 } else { 0 });
+        if stop {
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                f.state.jobs.control(Some(&id), "stop"),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), task_ended(&f.state, &id))
+                    .await
+                    .unwrap()["state"],
+                "cancelled"
+            );
+        }
+        sqlx::query(&format!(
+            "ALTER TABLE unavailable_notification_recipients RENAME TO {table}"
+        ))
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+        if !stop {
+            let result = task_ended(&f.state, &id).await;
+            assert_eq!(result["task_id"], id);
+            assert_eq!(result["state"], "completed");
+        }
+    }
+    let targets: Vec<String> =
+        sqlx::query_scalar("SELECT payload_json->>'chat_id' FROM notification_outbox")
+            .fetch_all(&f.state.db)
+            .await
+            .unwrap();
+    assert_eq!(targets, vec!["200"]);
+    notifications::flush(&f.state).await;
+    assert_eq!(f.sent.lock().await.len(), 1);
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Telegram is localhost"]
+async fn persistent_notification_plan_write_retries_and_stop_does_not_skip_the_failure() {
+    let f = Fixture::new().await;
+    f.state
+        .save_config(&json!({"notification_scope":{"recognize_fail":"user"}}))
+        .await
+        .unwrap();
+    sqlx::query("CREATE FUNCTION reject_notification_plan() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN IF NEW.step_key LIKE 'plans:notification-intent:%' THEN RAISE EXCEPTION 'simulated notification plan persistence failure'; END IF; RETURN NEW; END;$$")
+        .execute(&f.state.db).await.unwrap();
+    for stop in [false, true] {
+        sqlx::query("CREATE TRIGGER reject_notification_plan BEFORE INSERT ON durable_job_steps FOR EACH ROW EXECUTE FUNCTION reject_notification_plan()")
+            .execute(&f.state.db).await.unwrap();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let work = f.state.clone();
+        let id = f
+            .state
+            .jobs
+            .submit_owned(
+                "通知计划故障等待",
+                json!({"kind":"notification_plan_write_test"}),
+                None,
+                move |_| async move {
+                    started.send(()).unwrap();
+                    notifications::with_operator(
+                        "member",
+                        notifications::enqueue_failure(
+                            &work,
+                            &json!({"Id":"movie","Name":"原通知计划"}),
+                            "原失败原因",
+                        ),
+                    )
+                    .await?;
+                    Ok(json!({"updated":1}))
+                },
+            )
+            .await
+            .unwrap();
+        ready.await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(f.state.jobs.result(&id).await.unwrap()["is_running"], true);
+        if stop {
+            f.state.jobs.control(Some(&id), "stop").await.unwrap();
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), task_ended(&f.state, &id))
+                    .await
+                    .unwrap()["state"],
+                "cancelled"
+            );
+        }
+        sqlx::query("DROP TRIGGER reject_notification_plan ON durable_job_steps")
+            .execute(&f.state.db)
+            .await
+            .unwrap();
+        if !stop {
+            assert_eq!(task_ended(&f.state, &id).await["state"], "completed");
+        }
+        let registered: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notification_outbox")
+            .fetch_one(&f.state.db)
+            .await
+            .unwrap();
+        assert_eq!(
+            registered, 1,
+            "the stopped attempt must not be reported as registered"
+        );
+    }
+    sqlx::query("DROP FUNCTION reject_notification_plan()")
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    notifications::flush(&f.state).await;
+    assert_eq!(f.sent.lock().await.len(), 1);
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Telegram is localhost"]
+async fn invalid_notification_registration_plans_are_preserved_without_any_delivery() {
+    use sha2::{Digest, Sha256};
+    let f = Fixture::new().await;
+    let mut ids = Vec::new();
+    for fault in [
+        "method",
+        "kind",
+        "key",
+        "token",
+        "payload",
+        "recipient",
+        "local_photo",
+        "photo_traversal",
+        "photo_port",
+    ] {
+        let intent_id = format!("invalid-{fault}");
+        let mut key = format!(
+            "notification-intent:{:x}",
+            Sha256::digest(intent_id.as_bytes())
+        );
+        let mut invalid = json!({"id":intent_id,"kind":"recognize_fail","method":"sendMessage",
+            "payload":{"chat_id":"200","text":"原通知正文","parse_mode":"MarkdownV2",
+                "disable_web_page_preview":true,"disable_notification":false},"created_at":1});
+        match fault {
+            "method" => invalid["method"] = json!("sendMessage/../../deleteMessage"),
+            "kind" => invalid["kind"] = json!("unknown"),
+            "key" => key.push_str("-wrong"),
+            "token" => invalid["telegram_bot_token"] = json!("fixture"),
+            "payload" => invalid["payload"]["reply_markup"] = json!({"unknown":"instruction"}),
+            "recipient" => invalid["payload"]["chat_id"] = Value::Null,
+            "local_photo" | "photo_traversal" | "photo_port" => {
+                invalid["kind"] = json!("library_new");
+                invalid["method"] = json!("sendPhoto");
+                invalid["payload"] = json!({"chat_id":"200","caption":"原图片正文","parse_mode":"MarkdownV2",
+                    "disable_notification":false,"photo":if fault=="local_photo" {"file:///invalid-notification.jpg"}
+                        else if fault=="photo_port" {"https://image.tmdb.org:8443/t/p/w780/invalid-notification.jpg"}
+                        else {"https://image.tmdb.org/t/p/w780/../../invalid-notification.jpg"}});
+            }
+            _ => unreachable!(),
+        }
+        let valid_id = format!("valid-{fault}");
+        let valid_key = format!(
+            "notification-intent:{:x}",
+            Sha256::digest(valid_id.as_bytes())
+        );
+        let valid = json!({"id":valid_id,"kind":"recognize_fail","method":"sendMessage",
+            "payload":{"chat_id":"200","text":"同任务的合法通知正文","parse_mode":"MarkdownV2",
+                "disable_web_page_preview":true,"disable_notification":false},"created_at":1});
+        let id = f
+            .state
+            .jobs
+            .submit_owned(
+                "非法通知计划",
+                json!({"kind":"notification_invalid_plan_test"}),
+                None,
+                move |context| async move {
+                    context.save_plan(&key, &invalid).await?;
+                    context.save_plan(&valid_key, &valid).await?;
+                    Ok(json!({"updated":1}))
+                },
+            )
+            .await
+            .unwrap();
+        let result = task_ended(&f.state, &id).await;
+        assert_eq!(result["state"], "completed");
+        assert_eq!(result["cleanup_pending"], true);
+        ids.push(id);
+    }
+    let restarted = f.restarted().await;
+    restarted
+        .jobs
+        .resume_pending(
+            restarted.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    for id in ids {
+        let result = restarted.jobs.result(&id).await.unwrap();
+        assert_eq!(
+            result["cleanup_pending"], true,
+            "invalid plan must not be cleared: {result}"
+        );
+        assert!(
+            result["resume_error"]
+                .as_str()
+                .unwrap()
+                .contains("已保留原计划")
+        );
+        let retained: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM durable_job_steps WHERE job_id=$1 AND step_key LIKE 'plans:notification-intent:%'")
+            .bind(&id).fetch_one(&f.state.db).await.unwrap();
+        let completed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM durable_job_steps WHERE job_id=$1 AND step_key LIKE 'completed:notification-intent:%'")
+            .bind(&id).fetch_one(&f.state.db).await.unwrap();
+        assert_eq!(retained, 2);
+        assert_eq!(
+            completed, 0,
+            "validate the whole pending set before registering any member"
+        );
+    }
+    let registered: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notification_outbox")
+        .fetch_one(&f.state.db)
+        .await
+        .unwrap();
+    assert_eq!(registered, 0);
+    notifications::flush(&restarted).await;
+    assert!(f.sent.lock().await.is_empty());
+    assert_eq!(f.native_calls.load(Ordering::SeqCst), 0);
+    restarted.jobs.shutdown().await;
+    f.cleanup().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Telegram is localhost"]
+async fn notification_registration_reports_missing_outbox_for_success_and_failure() {
+    let f = Fixture::new().await;
+    sqlx::query("ALTER TABLE notification_outbox RENAME TO unavailable_notification_outbox")
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    let failure = notifications::enqueue_failure(
+        &f.state,
+        &json!({"Id":"movie","Name":"通知登记失败测试"}),
+        "真实入库失败",
+    )
+    .await;
+    let movie = json!({"Id":"movie","Type":"Movie","Name":"通知登记失败测试",
+        "Path":"/media/movie.mkv","MediaSources":[{"Id":"source","Path":"/media/movie.mkv",
+        "Size":1024,"Container":"mkv","MediaStreams":[{"Type":"Video","Codec":"h264"}]}]});
+    let success = notifications::media(
+        &f.state,
+        &movie,
+        true,
+        &[],
+        &json!({"pending":[]}),
+        &[],
+        None,
+    )
+    .await;
+    sqlx::query("ALTER TABLE unavailable_notification_outbox RENAME TO notification_outbox")
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    let sent = f.sent.lock().await.len();
+    f.cleanup().await;
+    assert!(
+        failure.is_err(),
+        "failure intent was not persisted: {failure:?}"
+    );
+    assert!(
+        success.is_err(),
+        "success intent was not persisted: {success:?}"
+    );
+    assert_eq!(sent, 0, "unregistered intent must not be sent");
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Telegram is localhost"]
+async fn notification_recipient_lookup_errors_are_not_an_empty_successful_selection() {
+    let f = Fixture::new().await;
+    f.state
+        .save_config(&json!({"notification_scope":{"recognize_fail":"user"}}))
+        .await
+        .unwrap();
+    let mut results = vec![];
+    for table in ["emby_users", "emby_users_extended"] {
+        sqlx::query(&format!(
+            "ALTER TABLE {table} RENAME TO unavailable_notification_recipients"
+        ))
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+        results.push(
+            notifications::with_operator(
+                "member",
+                notifications::enqueue_failure(
+                    &f.state,
+                    &json!({"Id":"movie","Name":"接收列表查询失败测试"}),
+                    "真实入库失败",
+                ),
+            )
+            .await,
+        );
+        sqlx::query(&format!(
+            "ALTER TABLE unavailable_notification_recipients RENAME TO {table}"
+        ))
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    }
+    let registered: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM notification_outbox")
+        .fetch_one(&f.state.db)
+        .await
+        .unwrap();
+    let sent = f.sent.lock().await.len();
+    f.cleanup().await;
+    assert!(results.iter().all(Result::is_err), "{results:?}");
+    assert_eq!(
+        registered, 0,
+        "unknown actor must not fall back to another recipient"
+    );
+    assert_eq!(sent, 0);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Telegram is localhost"]
+async fn notification_ack_update_failure_keeps_registered_intent_for_retry() {
+    let f = Fixture::new().await;
+    f.state
+        .save_config(&json!({"notification_scope":{"recognize_fail":"user"}}))
+        .await
+        .unwrap();
+    sqlx::query("CREATE FUNCTION fail_notification_update() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'simulated notification acknowledgement persistence failure'; END;$$")
+        .execute(&f.state.db).await.unwrap();
+    sqlx::query("CREATE TRIGGER fail_notification_update BEFORE UPDATE ON notification_outbox FOR EACH ROW EXECUTE FUNCTION fail_notification_update()")
+        .execute(&f.state.db).await.unwrap();
+    let result = notifications::with_operator(
+        "member",
+        notifications::with_delivery_key(
+            "ack-update-test",
+            notifications::failure(
+                &f.state,
+                &json!({"Id":"movie","Name":"已登记通知测试"}),
+                "真实入库失败",
+            ),
+        ),
+    )
+    .await;
+    let pending: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM notification_outbox WHERE status='pending'")
+            .fetch_one(&f.state.db)
+            .await
+            .unwrap();
+    sqlx::query("DROP TRIGGER fail_notification_update ON notification_outbox")
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    sqlx::query("DROP FUNCTION fail_notification_update()")
+        .execute(&f.state.db)
+        .await
+        .unwrap();
+    notifications::flush(&f.state).await;
+    let after_retry: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM notification_outbox WHERE status='sent'")
+            .fetch_one(&f.state.db)
+            .await
+            .unwrap();
+    f.cleanup().await;
+    assert!(result.is_ok(), "intent was already registered: {result:?}");
+    assert_eq!(
+        pending, 1,
+        "failed acknowledgement must retain the durable intent"
+    );
+    assert_eq!(
+        after_retry, 1,
+        "the original intent remains available after the fault is removed"
+    );
 }
 
 #[tokio::test]

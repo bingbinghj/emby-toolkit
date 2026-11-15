@@ -40,6 +40,413 @@ const METADATA_FIELDS: &[&str] = &[
     "ParentIndexNumber",
 ];
 
+struct IngestSync<'a> {
+    target: &'a SavedTarget,
+    identity: &'a crate::moviepilot_ingest::Identity,
+    owner: &'a Path,
+}
+
+fn ingest_sync_scope(target: &SavedTarget) -> Value {
+    json!({"id":target.id,"path":target.path,"source":target.source,"sha":target.sha})
+}
+
+async fn check_ingest_sync_request(ingest: &IngestSync<'_>) -> Result<Value> {
+    let path = ingest.owner.join("identity.json");
+    let bytes = current_json(&path)
+        .await?
+        .ok_or_else(|| conflict("单目标同步缺少原文件身份记录，恢复材料已保留"))?;
+    let owner = parse_recovery_json(&bytes, &path)?;
+    let target = ingest.target;
+    let identity = ingest.identity;
+    if owner["sync_empty"] != true
+        || owner["current"] != identity.revision()
+        || owner["info"] != target.info
+        || target.id != identity.id
+        || target.path != identity.path
+        || target.source != identity.source
+        || target.sha
+            != identity
+                .cloud
+                .as_ref()
+                .map(|cloud| string(cloud, "sha1").to_uppercase())
+        || target.asset.is_some()
+    {
+        return Err(conflict(
+            "单目标同步的原身份、请求或范围不一致，恢复材料已保留",
+        ));
+    }
+    Ok(owner)
+}
+
+// Only the verified PRO ExportDTO changes are comparable here. Unknown fields
+// remain in both values, including unknown null fields; this is not a generic
+// native-JSON normalization or permission to publish a native DTO as a sidecar.
+fn ingest_export_matches(request: &Value, response: &Value) -> bool {
+    fn nulls(value: &mut Value, fields: &str) {
+        if let Some(object) = value.as_object_mut() {
+            for field in fields.split(',') {
+                if object.get(field).is_some_and(Value::is_null) {
+                    object.remove(field);
+                }
+            }
+        }
+    }
+    fn chapters(value: &mut Value) -> Option<()> {
+        for chapter in value.as_array_mut()? {
+            if !chapter["ImageTag"].is_null() && !chapter["ImageTag"].is_string() {
+                return None;
+            }
+            // ExportDTO clears the image tag; image bytes are checked by the
+            // resource guard, independently of this display/cache identifier.
+            chapter.as_object_mut()?.remove("ImageTag");
+            nulls(chapter, "Name,MarkerType,ChapterIndex");
+        }
+        Some(())
+    }
+    fn comparable(value: &Value, request: &Value) -> Option<Value> {
+        let mut value = value.clone();
+        let bundles = value.as_array_mut()?;
+        if bundles.len() != 1 {
+            return None;
+        }
+        let bundle = &mut bundles[0];
+        if !bundle["ZeroFingerprintConfidence"].is_null()
+            && !bundle["ZeroFingerprintConfidence"].is_boolean()
+        {
+            return None;
+        }
+        bundle.as_object_mut()?.remove("ZeroFingerprintConfidence");
+        nulls(bundle, "EmbeddedInfo,EmbeddedImage");
+        chapters(bundle.get_mut("Chapters")?)?;
+        let top = bundle["Chapters"].clone();
+        let source = bundle.get_mut("MediaSourceInfo")?;
+        for field in ["Id", "ItemId", "Path", "Name"] {
+            source.as_object_mut()?.remove(field);
+        }
+        // The probe describes remote reads. Emby rebuilds this hint from the
+        // native item's shortcut/location; it does not import the probe value.
+        if !source["IsRemote"].is_null() && !source["IsRemote"].is_boolean() {
+            return None;
+        }
+        source.as_object_mut()?.remove("IsRemote");
+        for (field, kind) in [
+            ("DefaultAudioStreamIndex", "Audio"),
+            ("DefaultSubtitleStreamIndex", "Subtitle"),
+        ] {
+            if request[0]["MediaSourceInfo"][field].is_null() {
+                if !source[field].is_null()
+                    && !source[field].as_i64().is_some_and(|index| {
+                        i32::try_from(index).is_ok()
+                            && media_edit::list(&source["MediaStreams"])
+                                .iter()
+                                .any(|stream| stream["Type"] == kind && stream["Index"] == index)
+                    })
+                {
+                    return None;
+                }
+                source.as_object_mut()?.remove(field);
+            }
+        }
+        if request[0]["MediaSourceInfo"]["MimeType"].is_null() {
+            if !source["MimeType"].is_null()
+                && !source["MimeType"].as_str().is_some_and(|mime| {
+                    mime.split_once('/').is_some_and(|(kind, subtype)| {
+                        [kind, subtype].iter().all(|part| {
+                            !part.is_empty()
+                                && part.bytes().all(|byte| {
+                                    byte.is_ascii_alphanumeric() || b"!#$&^_.+-".contains(&byte)
+                                })
+                        })
+                    })
+                })
+            {
+                return None;
+            }
+            // This is a read-only getter derived from Container. A returned
+            // value is additionally bound to the actual native getter below.
+            source.as_object_mut()?.remove("MimeType");
+        }
+        if !source["Chapters"].is_null() {
+            let mut nested = source["Chapters"].clone();
+            if !nested.as_array()?.is_empty() {
+                chapters(&mut nested)?;
+                if nested != top {
+                    return None;
+                }
+            }
+        }
+        // The pinned exporter requests fillChapters=false (empty nested list).
+        // Native GET may add the same chapters; the complete top list remains.
+        source.as_object_mut()?.remove("Chapters");
+        // Nullable properties of the pinned 4.10.2/PRO 3.0.0.57 DTO schema.
+        nulls(
+            source,
+            "Chapters,Protocol,EncoderPath,EncoderProtocol,Type,ProbePath,ProbeProtocol,Container,Size,SortName,IsRemote,HasMixedProtocols,RunTimeTicks,ContainerStartTimeTicks,SupportsTranscoding,TrancodeLiveStartIndex,WallClockStart,SupportsDirectStream,SupportsDirectPlay,IsInfiniteStream,RequiresOpening,OpenToken,RequiresClosing,LiveStreamId,BufferMs,RequiresLooping,SupportsProbing,Video3DFormat,Formats,Bitrate,Timestamp,RequiredHttpHeaders,DirectStreamUrl,AddApiKeyToDirectStreamUrl,TranscodingUrl,TranscodingSubProtocol,TranscodingContainer,AnalyzeDurationMs,ReadAtNativeFramerate,DefaultAudioStreamIndex,DefaultSubtitleStreamIndex,ServerId,MimeType,TranscodingMimeType",
+        );
+        for stream in source["MediaStreams"].as_array_mut()? {
+            for field in ["DisplayTitle", "DisplayLanguage"] {
+                if !stream[field].is_null() && !stream[field].is_string() {
+                    return None;
+                }
+                stream.as_object_mut()?.remove(field);
+            }
+            for field in ["AverageFrameRate", "RealFrameRate"] {
+                if let Some(value) = stream[field].as_f64() {
+                    stream[field] = json!(value as f32);
+                }
+            }
+            nulls(
+                stream,
+                "Codec,CodecTag,Language,ColorTransfer,ColorPrimaries,ColorSpace,Comment,StreamStartTimeTicks,TimeBase,Title,Extradata,VideoRange,NalLengthSize,IsInterlaced,IsAVC,ChannelLayout,BitRate,BitDepth,RefFrames,Rotation,Channels,SampleRate,IsDefault,IsForced,IsHearingImpaired,Height,Width,AverageFrameRate,RealFrameRate,Profile,Type,AspectRatio,Index,IsExternal,DeliveryMethod,DeliveryUrl,DeliveryFormat,IsExternalUrl,IsChunkedResponse,IsTextSubtitleStream,SupportsExternalStream,Path,Protocol,PixelFormat,Level,IsAnamorphic,ExtendedVideoType,ExtendedVideoSubType,ExtendedVideoSubTypeDescription,ItemId,ServerId,AttachmentSize,MimeType,SubtitleLocationType",
+            );
+        }
+        Some(value)
+    }
+    response.as_array().is_some_and(|bundles| {
+        bundles.len() == 1
+            && bundles[0]["MediaSourceInfo"].is_object()
+            && ["Id", "ItemId", "Path", "Name"]
+                .iter()
+                .all(|field| bundles[0]["MediaSourceInfo"][*field].is_null())
+            && bundles[0]["Chapters"].as_array().is_some_and(|chapters| {
+                chapters.iter().all(|chapter| chapter["ImageTag"].is_null())
+            })
+    }) && matches!((comparable(request, request), comparable(response, request)), (Some(a), Some(b)) if a == b)
+}
+
+fn ingest_native_readback(source: &Value, chapters: &Value, streams: &Value) -> Option<Value> {
+    let mut native = json!([{"MediaSourceInfo":source,"Chapters":chapters}]);
+    for field in ["Id", "ItemId", "Path", "Name"] {
+        native[0]["MediaSourceInfo"][field] = Value::Null;
+    }
+    for chapter in native[0]["Chapters"].as_array_mut()? {
+        if !chapter["ImageTag"].is_null() && !chapter["ImageTag"].is_string() {
+            return None;
+        }
+        chapter["ImageTag"] = Value::Null;
+    }
+    native[0]["MediaSourceInfo"]["MediaStreams"] = streams.clone();
+    Some(native)
+}
+
+async fn record_ingest_sync_export(
+    ingest: &IngestSync<'_>,
+    recovery: &Path,
+    path: &Path,
+    request: &[u8],
+    response: &Value,
+    before: &Value,
+) -> Result<bool> {
+    check_ingest_sync_request(ingest).await?;
+    let submitted = parse_recovery_json(request, path)?;
+    if submitted != ingest.target.info {
+        return Err(conflict("本次同步正文与原入库请求不一致，恢复材料已保留"));
+    }
+    if !ingest_export_matches(&submitted, response) {
+        return Ok(false);
+    }
+    let bytes = current_json(path)
+        .await?
+        .ok_or_else(|| conflict("本次同步导出 JSON 缺失，恢复材料已保留"))?;
+    if !sync_json_matches(
+        &bytes,
+        request,
+        &serde_json::to_vec(response).unwrap(),
+        path,
+    )? {
+        return Err(conflict("本次同步导出 JSON 已被修改，恢复材料已保留"));
+    }
+    let source = media_info::item_source(
+        before,
+        &[
+            &ingest.target.path,
+            ingest.target.source.as_deref().unwrap_or(""),
+        ],
+    )
+    .ok_or_else(|| conflict("本次同步缺少唯一原生媒体源，恢复材料已保留"))?;
+    let proof = json!({"kind":"moviepilot-empty-sync-export","owner":ingest.owner,
+        "entity":ingest.identity.revision(),"scope":ingest_sync_scope(ingest.target),
+        "request_sha256":json_hash(request),"response":response,
+        "export":parse_recovery_json(&bytes,path)?,"export_sha256":json_hash(&bytes),
+        "native_item":{"Id":before["Id"],"Path":before["Path"],"Type":before["Type"],
+            "PresentationUniqueKey":before["PresentationUniqueKey"],"ExtraType":before["ExtraType"],"PartCount":before["PartCount"]},
+        "native_source":{"Id":source["Id"],"ItemId":source["ItemId"],"Path":source["Path"]}});
+    let proof_path = recovery.join("ingest-sync-export.json");
+    let proof_bytes = serde_json::to_vec(&proof).unwrap();
+    write_recovery_file(&proof_path, &proof_bytes).await?;
+    tokio::fs::File::open(recovery).await?.sync_all().await?;
+    if recovery != ingest.owner {
+        let path = ingest.owner.join("ingest-sync-export-link.json");
+        let original = current_json(&path).await?;
+        if let Some(bytes) = &original {
+            let previous = parse_recovery_json(bytes, &path)?;
+            if previous["entity"] != ingest.identity.revision()
+                || previous["scope"] != ingest_sync_scope(ingest.target)
+            {
+                return Err(conflict("原单目标同步导出指针变化，恢复材料已保留"));
+            }
+        }
+        let stage = ingest.owner.join(format!(
+            ".ingest-export-link-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let link = json!({"proof":proof_path,"proof_sha256":json_hash(&proof_bytes),
+            "entity":ingest.identity.revision(),"scope":ingest_sync_scope(ingest.target)});
+        write_recovery_file(&stage, &serde_json::to_vec(&link).unwrap()).await?;
+        let result = restore_json_guarded(&path, &stage, original.as_deref()).await;
+        let _ = tokio::fs::remove_file(&stage).await;
+        result?;
+        tokio::fs::File::open(ingest.owner)
+            .await?
+            .sync_all()
+            .await?;
+    }
+    Ok(true)
+}
+
+pub(crate) async fn claim_ingest_sync_export(
+    state: &AppState,
+    target: &SavedTarget,
+    identity: &crate::moviepilot_ingest::Identity,
+    owner: &Path,
+    exported: &Path,
+    context: &JobContext,
+) -> Result<()> {
+    let ingest = IngestSync {
+        target,
+        identity,
+        owner,
+    };
+    check_ingest_sync_request(&ingest).await?;
+    let (path, _backup, request) = validate_sync_ingest_recovery(owner, target, false).await?;
+    crate::moviepilot_ingest::unchanged(state, identity, context).await?;
+    let live = identity_details(state, target).await?;
+    if !crate::moviepilot_ingest::readback_matches(&target.info, &live, identity) {
+        return Err(conflict("单目标同步原生媒体尚未完整验收，恢复材料已保留"));
+    }
+    let link_path = owner.join("ingest-sync-export-link.json");
+    let link = current_json(&link_path)
+        .await?
+        .map(|bytes| parse_recovery_json(&bytes, &link_path))
+        .transpose()?;
+    let proof_path = if let Some(link) = &link {
+        if link["entity"] != identity.revision() || link["scope"] != ingest_sync_scope(target) {
+            return Err(conflict("本次单目标同步导出指针不一致，恢复材料已保留"));
+        }
+        recovery_backup(owner, &link["proof"]).await?
+    } else {
+        recovery_backup(owner, &json!(exported.join("ingest-sync-export.json"))).await?
+    };
+    let proof_bytes = current_json(&proof_path)
+        .await?
+        .ok_or_else(|| conflict("缺少本次单目标同步导出证明，恢复材料已保留"))?;
+    let proof = parse_recovery_json(&proof_bytes, &proof_path)?;
+    let source = media_info::item_source(
+        &live,
+        &[&target.path, target.source.as_deref().unwrap_or("")],
+    )
+    .ok_or_else(|| conflict("当前原生媒体源归属不明确，恢复材料已保留"))?;
+    if proof["kind"] != "moviepilot-empty-sync-export"
+        || proof["owner"] != json!(owner)
+        || proof["entity"] != identity.revision()
+        || proof["scope"] != ingest_sync_scope(target)
+        || link
+            .as_ref()
+            .is_some_and(|link| link["proof_sha256"] != json_hash(&proof_bytes))
+        || proof["request_sha256"] != json_hash(&request)
+        || source["ItemId"] != target.id
+        || !source["Path"]
+            .as_str()
+            .is_some_and(|path| path == target.path || target.source.as_deref() == Some(path))
+        || !ingest_export_matches(&target.info, &proof["response"])
+        || [
+            "Id",
+            "Path",
+            "Type",
+            "PresentationUniqueKey",
+            "ExtraType",
+            "PartCount",
+        ]
+        .iter()
+        .any(|field| proof["native_item"][*field] != live[*field])
+        || ["Id", "ItemId", "Path"]
+            .iter()
+            .any(|field| proof["native_source"][*field] != source[*field])
+        || [
+            "MimeType",
+            "DefaultAudioStreamIndex",
+            "DefaultSubtitleStreamIndex",
+        ]
+        .iter()
+        .any(|field| {
+            !proof["response"][0]["MediaSourceInfo"][*field].is_null()
+                && proof["response"][0]["MediaSourceInfo"][*field] != source[*field]
+        })
+    {
+        return Err(conflict(
+            "本次同步导出证明或当前原生身份不一致，恢复材料已保留",
+        ));
+    }
+    for streams in [&source["MediaStreams"], &live["MediaStreams"]] {
+        let native = ingest_native_readback(source, &live["Chapters"], streams)
+            .ok_or_else(|| conflict("当前原生章节或图片标识无效，恢复材料已保留"))?;
+        if !ingest_export_matches(&target.info, &native) {
+            return Err(conflict(
+                "当前原生媒体属性与本次已验请求不一致，恢复材料已保留",
+            ));
+        }
+    }
+    let current = current_json(&path)
+        .await?
+        .ok_or_else(|| conflict("本次同步正式 JSON 缺失，恢复材料已保留"))?;
+    if !json_equivalent(&current, &request, &path)?
+        && (proof["export_sha256"] != json_hash(&current)
+            || proof["export"] != parse_recovery_json(&current, &path)?
+            || !sync_json_matches(
+                &current,
+                &request,
+                &serde_json::to_vec(&proof["response"]).unwrap(),
+                &path,
+            )?)
+    {
+        return Err(conflict("本次同步导出 JSON 在失败后被修改，恢复材料已保留"));
+    }
+    let stage = owner.join(format!(
+        ".ingest-canonical-{}",
+        uuid::Uuid::new_v4().simple()
+    ));
+    write_recovery_file(&stage, &request).await?;
+    let result = async {
+        crate::moviepilot_ingest::unchanged(state, identity, context).await?;
+        let final_live = identity_details(state, target).await?;
+        if [
+            "Id",
+            "Path",
+            "Type",
+            "Size",
+            "RunTimeTicks",
+            "Chapters",
+            "MediaSources",
+            "MediaStreams",
+            "PartCount",
+            "ExtraType",
+            "PresentationUniqueKey",
+        ]
+        .iter()
+        .any(|field| final_live[*field] != live[*field])
+        {
+            return Err(conflict(
+                "原生媒体在单目标同步认领前再次变化，恢复材料已保留",
+            ));
+        }
+        restore_json_guarded(&path, &stage, Some(&current)).await?;
+        crate::moviepilot_ingest::unchanged(state, identity, context).await
+    }
+    .await;
+    let _ = tokio::fs::remove_file(&stage).await;
+    result
+}
+
 async fn recovery_backup(recovery: &Path, value: &Value) -> Result<PathBuf> {
     let path = PathBuf::from(value.as_str().ok_or_else(|| conflict("恢复材料路径缺失"))?);
     check_ancestors(&path).await?;
@@ -412,7 +819,7 @@ pub(crate) async fn recovery_json_conflicts(
     recovery: &Path,
 ) -> Result<Vec<Value>> {
     let record = recovery_record(recovery).await?;
-    let (_, requested) = prepare_recovery_json(state, recovery, &record).await?;
+    let (_, requested) = prepare_recovery_json(state, recovery, &record, None).await?;
     Ok(inspect_recovery_json(recovery, &record, &requested)
         .await?
         .0)
@@ -552,6 +959,7 @@ async fn prepare_recovery_json(
     state: &AppState,
     recovery: &Path,
     record: &Value,
+    verified_ingest: Option<&IngestSync<'_>>,
 ) -> Result<RecoveryJsonTargets> {
     let ids = record["target_ids"]
         .as_array()
@@ -583,8 +991,36 @@ async fn prepare_recovery_json(
                 "{id}：备份 JSON 路径与当前媒体身份不一致"
             )));
         }
-        crate::identity::verify(&current.asset, &info)?;
         let source = crate::media_paths::strm_target(&current.path).await;
+        let mut checked_asset = current.asset.clone();
+        if let Some(ingest) = verified_ingest {
+            let original = check_ingest_sync_request(ingest).await?;
+            if ingest.owner != recovery
+                || record["target_ids"] != json!([ingest.target.id])
+                || id != ingest.target.id
+                || info != ingest.target.info
+                || current.path != ingest.target.path
+                || source != ingest.target.source
+                || current.sha != ingest.target.sha
+                || (original["previous"]["asset"].is_object()
+                    && original["previous"]["asset"] != current.asset)
+                || ingest.identity.cloud.as_ref().is_some_and(|cloud| {
+                    current
+                        .pc
+                        .as_deref()
+                        .is_some_and(|pc| pc != string(cloud, "pick_code"))
+                })
+            {
+                return Err(conflict(
+                    "已验单目标同步的当前资产或原范围变化，恢复材料已保留",
+                ));
+            }
+            // This authorization only checks this task's pending content. The
+            // DB and the returned asset snapshot remain pending until every
+            // original resource and the final native readback have passed.
+            checked_asset["moviepilot_media_pending"] = json!(false);
+        }
+        crate::identity::verify(&checked_asset, &info)?;
         if let Some(saved) = media_edit::list(&record["targets"])
             .iter()
             .find(|entry| entry["id"] == id)
@@ -646,7 +1082,70 @@ pub(crate) async fn recover_record(
     context: &JobContext,
     current_hashes: &BTreeMap<String, String>,
 ) -> Result<Vec<PathBuf>> {
-    recover_record_inner(state, recovery, context, current_hashes, false).await
+    recover_record_inner(state, recovery, context, current_hashes, false, None).await
+}
+
+pub(crate) async fn recover_ingest_sync(
+    state: &AppState,
+    target: &SavedTarget,
+    identity: &crate::moviepilot_ingest::Identity,
+    recovery: &Path,
+    exported: &Path,
+    context: &JobContext,
+) -> Result<Vec<PathBuf>> {
+    claim_ingest_sync_export(state, target, identity, recovery, exported, context).await?;
+    let ingest = IngestSync {
+        target,
+        identity,
+        owner: recovery,
+    };
+    recover_record_inner(
+        state,
+        recovery,
+        context,
+        &BTreeMap::new(),
+        false,
+        Some(&ingest),
+    )
+    .await
+}
+
+pub(crate) async fn validate_sync_ingest_recovery(
+    recovery: &Path,
+    target: &SavedTarget,
+    retry: bool,
+) -> Result<(PathBuf, PathBuf, Vec<u8>)> {
+    let record = recovery_record(recovery).await?;
+    let targets = media_edit::list(&record["targets"]);
+    let files = media_edit::list(&record["json"]);
+    if record["target_ids"] != json!([target.id])
+        || targets.len() != 1
+        || files.len() != 1
+        || targets[0]["id"] != target.id
+        || targets[0]["path"] != target.path
+        || targets[0]["source"] != json!(target.source)
+        || targets[0]["sha"] != json!(target.sha)
+        || !targets[0]["asset"].is_null()
+        || files[0]["item_id"] != target.id
+    {
+        return Err(conflict(
+            "原单目标同步恢复范围或文件身份不一致，全部材料已保留",
+        ));
+    }
+    let path = Path::new(&target.path);
+    let path = path.with_file_name(format!(
+        "{}-mediainfo.json",
+        path.file_stem().unwrap_or_default().to_string_lossy()
+    ));
+    let backup = recovery_backup(recovery, &files[0]["backup"]).await?;
+    let request = tokio::fs::read(&backup).await?;
+    if files[0]["path"] != json!(path)
+        || parse_recovery_json(&request, &backup)? != target.info
+        || retry && parse_recovery_json(&tokio::fs::read(&path).await?, &path)? != target.info
+    {
+        return Err(conflict("原单目标同步的当前 JSON 或备份变化，未重新提交"));
+    }
+    Ok((path, backup, request))
 }
 
 pub(crate) async fn recover_started_record(
@@ -654,7 +1153,7 @@ pub(crate) async fn recover_started_record(
     recovery: &Path,
     context: &JobContext,
 ) -> Result<Vec<PathBuf>> {
-    recover_record_inner(state, recovery, context, &BTreeMap::new(), true).await
+    recover_record_inner(state, recovery, context, &BTreeMap::new(), true, None).await
 }
 
 async fn recover_record_inner(
@@ -663,15 +1162,19 @@ async fn recover_record_inner(
     context: &JobContext,
     current_hashes: &BTreeMap<String, String>,
     started_only: bool,
+    verified_ingest: Option<&IngestSync<'_>>,
 ) -> Result<Vec<PathBuf>> {
     context.checkpoint().await?;
     let mut record = recovery_record(recovery).await?;
-    let (mut targets, mut requested) = prepare_recovery_json(state, recovery, &record).await?;
+    let (mut targets, mut requested) =
+        prepare_recovery_json(state, recovery, &record, verified_ingest).await?;
     let cleared = original_clear_intents(state, recovery, &record, &targets).await?;
     if started_only {
         targets.retain(|target| cleared.contains(&target.id));
         requested.retain(|id, _| cleared.contains(id));
-        if targets.is_empty() { return Ok(vec![]); }
+        if targets.is_empty() {
+            return Ok(vec![]);
+        }
         narrow_recovery_record(&mut record, &cleared)?;
     }
     let json_paths = requested
@@ -842,6 +1345,9 @@ async fn recover_record_inner(
     context.checkpoint().await?;
     let mut directories = conflict_backup_directories(state, recovery).await?;
     let outcome: Result<()> = async {
+        if let Some(ingest) = verified_ingest {
+            crate::moviepilot_ingest::unchanged(state, ingest.identity, context).await?;
+        }
         verify_current_json_snapshot(&observed).await?;
         for target in &targets {
             identity_details(state, target).await?;
@@ -875,9 +1381,14 @@ async fn recover_record_inner(
         let confirmed = AtomicBool::new(false);
         let retry = recovery.join(format!("retry-{}", uuid::Uuid::new_v4().simple()));
         for target in &targets {
-            finish.save_plan(&format!("saved-formal-json:{}", target.id), &target.info).await?;
+            finish
+                .save_plan(&format!("saved-formal-json:{}", target.id), &target.info)
+                .await?;
         }
-        reload_inner(state, &targets, &finish, &confirmed, &retry, recovery, &cleared).await?;
+        reload_inner(
+            state, &targets, &finish, &confirmed, &retry, recovery, &cleared, None,
+        )
+        .await?;
         verify_reloaded(
             state,
             &targets.iter().collect::<Vec<_>>(),
@@ -1677,14 +2188,43 @@ pub(crate) async fn preflight_ingest_import(
     state: &AppState,
     target: &SavedTarget,
     context: &JobContext,
-) -> Result<()> {
+) -> Result<bool> {
+    context.checkpoint().await?;
     ensure_single_bundle(&target.info)?;
     ensure_json_streams_unfiltered(&target.info, &target.id)?;
-    ensure_file_import_supported(state, &crate::strm::config(state).await?, &target.id, false)
-        .await?;
     let live = identity_details(state, target).await?;
+    let settings = crate::strm::config(state).await?;
+    if empty_ingest_target(target, &live) && !needs_file_import(&target.info, &live) {
+        ensure_target_unfiltered(target, &live)?;
+        ensure_sync_supported(state, &settings).await?;
+        // SyncMediaInfo resolves this native Id and saves only its internal
+        // streams. Refresh expands a presentation key to other versions.
+        return Ok(true);
+    }
+    ensure_file_import_supported(state, &settings, &target.id, false).await?;
     ensure_target_reload_supported(target, &live)?;
-    ensure_single_clear_scope(state, target, &live, context).await
+    ensure_single_clear_scope(state, target, &live, context).await?;
+    Ok(false)
+}
+
+fn empty_ingest_target(target: &SavedTarget, live: &Value) -> bool {
+    let Some(source) = media_info::item_source(
+        live,
+        &[&target.path, target.source.as_deref().unwrap_or("")],
+    ) else {
+        return false;
+    };
+    matches!(live["Type"].as_str(), Some("Movie" | "Episode"))
+        && live["PartCount"] == 1
+        && string(live, "ExtraType").is_empty()
+        && source["ItemId"] == target.id
+        && source["Container"] == "strm"
+        && [live, source].iter().all(|item| {
+            item["Size"] == 0
+                && (item["RunTimeTicks"].is_null() || item["RunTimeTicks"] == 0)
+                && item["MediaStreams"].as_array().is_some_and(Vec::is_empty)
+                && item["Chapters"].as_array().is_some_and(Vec::is_empty)
+        })
 }
 
 fn ensure_target_unfiltered(target: &SavedTarget, live: &Value) -> Result<()> {
@@ -2117,7 +2657,9 @@ async fn verify_reloaded(
             let mut reasons = differences(target, &live);
             for field in METADATA_FIELDS {
                 if live[*field] != before[&target.id][*field] {
-                    return Err(conflict(format!("当前元数据字段 {field} 在同步期间被修改，已保留现场和恢复备份")));
+                    return Err(conflict(format!(
+                        "当前元数据字段 {field} 在同步期间被修改，已保留现场和恢复备份"
+                    )));
                 }
             }
             let expected = media_info::container(&target.info).unwrap();
@@ -2314,7 +2856,9 @@ fn explicitly_cleared(live: &Value) -> bool {
     live["MediaStreams"].as_array().is_some_and(Vec::is_empty)
         && live["Chapters"].as_array().is_some_and(Vec::is_empty)
         && live["MediaSources"].as_array().is_some_and(|sources| {
-            sources.iter().all(|source| source["MediaStreams"].as_array().is_some_and(Vec::is_empty))
+            sources
+                .iter()
+                .all(|source| source["MediaStreams"].as_array().is_some_and(Vec::is_empty))
         })
 }
 
@@ -2332,7 +2876,9 @@ async fn original_clear_intents(
     let mut cleared = BTreeSet::new();
     for target in targets {
         let proof = recovery.join(format!("clear-intent-{}.json", target.id));
-        if !tokio::fs::try_exists(&proof).await? { continue; }
+        if !tokio::fs::try_exists(&proof).await? {
+            continue;
+        }
         if crate::media_recovery::read_json(&proof).await? != clear_intent(target, record) {
             return Err(conflict("原清理意图与媒体身份或恢复记录不一致，未继续导入"));
         }
@@ -2346,15 +2892,30 @@ async fn original_clear_intents(
 
 fn narrow_recovery_record(record: &mut Value, owners: &BTreeSet<String>) -> Result<()> {
     for key in ["observations", "thumbnail_times", "chapter_images"] {
-        if let Some(values) = record[key].as_object_mut() { values.retain(|id, _| owners.contains(id)); }
+        if let Some(values) = record[key].as_object_mut() {
+            values.retain(|id, _| owners.contains(id));
+        }
     }
-    for (key, field) in [("targets", "id"), ("json", "item_id"), ("audio_complete", "item_id"), ("bridges", "item_id")] {
-        if let Some(values) = record[key].as_array_mut() { values.retain(|value| owners.contains(&string(value, field))); }
+    for (key, field) in [
+        ("targets", "id"),
+        ("json", "item_id"),
+        ("audio_complete", "item_id"),
+        ("bridges", "item_id"),
+    ] {
+        if let Some(values) = record[key].as_array_mut() {
+            values.retain(|value| owners.contains(&string(value, field)));
+        }
     }
     let mut files = vec![];
     for mut file in media_edit::list(&record["files"]) {
-        let kept = media_edit::list(&file["owner_ids"]).into_iter().filter(|id| id.as_str().is_some_and(|id| owners.contains(id))).collect::<Vec<_>>();
-        if !kept.is_empty() { file["owner_ids"] = json!(kept); files.push(file); }
+        let kept = media_edit::list(&file["owner_ids"])
+            .into_iter()
+            .filter(|id| id.as_str().is_some_and(|id| owners.contains(id)))
+            .collect::<Vec<_>>();
+        if !kept.is_empty() {
+            file["owner_ids"] = json!(kept);
+            files.push(file);
+        }
     }
     record["files"] = json!(files);
     record["target_ids"] = json!(owners);
@@ -2368,7 +2929,49 @@ pub(crate) async fn reload(
     confirmed: &AtomicBool,
     recovery: &Path,
 ) -> Result<Vec<String>> {
-    reload_inner(state, targets, context, confirmed, recovery, recovery, &BTreeSet::new()).await
+    reload_inner(
+        state,
+        targets,
+        context,
+        confirmed,
+        recovery,
+        recovery,
+        &BTreeSet::new(),
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn reload_ingest_sync(
+    state: &AppState,
+    target: &SavedTarget,
+    identity: &crate::moviepilot_ingest::Identity,
+    context: &JobContext,
+    confirmed: &AtomicBool,
+    recovery: &Path,
+    owner: &Path,
+) -> Result<Vec<String>> {
+    let ingest = IngestSync {
+        target,
+        identity,
+        owner,
+    };
+    check_ingest_sync_request(&ingest).await?;
+    crate::moviepilot_ingest::unchanged(state, identity, context).await?;
+    if !preflight_ingest_import(state, target, context).await? {
+        return Err(conflict("本次单目标同步不再是明确空媒体，恢复材料已保留"));
+    }
+    reload_inner(
+        state,
+        std::slice::from_ref(target),
+        context,
+        confirmed,
+        recovery,
+        recovery,
+        &BTreeSet::new(),
+        Some(&ingest),
+    )
+    .await
 }
 
 async fn reload_inner(
@@ -2379,6 +2982,7 @@ async fn reload_inner(
     recovery: &Path,
     intent_directory: &Path,
     already_cleared: &BTreeSet<String>,
+    ingest: Option<&IngestSync<'_>>,
 ) -> Result<Vec<String>> {
     let mut observations = BTreeMap::new();
     let mut affected = vec![];
@@ -2547,13 +3151,20 @@ async fn reload_inner(
             }
         }
         snapshot_file(&path, recovery, &mut files, &target.id).await?;
-        if let Some(expected) = context.plan(&format!("saved-formal-json:{}", target.id)).await? {
+        if let Some(expected) = context
+            .plan(&format!("saved-formal-json:{}", target.id))
+            .await?
+        {
             let canonical = tokio::fs::canonicalize(&path).await?;
-            let saved = files.get(&canonical).ok_or_else(|| conflict("原已保存 JSON 现已缺失，未采纳新的恢复基线"))?;
+            let saved = files
+                .get(&canonical)
+                .ok_or_else(|| conflict("原已保存 JSON 现已缺失，未采纳新的恢复基线"))?;
             let actual: Value = serde_json::from_slice(&snapshot_bytes(saved).await?)
                 .map_err(|_| conflict("原已保存 JSON 现已无效，未采纳新的恢复基线"))?;
             if actual != expected {
-                return Err(conflict("已保存 JSON 在任务中断后发生变化，保留用户新文件和原持久请求"));
+                return Err(conflict(
+                    "已保存 JSON 在任务中断后发生变化，保留用户新文件和原持久请求",
+                ));
             }
         }
         if let Ok(path) = tokio::fs::canonicalize(&path).await {
@@ -2771,6 +3382,16 @@ async fn reload_inner(
                 };
                 let mut reported = restored[0]["MediaSourceInfo"].clone();
                 reported["Chapters"] = restored[0]["Chapters"].clone();
+                if let Some(ingest) = ingest {
+                    if file_import {
+                        return Err(conflict("单目标同步不能转为文件导入，恢复材料已保留"));
+                    }
+                    if !record_ingest_sync_export(ingest, recovery, path, &bytes, &restored, &observations[&target.id]).await?
+                        && differences(target, &reported).is_empty()
+                    {
+                        return Err(conflict("本次原生导出的未知属性或媒体数据不一致，恢复材料已保留"));
+                    }
+                }
                 if file_import || !differences(target, &reported).is_empty() {
                     let live = identity_details(state, target).await?;
                     if file_import || !differences(target, &live).is_empty() {
@@ -2901,7 +3522,12 @@ async fn reload_inner(
                                 cache_warnings.push(warning);
                             }
                         } else {
-                            sync_one(state, target, payload, &recovery_context, &empty).await?;
+                            let restored = sync_one(state, target, payload, &recovery_context, &empty).await?;
+                            if let Some(ingest) = ingest
+                                && !record_ingest_sync_export(ingest, recovery, path, &bytes, &restored, &empty).await?
+                            {
+                                return Err(conflict("本次原生导出的未知属性或媒体数据不一致，恢复材料已保留"));
+                            }
                         }
                     }
                 }
@@ -3052,6 +3678,116 @@ mod file_import_control_tests {
 #[cfg(test)]
 mod recovery_tests {
     use super::*;
+
+    #[test]
+    fn empty_ingest_native_readback_projects_only_pinned_derived_fields() {
+        let request = json!([{"Chapters":[{"Name":"Opening","StartPositionTicks":0,"ChapterIndex":0}],
+            "MediaSourceInfo":{"Size":1000,"RunTimeTicks":600000000,"Type":"Default",
+                "Container":"mkv","IsRemote":true,"Chapters":[],"MediaStreams":[
+                    {"Type":"Video","Codec":"hevc","Index":0,"Width":3840},
+                    {"Type":"Audio","Codec":"aac","Index":1,"Title":"original"}]}}]);
+        let mut source = request[0]["MediaSourceInfo"].clone();
+        source["Id"] = json!("mediasource_101");
+        source["ItemId"] = json!("101");
+        source["Path"] = json!("/cloud/current.mkv");
+        source["Name"] = json!("Native display");
+        source["IsRemote"] = json!(false);
+        source["DefaultAudioStreamIndex"] = json!(1);
+        source["MimeType"] = json!("video/x-matroska");
+        let mut chapters = request[0]["Chapters"].clone();
+        chapters[0]["ImageTag"] = json!("native-image-tag");
+        source["Chapters"] = chapters.clone();
+        let projected =
+            ingest_native_readback(&source, &chapters, &source["MediaStreams"]).unwrap();
+        assert!(ingest_export_matches(&request, &projected));
+        assert!(projected[0]["Chapters"][0]["ImageTag"].is_null());
+        for fault in [
+            "invalid_index",
+            "wide_index",
+            "invalid_remote",
+            "nested_time",
+            "nested_unknown",
+            "source_unknown",
+        ] {
+            let mut changed = source.clone();
+            match fault {
+                "invalid_index" => changed["DefaultAudioStreamIndex"] = json!(0),
+                "wide_index" => changed["DefaultAudioStreamIndex"] = json!(i64::MAX),
+                "invalid_remote" => changed["IsRemote"] = json!("false"),
+                "nested_time" => changed["Chapters"][0]["StartPositionTicks"] = json!(1),
+                "nested_unknown" => changed["Chapters"][0]["UnknownNativeAttribute"] = Value::Null,
+                "source_unknown" => changed["UnknownNativeAttribute"] = Value::Null,
+                _ => unreachable!(),
+            }
+            let projected =
+                ingest_native_readback(&changed, &chapters, &changed["MediaStreams"]).unwrap();
+            assert!(!ingest_export_matches(&request, &projected), "{fault}");
+        }
+        let mut explicit = request.clone();
+        explicit[0]["MediaSourceInfo"]["MimeType"] = json!("video/mp4");
+        assert!(!ingest_export_matches(&explicit, &projected));
+        explicit = request.clone();
+        explicit[0]["MediaSourceInfo"]["DefaultAudioStreamIndex"] = json!(2);
+        assert!(!ingest_export_matches(&explicit, &projected));
+        let mut wrong_image = chapters;
+        wrong_image[0]["ImageTag"] = json!({"invalid":true});
+        assert!(ingest_native_readback(&source, &wrong_image, &source["MediaStreams"]).is_none());
+    }
+
+    #[test]
+    fn empty_ingest_export_accepts_only_pinned_dto_and_existing_display_differences() {
+        let request = json!([{"Chapters":[],"MediaSourceInfo":{"Path":"/cloud/current.mkv",
+            "Size":1000,"RunTimeTicks":600000000,"Type":"Default","Container":"mkv",
+            "MediaStreams":[{"Type":"Video","Codec":"hevc","Width":3840,"Height":2160,
+                "AverageFrameRate":23.976023976,"Index":0},
+                {"Type":"Audio","Codec":"aac","Title":"original","Language":"eng","Index":1}]}}]);
+        let mut response = request.clone();
+        for field in ["Id", "ItemId", "Path", "Name"] {
+            response[0]["MediaSourceInfo"][field] = Value::Null;
+        }
+        response[0]["ZeroFingerprintConfidence"] = json!(true);
+        response[0]["MediaSourceInfo"]["SortName"] = Value::Null;
+        response[0]["MediaSourceInfo"]["MediaStreams"][0]["CodecTag"] = Value::Null;
+        response[0]["MediaSourceInfo"]["MediaStreams"][0]["DisplayTitle"] =
+            json!("Calculated title");
+        response[0]["MediaSourceInfo"]["MediaStreams"][0]["AverageFrameRate"] =
+            json!(23.976024_f32);
+        assert!(ingest_export_matches(&request, &response));
+        let path = Path::new("/media/current-mediainfo.json");
+        assert!(
+            !json_equivalent(
+                &serde_json::to_vec(&request).unwrap(),
+                &serde_json::to_vec(&response).unwrap(),
+                path
+            )
+            .unwrap()
+        );
+        for field in [
+            "title",
+            "width",
+            "unknown_null",
+            "native_id",
+            "unknown_stream",
+        ] {
+            let mut changed = response.clone();
+            match field {
+                "title" => {
+                    changed[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"] = json!("edited")
+                }
+                "width" => changed[0]["MediaSourceInfo"]["MediaStreams"][0]["Width"] = json!(1920),
+                "unknown_null" => {
+                    changed[0]["MediaSourceInfo"]["UnknownNativeAttribute"] = Value::Null
+                }
+                "native_id" => changed[0]["MediaSourceInfo"]["ItemId"] = json!("101"),
+                "unknown_stream" => {
+                    changed[0]["MediaSourceInfo"]["MediaStreams"][0]["UnknownNativeAttribute"] =
+                        Value::Null
+                }
+                _ => unreachable!(),
+            }
+            assert!(!ingest_export_matches(&request, &changed), "{field}");
+        }
+    }
 
     #[test]
     fn native_sync_json_retains_submitted_confidence_when_native_response_recalculates_it() {
