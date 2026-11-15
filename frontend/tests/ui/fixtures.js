@@ -141,6 +141,9 @@ export const test = base.extend({
       respond('GET', `/api/dashboard/layout/${profile}`, { layout: null });
       respond('POST', `/api/dashboard/layout/${profile}`, request => ({ layout: request.body.layout }));
     }
+    respond('GET', '/api/media_server/statistics', {
+      statistics: { movie_count: { count: 1 }, tv_count: { count: 0 } },
+    });
     respond('GET', '/api/dashboard/media', {
       statistics: { movie_count: { count: 1 }, tv_count: { count: 0 }, episode_count: { count: 0 }, music_count: { count: 0 } },
       recent: [{ id: '101', name: mediaDetails.item_name, item_type: 'Movie', production_year: 2026, image_tag: 'fixture' }],

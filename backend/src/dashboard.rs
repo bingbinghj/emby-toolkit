@@ -9,7 +9,34 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/api/dashboard/media", get(media))
+    Router::new()
+        .route("/api/dashboard/media", get(media))
+        .route("/api/media_server/statistics", get(server_statistics))
+}
+
+/// Connection cards use MP's one server-total query, without loading libraries
+/// or the dashboard's monthly admission statistics.
+async fn server_statistics(State(state): State<AppState>) -> Json<Value> {
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        state.emby_once(Method::GET, "Items/Counts", &[], None),
+    )
+    .await
+    .unwrap_or_else(|_| Err(ApiError::bad("媒体服务器统计读取超时")));
+    let mut statistics = json!({});
+    for (key, field, label) in [
+        ("movie_count", "MovieCount", "电影"),
+        ("tv_count", "SeriesCount", "电视剧"),
+    ] {
+        let count = response.as_ref().ok().and_then(|body| body[field].as_u64());
+        statistics[key] = match count {
+            Some(count) => json!({"count":count}),
+            None => json!({"count":null,"error":response.as_ref().err()
+                .map(|error| error.1.clone())
+                .unwrap_or_else(|| format!("Emby 未返回有效的{label}统计"))}),
+        };
+    }
+    Json(json!({"statistics":statistics}))
 }
 
 fn valid_id(id: &str) -> bool {

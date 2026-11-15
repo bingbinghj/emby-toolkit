@@ -77,3 +77,19 @@ test('media server connection tests show real results without saving and clear t
   await editor(page).getByRole('button', { name: '取消媒体服务器配置', exact: true }).click();
   expect(configurationWrites(api)).toEqual([]);
 });
+
+test('the media server card reads only its statistics and preserves unknown counts without inventing zero', async ({ page, api }) => {
+  api.respond('GET', '/api/media_server/statistics', { statistics: {
+    movie_count: { count: 0 }, tv_count: { count: null, error: '电视剧统计暂不可用' },
+  } });
+  await page.goto('/settings/general?tab=system');
+  await expect(card(page).getByLabel('电影数量 0', { exact: true })).toBeVisible();
+  await expect(card(page).getByLabel('电视剧数量 —', { exact: true })).toBeVisible();
+  await expect(card(page).getByLabel(/音乐数量/)).toHaveCount(0);
+  expect(api.requests.filter(request => request.path === '/api/media_server/statistics')).toHaveLength(1);
+  expect(api.requests.filter(request => request.path === '/api/dashboard/media')).toHaveLength(0);
+  await page.getByRole('button', { name: '配置媒体服务器', exact: true }).click();
+  await expect(editor(page).getByLabel('地址', { exact: true })).toBeVisible();
+  await editor(page).getByRole('button', { name: '取消媒体服务器配置', exact: true }).click();
+  expect(configurationWrites(api)).toEqual([]);
+});

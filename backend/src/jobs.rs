@@ -66,6 +66,18 @@ pub(crate) fn server_url(config: &Value) -> Option<String> {
     Some(url.to_string().trim_end_matches('/').into())
 }
 
+async fn cancel_owned_queue(
+    transaction: &mut Transaction<'_, Postgres>,
+    job_id: &str,
+    message: &str,
+) -> Result<()> {
+    // Terminal jobs load a trimmed payload; use the original persisted owner.
+    sqlx::query("WITH cancelled AS (UPDATE media_organize_queue q SET status='cancelled',message=$2,completed_at=NOW() FROM durable_jobs j WHERE j.id=$1 AND j.spec_json->>'kind'='media_organize_queue' AND j.spec_json->>'owned'='true' AND q.id=j.spec_json#>>'{payload,queue_id}' AND q.task_id=j.id AND q.status IN ('queued','running','interrupted') RETURNING q.item_id,q.history_ids)
+        UPDATE media_organize_history h SET status='failed',message=$2,completed_at=NOW() FROM cancelled q WHERE h.status='processing' AND h.item_id=q.item_id AND q.history_ids ? h.id")
+        .bind(job_id).bind(message).execute(&mut **transaction).await?;
+    Ok(())
+}
+
 #[derive(Clone)]
 struct PersistedJob {
     id: String,
@@ -542,6 +554,7 @@ impl JobManager {
                     .await?;
                 }
             }
+            let already_cancelled = state["state"] == "cancelled";
             if matches!(
                 state["state"].as_str(),
                 Some("running" | "pausing" | "paused" | "stopping" | "interrupted")
@@ -550,17 +563,19 @@ impl JobManager {
                     state["state"] = json!("cancelled");
                     state["is_running"] = json!(false);
                     state["message"] = json!("任务已按上次停止请求取消");
+                    let mut transaction = pool.begin().await?;
                     sqlx::query(
                         "UPDATE durable_jobs SET state_json=$2,updated_at=NOW() WHERE id=$1",
                     )
                     .bind(&id)
                     .bind(&state)
-                    .execute(&pool)
+                    .execute(&mut *transaction)
                     .await?;
                     if spec.owned && spec.kind == "media_organize_queue" {
-                        sqlx::query("UPDATE media_organize_queue SET status='cancelled',message=$3,completed_at=NOW() WHERE id=$1 AND task_id=$2 AND status IN ('queued','running','interrupted')")
-                            .bind(spec.payload["queue_id"].as_str().unwrap_or("")).bind(&id).bind("任务已按上次停止请求取消").execute(&pool).await?;
+                        cancel_owned_queue(&mut transaction, &id, "任务已按上次停止请求取消")
+                            .await?;
                     }
+                    transaction.commit().await?;
                 } else {
                     inner.recoverable.push_back(PersistedJob {
                         id,
@@ -571,6 +586,16 @@ impl JobManager {
                     });
                     continue;
                 }
+            }
+            if already_cancelled && spec.owned && spec.kind == "media_organize_queue" {
+                let mut transaction = pool.begin().await?;
+                cancel_owned_queue(
+                    &mut transaction,
+                    &id,
+                    state["message"].as_str().unwrap_or("任务已取消"),
+                )
+                .await?;
+                transaction.commit().await?;
             }
             if was_unfinished
                 && spec.owned
@@ -890,15 +915,22 @@ impl JobManager {
             state["result"] = json!({"error":crate::logs::redact(&error.1)});
         }
         if let Some(pool) = &self.persistence {
+            let mut transaction = pool.begin().await?;
             sqlx::query("UPDATE durable_jobs SET state_json=$2,updated_at=NOW() WHERE id=$1")
                 .bind(&saved.id)
                 .bind(&state)
-                .execute(pool)
+                .execute(&mut *transaction)
                 .await?;
-            if terminal && saved.spec.owned && saved.spec.kind == "media_organize_queue" {
-                sqlx::query("UPDATE media_organize_queue q SET status='failed',message=$2,result=$3,completed_at=NOW() FROM durable_jobs j WHERE j.id=$1 AND q.task_id=j.id AND q.id=j.spec_json->'payload'->>'queue_id' AND q.status IN ('queued','running','interrupted')")
-                    .bind(&saved.id).bind(state["message"].as_str().unwrap_or("")).bind(&state["result"]).execute(pool).await?;
+            if terminal
+                && !already_terminal
+                && saved.spec.owned
+                && saved.spec.kind == "media_organize_queue"
+            {
+                sqlx::query("WITH failed AS (UPDATE media_organize_queue q SET status='failed',message=$2,result=$3,completed_at=NOW() FROM durable_jobs j WHERE j.id=$1 AND q.task_id=j.id AND q.id=j.spec_json->'payload'->>'queue_id' AND q.status IN ('queued','running','interrupted') RETURNING q.item_id,q.history_ids)
+                    UPDATE media_organize_history h SET status='failed',message=$2,completed_at=NOW() FROM failed q WHERE h.status='processing' AND h.item_id=q.item_id AND q.history_ids ? h.id")
+                    .bind(&saved.id).bind(state["message"].as_str().unwrap_or("")).bind(&state["result"]).execute(&mut *transaction).await?;
             }
+            transaction.commit().await?;
         }
         let mut inner = self.inner.lock().await;
         inner.recovery_message = state["message"].as_str().map(str::to_string);
@@ -1152,6 +1184,7 @@ impl JobManager {
                     });
             let mut state = context.progress.lock().await;
             let keep_paused = state["pause_requested"] == true;
+            let stopped = context.is_cancelled() && !context.is_interrupted();
             state["is_running"] = json!(false);
             state["pause_requested"] = json!(context.is_interrupted() && keep_paused);
             state["stop_requested"] = json!(false);
@@ -1266,6 +1299,7 @@ impl JobManager {
                     if let Err(error)=sqlx::query("UPDATE media_organize_queue SET status=$3,result=$4,message=$5,completed_at=NOW() WHERE id=$1 AND task_id=$2 AND status IN ('queued','running','interrupted')")
                         .bind(owner["queue_id"].as_str().unwrap_or("")).bind(&context.id).bind(status).bind(&state["result"]).bind(state["message"].as_str().unwrap_or("")).execute(pool).await {
                         state["state"]=json!("interrupted");state["cleanup_pending"]=json!(true);
+                        state["stop_requested"]=json!(stopped);
                         state["message"]=json!(format!("整理队列收尾未确认，保留原任务等待恢复：{}",crate::logs::redact(&error.to_string())));
                     }
                 }
@@ -1288,6 +1322,7 @@ impl JobManager {
             if let Err(error) = saved {
                 state["state"] = json!("interrupted");
                 state["cleanup_pending"] = json!(true);
+                state["stop_requested"] = json!(stopped);
                 state["message"] = json!(format!(
                     "任务结果持久化未确认，已保留进度等待恢复：{}",
                     crate::logs::redact(&error.1)

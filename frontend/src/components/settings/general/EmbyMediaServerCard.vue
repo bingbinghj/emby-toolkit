@@ -23,7 +23,7 @@ watch(() => [props.ready, props.refreshKey], async () => {
   error.value = '';
   if (!props.ready) return;
   try {
-    const { data } = await axios.get('/api/dashboard/media');
+    const { data } = await axios.get('/api/media_server/statistics');
     if (version !== requestVersion) return;
     if (!data?.statistics || typeof data.statistics !== 'object') throw new Error('媒体统计响应无效');
     statistics.value = data.statistics;
@@ -47,7 +47,7 @@ function edit() { if (!props.disabled) emit('edit'); }
         <div class="app-card-summary__title text-h6">Emby</div>
         <div class="media-server-counts text-sm text-medium-emphasis" :title="error || '媒体统计'">
           <span v-for="item in counts" :key="item.title" :aria-label="`${item.title}数量 ${item.value}`" :title="`${item.title} ${item.value}`">
-            <VIcon :icon="item.icon" size="18" class="me-1" />
+            <VIcon :icon="item.icon" size="24" class="me-1" />
             <span class="media-server-count">{{ item.value }}</span>
           </span>
         </div>

@@ -143,14 +143,20 @@
                     </template>
                   </SettingCard>
                 </VCol>
-                <VCol cols="12" sm="6" lg="4" xl="3" xxl="2" v-show="settingsSearch.showCard('媒体服务器')">
-                  <SettingCard class="dashboard-card" title="媒体服务器" subtitle="媒体服务器与媒体库">
-                    <VCardText>
+                <VCol cols="12" v-show="settingsSearch.showCard('媒体服务器')">
+                  <SettingCard class="dashboard-card media-server-setting-card" title="媒体服务器" subtitle="媒体服务器与媒体库">
+                    <VCardText class="service-setting-card-content">
                       <div class="media-server-card-grid">
                         <EmbyMediaServerCard :ready="Boolean(configModel.emby_server_url && configModel.emby_api_key)"
                           :disabled="savingConfig || loadingConfig" :refresh-key="mediaServerRevision" @edit="openMediaServerDialog" />
                       </div>
                       <VAlert v-if="libraryError" type="warning" variant="tonal" density="compact" class="mt-3">{{ libraryError }}</VAlert>
+                    </VCardText>
+                    <VCardText class="service-setting-card-content">
+                      <div class="d-flex flex-wrap ga-4 mt-4">
+                        <VBtn type="button" variant="flat" prepend-icon="mdi-cog" aria-label="配置媒体服务器"
+                          :disabled="savingConfig || loadingConfig" @click="openMediaServerDialog">配置</VBtn>
+                      </div>
                     </VCardText>
                     <VDialog v-model="mediaServerDialogOpen" scrollable max-width="40rem" :fullscreen="isMobile"
                       :persistent="mediaServerBusy" @update:model-value="!$event && closeMediaServerDialog()"
@@ -661,13 +667,19 @@
             </VWindowItem>
             <VWindowItem value="directory" eager>
               <VRow class="mp-aligned-grid settings-card-grid settings-grid">
-                <VCol cols="12" sm="6" lg="4" xl="3" xxl="2" v-show="settingsSearch.showCard('存储')">
-                  <SettingCard class="dashboard-card" title="存储" subtitle="115 授权方式与连接状态">
-                    <VCardText>
+                <VCol cols="12" v-show="settingsSearch.showCard('存储')">
+                  <SettingCard class="dashboard-card storage-setting-card" title="存储" subtitle="115 授权方式与连接状态">
+                    <VCardText class="service-setting-card-content">
                       <div class="storage-card-grid">
                         <P115StorageCard :info="p115Info" :disabled="savingConfig || loadingConfig" @edit="openStorageDialog" />
                       </div>
                       <VAlert v-if="p115StatusError && !storageDialogOpen" type="error" variant="tonal" density="compact" class="mt-3">{{ p115StatusError }}</VAlert>
+                    </VCardText>
+                    <VCardText class="service-setting-card-content">
+                      <div class="d-flex flex-wrap ga-4 mt-4">
+                        <VBtn type="button" variant="flat" prepend-icon="mdi-cog" aria-label="配置存储"
+                          :disabled="savingConfig || loadingConfig" @click="openStorageDialog">配置</VBtn>
+                      </div>
                     </VCardText>
                     <VDialog v-model="storageDialogOpen" class="storage-settings-dialog" scrollable max-width="40rem" :fullscreen="isMobile"
                       :persistent="storageBusy || showCookieModal || showQrcodeModal" @update:model-value="!$event && closeStorageDialog()"
@@ -3597,7 +3609,9 @@ onUnmounted(() => {
 
 <style scoped>
 .settings-container { min-width: 0; }
-.storage-card-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:12px; }
+.settings-container :is(.media-server-setting-card, .storage-setting-card) :deep(.service-setting-card-content) { padding:0 1.25rem 1.25rem; }
+.settings-container :is(.media-server-setting-card, .storage-setting-card) :deep(.app-card-shell > .v-card-text) { padding:1.25rem; }
+:is(.media-server-card-grid, .storage-card-grid) { display:grid; grid-template-columns:repeat(auto-fill,minmax(16rem,1fr)); gap:12px; }
 .storage-dialog :deep(.v-card-text) { min-width:0; }
 .storage-auth-row { display:grid; grid-template-columns:4.5rem minmax(0,1fr); gap:12px; margin-block-end:20px; }
 .storage-auth-row > div { min-width:0; }
@@ -3606,7 +3620,6 @@ onUnmounted(() => {
 .storage-auth-radio :deep(.v-input__control) { flex-direction:row; align-items:flex-start; gap:12px; }
 .storage-auth-radio :deep(.v-input__control > .v-label) { flex:0 0 4.5rem; margin:8px 0 0; white-space:nowrap; }
 .storage-auth-radio :deep(.v-selection-control-group) { flex:1 1 auto; min-width:0; }
-.media-server-card-grid { display:grid; grid-template-columns:minmax(0,1fr); gap:12px; }
 .media-server-dialog :deep(.v-card-text) { min-width:0; }
 :is(.media-server-dialog, .storage-dialog) :deep(.app-responsive-input__native input::placeholder) {
   color:rgba(var(--v-theme-on-surface),0.95);

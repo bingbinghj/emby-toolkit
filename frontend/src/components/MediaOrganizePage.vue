@@ -21,23 +21,15 @@
             </div>
           </header>
 
-      <VCard v-if="selectedItems.length" class="organize-selection" role="group" aria-label="批量选择" data-testid="organize-selection">
+      <div v-if="selectedItems.length" class="organize-selection" role="group" aria-label="批量选择" data-testid="organize-selection">
         <div class="organize-selection-actions">
           <VCheckbox :model-value="allPageSelected" :indeterminate="pageSelectedCount > 0 && !allPageSelected" label="全选本页" density="compact" hide-details :disabled="!canSelectItems() || !selectablePageItems.length" data-testid="organize-select-page" @update:model-value="selectPage" />
-          <span class="text-caption text-medium-emphasis">已选择 {{ selectedItems.length }} 条记录，对应 {{ selectedMediaCount }} 项媒体</span>
-          <VBtn size="small" color="primary" variant="tonal" prepend-icon="mdi-redo-variant" :disabled="!canReorganize" :loading="processing" data-testid="organize-selected" @click="openReprocessConfirmation">重新整理</VBtn>
-          <VBtn size="small" color="info" variant="tonal" prepend-icon="mdi-movie-search-outline" :disabled="!canReorganize" data-testid="organize-selected-rescrape" @click="openRescrapeConfirmation">重新刮削</VBtn>
-          <VBtn size="small" variant="text" :disabled="processing" @click="selectedItems = []">取消选择</VBtn>
-          <VBtn size="small" variant="text" :append-icon="selectionDetails ? 'mdi-chevron-up' : 'mdi-chevron-down'" data-testid="organize-selection-details" @click="selectionDetails = !selectionDetails">已选记录</VBtn>
+          <span class="text-caption text-medium-emphasis" data-testid="organize-selection-count">{{ pageSelectedCount }}/{{ items.length }} 项</span>
+          <VBtn size="small" color="primary" variant="tonal" prepend-icon="mdi-redo-variant" :disabled="!canReorganize" :loading="processing" data-testid="organize-selected" @click="openReprocessConfirmation">批量重新整理</VBtn>
+          <VBtn size="small" color="error" variant="tonal" prepend-icon="mdi-trash-can-outline" :disabled="!canDelete" data-testid="organize-selected-delete" @click="openDeleteConfirmation()">批量删除</VBtn>
+          <VBtn size="small" variant="text" :disabled="processing" @click="selectedItems = []">取消全选</VBtn>
         </div>
-        <div v-if="selectionDetails" class="organize-selection-records">
-        <div class="text-caption text-medium-emphasis">跨分页保留选择。</div>
-        <VVirtualScroll v-if="selectedItems.length > 100" :items="selectedItems" :height="160" :item-height="38" class="mt-2" tabindex="0" aria-label="已选择的入库记录" data-testid="organize-selected-scroll">
-          <template #default="{ item }"><div class="pb-2"><VChip size="small" closable :disabled="processing" @click:close="removeSelection(item.id)">{{ itemTitle(item) }}{{ episodeLabel(item) ? ` · ${episodeLabel(item)}` : '' }} · {{ statusPresentation(item).title }}</VChip></div></template>
-        </VVirtualScroll>
-        <div v-else class="d-flex flex-wrap ga-2 mt-2"><VChip v-for="item in selectedItems" :key="item.id" size="small" closable :disabled="processing" @click:close="removeSelection(item.id)">{{ itemTitle(item) }}{{ episodeLabel(item) ? ` · ${episodeLabel(item)}` : '' }} · {{ statusPresentation(item).title }}</VChip></div>
-        </div>
-      </VCard>
+      </div>
       <div v-else class="organize-summary text-medium-emphasis">{{ total === null ? '正在读取入库记录' : `共 ${total} 条记录，${pages} 页` }}</div>
 
       <VAlert v-if="itemsError" type="error" variant="tonal" class="mb-4" data-testid="organize-load-error">{{ itemsError }}<VBtn variant="text" :loading="loadingItems" @click="loadItems">重新读取</VBtn></VAlert>
@@ -67,7 +59,7 @@
                     <div v-if="item.message" class="text-body-2 mt-2 history-message">{{ item.message }}</div>
                     <div v-if="!item.item_id" class="text-caption text-medium-emphasis mt-1">尚未关联媒体，暂不能重新整理。</div>
                   </div>
-                  <VMenu location="bottom end"><template #activator="{ props }"><VBtn v-bind="props" icon="mdi-dots-vertical" variant="text" color="default" size="small" :aria-label="`${itemTitle(item)} 操作`" /></template><VList min-width="180"><VListItem title="重新整理" prepend-icon="mdi-redo-variant" :disabled="!canSelectRecord(item)" @click="openRecordConfirmation(item, 'reprocess')" /><VListItem title="重新刮削" prepend-icon="mdi-movie-search-outline" :disabled="!canSelectRecord(item)" @click="openRecordConfirmation(item, 'rescrape')" /><VListItem v-if="item.item_id" title="媒体信息编辑" prepend-icon="mdi-pencil-outline" :to="`/edit-media/${encodeURIComponent(item.item_id)}`" /></VList></VMenu>
+                  <VMenu location="bottom end"><template #activator="{ props }"><VBtn v-bind="props" icon="mdi-dots-vertical" variant="text" color="default" size="small" :aria-label="`${itemTitle(item)} 操作`" /></template><VList min-width="180"><VListItem title="重新整理" prepend-icon="mdi-redo-variant" :disabled="!canReorganizeRecord(item)" @click="openRecordConfirmation(item, 'reprocess')" /><VListItem title="重新刮削" prepend-icon="mdi-movie-search-outline" :disabled="!canReorganizeRecord(item)" @click="openRecordConfirmation(item, 'rescrape')" /><VListItem v-if="item.item_id" title="媒体信息编辑" prepend-icon="mdi-pencil-outline" :to="`/edit-media/${encodeURIComponent(item.item_id)}`" /><VListItem title="删除" prepend-icon="mdi-trash-can-outline" :disabled="!canSelectRecord(item)" @click="openDeleteConfirmation(item)" /></VList></VMenu>
                 </VCardText>
               </VCard>
             </div>
@@ -84,7 +76,7 @@
               <div class="organize-media-copy"><VBtn v-if="item.item_id" variant="text" color="default" class="media-title text-none px-0" :to="`/edit-media/${encodeURIComponent(item.item_id)}`">{{ itemTitle(item) }}</VBtn><div v-else class="font-weight-medium">{{ itemTitle(item) }}</div><div class="text-caption text-medium-emphasis">{{ episodeLabel(item) || (item.item_type === 'Movie' ? '电影' : '剧集') }}</div><div v-if="!item.item_id" class="text-caption text-medium-emphasis">尚未关联媒体</div></div>
               <div class="organize-record-meta text-caption text-medium-emphasis"><div>{{ item.library_name || '—' }}</div><div v-if="item.file_name" :title="item.file_name" class="organize-file-name">{{ item.file_name }}</div><div>{{ formatDate(item.created_at) }}</div></div>
               <div class="organize-record-status"><VChip size="small" variant="tonal" :color="statusPresentation(item).color">{{ statusPresentation(item).title }}</VChip><div v-if="item.message" class="text-body-2 mt-1 history-message">{{ item.message }}</div></div>
-              <VMenu location="bottom end"><template #activator="{ props }"><VBtn v-bind="props" icon="mdi-dots-vertical" variant="text" color="default" :aria-label="`${itemTitle(item)} 操作`" /></template><VList min-width="180"><VListItem title="重新整理" prepend-icon="mdi-redo-variant" :disabled="!canSelectRecord(item)" @click="openRecordConfirmation(item, 'reprocess')" /><VListItem title="重新刮削" prepend-icon="mdi-movie-search-outline" :disabled="!canSelectRecord(item)" @click="openRecordConfirmation(item, 'rescrape')" /><VListItem v-if="item.item_id" title="媒体信息编辑" prepend-icon="mdi-pencil-outline" :to="`/edit-media/${encodeURIComponent(item.item_id)}`" /></VList></VMenu>
+              <VMenu location="bottom end"><template #activator="{ props }"><VBtn v-bind="props" icon="mdi-dots-vertical" variant="text" color="default" :aria-label="`${itemTitle(item)} 操作`" /></template><VList min-width="180"><VListItem title="重新整理" prepend-icon="mdi-redo-variant" :disabled="!canReorganizeRecord(item)" @click="openRecordConfirmation(item, 'reprocess')" /><VListItem title="重新刮削" prepend-icon="mdi-movie-search-outline" :disabled="!canReorganizeRecord(item)" @click="openRecordConfirmation(item, 'rescrape')" /><VListItem v-if="item.item_id" title="媒体信息编辑" prepend-icon="mdi-pencil-outline" :to="`/edit-media/${encodeURIComponent(item.item_id)}`" /><VListItem title="删除" prepend-icon="mdi-trash-can-outline" :disabled="!canSelectRecord(item)" @click="openDeleteConfirmation(item)" /></VList></VMenu>
             </VCard>
           </td></tr>
         </template>
@@ -119,6 +111,19 @@
         <VDivider /><VCardActions><VSpacer /><VBtn variant="tonal" color="secondary" :disabled="processing" @click="confirmationOpen = false">取消</VBtn><VBtn color="primary" variant="flat" :loading="processing" data-testid="organize-confirm" @click="reorganize">加入{{ operationLabel(confirmationMode) }}队列</VBtn></VCardActions>
       </VCard>
     </VDialog>
+    <VBottomSheet v-model="deleteOpen" inset :persistent="processing">
+      <VCard class="text-center">
+        <VCardTitle>删除选中的 {{ deleteItems.length }} 条整理记录</VCardTitle>
+        <VCardText>
+          <p>仅删除整理记录，媒体文件和媒体库项目保留。</p>
+          <VVirtualScroll v-if="deleteItems.length > 100" :items="deleteItems" :height="Math.min(listHeight, 256)" :item-height="48" data-testid="organize-delete-scroll">
+            <template #default="{ item }"><VListItem :title="itemTitle(item)" :subtitle="episodeLabel(item) || item.file_name || item.id" /></template>
+          </VVirtualScroll>
+          <VList v-else bg-color="transparent" density="compact"><VListItem v-for="item in deleteItems" :key="item.id" :title="itemTitle(item)" :subtitle="episodeLabel(item) || item.file_name || item.id" /></VList>
+        </VCardText>
+        <VCardActions class="justify-center"><VBtn variant="text" :disabled="processing" @click="deleteOpen = false">取消</VBtn><VBtn color="error" variant="flat" :loading="processing" data-testid="organize-delete-confirm" @click="deleteHistory">仅删除整理记录</VBtn></VCardActions>
+      </VCard>
+    </VBottomSheet>
     <MediaOrganizeQueueDialog v-model="queueOpen" :queue="queue" />
     <Teleport to="body">
       <div class="compact-fab-stack compact-fab-stack--history organize-queue-fab" :class="{ 'organize-queue-fab--desktop': !smAndDown }" :style="smAndDown ? undefined : { insetBlockEnd: `${desktopFabBottom}px` }">
@@ -159,23 +164,26 @@ watch([pageElement, viewportWidth, viewportHeight], () => {
   const layout = pageElement.value?.closest('.layout-page-content');
   if (layout) contentBottomInset.value = parseFloat(getComputedStyle(layout).paddingBottom) || 0;
 }, { flush: 'post' });
-const selectedItems = ref([]), selectionDetails = ref(false), confirmationItems = ref([]), confirmationOpen = ref(false), confirmationMode = ref('reprocess'), queueOpen = ref(false);
+const selectedItems = ref([]), confirmationItems = ref([]), confirmationOpen = ref(false), confirmationMode = ref('reprocess'), queueOpen = ref(false), deleteItems = ref([]), deleteOpen = ref(false);
 const loadingItems = ref(false), itemsError = ref(''), processing = ref(false), feedback = ref(null);
 let active = true, itemSequence = 0, searchTimer;
 const loadedQuery = ref('');
 const queryKey = () => JSON.stringify([page.value, pageSize.value, appliedSearch.value, statusFilter.value]);
 const selectedIds = computed(() => selectedItems.value.map(item => item.id));
-const selectedMediaCount = computed(() => new Set(selectedItems.value.filter(item => item.item_id).map(item => item.item_id)).size);
-const canReorganize = computed(() => !processing.value && selectedItems.value.length > 0 && selectedItems.value.every(isReadyRecord));
+const selectedPageItems = computed(() => items.value.filter(item => selectedIds.value.includes(item.id)));
+const canReorganize = computed(() => canSelectItems() && selectedPageItems.value.length > 0 && selectedPageItems.value.every(isReadyRecord));
+const canDelete = computed(() => canSelectItems() && selectedPageItems.value.length > 0 && selectedPageItems.value.every(isDeletableRecord));
 const confirmationMediaCount = computed(() => new Set(confirmationItems.value.map(item => item.item_id)).size);
 const pages = computed(() => Math.max(1, Math.ceil((total.value || 0) / pageSize.value)));
 const pageTip = computed(() => ({ begin: total.value ? pageSize.value * (page.value - 1) + 1 : 0, end: Math.min(pageSize.value * page.value, total.value || 0) }));
 const emptyText = computed(() => itemsError.value ? '入库处理记录尚未读取成功' : '当前条件下没有入库处理记录');
 const canSelectItems = () => !processing.value && !loadingItems.value && !itemsError.value && loadedQuery.value === queryKey();
-const isReadyRecord = item => ['Movie', 'Episode'].includes(item.item_type) && typeof item.item_id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(item.item_id) && ['success', 'warning', 'failed'].includes(item.status);
-const canSelectRecord = item => canSelectItems() && isReadyRecord(item);
+const isDeletableRecord = item => ['Movie', 'Episode'].includes(item.item_type) && ['success', 'warning', 'failed'].includes(item.status);
+const isReadyRecord = item => isDeletableRecord(item) && typeof item.item_id === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(item.item_id);
+const canSelectRecord = item => canSelectItems() && isDeletableRecord(item);
+const canReorganizeRecord = item => canSelectItems() && isReadyRecord(item);
 const headers = [{ title: '媒体', key: 'name', sortable: false }, { title: '媒体库', key: 'library_name', sortable: false }, { title: '类型', key: 'item_type', sortable: false }, { title: '处理开始时间', key: 'created_at', sortable: false }, { title: '状态', key: 'status', sortable: false }];
-const selectablePageItems = computed(() => items.value.filter(isReadyRecord));
+const selectablePageItems = computed(() => items.value.filter(isDeletableRecord));
 const pageSelectedCount = computed(() => selectablePageItems.value.filter(item => selectedIds.value.includes(item.id)).length);
 const allPageSelected = computed(() => selectablePageItems.value.length > 0 && pageSelectedCount.value === selectablePageItems.value.length);
 const selectPage = enabled => updateSelection(enabled ? [...selectedIds.value, ...selectablePageItems.value.map(item => item.id)] : selectedIds.value.filter(id => !selectablePageItems.value.some(item => item.id === id)));
@@ -248,7 +256,6 @@ const scheduleSearch = () => {
   if (!searchComposing.value && !processing.value && (search.value?.trim() || '') !== appliedSearch.value) searchTimer = setTimeout(searchItems, smAndDown.value ? 600 : 1000);
 };
 const finishSearchComposition = () => { searchComposing.value = false; scheduleSearch(); };
-const removeSelection = id => { if (!processing.value) selectedItems.value = selectedItems.value.filter(item => item.id !== id); };
 const updateSelection = ids => {
   if (!canSelectItems()) return;
   const current = new Set(items.value.map(item => item.id)), next = new Set(ids);
@@ -259,17 +266,52 @@ const updateSelection = ids => {
 };
 const toggleSelection = (item, enabled) => updateSelection(enabled ? [...selectedIds.value, item.id] : selectedIds.value.filter(id => id !== item.id));
 const openConfirmation = () => {
-  if (processing.value || !selectedItems.value.length || !selectedItems.value.every(isReadyRecord)) return;
+  const targets = selectedPageItems.value;
+  if (!canSelectItems() || !targets.length || !targets.every(isReadyRecord)) return;
+  selectedItems.value = targets.map(item => ({ ...item }));
   confirmationItems.value = selectedItems.value.map(item => ({ ...item }));
   confirmationOpen.value = true;
 };
-const openRescrapeConfirmation = () => { if (canReorganize.value) { confirmationMode.value = 'rescrape'; openConfirmation(); } };
 const openReprocessConfirmation = () => { if (canReorganize.value) { confirmationMode.value = 'reprocess'; openConfirmation(); } };
 const openRecordConfirmation = (item, mode) => {
-  if (!canSelectRecord(item)) return;
+  if (!canReorganizeRecord(item)) return;
   confirmationItems.value = [{ ...item }];
   confirmationMode.value = mode;
   confirmationOpen.value = true;
+};
+const openDeleteConfirmation = item => {
+  const targets = item ? [item] : selectedPageItems.value;
+  if (!canSelectItems() || !targets.length || !targets.every(isDeletableRecord)) return;
+  if (!item) selectedItems.value = targets.map(target => ({ ...target }));
+  deleteItems.value = targets.map(target => ({ ...target }));
+  deleteOpen.value = true;
+};
+const deleteHistory = async () => {
+  if (processing.value || !deleteItems.value.length || !deleteItems.value.every(isDeletableRecord)) return;
+  const ids = deleteItems.value.map(item => item.id);
+  processing.value = true;
+  try {
+    const { data } = await axios.delete('/api/media_organize/history', { data: { history_ids: ids } });
+    if (!active) return;
+    const verified = data?.deleted_count === ids.length && Array.isArray(data.deleted_ids)
+      && data.deleted_ids.length === ids.length && new Set(data.deleted_ids).size === ids.length
+      && data.deleted_ids.every(id => ids.includes(id));
+    feedback.value = { type: verified ? 'success' : 'warning', message: verified ? data.message || '整理记录已删除' : '整理记录删除结果尚未确认', details: verified ? [] : ['已保留选择，请刷新记录后核对。'] };
+    message[feedback.value.type](feedback.value.message);
+    deleteOpen.value = false;
+    if (verified) {
+      selectedItems.value = selectedItems.value.filter(item => !ids.includes(item.id));
+      deleteItems.value = [];
+      await loadItems();
+    }
+  } catch (error) {
+    if (!active) return;
+    feedback.value = { type: 'error', message: error.response?.data?.error || error.message || '删除整理记录失败', details: [] };
+    message.error(feedback.value.message);
+    deleteOpen.value = false;
+  } finally {
+    processing.value = false;
+  }
 };
 const reorganize = async () => {
   if (processing.value || !confirmationItems.value.length || !['reprocess', 'rescrape'].includes(confirmationMode.value)) return;
@@ -283,8 +325,8 @@ const reorganize = async () => {
     const result = response.data || {};
     if (response.status === 202) {
       const accepted = queueReceiptMatches(result, ids, mode);
-      feedback.value = { type: accepted ? 'info' : 'warning', message: accepted ? result.message || '媒体已加入整理队列' : '整理队列提交结果尚未确认', details: accepted ? (result.duplicate_count ? ['队列中已有 ' + result.duplicate_count + ' 项任务，本次不重复提交。'] : []) : ['请打开整理队列核对所选媒体的状态。'] };
-      message[feedback.value.type](feedback.value.message);
+      feedback.value = accepted ? null : { type: 'warning', message: '整理队列提交结果尚未确认', details: ['请打开整理队列核对所选媒体的状态。'] };
+      if (!accepted) message.warning(feedback.value.message);
       confirmationOpen.value = false;
       queueOpen.value = true;
       void queue.refresh();
@@ -342,7 +384,6 @@ onBeforeUnmount(() => { active = false; ++itemSequence; clearTimeout(searchTimer
 .organize-selection { flex: 0 0 auto; }
 .organize-selection-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 8px 16px; min-block-size: 58px; }
 .organize-selection-actions > .v-input { flex: 0 0 auto; }
-.organize-selection-records { padding: 0 16px 12px; }
 .organize-summary { padding-inline: 16px; font-size: 0.85rem; }
 .organize-record-row > td { padding: 0 0 10px !important; border: 0 !important; }
 .organize-record { display: flex; align-items: center; gap: 12px; min-block-size: 90px; padding: 8px 12px; }

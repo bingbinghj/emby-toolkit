@@ -64,7 +64,7 @@ test('rescraping one episode enters the queue immediately without claiming compl
   await expect(task(page, 'episode-rescrape')).toContainText('重新刮削');
   await expect(task(page, 'episode-rescrape')).toContainText('等待处理');
   await expect(task(page, 'episode-rescrape')).not.toContainText('已完成');
-  await expect(page.getByTestId('organize-result')).toContainText('已加入重新刮削队列');
+  await expect(page.getByTestId('organize-result')).toHaveCount(0);
   const posts = api.requests.filter(request => request.method === 'POST' && request.path === organizePath);
   expect(posts).toHaveLength(1);
   expect(posts[0].body).toEqual({ item_ids: ['episode-8'], history_ids: [episode.id], mode: 'rescrape' });

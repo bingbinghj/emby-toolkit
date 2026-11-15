@@ -97,6 +97,13 @@ impl Fixture {
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         (status, serde_json::from_slice(&body).unwrap())
     }
+    async fn seed_history(&self, item: Option<&str>, status: &str) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO media_organize_history(id,source,source_identity,item_id,item_json,status) VALUES($1,'emby',$1,$2,$3,$4)")
+            .bind(&id).bind(item).bind(json!({"item_type":"Episode","name":"删除范围测试","file_name":"ep200.strm"})).bind(status)
+            .execute(&self.state.db).await.unwrap();
+        id
+    }
     async fn rows(&self) -> Vec<Value> {
         sqlx::query_scalar("SELECT item_json || jsonb_build_object('id',id,'status',status,'message',message,'created_at',created_at,'completed_at',completed_at) FROM media_organize_history ORDER BY id").fetch_all(&self.state.db).await.unwrap()
     }
@@ -110,6 +117,211 @@ impl Fixture {
             .unwrap();
         self.root.close().await;
     }
+}
+
+async fn mutate_history_fixture(
+    state: &AppState,
+    method: &str,
+    path: &str,
+    body: Value,
+    cookie: &str,
+) -> (StatusCode, Value) {
+    let response = emby_toolkit::router(state.clone())
+        .oneshot(Request::builder().method(method).uri(path)
+            .header(header::COOKIE, cookie).header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string())).unwrap())
+        .await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    (status, if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap() })
+}
+
+async fn wait_for_database_blocker(pool: &sqlx::PgPool, blocker: i32) {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let blocked: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))")
+                .bind(blocker).fetch_one(pool).await.unwrap();
+            if blocked { break; }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    }).await.expect("request must reach the intended database lock");
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; deletion and media sentinels stay local"]
+async fn history_delete_removes_only_selected_records_and_preserves_media_state() {
+    let f = Fixture::new().await;
+    let first = f.seed_history(Some("ep200"), "success").await;
+    let second = f.seed_history(Some("ep200"), "warning").await;
+    let unbound = f.seed_history(None, "failed").await;
+    let retained = f.seed_history(Some("ep201"), "failed").await;
+    sqlx::query("INSERT INTO media_metadata(tmdb_id,item_type,emby_item_ids_json,asset_details_json) VALUES('200','Episode','[\"ep200\"]','[{\"path\":\"/media/ep200.strm\"}]')")
+        .execute(&f.state.db).await.unwrap();
+    sqlx::query("INSERT INTO processed_log(item_id,item_name) VALUES('ep200','已有媒体')")
+        .execute(&f.state.db).await.unwrap();
+    let before: Value = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE tmdb_id='200'")
+        .fetch_one(&f.state.db).await.unwrap();
+    let files = ["ep200.strm", "ep200-mediainfo.json", "ep200.nfo", "ep200-320-10.bif"];
+    for name in files { std::fs::write(f._directory.path().join(name), name).unwrap(); }
+    let (status, result) = mutate_history_fixture(&f.state, "DELETE", "/api/media_organize/history",
+        json!({"history_ids":[first,second,unbound,first]}), &f.cookie()).await;
+    if status != StatusCode::OK {
+        f.close().await;
+        panic!("history deletion must return 200, got {status}: {result}");
+    }
+    assert_eq!(result["deleted_count"], 3);
+    let deleted = result["deleted_ids"].as_array().unwrap().iter().map(|id| id.as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(deleted, [&first[..], &second[..], &unbound[..]].into_iter().collect());
+    let rows = f.rows().await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["id"], retained);
+    assert_eq!(sqlx::query_scalar::<_, Value>("SELECT to_jsonb(m) FROM media_metadata m WHERE tmdb_id='200'").fetch_one(&f.state.db).await.unwrap(), before);
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM processed_log WHERE item_id='ep200'").fetch_one(&f.state.db).await.unwrap(), 1);
+    for name in files { assert_eq!(std::fs::read(f._directory.path().join(name)).unwrap(), name.as_bytes()); }
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; all invalid delete requests remain local"]
+async fn history_delete_rejects_nonadmin_invalid_and_missing_ids_without_partial_deletion() {
+    let f = Fixture::new().await;
+    let id = f.seed_history(Some("ep200"), "failed").await;
+    let body = json!({"history_ids":[id]});
+    assert_eq!(mutate_history_fixture(&f.state, "DELETE", "/api/media_organize/history", body.clone(), "").await.0, StatusCode::FORBIDDEN);
+    sqlx::query("UPDATE emby_users SET is_administrator=false WHERE id='admin'").execute(&f.state.db).await.unwrap();
+    assert_eq!(mutate_history_fixture(&f.state, "DELETE", "/api/media_organize/history", body, &f.cookie()).await.0, StatusCode::FORBIDDEN);
+    sqlx::query("UPDATE emby_users SET is_administrator=true WHERE id='admin'").execute(&f.state.db).await.unwrap();
+    for body in [json!({}), json!({"history_ids":[]}), json!({"history_ids":[""]}), json!({"history_ids":[12]}), json!({"history_ids":["not-a-uuid"]}), json!({"history_ids":vec![id.clone();1001]})] {
+        assert_eq!(mutate_history_fixture(&f.state, "DELETE", "/api/media_organize/history", body, &f.cookie()).await.0, StatusCode::BAD_REQUEST);
+    }
+    let (status, _) = mutate_history_fixture(&f.state, "DELETE", "/api/media_organize/history",
+        json!({"history_ids":[id,uuid::Uuid::new_v4().to_string()]}), &f.cookie()).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(f.rows().await.len(), 1);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; unfinished queue protection remains local"]
+async fn history_delete_protects_processing_and_resumable_queue_references_atomically() {
+    let f = Fixture::new().await;
+    let safe = f.seed_history(Some("ep199"), "success").await;
+    let protected = f.seed_history(Some("ep200"), "processing").await;
+    let body = json!({"history_ids":[safe,protected]});
+    assert_eq!(mutate_history_fixture(&f.state, "DELETE", "/api/media_organize/history", body.clone(), &f.cookie()).await.0, StatusCode::CONFLICT);
+    sqlx::query("UPDATE media_organize_history SET status='failed' WHERE id=$1").bind(&protected).execute(&f.state.db).await.unwrap();
+    let queue = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO media_organize_queue(id,item_id,mode,item_json,history_ids,operator_id) VALUES($1,'ep200','reprocess','{}',$2,'admin')")
+        .bind(&queue).bind(json!([protected])).execute(&f.state.db).await.unwrap();
+    let before = f.rows().await;
+    for state in ["queued", "running", "interrupted"] {
+        sqlx::query("UPDATE media_organize_queue SET status=$1 WHERE id=$2").bind(state).bind(&queue).execute(&f.state.db).await.unwrap();
+        assert_eq!(mutate_history_fixture(&f.state, "DELETE", "/api/media_organize/history", body.clone(), &f.cookie()).await.0, StatusCode::CONFLICT);
+        assert_eq!(f.rows().await, before);
+    }
+    sqlx::query("UPDATE media_organize_queue SET status='failed' WHERE id=$1").bind(&queue).execute(&f.state.db).await.unwrap();
+    assert_eq!(mutate_history_fixture(&f.state, "DELETE", "/api/media_organize/history", body, &f.cookie()).await.0, StatusCode::OK);
+    let (status, _) = mutate_history_fixture(&f.state, "POST", &format!("/api/media_organize/queue/{queue}/retry"), json!({}), &f.cookie()).await;
+    assert_eq!(status, StatusCode::CONFLICT, "retry must not discard deleted history IDs");
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM media_organize_queue").fetch_one(&f.state.db).await.unwrap(), 1);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; obsolete attempts and retained results stay local"]
+async fn history_delete_allows_an_interrupted_attempt_superseded_by_a_completed_retry() {
+    let f = Fixture::new().await;
+    let id = f.seed_history(Some("ep200"), "success").await;
+    for status in ["interrupted", "completed"] {
+        sqlx::query("INSERT INTO media_organize_queue(id,item_id,mode,item_json,history_ids,operator_id,status,result) VALUES($1,'ep200','reprocess','{}',$2,'admin',$3,$4)")
+            .bind(uuid::Uuid::new_v4().to_string()).bind(json!([id])).bind(status).bind(json!({"original_status":status}))
+            .execute(&f.state.db).await.unwrap();
+    }
+    let before: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(q) FROM media_organize_queue q ORDER BY queue_order").fetch_all(&f.state.db).await.unwrap();
+    let (status, result) = mutate_history_fixture(&f.state, "DELETE", "/api/media_organize/history", json!({"history_ids":[id]}), &f.cookie()).await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["deleted_count"], 1);
+    assert_eq!(result["deleted_ids"], json!([id]));
+    assert!(f.rows().await.is_empty());
+    assert_eq!(sqlx::query_scalar::<_, Value>("SELECT to_jsonb(q) FROM media_organize_queue q ORDER BY queue_order").fetch_all(&f.state.db).await.unwrap(), before);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; deterministic delete/enqueue race stays local"]
+async fn history_deleted_after_selection_is_rejected_inside_the_enqueue_transaction() {
+    let f = Fixture::new().await;
+    let item = format!("ep_{}", uuid::Uuid::new_v4().simple());
+    let id = f.seed_history(Some(&item), "failed").await;
+    let mut gate = f.state.db.begin().await.unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut *gate).await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))").bind(format!("emby-toolkit:organize-queue:{item}:reprocess")).execute(&mut *gate).await.unwrap();
+    let state = f.state.clone();
+    let cookie = f.cookie();
+    let body = json!({"item_ids":[item],"history_ids":[id]});
+    let request = tokio::spawn(async move { mutate_history_fixture(&state, "POST", "/api/actions/reorganize", body, &cookie).await });
+    wait_for_database_blocker(&f.state.db, pid).await;
+    assert_eq!(mutate_history_fixture(&f.state, "DELETE", "/api/media_organize/history", json!({"history_ids":[id]}), &f.cookie()).await.0, StatusCode::OK);
+    gate.commit().await.unwrap();
+    assert_eq!(tokio::time::timeout(Duration::from_secs(3), request).await.unwrap().unwrap().0, StatusCode::CONFLICT);
+    assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM media_organize_queue").fetch_one(&f.state.db).await.unwrap(), 0);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; deterministic enqueue/delete race stays local"]
+async fn history_delete_waits_for_an_enqueue_transaction_then_preserves_its_active_reference() {
+    let f = Fixture::new().await;
+    let item = format!("ep_{}", uuid::Uuid::new_v4().simple());
+    let id = f.seed_history(Some(&item), "failed").await;
+    let label = format!("history-delete-insert-{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE FUNCTION hold_queue_insert() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_advisory_xact_lock(hashtext('{label}')); RETURN NEW; END $$"))
+        .execute(&f.state.db).await.unwrap();
+    sqlx::query("CREATE TRIGGER hold_queue_insert BEFORE INSERT ON media_organize_queue FOR EACH ROW EXECUTE FUNCTION hold_queue_insert()")
+        .execute(&f.state.db).await.unwrap();
+    let mut gate = f.state.db.begin().await.unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut *gate).await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))").bind(label).execute(&mut *gate).await.unwrap();
+    let state = f.state.clone();
+    let cookie = f.cookie();
+    let body = json!({"item_ids":[item],"history_ids":[id]});
+    let enqueue = tokio::spawn(async move { mutate_history_fixture(&state, "POST", "/api/actions/reorganize", body, &cookie).await });
+    wait_for_database_blocker(&f.state.db, pid).await;
+    let enqueue_pid: i32 = sqlx::query_scalar("SELECT pid FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)) AND query LIKE 'INSERT INTO media_organize_queue%' LIMIT 1")
+        .bind(pid).fetch_one(&f.state.db).await.unwrap();
+    let state = f.state.clone();
+    let cookie = f.cookie();
+    let deletion = tokio::spawn(async move { mutate_history_fixture(&state, "DELETE", "/api/media_organize/history", json!({"history_ids":[id]}), &cookie).await });
+    wait_for_database_blocker(&f.state.db, enqueue_pid).await;
+    gate.commit().await.unwrap();
+    assert_eq!(tokio::time::timeout(Duration::from_secs(3), enqueue).await.unwrap().unwrap().0, StatusCode::ACCEPTED);
+    assert_eq!(tokio::time::timeout(Duration::from_secs(3), deletion).await.unwrap().unwrap().0, StatusCode::CONFLICT);
+    assert_eq!(f.rows().await.len(), 1);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; queue cancellation lock ordering stays local"]
+async fn history_enqueue_keeps_queue_then_history_lock_order_when_cancellation_runs() {
+    let f = Fixture::new().await;
+    let item = format!("ep_{}", uuid::Uuid::new_v4().simple());
+    let id = f.seed_history(Some(&item), "failed").await;
+    let queue = uuid::Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO media_organize_queue(id,item_id,mode,item_json,history_ids,operator_id) VALUES($1,$2,'reprocess','{}',$3,'admin')")
+        .bind(&queue).bind(&item).bind(json!([id])).execute(&f.state.db).await.unwrap();
+    let mut cancel = f.state.db.begin().await.unwrap();
+    let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut *cancel).await.unwrap();
+    sqlx::query("UPDATE media_organize_queue SET status='cancelled' WHERE id=$1").bind(queue).execute(&mut *cancel).await.unwrap();
+    let state = f.state.clone();
+    let cookie = f.cookie();
+    let body = json!({"item_ids":[item],"history_ids":[id]});
+    let enqueue = tokio::spawn(async move { mutate_history_fixture(&state, "POST", "/api/actions/reorganize", body, &cookie).await });
+    wait_for_database_blocker(&f.state.db, pid).await;
+    tokio::time::timeout(Duration::from_secs(2), sqlx::query("UPDATE media_organize_history SET message='取消已完成' WHERE id=$1").bind(id).execute(&mut *cancel))
+        .await.expect("enqueue must not lock history before the existing queue").unwrap();
+    cancel.commit().await.unwrap();
+    assert_eq!(tokio::time::timeout(Duration::from_secs(3), enqueue).await.unwrap().unwrap().0, StatusCode::ACCEPTED);
+    f.close().await;
 }
 fn episode(id: &str) -> Value {
     json!({"Id":id,"Type":"Episode","Name":format!("本集-{id}"),"SeriesId":"series","SeriesName":"入库测试剧","ParentIndexNumber":1,"IndexNumber":2,"ImageTags":{"Primary":"frame"},"SeriesPrimaryImageTag":"series-poster","Path":format!("/media/{id}.strm"),"AccessToken":"must-not-store","ProviderIds":{"Tmdb":"private-extra"}})

@@ -34,6 +34,53 @@ fn text(data: &Value, field: &str, default: &str) -> String {
         .unwrap_or(default)
         .to_string()
 }
+
+// Emby 4.10.2 computes these readonly fields from the imported enum values.
+pub(crate) fn native_video_range_fields(
+    extended_type: &str,
+    extended_subtype: &str,
+) -> Option<(&'static str, &'static str)> {
+    let range = match extended_type {
+        "None" => "SDR",
+        "Hdr10" => "HDR 10",
+        "Hdr10Plus" => "HDR 10+",
+        "HyperLogGamma" => "HLG",
+        "DolbyVision" => "DolbyVision",
+        _ => return None,
+    };
+    let description = match extended_subtype {
+        "None" => "None",
+        "Hdr10" => "HDR 10",
+        "Hdr10Plus0" => "HDR 10+",
+        "HyperLogGamma" => "HLG",
+        "DoviProfile02" => "Profile 0.2 (SDR)",
+        "DoviProfile10" => "Profile 1.0",
+        "DoviProfile22" => "Profile 2.2 (SDR)",
+        "DoviProfile30" => "Profile 3.0",
+        "DoviProfile42" => "Profile 4.2 (SDR)",
+        "DoviProfile50" => "Profile 5.0",
+        "DoviProfile61" => "Profile 6.1 (HDR10 compatible)",
+        "DoviProfile76" => "Profile 7.6 (Bluray)",
+        "DoviProfile81" => "Profile 8.1 (HDR10 compatible)",
+        "DoviProfile82" => "Profile 8.2 (SDR)",
+        "DoviProfile83" => "Profile 8.3",
+        "DoviProfile84" => "Profile 8.4 (HLG compatible)",
+        "DoviProfile85" => "Profile 8.5",
+        "DoviProfile92" => "Profile 9.2 (SDR)",
+        _ => return None,
+    };
+    Some((range, description))
+}
+
+pub(crate) fn native_internal_subtitle_fields(codec: &str, index: i64) -> (bool, &'static str) {
+    let codec = codec.to_lowercase();
+    let text = !codec.is_empty()
+        && !["dvb_teletext", "dvb_subtitle", "dvbsub", "dvd_subtitle", "dvdsub",
+            "hdmv_pgs_subtitle", "pgssub", "xsub", "sub", "sup"].contains(&codec.as_str())
+        && !codec.contains("pgs") && !codec.contains("dvbsub");
+    (text, if index >= 100 { "VideoSideData" } else { "InternalStream" })
+}
+
 pub fn build(probe: &Value, node: &Value, mappings: &Value) -> Option<Value> {
     if probe.as_object().is_none_or(|v| v.is_empty()) {
         return None;
@@ -114,36 +161,41 @@ pub fn build(probe: &Value, node: &Value, mappings: &Value) -> Option<Value> {
                 });
                 let transfer = string(&raw, "color_transfer");
                 let primaries = string(&raw, "color_primaries");
-                let mut video_range = String::new();
-                let mut extended = "None".to_string();
-                let mut subtype = "None".to_string();
-                let mut description = "None".to_string();
-                if let Some(profile) = profile.filter(|v| integer(v) != 0) {
-                    let profile = integer(profile);
-                    extended = "DolbyVision".into();
-                    subtype = format!("DoviProfile{profile}");
-                    description = format!("Profile {profile}");
-                    if profile == 8 && compatibility.is_some_and(|c| integer(c) == 1) {
-                        subtype = "DoviProfile81".into();
-                        description = "Profile 8.1 (HDR10 compatible)".into();
-                    } else if profile == 7 && transfer == "smpte2084" {
-                        description = "Profile 7 (HDR10 compatible)".into();
-                    }
-                    video_range = if transfer == "smpte2084" {
-                        "DolbyVision HDR10"
-                    } else {
-                        "DolbyVision"
-                    }
-                    .into();
+                let (extended, subtype) = if dv.is_some() {
+                    let profile_integer = |value: &Value| value.as_i64().or_else(|| value.as_str()?.parse().ok());
+                    let subtype = match (
+                        profile.and_then(profile_integer),
+                        compatibility.and_then(profile_integer),
+                    ) {
+                        (Some(0), Some(2)) => "DoviProfile02",
+                        (Some(1), Some(0)) => "DoviProfile10",
+                        (Some(2), Some(2)) => "DoviProfile22",
+                        (Some(3), Some(0)) => "DoviProfile30",
+                        (Some(4), Some(2)) => "DoviProfile42",
+                        (Some(5), _) => "DoviProfile50",
+                        (Some(6), Some(1)) => "DoviProfile61",
+                        (Some(7), _) => "DoviProfile76",
+                        (Some(8), Some(1)) => "DoviProfile81",
+                        (Some(8), Some(2)) => "DoviProfile82",
+                        (Some(8), Some(3)) => "DoviProfile83",
+                        (Some(8), Some(4)) => "DoviProfile84",
+                        (Some(8), Some(5)) => "DoviProfile85",
+                        (Some(9), Some(2)) => "DoviProfile92",
+                        _ => "None",
+                    };
+                    ("DolbyVision", subtype)
                 } else if raw["side_data_list"].to_string().contains("HDR10+")
                     || raw["side_data_list"].to_string().contains("SMPTE2094-40")
                 {
-                    video_range = "HDR10+".into();
+                    ("Hdr10Plus", "Hdr10Plus0")
                 } else if transfer == "smpte2084" {
-                    video_range = "HDR10".into();
-                } else if primaries == "bt2020" {
-                    video_range = "HDR".into();
-                }
+                    ("Hdr10", "Hdr10")
+                } else if transfer == "arib-std-b67" {
+                    ("HyperLogGamma", "HyperLogGamma")
+                } else {
+                    ("None", "None")
+                };
+                let (video_range, description) = native_video_range_fields(extended, subtype)?;
                 let resolution = if width >= 3800 {
                     "4K".into()
                 } else if width >= 1900 {
@@ -155,10 +207,12 @@ pub fn build(probe: &Value, node: &Value, mappings: &Value) -> Option<Value> {
                 } else {
                     String::new()
                 };
-                let effect = if extended == "DolbyVision" {
-                    "Dolby Vision"
-                } else {
-                    video_range.as_str()
+                let effect = match extended {
+                    "DolbyVision" => "Dolby Vision",
+                    "Hdr10" => "HDR10",
+                    "Hdr10Plus" => "HDR10+",
+                    "HyperLogGamma" => "HLG",
+                    _ => "",
                 };
                 let fps = rate(&raw["avg_frame_rate"]);
                 let fps = if fps.is_null() {
@@ -280,11 +334,11 @@ pub fn build(probe: &Value, node: &Value, mappings: &Value) -> Option<Value> {
                     } else {
                         format!("({subtitle})")
                     });
-                    stream["IsTextSubtitleStream"] = json!(
-                        ["subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"]
-                            .contains(&codec.as_str())
-                    );
-                    stream["SubtitleLocationType"] = json!("InternalStream");
+                    // Match Emby's readonly getters, including less common
+                    // text formats and subtitles carried in video side data.
+                    let (text, location) = native_internal_subtitle_fields(&codec, index);
+                    stream["IsTextSubtitleStream"] = json!(text);
+                    stream["SubtitleLocationType"] = json!(location);
                 }
                 stream["DisplayTitle"] = json!(display_parts.join(" "));
             }

@@ -9,6 +9,7 @@ use crate::{
 use axum::{
     Json, Router,
     extract::{Query, State},
+    http::StatusCode,
     routing::get,
 };
 use chrono::{Datelike, TimeZone};
@@ -20,7 +21,46 @@ use std::{
 };
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/api/media_organize/history", get(history))
+    Router::new().route("/api/media_organize/history", get(history).delete(delete_history))
+}
+
+/// Explicitly remove selected terminal receipts; media and files are unchanged.
+async fn delete_history(
+    State(state): State<AppState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>> {
+    let selected = body["history_ids"]
+        .as_array()
+        .filter(|ids| !ids.is_empty() && ids.len() <= 1000)
+        .ok_or_else(|| ApiError::bad("请选择 1 至 1000 条整理记录"))?;
+    let mut ids = BTreeSet::new();
+    for id in selected {
+        let id = id
+            .as_str()
+            .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+            .ok_or_else(|| ApiError::bad("整理记录 ID 无效"))?;
+        ids.insert(id.to_string());
+    }
+    let ids = ids.into_iter().collect::<Vec<_>>();
+    let mut transaction = state.db.begin().await?;
+    let rows: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',id,'status',status) FROM media_organize_history WHERE id=ANY($1) ORDER BY id FOR UPDATE")
+        .bind(&ids).fetch_all(&mut *transaction).await?;
+    if rows.len() != ids.len() {
+        return Err(ApiError(StatusCode::NOT_FOUND, "部分整理记录已不存在，未删除任何记录".into()));
+    }
+    let unfinished: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM media_organize_queue q WHERE q.history_ids ?| $1::text[] AND (q.status IN ('queued','running') OR q.status='interrupted' AND NOT EXISTS(SELECT 1 FROM media_organize_queue other WHERE other.item_id=q.item_id AND other.mode=q.mode AND other.id<>q.id AND (other.status IN ('queued','running') OR other.queue_order>q.queue_order))))")
+        .bind(&ids).fetch_one(&mut *transaction).await?;
+    if unfinished || rows.iter().any(|row| !matches!(row["status"].as_str(), Some("success" | "warning" | "failed"))) {
+        return Err(ApiError(StatusCode::CONFLICT, "所选记录仍有关联未完成整理任务，未删除任何记录".into()));
+    }
+    let deleted: Vec<String> = sqlx::query_scalar("DELETE FROM media_organize_history WHERE id=ANY($1) RETURNING id")
+        .bind(&ids).fetch_all(&mut *transaction).await?;
+    if deleted.len() != ids.len() {
+        return Err(ApiError(StatusCode::CONFLICT, "整理记录删除未完整确认，未提交删除".into()));
+    }
+    transaction.commit().await?;
+    Ok(Json(json!({"deleted_count":deleted.len(),"deleted_ids":deleted,
+        "message":format!("已删除 {} 条整理记录",ids.len())})))
 }
 
 /// MP counts successful transfer history in the server's current calendar month.
@@ -108,10 +148,11 @@ pub async fn monthly_statistics(
 pub async fn interrupt_unfinished(pool: &sqlx::PgPool) -> Result<()> {
     // Keep admissions whose accepted event or durable job can still resume;
     // only legacy orphaned history has no executable work after a restart.
+    // This runs before queue recovery, including its latest interrupted intent.
     sqlx::query("UPDATE media_organize_history h
         SET status='failed',message='上次 ETK 入库处理缺少可恢复任务，请核对后重新整理',completed_at=NOW()
         WHERE h.status='processing'
-        AND NOT EXISTS(SELECT 1 FROM media_organize_queue q WHERE q.history_ids ? h.id AND q.status IN ('queued','running'))
+        AND NOT EXISTS(SELECT 1 FROM media_organize_queue q WHERE q.history_ids ? h.id AND (q.status IN ('queued','running') OR q.status='interrupted' AND NOT EXISTS(SELECT 1 FROM media_organize_queue other WHERE other.item_id=q.item_id AND other.mode=q.mode AND other.id<>q.id AND (other.status IN ('queued','running') OR other.queue_order>q.queue_order))))
         AND NOT EXISTS(SELECT 1 FROM webhook_pending p WHERE p.event_json->'history_ids' ? h.id
             AND NOT EXISTS(SELECT 1 FROM durable_jobs registered WHERE registered.spec_json#>>'{payload,event,_pending_id}'=p.event_json->>'_pending_id'
                 AND (registered.state_json->>'state' IN ('failed','cancelled') OR registered.state_json->>'stop_requested'='true')))

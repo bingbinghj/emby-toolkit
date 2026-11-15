@@ -3220,3 +3220,4 @@ async fn ingest_recovery_post_restores_original_chapter_resources_and_keeps_fina
 
 include!("fixtures/gaia_empty_ingest.rs");
 include!("fixtures/reorganize_ingest_flow.rs");
+include!("fixtures/legacy_video_range.rs");

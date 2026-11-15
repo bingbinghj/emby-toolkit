@@ -100,6 +100,68 @@ async fn effect(pool: &PgPool, item: &str) {
     sqlx::query("INSERT INTO resume_effects(item,writes) VALUES($1,1) ON CONFLICT(item) DO UPDATE SET writes=resume_effects.writes+1")
         .bind(item).execute(pool).await.unwrap();
 }
+
+async fn unfinished_queue_history(f: &Fixture) -> Value {
+    sqlx::raw_sql("INSERT INTO media_organize_history(id,source,source_identity,item_id,item_json,status) VALUES
+        ('selected-history','emby','selected-history','missing-item','{}','processing'),
+        ('unselected-history','emby','unselected-history','missing-item','{}','processing'),
+        ('foreign-history','emby','foreign-history','other-item','{}','processing'),
+        ('completed-history','emby','completed-history','missing-item','{}','success');
+        INSERT INTO media_organize_queue(id,item_id,mode,item_json,history_ids,operator_id,status) VALUES
+        ('unselected-queue','missing-item','reprocess','{}','[\"unselected-history\"]','test-user','queued'),
+        ('foreign-queue','other-item','reprocess','{}','[\"foreign-history\"]','test-user','queued');
+        CREATE FUNCTION record_recovery_start() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+            IF NEW.state_json->>'state'='running' AND OLD.state_json->>'state'<>'running' THEN
+                INSERT INTO resume_effects(item,writes) VALUES(NEW.id,1);
+            END IF; RETURN NEW;
+        END $$;
+        CREATE TRIGGER record_recovery_start BEFORE UPDATE ON durable_jobs FOR EACH ROW EXECUTE FUNCTION record_recovery_start();")
+        .execute(&f.pool).await.unwrap();
+    sqlx::query_scalar("SELECT jsonb_build_object('history',(SELECT jsonb_agg(to_jsonb(h) ORDER BY id) FROM media_organize_history h WHERE id<>'selected-history'),'queues',(SELECT jsonb_agg(to_jsonb(q) ORDER BY id) FROM media_organize_queue q))")
+        .fetch_one(&f.pool).await.unwrap()
+}
+
+async fn assert_queue_history_settled(
+    f: &Fixture,
+    before: &Value,
+    message: &str,
+    expected_starts: i64,
+) {
+    let selected: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(h) FROM media_organize_history h WHERE id='selected-history'",
+    )
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(selected["status"], "failed", "{selected}");
+    assert_eq!(selected["message"], message);
+    assert!(!selected["completed_at"].is_null());
+    let remaining: Value = sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(h) ORDER BY id) FROM media_organize_history h WHERE id<>'selected-history'")
+        .fetch_one(&f.pool).await.unwrap();
+    assert_eq!(
+        remaining, before["history"],
+        "unselected, foreign and completed history must be unchanged"
+    );
+    let queues: Value = sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(q) ORDER BY id) FROM media_organize_queue q WHERE id IN ('unselected-queue','foreign-queue')")
+        .fetch_one(&f.pool).await.unwrap();
+    assert_eq!(queues, before["queues"]);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM resume_effects")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        expected_starts,
+        "a stopped or rejected recovery must not start another business execution"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM notification_outbox")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap(),
+        0
+    );
+}
+
 async fn two_items(pool: PgPool, context: JobContext) -> Result<Value> {
     let plan = context.plan("files").await?.unwrap();
     assert_eq!(plan, json!(["first", "second"]));
@@ -529,7 +591,8 @@ async fn generic_and_owned_recovery_runs_in_original_registration_order() {
 #[ignore = "requires disposable PostgreSQL"]
 async fn an_owned_user_stop_is_reconciled_with_the_queue_before_restart_dispatch() {
     let f = Fixture::new().await;
-    sqlx::query("INSERT INTO media_organize_queue(id,item_id,mode,item_json,operator_id,task_id,status) VALUES('cancelled-queue','missing-item','rescrape','{}','test-user','cancelled-job','running')")
+    let before = unfinished_queue_history(&f).await;
+    sqlx::query("INSERT INTO media_organize_queue(id,item_id,mode,item_json,history_ids,operator_id,task_id,status,result) VALUES('cancelled-queue','missing-item','rescrape','{}','[\"selected-history\",\"foreign-history\",\"completed-history\"]','test-user','cancelled-job','running','{\"previous_stage\":\"saved\"}')")
         .execute(&f.pool).await.unwrap();
     sqlx::query("INSERT INTO durable_jobs(id,spec_json,state_json) VALUES('cancelled-job',$1,$2)")
         .bind(json!({"kind":"media_organize_queue","payload":{"kind":"media_organize_queue","queue_id":"cancelled-queue"},"owned":true}))
@@ -550,6 +613,312 @@ async fn an_owned_user_stop_is_reconciled_with_the_queue_before_restart_dispatch
             .await
             .unwrap();
     assert_eq!(status, "cancelled");
+    assert_queue_history_settled(&f, &before, "任务已按上次停止请求取消", 0).await;
+    let result: Value =
+        sqlx::query_scalar("SELECT result FROM media_organize_queue WHERE id='cancelled-queue'")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(result, json!({"previous_stage":"saved"}));
+    cold.jobs.shutdown().await;
+    f.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; recovery rejection and history remain local"]
+async fn owned_recovery_preparation_failure_settles_only_its_processing_history() {
+    let f = Fixture::new().await;
+    let before = unfinished_queue_history(&f).await;
+    sqlx::query("INSERT INTO media_organize_queue(id,item_id,mode,item_json,history_ids,operator_id,task_id,status) VALUES('failed-queue','missing-item','rescrape','{}','[\"selected-history\",\"foreign-history\",\"completed-history\"]','test-user','failed-job','running')")
+        .execute(&f.pool).await.unwrap();
+    sqlx::query("INSERT INTO durable_jobs(id,spec_json,state_json) VALUES('failed-job',$1,$2)")
+        .bind(json!({"kind":"media_organize_queue","payload":{"kind":"media_organize_queue","queue_id":"failed-queue"},"owned":true,"server_url":"http://127.0.0.1:1"}))
+        .bind(json!({"task_id":"failed-job","state":"interrupted","is_running":false,"last_action":"恢复整理"}))
+        .execute(&f.pool).await.unwrap();
+    let cold = f.cold().await;
+    cold.jobs
+        .resume_pending(cold.clone(), CancellationToken::new())
+        .await
+        .unwrap();
+    let task = cold.jobs.result("failed-job").await.unwrap();
+    assert_eq!(task["state"], "failed", "{task}");
+    assert_eq!(task["result_status"], 400);
+    assert_eq!(task["cleanup_pending"], true);
+    let queue: Value = sqlx::query_scalar(
+        "SELECT to_jsonb(q) FROM media_organize_queue q WHERE id='failed-queue'",
+    )
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(queue["status"], "failed");
+    assert_eq!(queue["result"], task["result"]);
+    assert_queue_history_settled(&f, &before, task["message"].as_str().unwrap(), 0).await;
+    cold.jobs.shutdown().await;
+    f.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; failed startup history write stays local"]
+async fn stopped_queue_history_write_failure_keeps_the_durable_stop_intent() {
+    let f = Fixture::new().await;
+    unfinished_queue_history(&f).await;
+    sqlx::query("INSERT INTO media_organize_queue(id,item_id,mode,item_json,history_ids,operator_id,task_id,status) VALUES('cancelled-queue','missing-item','rescrape','{}','[\"selected-history\"]','test-user','cancelled-job','running')")
+        .execute(&f.pool).await.unwrap();
+    sqlx::query("INSERT INTO durable_jobs(id,spec_json,state_json) VALUES('cancelled-job',$1,$2)")
+        .bind(json!({"kind":"media_organize_queue","payload":{"kind":"media_organize_queue","queue_id":"cancelled-queue"},"owned":true}))
+        .bind(json!({"task_id":"cancelled-job","state":"stopping","is_running":true,"stop_requested":true}))
+        .execute(&f.pool).await.unwrap();
+    sqlx::raw_sql("CREATE FUNCTION reject_history_stop() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id='selected-history' AND NEW.status='failed' THEN RAISE EXCEPTION 'injected history write failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_history_stop BEFORE UPDATE ON media_organize_history FOR EACH ROW EXECUTE FUNCTION reject_history_stop();")
+        .execute(&f.pool).await.unwrap();
+    let cold = AppState::new(f.pool.clone(), f.directory.path().join("app")).await;
+    assert!(
+        cold.is_err(),
+        "startup must reject an incomplete stop settlement"
+    );
+    let state: Value =
+        sqlx::query_scalar("SELECT state_json FROM durable_jobs WHERE id='cancelled-job'")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(state["state"], "stopping");
+    assert_eq!(state["stop_requested"], true);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM media_organize_queue WHERE id='cancelled-queue'"
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap(),
+        "queued",
+        "startup queue recovery may run before settlement, but cancellation must roll back"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM media_organize_history WHERE id='selected-history'"
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap(),
+        "processing"
+    );
+    f.finish().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; terminal cancellation reconciliation stays local"]
+async fn cancelled_owned_job_settles_its_active_queue_without_changing_terminal_results() {
+    for queue_state in ["running", "interrupted"] {
+        let f = Fixture::new().await;
+        let before = unfinished_queue_history(&f).await;
+        sqlx::query("INSERT INTO media_organize_queue(id,item_id,mode,item_json,history_ids,operator_id,task_id,status,result) VALUES('cancelled-queue','missing-item','rescrape','{}','[\"selected-history\",\"foreign-history\",\"completed-history\"]','test-user','cancelled-job',$1,'{\"previous_stage\":\"saved\"}')")
+            .bind(queue_state).execute(&f.pool).await.unwrap();
+        let original = json!({"task_id":"cancelled-job","state":"cancelled","is_running":false,
+            "stop_requested":false,"cleanup_pending":true,"last_action":"已停止的整理",
+            "progress":37,"result_status":409,"result":{"cancelled":true,"stage":"saved"},
+            "message":"保留原取消报告","started_at":1,"finished_at":4});
+        sqlx::query("INSERT INTO durable_jobs(id,spec_json,state_json) VALUES('cancelled-job',$1,$2)")
+            .bind(json!({"kind":"media_organize_queue","payload":{"kind":"media_organize_queue","queue_id":"cancelled-queue"},"owned":true}))
+            .bind(&original).execute(&f.pool).await.unwrap();
+        let cold = f.cold().await;
+        assert_eq!(cold.jobs.result("cancelled-job").await.unwrap(), original);
+        let persisted: Value =
+            sqlx::query_scalar("SELECT state_json FROM durable_jobs WHERE id='cancelled-job'")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            persisted, original,
+            "settling the queue must not rewrite terminal job data"
+        );
+        let queue: Value = sqlx::query_scalar(
+            "SELECT to_jsonb(q) FROM media_organize_queue q WHERE id='cancelled-queue'",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        assert_eq!(queue["status"], "cancelled", "{queue}");
+        assert_eq!(queue["result"], json!({"previous_stage":"saved"}));
+        assert_queue_history_settled(&f, &before, "保留原取消报告", 0).await;
+        cold.jobs
+            .resume_pending(cold.clone(), CancellationToken::new())
+            .await
+            .unwrap();
+        let mut cleaned = original.clone();
+        cleaned["cleanup_pending"] = json!(false);
+        assert_eq!(cold.jobs.result("cancelled-job").await.unwrap(), cleaned);
+        cold.jobs.shutdown().await;
+        f.finish().await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; cancelled job identity guards stay local"]
+async fn cancelled_job_keeps_other_tasks_and_already_terminal_queue_results() {
+    for queue_state in ["queued", "completed", "failed", "cancelled"] {
+        let f = Fixture::new().await;
+        unfinished_queue_history(&f).await;
+        let task_id = if queue_state == "queued" {
+            "different-job"
+        } else {
+            "cancelled-job"
+        };
+        sqlx::query("INSERT INTO media_organize_queue(id,item_id,mode,item_json,history_ids,operator_id,task_id,status,result,message) VALUES('cancelled-queue','missing-item','rescrape','{}','[\"selected-history\"]','test-user',$1,$2,'{\"original_result\":true}','原队列报告')")
+            .bind(task_id).bind(queue_state).execute(&f.pool).await.unwrap();
+        if queue_state != "queued" {
+            sqlx::query("UPDATE media_organize_history SET status='success',message='原入库结果' WHERE id='selected-history'")
+                .execute(&f.pool).await.unwrap();
+        }
+        let original = json!({"task_id":"cancelled-job","state":"cancelled","is_running":false,
+            "stop_requested":false,"last_action":"已停止的整理","result_status":207,
+            "result":{"cancelled":true},"progress":37,"message":"原取消报告"});
+        sqlx::query("INSERT INTO durable_jobs(id,spec_json,state_json) VALUES('cancelled-job',$1,$2)")
+            .bind(json!({"kind":"media_organize_queue","payload":{"kind":"media_organize_queue","queue_id":"cancelled-queue"},"owned":true}))
+            .bind(&original).execute(&f.pool).await.unwrap();
+        let before: Value = sqlx::query_scalar("SELECT jsonb_build_object('queue',(SELECT to_jsonb(q) FROM media_organize_queue q WHERE id='cancelled-queue'),'history',(SELECT to_jsonb(h) FROM media_organize_history h WHERE id='selected-history'))")
+            .fetch_one(&f.pool).await.unwrap();
+        let cold = f.cold().await;
+        let after: Value = sqlx::query_scalar("SELECT jsonb_build_object('queue',(SELECT to_jsonb(q) FROM media_organize_queue q WHERE id='cancelled-queue'),'history',(SELECT to_jsonb(h) FROM media_organize_history h WHERE id='selected-history'))")
+            .fetch_one(&f.pool).await.unwrap();
+        assert_eq!(
+            after, before,
+            "{queue_state} queue result and history must be preserved"
+        );
+        assert_eq!(cold.jobs.result("cancelled-job").await.unwrap(), original);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM resume_effects")
+                .fetch_one(&f.pool)
+                .await
+                .unwrap(),
+            0
+        );
+        cold.jobs.shutdown().await;
+        f.finish().await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; startup queue eligibility remains local"]
+async fn startup_preserves_only_interrupted_queue_intents_that_will_resume() {
+    for superseded in [false, true] {
+        let f = Fixture::new().await;
+        sqlx::raw_sql("INSERT INTO media_organize_history(id,source,source_identity,item_id,item_json,status,message) VALUES('startup-history','emby','startup-history','startup-item','{}','processing','保留启动前阶段');
+            INSERT INTO media_organize_queue(id,item_id,mode,item_json,history_ids,operator_id,status,result) VALUES('startup-interrupted','startup-item','rescrape','{}','[\"startup-history\"]','test-user','interrupted','{\"previous_stage\":true}');")
+            .execute(&f.pool).await.unwrap();
+        if superseded {
+            sqlx::query("INSERT INTO media_organize_queue(id,item_id,mode,item_json,operator_id,status) VALUES('startup-retried','startup-item','rescrape','{}','test-user','completed')")
+                .execute(&f.pool).await.unwrap();
+        }
+        let cold = f.cold().await;
+        let history: Value = sqlx::query_scalar(
+            "SELECT to_jsonb(h) FROM media_organize_history h WHERE id='startup-history'",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        let queue: Value = sqlx::query_scalar(
+            "SELECT to_jsonb(q) FROM media_organize_queue q WHERE id='startup-interrupted'",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        if superseded {
+            assert_eq!(queue["status"], "interrupted");
+            assert_eq!(history["status"], "failed");
+            assert_eq!(
+                history["message"],
+                "上次 ETK 入库处理缺少可恢复任务，请核对后重新整理"
+            );
+            assert!(!history["completed_at"].is_null());
+        } else {
+            assert_eq!(queue["status"], "queued");
+            assert_eq!(history["status"], "processing");
+            assert_eq!(history["message"], "保留启动前阶段");
+            assert!(history["completed_at"].is_null());
+        }
+        assert_eq!(queue["result"], json!({"previous_stage":true}));
+        cold.jobs.shutdown().await;
+        f.finish().await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; stopped queue write failures and restart stay local"]
+async fn user_stop_survives_queue_finish_write_failure_without_restart_execution() {
+    let f = Fixture::new().await;
+    let before = unfinished_queue_history(&f).await;
+    sqlx::raw_sql("INSERT INTO media_organize_queue(id,item_id,mode,item_json,history_ids,operator_id,status) VALUES('finish-failure-queue','missing-item','rescrape','{}','[\"selected-history\"]','test-user','running');
+        CREATE FUNCTION reject_queue_finish() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.id='finish-failure-queue' AND NEW.status='cancelled' THEN RAISE EXCEPTION 'injected queue finish failure'; END IF; RETURN NEW; END $$;
+        CREATE TRIGGER reject_queue_finish BEFORE UPDATE ON media_organize_queue FOR EACH ROW EXECUTE FUNCTION reject_queue_finish();")
+        .execute(&f.pool).await.unwrap();
+    let (ready, received) = oneshot::channel();
+    let work = f.pool.clone();
+    let id = f.state.jobs.submit_owned("停止后队列写失败",
+        json!({"kind":"media_organize_queue","queue_id":"finish-failure-queue"}), None,
+        move |context| async move {
+            effect(&work, "initial-execution").await;
+            let _ = ready.send(());
+            context.cancelled().await;
+            // Simulate execute's final queue write. Jobs will also attempt its
+            // own queue settlement; the same trigger rejects both writes.
+            sqlx::query("UPDATE media_organize_queue SET status='cancelled' WHERE id='finish-failure-queue' AND task_id=$1")
+                .bind(&context.id).execute(&work).await?;
+            Ok(json!({"cancelled":true}))
+        }).await.unwrap();
+    received.await.unwrap();
+    sqlx::query("UPDATE media_organize_queue SET task_id=$1 WHERE id='finish-failure-queue'")
+        .bind(&id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    f.state.jobs.control(Some(&id), "stop").await.unwrap();
+    let interrupted = ended(&f.state.jobs, &id).await;
+    assert_eq!(interrupted["state"], "interrupted", "{interrupted}");
+    assert_eq!(
+        interrupted["stop_requested"], true,
+        "an unconfirmed finish must retain the stop intent"
+    );
+    let persisted: Value = sqlx::query_scalar("SELECT state_json FROM durable_jobs WHERE id=$1")
+        .bind(&id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(persisted["stop_requested"], true);
+    let proof_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM durable_job_steps WHERE job_id=$1 AND step_key='completed:__job_result__'")
+        .bind(&id).fetch_one(&f.pool).await.unwrap();
+    assert_eq!(
+        proof_count, 0,
+        "no terminal proof was stored after the failed queue settlement"
+    );
+    f.state.jobs.shutdown().await;
+    sqlx::query("DROP TRIGGER reject_queue_finish ON media_organize_queue")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let cold = f.cold().await;
+    cold.jobs
+        .resume_pending(cold.clone(), CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(cold.jobs.result(&id).await.unwrap()["state"], "cancelled");
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM media_organize_queue WHERE id='finish-failure-queue'"
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap(),
+        "cancelled"
+    );
+    assert_queue_history_settled(&f, &before, "任务已按上次停止请求取消", 1).await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>(
+            "SELECT writes FROM resume_effects WHERE item='initial-execution'"
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap(),
+        1
+    );
     cold.jobs.shutdown().await;
     f.finish().await;
 }

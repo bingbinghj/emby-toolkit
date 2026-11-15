@@ -15,7 +15,7 @@ use axum::{
 use futures_util::FutureExt;
 use serde_json::{Value, json};
 use sqlx::PgPool;
-use std::{collections::HashMap, time::Duration};
+use std::{collections::{BTreeSet, HashMap}, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 pub fn router() -> Router<AppState> {
@@ -74,12 +74,29 @@ pub(crate) async fn enqueue(
             .execute(&mut *transaction)
             .await?;
     }
+    // Keep cancel's queue -> history lock order, including interrupted entries
+    // that the worker can make active again. Reuse only these locked rows below.
+    let existing_queues: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(q) FROM media_organize_queue q WHERE item_id=ANY($1) AND mode=$2 AND status IN ('queued','running','interrupted') ORDER BY id FOR UPDATE")
+        .bind(ids).bind(mode).fetch_all(&mut *transaction).await?;
+    if !history_ids.is_empty() {
+        let expected = history_ids.iter().collect::<BTreeSet<_>>();
+        let linked: Vec<Value> = sqlx::query_scalar("SELECT jsonb_build_object('id',id,'item_id',item_id,'status',status) FROM media_organize_history WHERE id=ANY($1) ORDER BY id FOR UPDATE")
+            .bind(history_ids).fetch_all(&mut *transaction).await?;
+        if linked.len() != expected.len()
+            || linked.iter().map(|row| string(row, "item_id")).collect::<BTreeSet<_>>() != ids.iter().cloned().collect::<BTreeSet<_>>()
+            || linked.iter().any(|row| row["status"] == "processing" && !existing_queues.iter().any(|queue| {
+                matches!(queue["status"].as_str(), Some("queued" | "running"))
+                    && queue["item_id"] == row["item_id"]
+                    && queue["history_ids"].as_array().is_some_and(|ids| ids.contains(&row["id"]))
+            }))
+        {
+            return Err(ApiError(StatusCode::CONFLICT, "整理记录已删除、仍在处理中或媒体绑定变化，未加入整理队列".into()));
+        }
+    }
     for id in ids {
-        let existing: Option<Value> = sqlx::query_scalar("SELECT to_jsonb(q) FROM media_organize_queue q WHERE item_id=$1 AND mode=$2 AND status IN ('queued','running') FOR UPDATE")
-            .bind(id).bind(mode).fetch_optional(&mut *transaction).await?;
-        if let Some(existing) = existing {
+        if let Some(existing) = existing_queues.iter().find(|queue| queue["item_id"] == id.as_str() && matches!(queue["status"].as_str(), Some("queued" | "running"))) {
             duplicate_count += 1;
-            items.push(existing);
+            items.push(existing.clone());
             continue;
         }
         let selected: Vec<String> = sqlx::query_scalar("SELECT id FROM media_organize_history WHERE id=ANY($1) AND item_id=$2 ORDER BY created_at,id")

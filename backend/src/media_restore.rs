@@ -84,10 +84,13 @@ pub async fn probe(
         "-show_chapters",
         &url,
     ]);
-    let output = tokio::time::timeout(Duration::from_secs(45), command.output())
-        .await
-        .map_err(|_| ApiError::bad("ffprobe 提取超时"))??;
+    let output = tokio::select! {
+        _ = context.cancelled() => { context.checkpoint().await?; unreachable!() },
+        output = tokio::time::timeout(Duration::from_secs(45), command.output()) =>
+            output.map_err(|_| ApiError::bad("ffprobe 提取超时"))??,
+    };
     drop(_slot);
+    context.checkpoint().await?;
     if !output.status.success() {
         return Err(ApiError::bad("ffprobe 提取失败，保留现有媒体信息"));
     }
@@ -109,6 +112,92 @@ enum CacheMode {
     Rebuild,
     Full,
 }
+
+fn legacy_video_fields(stream: &Value) -> bool {
+    if stream["Type"] != "Video" || stream["IsExternal"] == true {
+        return false;
+    }
+    stream["ExtendedVideoType"] == "None"
+        && stream["ExtendedVideoSubType"] == "None"
+        && stream["ExtendedVideoSubTypeDescription"] == "None"
+        && matches!(
+            stream["VideoRange"].as_str(),
+            Some("" | "HDR" | "HDR10" | "HDR10+")
+        )
+        || stream["ExtendedVideoType"] == "DolbyVision"
+            && (stream["VideoRange"] == "DolbyVision HDR10"
+                || ["DoviProfile1", "DoviProfile2", "DoviProfile3", "DoviProfile4",
+                    "DoviProfile5", "DoviProfile6", "DoviProfile7", "DoviProfile8", "DoviProfile9"]
+                    .contains(&stream["ExtendedVideoSubType"].as_str().unwrap_or("")))
+}
+
+fn repair_cached_video_fields(info: &Value, rebuilt: &Value) -> Result<Value> {
+    let refuse =
+        || ApiError::bad("旧媒体信息备份的视频分类缺少一致的原始探测证据，请重新整理入库后重试");
+    let source = crate::media_info::container(info).ok_or_else(refuse)?;
+    let current = crate::media_info::container(rebuilt).ok_or_else(refuse)?;
+    if crate::identity::size(&source["Size"]).is_none_or(|size| size == 0)
+        || info.as_array().is_some_and(|bundles| bundles.len() != 1)
+        || ["Size", "Container", "RunTimeTicks"]
+            .iter()
+            .any(|field| source[*field] != current[*field])
+    {
+        return Err(refuse());
+    }
+    let current_streams = current["MediaStreams"].as_array().ok_or_else(refuse)?;
+    let mut repaired = info.clone();
+    for stream in crate::media_info::streams_mut(&mut repaired)
+        .ok_or_else(refuse)?
+        .iter_mut()
+        .filter(|stream| legacy_video_fields(stream))
+    {
+        let candidates = current_streams
+            .iter()
+            .filter(|current| current["Type"] == "Video" && current["Index"] == stream["Index"])
+            .collect::<Vec<_>>();
+        let [current] = candidates.as_slice() else {
+            return Err(refuse());
+        };
+        if !string(stream, "Codec").eq_ignore_ascii_case(&string(current, "Codec"))
+            || [
+                "ColorTransfer",
+                "ColorPrimaries",
+                "ColorSpace",
+                "Width",
+                "Height",
+                "BitDepth",
+                "PixelFormat",
+            ]
+            .iter()
+            .any(|field| stream[*field] != current[*field])
+        {
+            return Err(refuse());
+        }
+        for field in [
+            "VideoRange",
+            "ExtendedVideoType",
+            "ExtendedVideoSubType",
+            "ExtendedVideoSubTypeDescription",
+        ] {
+            stream[field] = current[field].clone();
+        }
+    }
+    Ok(repair_cached_subtitle_fields(repaired))
+}
+
+fn repair_cached_subtitle_fields(mut info: Value) -> Value {
+    if let Some(streams) = crate::media_info::streams_mut(&mut info) {
+        for stream in streams.iter_mut().filter(|stream| stream["Type"] == "Subtitle" && stream["IsExternal"] == false) {
+            let Some(codec) = stream["Codec"].as_str().filter(|codec| !codec.is_empty()) else { continue; };
+            let Some(index) = stream["Index"].as_i64().filter(|index| i32::try_from(*index).is_ok()) else { continue; };
+            let (text, location) = crate::probe::native_internal_subtitle_fields(codec, index);
+            stream["IsTextSubtitleStream"] = json!(text);
+            stream["SubtitleLocationType"] = json!(location);
+        }
+    }
+    info
+}
+
 pub async fn info(
     state: &AppState,
     sha: &str,
@@ -162,7 +251,29 @@ async fn cached_info(
                 && crate::media_paths::matches_container(&cache["mediainfo_json"], filename)
             {
                 tracing::info!("[媒体信息还原] {filename} 命中已有媒体信息备份");
-                return Ok(cache["mediainfo_json"].clone());
+                let info = &cache["mediainfo_json"];
+                if crate::media_info::container(info).is_some_and(|source| {
+                    list(&source["MediaStreams"])
+                        .iter()
+                        .any(legacy_video_fields)
+                }) {
+                    let mappings = crate::db::setting(&state.db, "language_mapping")
+                        .await?
+                        .unwrap_or(json!([]));
+                    let rebuilt = crate::probe::build(
+                        &cache["raw_ffprobe_json"],
+                        &json!({"fn":filename}),
+                        &mappings,
+                    )
+                    .filter(crate::media_info::recoverable)
+                    .ok_or_else(|| {
+                        ApiError::bad(
+                            "旧媒体信息备份的视频分类缺少原始探测缓存，请重新整理入库后重试",
+                        )
+                    })?;
+                    return repair_cached_video_fields(info, &rebuilt);
+                }
+                return Ok(repair_cached_subtitle_fields(info.clone()));
             }
             let raw = &cache["raw_ffprobe_json"];
             let unknown_text = list(&raw["streams"]).iter().any(|s| {
@@ -190,6 +301,7 @@ async fn cached_info(
         }
     }
     let (info, raw) = probe(state, pc, filename, context).await?;
+    context.checkpoint().await?;
     sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,raw_ffprobe_json) VALUES($1,$2) ON CONFLICT(sha1) DO UPDATE SET raw_ffprobe_json=EXCLUDED.raw_ffprobe_json").bind(sha).bind(raw).execute(&state.db).await?;
     Ok(info)
 }

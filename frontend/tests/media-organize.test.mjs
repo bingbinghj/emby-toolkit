@@ -16,24 +16,25 @@ function functionSource(name) {
   assert.ok(start >= 0 && end > start, name);
   return source.slice(start, end);
 }
-function fixture({ get = async () => ({ data: list }), post = async () => ({ status: 200, data: result }) } = {}) {
+function fixture({ get = async () => ({ data: list }), post = async () => ({ status: 200, data: result }), delete: remove = async (_url, options) => ({ data: { deleted_count: options.data.history_ids.length, deleted_ids: options.data.history_ids } }) } = {}) {
   const calls = [], messages = [];
   const context = vm.createContext({
     active: true, itemSequence: 0, pageSize: { value: 50 }, pageSizeOptions: [25, 50, 100, 500, 1000], queueReceiptMatches,
     computed: fn => ({ get value() { return fn(); } }),
     statusFilter: { value: 'all' }, loadedQuery: { value: '[1,50,"","all"]' },
     items: { value: [movie] }, search: { value: '' }, appliedSearch: { value: '' }, page: { value: 1 }, total: { value: 100 },
-    selectedItems: { value: [] }, confirmationItems: { value: [] }, confirmationOpen: { value: false }, confirmationMode: { value: 'reprocess' }, queueOpen: { value: false },
+    selectedItems: { value: [] }, confirmationItems: { value: [] }, confirmationOpen: { value: false }, confirmationMode: { value: 'reprocess' }, queueOpen: { value: false }, deleteItems: { value: [] }, deleteOpen: { value: false },
     activeQueueItems: { value: new Set() }, queue: { refresh: async () => {} },
     loadingItems: { value: false }, itemsError: { value: '' }, processing: { value: false }, feedback: { value: null },
     axios: {
       get: async (url, options) => { calls.push({ method: 'GET', url, options: options && clone(options) }); return get(url, options); },
       post: async (url, body) => { calls.push({ method: 'POST', url, body: clone(body) }); return post(url, body); },
+      delete: async (url, options) => { calls.push({ method: 'DELETE', url, body: clone(options.data) }); return remove(url, options); },
     },
     message: Object.fromEntries(['success', 'info', 'warning', 'error'].map(type => [type, text => messages.push({ type, text })])),
   });
-  const select = source.match(/const queryKey = .*;/)[0] + '\n' + source.match(/const canSelectItems = .*;/)[0] + '\n' + source.match(/const isReadyRecord = .*;/)[0] + '\n' + source.match(/const canSelectRecord = .*;/)[0];
-  vm.runInContext(select + '\n' + source.match(/const pageTip = .*;/)[0] + '\n' + source.match(/const pages = .*;/)[0] + '\n' + ['loadItems', 'changePageSize', 'updateSelection', 'openConfirmation', 'reorganize'].map(functionSource).join('\n') + '\nthis.load = loadItems; this.resizePage = changePageSize; this.select = updateSelection; this.confirm = openConfirmation; this.run = reorganize; this.pageTip = pageTip; this.pages = pages;', context);
+  const select = ['queryKey', 'selectedIds', 'selectedPageItems', 'canSelectItems', 'isDeletableRecord', 'isReadyRecord', 'canSelectRecord'].map(name => source.match(new RegExp(`const ${name} = .*;`))[0]).join('\n');
+  vm.runInContext(select + '\n' + source.match(/const pageTip = .*;/)[0] + '\n' + source.match(/const pages = .*;/)[0] + '\n' + ['loadItems', 'changePageSize', 'updateSelection', 'openConfirmation', 'openDeleteConfirmation', 'deleteHistory', 'reorganize'].map(functionSource).join('\n') + '\nthis.load = loadItems; this.resizePage = changePageSize; this.select = updateSelection; this.confirm = openConfirmation; this.confirmDelete = openDeleteConfirmation; this.remove = deleteHistory; this.run = reorganize; this.pageTip = pageTip; this.pages = pages;', context);
   return { context, calls, messages };
 }
 
@@ -114,7 +115,8 @@ test('all 1000 real rows can be selected and submitted in one confirmed queue op
   assert.equal(submissions.length, 1);
   assert.equal(submissions[0].body.item_ids.length, 1000);
   assert.equal(submissions[0].body.history_ids.length, 1000);
-  assert.equal(f.context.feedback.value.type, 'info');
+  assert.equal(f.context.feedback.value, null);
+  assert.deepEqual(f.messages, []);
   assert.equal(f.context.selectedItems.value.length, 1000);
 });
 
@@ -276,7 +278,7 @@ for (const record of [{ ...movie, status: 'processing' }, { ...movie, item_id: n
     f.context.select(['00000000-0000-4000-8000-000000000101']);
     f.context.confirm();
     await f.context.run();
-    assert.deepEqual(clone(f.context.selectedItems.value), []);
+    assert.deepEqual(clone(f.context.selectedItems.value), record.item_id ? [] : [record]);
     assert.equal(f.calls.some(call => call.method === 'POST'), false);
   });
 }
@@ -342,15 +344,15 @@ test('history search ignores composing input and coalesces typed queries using M
 const acceptedQueue = (itemId = '101', mode = 'reprocess') => ({ mode, queued_count: 1, duplicate_count: 0,
   queue_ids: ['queue-accepted'], items: [{ id: 'queue-accepted', item_id: itemId, mode, status: 'queued' }], message: '已加入整理队列' });
 
-test('an accepted queue response releases the form without claiming the media finished', async () => {
+test('an accepted queue response releases the form and opens the queue without a success prompt', async () => {
   const f = fixture({ post: async () => ({ status: 202, data: acceptedQueue() }) });
   f.context.select(['00000000-0000-4000-8000-000000000101']); f.context.confirm();
   await f.context.run();
   assert.equal(f.context.processing.value, false);
   assert.equal(f.context.confirmationOpen.value, false);
   assert.equal(f.context.queueOpen.value, true);
-  assert.equal(f.context.feedback.value.type, 'info');
-  assert.equal(f.context.feedback.value.message, '已加入整理队列');
+  assert.equal(f.context.feedback.value, null);
+  assert.deepEqual(f.messages, []);
   assert.equal(f.calls.some(call => call.url.startsWith('/api/tasks/result/')), false);
 });
 
@@ -364,7 +366,8 @@ test('rescrape freezes its selected episode and mode before awaiting queue accep
   f.context.confirmationMode.value = 'reprocess';
   pending.resolve({ status: 202, data: acceptedQueue('episode-5', 'rescrape') }); await work;
   assert.deepEqual(f.calls.find(call => call.method === 'POST').body, { item_ids: ['episode-5'], history_ids: [movie.id], mode: 'rescrape' });
-  assert.equal(f.context.feedback.value.type, 'info');
+  assert.equal(f.context.feedback.value, null);
+  assert.deepEqual(f.messages, []);
 });
 
 test('an incomplete queue receipt cannot claim that every selected item was accepted', async () => {
@@ -392,6 +395,109 @@ test('queue acceptance unlocks the form even while its queue refresh is slow', a
   f.context.queue.refresh = () => pending.promise;
   f.context.select([movie.id]); f.context.confirm(); await f.context.run();
   assert.equal(f.context.processing.value, false);
-  assert.equal(f.context.feedback.value.message, '已加入整理队列');
+  assert.equal(f.context.feedback.value, null);
+  assert.deepEqual(f.messages, []);
   pending.resolve();
+});
+
+test('a terminal unbound failure can be deleted by history ID without reorganizing media', async () => {
+  const record = { ...movie, item_id: null, status: 'failed' };
+  const f = fixture({ get: async () => ({ data: { items: [record], total: 1 } }) });
+  await f.context.load(); f.context.select([record.id]); f.context.confirm(); await f.context.run();
+  assert.equal(f.calls.some(call => call.method === 'POST'), false);
+  f.context.confirmDelete(); await f.context.remove();
+  assert.deepEqual(f.calls.find(call => call.method === 'DELETE'), { method: 'DELETE', url: '/api/media_organize/history', body: { history_ids: [record.id] } });
+  assert.equal(f.context.feedback.value.type, 'success');
+  assert.deepEqual(clone(f.context.selectedItems.value), []);
+});
+
+test('single-record deletion freezes only that record and preserves unrelated selections', async () => {
+  const f = fixture();
+  f.context.select([movie.id]);
+  const other = { ...movie, id: 'other-history' };
+  f.context.confirmDelete(other);
+  await f.context.remove();
+  assert.deepEqual(f.calls.find(call => call.method === 'DELETE').body, { history_ids: [other.id] });
+  assert.deepEqual(clone(f.context.selectedItems.value), [movie]);
+});
+
+test('batch deletion freezes the confirmed current-page history IDs and accepts a reordered complete receipt', async () => {
+  const second = { ...movie, id: 'second-history' };
+  const f = fixture({ delete: async (_url, options) => ({ data: { deleted_count: 2, deleted_ids: [...options.data.history_ids].reverse() } }) });
+  f.context.items.value = [movie, second];
+  f.context.selectedItems.value = [movie, second]; f.context.confirmDelete();
+  f.context.selectedItems.value.push({ ...movie, id: 'later-history' });
+  await f.context.remove();
+  assert.deepEqual(f.calls.find(call => call.method === 'DELETE').body, { history_ids: [movie.id, second.id] });
+  assert.deepEqual(clone(f.context.selectedItems.value).map(item => item.id), ['later-history']);
+  assert.equal(f.context.feedback.value.type, 'success');
+});
+
+test('an incomplete, foreign or duplicate deletion receipt retains selection without refreshing history', async () => {
+  for (const data of [{ deleted_count: 0, deleted_ids: [] }, { deleted_count: 1, deleted_ids: ['other-history'] }, { deleted_count: 1, deleted_ids: [movie.id, movie.id] }]) {
+    const f = fixture({ delete: async () => ({ data }) });
+    f.context.select([movie.id]); f.context.confirmDelete(); await f.context.remove();
+    assert.equal(f.context.feedback.value.type, 'warning');
+    assert.deepEqual(clone(f.context.selectedItems.value), [movie]);
+    assert.equal(f.calls.some(call => call.method === 'GET'), false);
+  }
+});
+
+test('a rejected active-history deletion shows the actual error and retains all selections', async () => {
+  const f = fixture({ delete: async () => { throw { response: { data: { error: '所选记录有关联的未完成任务' } } }; } });
+  f.context.select([movie.id]); f.context.confirmDelete(); await f.context.remove();
+  assert.equal(f.context.feedback.value.message, '所选记录有关联的未完成任务');
+  assert.equal(f.context.feedback.value.type, 'error');
+  assert.deepEqual(clone(f.context.selectedItems.value), [movie]);
+  assert.equal(f.calls.some(call => call.method === 'GET'), false);
+});
+
+test('deletion double clicks submit one request and a late response cannot alter an unmounted page', async () => {
+  const pending = deferred(), f = fixture({ delete: () => pending.promise });
+  f.context.select([movie.id]); f.context.confirmDelete();
+  const deleting = f.context.remove(); await f.context.remove();
+  assert.equal(f.calls.filter(call => call.method === 'DELETE').length, 1);
+  f.context.active = false;
+  pending.resolve({ data: { deleted_count: 1, deleted_ids: [movie.id] } }); await deleting;
+  assert.equal(f.context.feedback.value, null);
+  assert.deepEqual(f.messages, []);
+  assert.deepEqual(clone(f.context.selectedItems.value), [movie]);
+});
+
+test('a processing record cannot enter single or batch deletion confirmation', () => {
+  const f = fixture();
+  const record = { ...movie, status: 'processing' };
+  f.context.confirmDelete(record);
+  assert.equal(f.context.deleteOpen.value, false);
+  f.context.items.value = [record];
+  f.context.selectedItems.value = [record]; f.context.confirmDelete();
+  assert.equal(f.context.deleteOpen.value, false);
+});
+
+test('batch reorganization prunes hidden-page selections and submits only the visible page', async () => {
+  const visible = { ...movie, id: 'visible-history', item_id: 'visible-media' };
+  const f = fixture({ post: async () => ({ status: 202, data: { mode: 'reprocess', queued_count: 1, duplicate_count: 0, queue_ids: ['visible-queue'], items: [{ id: 'visible-queue', item_id: visible.item_id, mode: 'reprocess', status: 'queued' }] } }) });
+  f.context.selectedItems.value = [movie, visible]; f.context.items.value = [visible];
+  f.context.confirm(); await f.context.run();
+  assert.deepEqual(f.calls.find(call => call.method === 'POST').body, { item_ids: [visible.item_id], history_ids: [visible.id], mode: 'reprocess' });
+  assert.deepEqual(clone(f.context.selectedItems.value).map(item => item.id), [visible.id]);
+});
+
+test('batch deletion prunes hidden-page selections and deletes only the visible page', async () => {
+  const visible = { ...movie, id: 'visible-history' };
+  const f = fixture();
+  f.context.selectedItems.value = [movie, visible]; f.context.items.value = [visible];
+  f.context.confirmDelete();
+  assert.deepEqual(clone(f.context.deleteItems.value).map(item => item.id), [visible.id]);
+  await f.context.remove();
+  assert.deepEqual(f.calls.find(call => call.method === 'DELETE').body, { history_ids: [visible.id] });
+  assert.deepEqual(clone(f.context.selectedItems.value), []);
+});
+
+test('hidden-page drafts alone cannot open either batch confirmation', () => {
+  const f = fixture();
+  f.context.selectedItems.value = [{ ...movie, id: 'hidden-history' }];
+  f.context.confirm(); f.context.confirmDelete();
+  assert.equal(f.context.confirmationOpen.value, false);
+  assert.equal(f.context.deleteOpen.value, false);
 });
