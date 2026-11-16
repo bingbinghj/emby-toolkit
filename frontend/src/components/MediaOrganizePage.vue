@@ -1,4 +1,4 @@
-<!-- 布局参考 MoviePilot-Frontend v3 TransferHistoryView/ReorganizeDialog（MIT），许可证见 frontend/third-party/MoviePilot-LICENSE。 -->
+<!-- 布局参考 MoviePilot-Frontend v3 TransferHistoryView/ReorganizeDialog/TransferHistoryDeleteDialog（MIT），许可证见 frontend/third-party/MoviePilot-LICENSE。 -->
 <template>
   <div ref="pageElement" class="mp-page media-organize-page" :class="{ 'media-organize-page--desktop': !smAndDown }" :style="smAndDown ? undefined : { blockSize: `${desktopPageHeight}px` }">
     <div class="organize-controls">
@@ -113,15 +113,11 @@
     </VDialog>
     <VBottomSheet v-model="deleteOpen" inset :persistent="processing">
       <VCard class="text-center">
-        <VCardTitle>删除选中的 {{ deleteItems.length }} 条整理记录</VCardTitle>
-        <VCardText>
-          <p>仅删除整理记录，媒体文件和媒体库项目保留。</p>
-          <VVirtualScroll v-if="deleteItems.length > 100" :items="deleteItems" :height="Math.min(listHeight, 256)" :item-height="48" data-testid="organize-delete-scroll">
-            <template #default="{ item }"><VListItem :title="itemTitle(item)" :subtitle="episodeLabel(item) || item.file_name || item.id" /></template>
-          </VVirtualScroll>
-          <VList v-else bg-color="transparent" density="compact"><VListItem v-for="item in deleteItems" :key="item.id" :title="itemTitle(item)" :subtitle="episodeLabel(item) || item.file_name || item.id" /></VList>
-        </VCardText>
-        <VCardActions class="justify-center"><VBtn variant="text" :disabled="processing" @click="deleteOpen = false">取消</VBtn><VBtn color="error" variant="flat" :loading="processing" data-testid="organize-delete-confirm" @click="deleteHistory">仅删除整理记录</VBtn></VCardActions>
+        <IconBtn class="absolute right-3 top-3 z-10" aria-label="关闭删除确认" :disabled="processing" @click.stop="deleteOpen = false"><VIcon icon="mdi-close" /></IconBtn>
+        <VCardTitle class="pe-10">确认删除 {{ deleteItems.length }} 条记录？</VCardTitle>
+        <div class="d-flex flex-column flex-lg-row justify-center my-3">
+          <VBtn color="primary" class="mb-2 mx-2" :loading="processing" data-testid="organize-delete-confirm" @click="deleteHistory">仅删除整理记录</VBtn>
+        </div>
       </VCard>
     </VBottomSheet>
     <MediaOrganizeQueueDialog v-model="queueOpen" :queue="queue" />

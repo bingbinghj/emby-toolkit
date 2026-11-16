@@ -132,9 +132,10 @@ test('single-record deletion freezes that history while preserving an unrelated 
   await rows(page).first().getByRole('button', { name: '整理验证剧集 操作', exact: true }).click();
   await page.locator('.v-overlay--active').getByText('删除', { exact: true }).click();
   const dialog = deleteDialog(page);
-  await expect(dialog).toContainText('删除选中的 1 条整理记录');
-  await expect(dialog).toContainText('媒体文件和媒体库项目保留');
-  await expect(dialog).toContainText('整理验证剧集');
+  await expect(dialog.locator('.v-card-title')).toHaveText('确认删除 1 条记录？');
+  await expect(dialog.getByRole('button', { name: '仅删除整理记录', exact: true })).toBeVisible();
+  await expect(dialog.locator('.v-list-item')).toHaveCount(0);
+  await expect(dialog).not.toContainText('整理验证剧集');
   await expect(dialog).not.toContainText('排序验证电影');
   await dialog.getByTestId('organize-delete-confirm').click();
   await expect(rows(page)).toHaveCount(1);
@@ -145,7 +146,7 @@ test('single-record deletion freezes that history while preserving an unrelated 
   expect(api.requests.filter(request => request.method !== 'GET' && request.path !== historyPath)).toHaveLength(0);
 });
 
-test('batch deletion reviews only the current-page selection and preserves the earlier page history', async ({ page, api }) => {
+test('batch deletion confirms the current-page count and preserves the earlier page history', async ({ page, api }) => {
   let deleted = false;
   api.respond('GET', historyPath, request => ({ items: deleted ? [records[0]] : [Number(request.query.page) === 1 ? records[0] : records[1]], total: deleted ? 1 : 100 }));
   api.respond('DELETE', historyPath, request => {
@@ -161,9 +162,10 @@ test('batch deletion reviews only the current-page selection and preserves the e
   await expect(page.getByTestId('organize-selection-count')).toHaveText('1/1 项');
   await page.getByTestId('organize-selected-delete').click();
   const dialog = deleteDialog(page);
-  await expect(dialog).toContainText('删除选中的 1 条整理记录');
+  await expect(dialog.locator('.v-card-title')).toHaveText('确认删除 1 条记录？');
+  await expect(dialog.locator('.v-list-item')).toHaveCount(0);
   await expect(dialog).not.toContainText('整理验证剧集');
-  await expect(dialog).toContainText('排序验证电影');
+  await expect(dialog).not.toContainText('排序验证电影');
   await dialog.getByTestId('organize-delete-confirm').click();
   await expect(page.getByTestId('organize-selection')).toHaveCount(0);
   await expect(page.getByTestId('organize-page-info')).toHaveText('1 - 1 / 1');
@@ -172,6 +174,46 @@ test('batch deletion reviews only the current-page selection and preserves the e
   expect(deletes(api)).toHaveLength(1);
   expect(deletes(api)[0].body).toEqual({ history_ids: ['record-1'] });
 });
+
+for (const viewport of [{ name: 'desktop', width: 1280, height: 720 }, { name: 'mobile', width: 390, height: 844 }]) {
+  test(`${viewport.name} batch deletion confirms 50 records without listing them and cancellation preserves selection`, async ({ page, api }, testInfo) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    let current = Array.from({ length: 51 }, (_, index) => ({ ...records[1], id: `history-${index + 1}`, name: `批量验证电影${index + 1}` }));
+    const ids = current.slice(0, 50).map(item => item.id);
+    api.respond('GET', historyPath, request => ({ items: current.slice((Number(request.query.page) - 1) * 50, Number(request.query.page) * 50), total: current.length }));
+    api.respond('DELETE', historyPath, request => {
+      current = current.filter(item => !request.body.history_ids.includes(item.id));
+      return { deleted_count: request.body.history_ids.length, deleted_ids: request.body.history_ids };
+    });
+    await page.goto('/media-organize');
+    const items = viewport.name === 'mobile' ? page.getByTestId('organize-items-mobile') : page.getByTestId('organize-items');
+    await items.getByRole('checkbox').first().check();
+    await page.getByRole('checkbox', { name: '全选本页', exact: true }).check();
+    await expect(page.getByTestId('organize-selection-count')).toHaveText('50/50 项');
+    await page.getByTestId('organize-selected-delete').click();
+    const dialog = deleteDialog(page);
+    await expect(dialog.locator('.v-card-title')).toHaveText('确认删除 50 条记录？');
+    await expect(dialog.locator('.v-list-item, .v-virtual-scroll')).toHaveCount(0);
+    await expect(dialog.getByRole('button')).toHaveCount(2);
+    await expect(dialog.getByRole('button', { name: '仅删除整理记录', exact: true })).toBeInViewport({ ratio: 1 });
+    await expect(dialog.getByRole('button', { name: '关闭删除确认', exact: true })).toBeInViewport({ ratio: 1 });
+    await expect(dialog).not.toContainText('批量验证电影');
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath(`media-organize-delete-${viewport.name}.png`) });
+    await dialog.getByRole('button', { name: '关闭删除确认', exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    expect(deletes(api)).toHaveLength(0);
+    await expect(page.getByTestId('organize-selection-count')).toHaveText('50/50 项');
+    await page.getByTestId('organize-selected-delete').click();
+    await deleteDialog(page).getByTestId('organize-delete-confirm').click();
+    await expect(page.getByTestId('organize-page-info')).toHaveText('1 - 1 / 1');
+    await expect(page.getByTestId('organize-selection')).toHaveCount(0);
+    await expect(items).toContainText('批量验证电影51');
+    expect(deletes(api)).toHaveLength(1);
+    expect(deletes(api)[0].body).toEqual({ history_ids: ids });
+    expect(api.requests.filter(request => request.method !== 'GET' && request.path !== historyPath)).toHaveLength(0);
+  });
+}
 
 test('mobile unbound failure offers history deletion while reorganization remains disabled', async ({ page, api }) => {
   await page.setViewportSize({ width: 390, height: 844 });
