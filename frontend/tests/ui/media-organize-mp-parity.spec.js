@@ -12,7 +12,7 @@ const receipt = request => ({ mode: request.body.mode, queued_count: request.bod
   items: request.body.item_ids.map(item_id => ({ id: `queue-${item_id}`, item_id, mode: request.body.mode, status: 'queued' })),
 });
 
-test('MP header, virtual record cards, compact selection and single-page pagination remain separate', async ({ page, api }) => {
+test('MP header, virtual record cards, compact selection and single-page pagination remain separate', async ({ page, api }, testInfo) => {
   await page.setViewportSize({ width: 1280, height: 720 });
   api.respond('GET', historyPath, { items: records, total: 2 });
   await page.goto('/media-organize');
@@ -37,7 +37,7 @@ test('MP header, virtual record cards, compact selection and single-page paginat
   const queue = await page.getByTestId('organize-queue-open').boundingBox();
   expect(queue.y + queue.height).toBeLessThanOrEqual(footer.y - 20);
   expect(1280 - queue.x - queue.width).toBeGreaterThanOrEqual(30);
-  await page.screenshot({ path: '/root/emby-toolkit-followup-20261115-round2/ui/media-organize-mp-desktop.png' });
+  await page.screenshot({ path: testInfo.outputPath('media-organize-mp-desktop.png') });
   await selection.getByRole('checkbox', { name: '全选本页', exact: true }).check();
   await expect(page.getByTestId('organize-selection-count')).toHaveText('2/2 项');
   await selection.getByRole('button', { name: '取消全选', exact: true }).click();
@@ -75,7 +75,9 @@ test('record operations freeze only that record while retaining unrelated batch 
   api.respond('GET', historyPath, { items: records, total: 2 });
   api.respond('POST', actionPath, receipt, 202);
   await page.goto('/media-organize');
+  await expect(rows(page)).toHaveCount(records.length);
   await rows(page).last().getByRole('checkbox').check();
+  await expect(page.getByTestId('organize-selection-count')).toHaveText('1/2 项');
   await rows(page).first().getByRole('button', { name: '整理验证剧集 操作', exact: true }).click();
   await page.locator('.v-overlay--active').getByText('重新刮削', { exact: true }).click();
   await page.getByTestId('organize-confirm').click();

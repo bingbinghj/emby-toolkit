@@ -55,6 +55,7 @@ struct Host {
     clears: Arc<AtomicUsize>,
     refreshes: Arc<AtomicUsize>,
     syncs: Arc<AtomicUsize>,
+    file_imports: Arc<AtomicUsize>,
     config_writes: Arc<AtomicUsize>,
     wrong_final_language: Arc<AtomicBool>,
     refresh_logs: Arc<Mutex<Vec<String>>>,
@@ -293,7 +294,7 @@ async fn details(
     let mut item = host.item.lock().await.clone();
     let fields = query.get("Fields").map(String::as_str).unwrap_or("");
     if host.wrong_final_language.load(Ordering::SeqCst)
-        && (host.starts.load(Ordering::SeqCst) > 0 || host.syncs.load(Ordering::SeqCst) > 0)
+        && (host.starts.load(Ordering::SeqCst) > 0 || host.syncs.load(Ordering::SeqCst) > 0 || host.file_imports.load(Ordering::SeqCst) > 0)
         && fields.contains("MediaStreams")
         && !fields.contains("Chapters")
         && !fields.contains("PartCount")
@@ -359,10 +360,25 @@ async fn exact_refresh(
     Query(query): Query<HashMap<String, String>>,
 ) -> StatusCode {
     assert_eq!(query["Recursive"], "false");
-    assert_eq!(query["MetadataRefreshMode"], "FullRefresh");
+    assert!(["FullRefresh", "Default"].contains(&query["MetadataRefreshMode"].as_str()));
     assert_eq!(query["ImageRefreshMode"], "ValidationOnly");
     assert_eq!(query["ReplaceAllMetadata"], "false");
     assert_eq!(query["ReplaceAllImages"], "false");
+    if query["MetadataRefreshMode"] == "Default" {
+        assert_eq!(host.settings.lock().await["PersistMediaInfoMode"], "Restore");
+        let info: Value = serde_json::from_slice(&tokio::fs::read(host.directory.join("61616-mediainfo.json")).await.unwrap()).unwrap();
+        let mut item = host.item.lock().await;
+        let mut source = info[0]["MediaSourceInfo"].clone();
+        for field in ["Id", "ItemId", "Path"] {
+            source[field] = item["MediaSources"][0][field].clone();
+        }
+        item["MediaStreams"] = source["MediaStreams"].clone();
+        item["Size"] = source["Size"].clone();
+        item["RunTimeTicks"] = source["RunTimeTicks"].clone();
+        item["MediaSources"][0] = source;
+        item["Chapters"] = info[0]["Chapters"].clone();
+        host.file_imports.fetch_add(1, Ordering::SeqCst);
+    }
     host.refresh_logs
         .lock()
         .await
@@ -442,6 +458,10 @@ async fn apply_pro_bundle(host: &Host, item: &mut Value, bundle: &Value) {
     item["RunTimeTicks"] = source["RunTimeTicks"].clone();
     item["MediaSources"][0]["Size"] = source["Size"].clone();
     item["MediaSources"][0]["RunTimeTicks"] = source["RunTimeTicks"].clone();
+    for field in ["Container", "Bitrate"] {
+        item[field] = source[field].clone();
+        item["MediaSources"][0][field] = source[field].clone();
+    }
     item["Chapters"] = bundle["Chapters"].clone();
     let images = native_chapter_images(host, item);
     for (chapter, exists) in item["Chapters"]
@@ -547,13 +567,14 @@ impl Fixture {
             directory: directory.path().into(),
             metadata_root: directory.path().join("metadata"),
             item: Arc::new(Mutex::new(
-                json!({"Id":"61616","Guid":native_guid(&path,"Movie"),"PresentationUniqueKey":"fixture-key-61616","Type":"Movie","Name":"迪迦奥特曼：最终圣战","Path":path,"Size":original[0]["MediaSourceInfo"]["Size"],"PartCount":1,"MediaStreams":streams,"MediaSources":[{"Id":"mediasource_61616","ItemId":"61616","Path":"/cd2/61616.mkv","MediaStreams":streams}],"Chapters":original[0]["Chapters"]}),
+                json!({"Id":"61616","Guid":native_guid(&path,"Movie"),"PresentationUniqueKey":"fixture-key-61616","Type":"Movie","Name":"迪迦奥特曼：最终圣战","Path":path,"Size":original[0]["MediaSourceInfo"]["Size"],"PartCount":1,"MediaStreams":streams,"MediaSources":[{"Id":"mediasource_61616","ItemId":"61616","Path":"/cd2/61616.mkv","Container":original[0]["MediaSourceInfo"]["Container"],"Size":original[0]["MediaSourceInfo"]["Size"],"RunTimeTicks":original[0]["MediaSourceInfo"]["RunTimeTicks"],"Bitrate":original[0]["MediaSourceInfo"]["Bitrate"],"MediaStreams":streams}],"Chapters":original[0]["Chapters"]}),
             )),
             settings: Arc::new(Mutex::new(original_settings.clone())),
             starts: Arc::default(),
             clears: Arc::default(),
             refreshes: Arc::default(),
             syncs: Arc::default(),
+            file_imports: Arc::default(),
             config_writes: Arc::default(),
             wrong_final_language: Arc::new(AtomicBool::new(wrong_final_language)),
             refresh_logs: Arc::new(Mutex::new(vec![
@@ -682,7 +703,7 @@ impl Fixture {
 
     async fn assert_exact_sync_only(&self) {
         assert_eq!(self.host.clears.load(Ordering::SeqCst), 0);
-        assert_eq!(self.host.refreshes.load(Ordering::SeqCst), 0);
+        assert_eq!(self.host.refreshes.load(Ordering::SeqCst), self.host.file_imports.load(Ordering::SeqCst));
         assert_eq!(self.host.starts.load(Ordering::SeqCst), 0);
         assert_eq!(*self.host.settings.lock().await, self.original_settings);
     }

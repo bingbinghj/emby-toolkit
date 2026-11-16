@@ -115,6 +115,65 @@ async fn moviepilot_gaia_empty_new_episode_syncs_only_its_id_and_preserves_old_v
 }
 
 #[tokio::test]
+#[ignore = "requires disposable PostgreSQL; existing untitled media must use the normal MoviePilot entry"]
+async fn moviepilot_existing_untitled_episode_enters_ingestion_without_a_media_edit_scope_check() {
+    let (fixture, event, old, old_json, _, _) = gaia_empty_version_fixture().await;
+    let sha = "A".repeat(40);
+    let mut raw: Value =
+        sqlx::query_scalar("SELECT raw_ffprobe_json FROM p115_mediainfo_cache WHERE sha1=$1")
+            .bind(&sha)
+            .fetch_one(&fixture.state.db)
+            .await
+            .unwrap();
+    raw["streams"][1]["tags"]
+        .as_object_mut()
+        .unwrap()
+        .remove("title");
+    sqlx::query("UPDATE p115_mediainfo_cache SET raw_ffprobe_json=$1 WHERE sha1=$2")
+        .bind(&raw)
+        .bind(&sha)
+        .execute(&fixture.state.db)
+        .await
+        .unwrap();
+    let mut info = emby_toolkit::probe::build(&raw, &json!({"fn":"101.mkv"}), &json!([])).unwrap();
+    info[0]["MediaSourceInfo"]["Path"] = json!("/cd2/101.mkv");
+    {
+        let mut items = fixture.host.items.lock().await;
+        let item = items.get_mut("101").unwrap();
+        let mut source = info[0]["MediaSourceInfo"].clone();
+        source["Id"] = item["MediaSources"][1]["Id"].clone();
+        source["ItemId"] = json!("101");
+        source["Type"] = json!("Default");
+        for stream in source["MediaStreams"].as_array_mut().unwrap() {
+            if stream["Title"] == "" {
+                stream.as_object_mut().unwrap().remove("Title");
+            }
+        }
+        item["Size"] = source["Size"].clone();
+        item["RunTimeTicks"] = source["RunTimeTicks"].clone();
+        item["MediaStreams"] = source["MediaStreams"].clone();
+        item["Chapters"] = info[0]["Chapters"].clone();
+        item["MediaSources"][1] = source;
+    }
+    std::fs::write(fixture.sidecar_path(), serde_json::to_vec(&info).unwrap()).unwrap();
+    fixture.state.save_config(&json!({"emby_metadata_path":fixture._directory.path().join("not-mounted-edit-directory")})).await.unwrap();
+    let result = fixture.run_moviepilot_event(event).await;
+    assert_eq!(result["state"], "completed", "{result}");
+    assert!(fixture.host.sync_imports.lock().await.is_empty());
+    assert!(fixture.host.file_imports.lock().await.is_empty());
+    assert_eq!(fixture.host.items.lock().await["102"], old);
+    assert_eq!(
+        std::fs::read(
+            std::path::Path::new(fixture.files[1].as_str().unwrap())
+                .with_file_name("102-mediainfo.json")
+        )
+        .unwrap(),
+        old_json
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
 async fn moviepilot_empty_sync_accepts_native_location_and_playback_fields_without_changing_requested_info()
  {
@@ -183,16 +242,13 @@ async fn moviepilot_empty_sync_accepts_native_location_and_playback_fields_witho
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
-async fn moviepilot_gaia_noop_sync_never_clears_related_versions_or_reports_success() {
+async fn moviepilot_gaia_field_warning_never_clears_related_versions_or_blocks_metadata_ingestion() {
     let (fixture, event, old, old_json, _, _) = gaia_empty_version_fixture().await;
     fixture.host.skip_sync_import.store(true, Ordering::SeqCst);
     let result = fixture.run_moviepilot_event(event).await;
-    assert_eq!(result["state"], "failed", "{result}");
+    assert_eq!(result["state"], "completed_with_warnings", "{result}");
     assert!(
-        result["message"]
-            .as_str()
-            .unwrap()
-            .contains("不是唯一当前媒体"),
+        result["result"]["warnings"].as_u64().unwrap_or(0) > 0,
         "{result}"
     );
     assert_eq!(*fixture.host.sync_imports.lock().await, vec!["101"]);

@@ -1,6 +1,6 @@
 use emby_toolkit::{
     AppState,
-    error::{ApiError, Result},
+    error::Result,
     jobs::{JobContext, JobManager, JobSpec},
 };
 use serde_json::{Value, json};

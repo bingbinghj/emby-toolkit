@@ -13,7 +13,7 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     await page.setViewportSize(viewport);
     api.respond('GET', historyPath, { items: [], total: 0 });
     api.respond('GET', queuePath, queuePage([
-      task('complete', { status: 'completed' }),
+      task('waiting'),
       task('running', { status: 'running', progress: 87, progress_known: false, current_action: '读取媒体' }),
     ]));
     await page.goto('/media-organize');
@@ -22,18 +22,23 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     await expect(dialog).toBeVisible();
     await expect(dialog.locator('.queue-heading .v-card-subtitle')).toHaveText('本页 1 项媒体，共 2 项任务');
     const overall = dialog.getByRole('region', { name: '整体进度' });
-    await expect(overall).toContainText('本页已完成 1 / 2');
-    await expect(overall.locator('.queue-overall-value')).toHaveText('50%');
-    await expect(overall.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '50');
+    await expect(overall).toContainText('本页剩余 2 项');
+    await expect(overall.locator('.queue-overall-value')).toHaveText('进度未确认');
+    await expect(overall.getByRole('progressbar')).not.toHaveAttribute('aria-valuenow');
     const media = dialog.getByRole('navigation', { name: '队列媒体列表' }).getByRole('button');
-    await expect(media).toContainText('已完成 1 / 2');
-    await expect(media.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '50');
+    await expect(media).toContainText('剩余 2 项');
+    await expect(media.getByRole('progressbar')).not.toHaveAttribute('aria-valuenow');
     const running = page.getByTestId('organize-queue-task-running');
     await expect(running.locator('.queue-task-progress')).toContainText('处理中 · 读取媒体');
     await expect(running.getByRole('progressbar')).not.toHaveAttribute('aria-valuenow');
     await expect(running).not.toContainText('87%');
     await expect(running.getByRole('button', { name: /取消等待任务/ })).toBeDisabled();
-    await expect(page.getByTestId('organize-queue-task-complete').locator('.queue-task-progress')).toHaveText('100%');
+    await expect(page.getByTestId('organize-queue-task-waiting').locator('.queue-task-progress')).toHaveText('等待执行');
+    api.respond('GET', queuePath, queuePage([task('waiting'), task('running', { status: 'running', progress: 50, progress_known: true, current_action: '读取媒体' })]));
+    await page.getByRole('button', { name: '刷新整理队列', exact: true }).click();
+    await expect(overall.locator('.queue-overall-value')).toHaveText('25%');
+    await expect(overall.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '25');
+    await expect(media.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '25');
     const statusBox = await running.locator('.queue-task-status').boundingBox();
     const progressBox = await running.locator('.queue-task-progress').boundingBox();
     if (viewport.width >= 960) {

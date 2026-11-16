@@ -141,6 +141,7 @@ impl Fixture {
     }
 
     fn start(&mut self) {
+        self.cancel = CancellationToken::new();
         self.worker = Some(tokio::spawn(emby_toolkit::media_organize_queue::run(
             self.state.clone(),
             self.cancel.clone(),
@@ -210,7 +211,7 @@ impl Fixture {
             }
         })
         .await
-        .expect("queue entry did not reach its expected status")
+        .unwrap_or_else(|error| panic!("queue entry {id} did not reach status {status}: {error}"))
     }
 
     async fn history(&self, item: &str) -> String {
@@ -541,6 +542,18 @@ async fn failure_does_not_stop_later_entries_and_retry_creates_a_fresh_attempt()
             .is_some_and(|message| !message.is_empty())
     );
     assert_eq!(*f.requests.lock().await, ["101", "202"]);
+    let (_, idle_queue) = f
+        .request("GET", "/api/media_organize/queue", Value::Null)
+        .await;
+    assert_eq!(
+        idle_queue["items"],
+        json!([]),
+        "terminal failures must leave the active queue"
+    );
+    assert_eq!(idle_queue["total"], 0);
+    assert_eq!(idle_queue["queued_count"], 0);
+    assert_eq!(idle_queue["running_count"], 0);
+    f.stop_worker().await;
     let (status, retried) = f
         .request(
             "POST",
@@ -551,9 +564,67 @@ async fn failure_does_not_stop_later_entries_and_retry_creates_a_fresh_attempt()
     assert_eq!(status, StatusCode::ACCEPTED, "{retried}");
     let retry = retried["queue_ids"][0].as_str().unwrap();
     assert_ne!(retry, first);
+    let (_, retry_queue) = f
+        .request("GET", "/api/media_organize/queue", Value::Null)
+        .await;
+    assert_eq!(retry_queue["total"], 1);
+    assert_eq!(retry_queue["items"][0]["id"], retry);
+    f.start();
     f.wait_status(retry, "failed").await;
     assert_eq!(f.row(first).await["status"], "failed");
     assert_eq!(*f.requests.lock().await, ["101", "202", "101"]);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; terminal queue history remains durable and read-only"]
+async fn five_previous_failures_do_not_occupy_active_queue_pages_or_erase_their_results() {
+    let f = Fixture::new(true).await;
+    for _ in 0..5 {
+        let (status, accepted) = f.submit(json!({"item_ids":["101"]})).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let id = accepted["queue_ids"][0].as_str().unwrap();
+        sqlx::query("UPDATE media_organize_queue SET status='failed',message='完整入库未完成',result='{\"error\":\"完整入库未完成\"}',completed_at=NOW() WHERE id=$1")
+            .bind(id).execute(&f.state.db).await.unwrap();
+    }
+    let before: Value = sqlx::query_scalar(
+        "SELECT jsonb_agg(to_jsonb(q) ORDER BY queue_order) FROM media_organize_queue q",
+    )
+    .fetch_one(&f.state.db)
+    .await
+    .unwrap();
+    let (_, idle) = f
+        .request(
+            "GET",
+            "/api/media_organize/queue?page=1&page_size=1",
+            Value::Null,
+        )
+        .await;
+    assert_eq!(idle["items"], json!([]));
+    assert_eq!(idle["total"], 0);
+    let after: Value = sqlx::query_scalar(
+        "SELECT jsonb_agg(to_jsonb(q) ORDER BY queue_order) FROM media_organize_queue q",
+    )
+    .fetch_one(&f.state.db)
+    .await
+    .unwrap();
+    assert_eq!(
+        before, after,
+        "hiding finished attempts must not delete recovery or failure evidence"
+    );
+    let (_, accepted) = f.submit(json!({"item_ids":["101"]})).await;
+    assert_eq!(accepted["queued_count"], 1);
+    assert_eq!(accepted["duplicate_count"], 0);
+    let (_, current) = f
+        .request(
+            "GET",
+            "/api/media_organize/queue?page=1&page_size=1",
+            Value::Null,
+        )
+        .await;
+    assert_eq!(current["total"], 1);
+    assert_eq!(current["queued_count"], 1);
+    assert_eq!(current["items"][0]["id"], accepted["queue_ids"][0]);
     f.close().await;
 }
 

@@ -47,7 +47,6 @@ function fixture(t, { status = summary(terminal()), get = async () => ({ data: t
     loading: typeof taskResultLoading === 'undefined' ? null : taskResultLoading,
     error: typeof taskResultError === 'undefined' ? null : taskResultError,
     feedback: typeof taskResultFeedback === 'undefined' ? null : taskResultFeedback,
-    history: typeof taskHistory === 'undefined' ? null : taskHistory,
     showRunResult: showTaskRunResult, runFeedback: taskRunFeedback, triggering: isTriggeringTask,
     label: currentTaskStateLabel, paused: taskPaused, stopping: taskStopping,
     pausing: typeof taskPausing === 'undefined' ? null : taskPausing,
@@ -170,14 +169,13 @@ test('late reads from the former current task cannot overwrite or unlock the rep
   assert.equal(f.api.loading.value, false);
 });
 
-test('history selection uses its original ID and switching history prevents late errors from replacing the new result', async t => {
+test('result selection uses its original ID and switching tasks prevents late errors from replacing the new result', async t => {
   const first = deferred(), second = deferred();
   const histories = [summary(terminal('history/A')), summary(terminal('history-B', 'completed_with_warnings'))];
   const f = fixture(t, { status: { task_id: 'busy-task', state: 'running', is_running: true, history: histories },
     get: url => url.endsWith('history%2FA') ? first.promise : second.promise });
-  assert.deepEqual(clone(f.api.history.value).map(task => task.task_id), ['history/A', 'history-B']);
-  const firstRead = f.api.open(f.api.history.value[0]);
-  const secondRead = f.api.open(f.api.history.value[1]);
+  const firstRead = f.api.open(histories[0]);
+  const secondRead = f.api.open(histories[1]);
   assert.equal(f.calls[0].url, '/api/tasks/result/history%2FA');
   assert.equal(f.calls[0].options.signal.aborted, true);
   first.reject(new Error('旧历史请求失败'));
@@ -211,7 +209,7 @@ test('selecting the latest history keeps that selected ID when a new current tas
   let reads = 0;
   const f = fixture(t, { status: { ...task, history: [task] }, get: () => ++reads === 1 ? Promise.resolve({ data: terminal() }) : pending.promise });
   await flush();
-  const selected = f.api.open(f.api.history.value[0]);
+  const selected = f.api.open(task);
   f.background.value = { task_id: 'new-current-task', state: 'running', is_running: true, history: [task] };
   assert.equal(f.calls[1].options.signal.aborted, false);
   pending.resolve({ data: terminal() });
@@ -226,7 +224,7 @@ test('viewing the latest history during a new local submission completes its res
   const f = fixture(t, { status: { ...task, history: [task] } });
   await flush();
   f.api.triggering.value = 'backup-mediainfo';
-  await f.api.open(f.api.history.value[0]);
+  await f.api.open(task);
   assert.equal(f.api.loading.value, false);
   assert.equal(f.api.result.value.task_id, 'original-task');
   assert.equal(f.api.feedback.value.type, 'error');
@@ -316,7 +314,7 @@ test('control flags never replace a cancelled terminal label with stopping', t =
   assert.equal(f.api.label.value, '已停止');
 });
 
-test('the result and history controls compile as one Vue component', () => {
+test('the result controls compile as one Vue component', () => {
   const parsed = parse(source, { filename: 'SchedulerSettingsPage.vue' });
   assert.deepEqual(parsed.errors, []);
   const script = compileScript(parsed.descriptor, { id: 'scheduler-results' });

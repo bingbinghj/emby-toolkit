@@ -174,7 +174,7 @@ test('a selected movie runs the full background operation after scope confirmati
   await page.getByTestId('organize-selected').click();
   const dialog = page.locator('.v-overlay--active').filter({ has: page.getByTestId('organize-confirm') });
   await expect(dialog).toContainText('第一页电影');
-  await expect(dialog).toContainText('电影包含关联版本，剧集只处理所选单集');
+  await expect(dialog).toContainText('仅处理所选媒体文件，剧集只处理所选单集');
   await dialog.getByTestId('organize-confirm').click();
   await expect(page.getByTestId('organize-result')).toContainText('媒体重新整理完成');
   expect(posts(api)).toHaveLength(1);

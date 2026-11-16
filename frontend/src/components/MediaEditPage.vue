@@ -56,7 +56,7 @@
             <VBtn block variant="tonal" prepend-icon="mdi-shield-check-outline" :loading="isRevalidatingFingerprints" @click="revalidateFingerprints(itemDetails.item_id || itemId)">重新校验指纹（{{ fingerprintScopeLabel }}）</VBtn>
             <VBtn v-if="['Series', 'Season', 'Episode'].includes(itemDetails.item_type)" block color="warning" variant="tonal" prepend-icon="mdi-image-refresh-outline" :loading="isReplacingEpisodeImages" @click="confirmEpisodeImageReplacement">替换剧集图</VBtn>
             <VBtn v-if="['Series', 'Season', 'Episode'].includes(itemDetails.item_type)" block color="default" variant="tonal" class="media-credits-action" prepend-icon="mdi-movie-open-outline" :loading="isExtractingCredits" :disabled="creditsExtractionBlocked" :data-testid="itemDetails.item_type === 'Episode' ? 'episode-extract-credits' : 'scope-extract-credits'" @click="extractEpisodeCredits(itemDetails.item_id || itemId)">提取{{ fingerprintScopeLabel }}片尾</VBtn>
-            <VBtn block color="warning" variant="tonal" prepend-icon="mdi-file-edit-outline" @click="openRenameEditor">重命名媒体</VBtn>
+            <VBtn block color="warning" variant="tonal" prepend-icon="mdi-file-edit-outline" @click="openRenameEditor()">重命名媒体</VBtn>
             <VBtn block color="warning" variant="tonal" prepend-icon="mdi-cloud-search-outline" :loading="isRepairingP115Orphan" @click="confirmMediaAction('检查115孤儿文件', `确认只检查${p115OrphanScopeLabel}？`, repairCurrentP115Orphans)">检查115孤儿文件</VBtn>
           </VCardText>
         </VCard>
@@ -117,18 +117,18 @@
 
     <VDialog v-model="showEpisodeSelector" max-width="980" scrollable>
       <VCard>
-        <VCardTitle class="d-flex align-center ga-3"><span class="flex-grow-1 text-wrap">{{ itemDetails?.item_type === 'Series' ? '选择季和要编辑的视频' : '选择要编辑的视频' }}</span><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭分集选择" @click="showEpisodeSelector = false" /></VCardTitle>
+        <VCardTitle class="d-flex align-center ga-3"><span class="flex-grow-1 text-wrap">{{ episodeSelectorMode === 'rename' ? '选择要重命名的分集文件' : itemDetails?.item_type === 'Series' ? '选择季和要编辑的视频' : '选择要编辑的视频' }}</span><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭分集选择" @click="showEpisodeSelector = false" /></VCardTitle>
         <VProgressLinear v-if="isFetchingEpisodes" indeterminate />
         <VCardText>
-          <VBtn variant="tonal" prepend-icon="mdi-shield-check-outline" :loading="isRevalidatingFingerprints" class="mb-3" @click="revalidateFingerprints(itemDetails.item_id || itemId)">重新校验指纹（{{ fingerprintScopeLabel }}）</VBtn>
+          <VBtn v-if="episodeSelectorMode === 'edit'" variant="tonal" prepend-icon="mdi-shield-check-outline" :loading="isRevalidatingFingerprints" class="mb-3" @click="revalidateFingerprints(itemDetails.item_id || itemId)">重新校验指纹（{{ fingerprintScopeLabel }}）</VBtn>
           <div v-if="episodesList.length > 0" class="episode-selector-board">
             <div class="episode-selector-toolbar">
               <div v-if="itemDetails.item_type === 'Series'" class="episode-season-switcher">
                 <span class="episode-season-switcher-label">选择季</span>
                 <VBtn v-for="season in episodeSeasonGroups" :key="season.season_number" size="small" :variant="season.season_number === selectedSeasonNumber ? 'flat' : 'tonal'" @click="handleSeasonChange(season.season_number)">{{ formatSeasonLabel(season.season_number) }}</VBtn>
               </div>
-              <div class="episode-selector-summary">{{ itemDetails.item_type === 'Series' ? '当前季' : '本季' }} {{ visibleSeasonEpisodes.length }} 个视频，已选 {{ selectedEpisodeIds.length }} 个。</div>
-              <div class="d-flex flex-wrap align-center ga-2">
+              <div class="episode-selector-summary">{{ itemDetails.item_type === 'Series' ? '当前季' : '本季' }} {{ visibleSeasonEpisodes.length }} 个视频<span v-if="episodeSelectorMode === 'edit'">，已选 {{ selectedEpisodeIds.length }} 个</span>。</div>
+              <div v-if="episodeSelectorMode === 'edit'" class="d-flex flex-wrap align-center ga-2">
                 <VSelect v-if="currentSeasonHasMultipleVersions" v-model="selectedBatchVersionIndex" :items="batchVersionOptions" item-title="label" item-value="value" label="选择版本" density="compact" class="batch-version-select" />
                 <VBtn v-if="currentSeasonHasMultipleVersions" size="small" variant="tonal" :disabled="loadingConfig || selectedBatchVersionIndex === null" @click="selectEpisodesByVersion">选择此版本</VBtn>
                 <VBtn size="small" variant="tonal" :disabled="loadingConfig" @click="selectAllEpisodes">全选</VBtn><VBtn size="small" variant="tonal" @click="clearSelectedEpisodes">清空</VBtn>
@@ -139,7 +139,7 @@
               <div class="episode-parade-grid">
                 <div v-for="ep in selectedSeasonGroup.episodes" :key="ep.emby_id" :class="['episode-chip-shell', { 'episode-chip-selected': isEpisodeSelected(ep.emby_id), 'episode-chip-multi-version': Number(ep.version_count || 0) > 1, 'episode-chip-track-issue': ep.track_status === 'inconsistent' }]">
                   <span v-if="ep.track_status === 'inconsistent'" class="episode-chip-issue-dot">!</span>
-                  <VCheckboxBtn class="episode-chip-checkbox" :model-value="isEpisodeSelected(ep.emby_id)" :aria-label="`选择${formatEpisodeLabel(ep)}`" @update:model-value="checked => toggleEpisodeSelection(ep.emby_id, checked)" />
+                  <VCheckboxBtn v-if="episodeSelectorMode === 'edit'" class="episode-chip-checkbox" :model-value="isEpisodeSelected(ep.emby_id)" :aria-label="`选择${formatEpisodeLabel(ep)}`" @update:model-value="checked => toggleEpisodeSelection(ep.emby_id, checked)" />
                   <VBtn size="small" class="episode-chip" :variant="String(currentEditMediaId || '') === String(ep.emby_id || '') ? 'flat' : 'tonal'" :color="ep.track_status === 'inconsistent' ? 'error' : Number(ep.version_count || 0) > 1 ? 'warning' : 'primary'" :title="getEpisodeTooltip(ep)" @click="handleEpisodeChipClick(ep)">{{ formatEpisodeLabel(ep) }}</VBtn>
                 </div>
               </div>
@@ -841,7 +841,9 @@ const confirmMediaRecovery = (record) => {
 
 // ★ 新增：剧集分集选择相关状态
 const showEpisodeSelector = ref(false);
+const episodeSelectorMode = ref('edit');
 let episodeSelectorLoadSequence = 0;
+let renameContextLoadSequence = 0;
 const isFetchingEpisodes = ref(false);
 const episodesList = ref([]);
 const selectedEpisodeIds = ref([]);
@@ -890,11 +892,19 @@ const mediaInfoSegmentOptions = computed(() => (currentMediaInfoVersion.value?.s
   value: String(segment.emby_id)
 })));
 
-const openRenameEditor = async () => {
+const openRenameEditor = async (selectedId = '') => {
+  if (!selectedId && ['Series', 'Season'].includes(itemDetails.value?.item_type)) {
+    return openEpisodeSelector('rename');
+  }
+  const sequence = ++renameContextLoadSequence;
+  const pageSequence = mediaDetailsLoadSequence;
+  const targetId = String(selectedId || itemId.value || '').trim();
+  const isCurrentRequest = () => sequence === renameContextLoadSequence
+    && pageSequence === mediaDetailsLoadSequence;
   const loadingMsg = message.loading('正在读取重命名上下文...', { duration: 0 });
-  const targetId = String(currentEditMediaId.value || itemId.value || '').trim();
   try {
     const res = await axios.get(`/api/media_rename/${targetId}`);
+    if (!isCurrentRequest()) return;
     renameTargetId.value = targetId;
     renameExtension.value = res.data.file_ext || '';
     renameCustomName.value = stripRenameExtension(res.data.source_name || '');
@@ -906,6 +916,7 @@ const openRenameEditor = async () => {
     renameVersions.value = Array.isArray(res.data.versions) ? res.data.versions : [];
     showRenameEditor.value = true;
   } catch (error) {
+    if (!isCurrentRequest()) return;
     message.error(error.response?.data?.error || '读取重命名上下文失败');
   } finally {
     loadingMsg.destroy();
@@ -1232,6 +1243,10 @@ const getEpisodeTooltip = (ep) => {
 };
 
 const handleEpisodeChipClick = (ep) => {
+  if (episodeSelectorMode.value === 'rename') {
+    showEpisodeSelector.value = false;
+    return openRenameEditor(String(ep.emby_id));
+  }
   // 不再关闭分集选择框：媒体信息编辑框会盖在上层，关掉后还能继续点下一集。
   openMediaInfoEditor(ep.emby_id);
 };
@@ -1296,8 +1311,8 @@ const audioLanguageOptions = ref([]);
 const subtitleLanguageOptions = ref([]);
 
 // ★ 新增：点击编辑按钮的分流逻辑
-const handleMediaInfoButtonClick = async () => {
-  if (['Series', 'Season'].includes(itemDetails.value.item_type)) {
+const openEpisodeSelector = async (mode = 'edit') => {
+    episodeSelectorMode.value = mode;
     const sequence = ++episodeSelectorLoadSequence;
     const pageSequence = mediaDetailsLoadSequence;
     const targetId = String(itemId.value || '');
@@ -1306,6 +1321,7 @@ const handleMediaInfoButtonClick = async () => {
     // 如果是剧集或季，先拉取分集列表并打开选择框
     showEpisodeSelector.value = true;
     isFetchingEpisodes.value = true;
+    episodesList.value = [];
     clearSelectedEpisodes();
     try {
       const res = await axios.get(`/api/media_info/series/${targetId}/episodes`);
@@ -1320,10 +1336,13 @@ const handleMediaInfoButtonClick = async () => {
     } finally {
       if (isCurrentRequest()) isFetchingEpisodes.value = false;
     }
-  } else {
-    // 如果是电影，直接打开编辑器
-    openMediaInfoEditor(itemId.value);
+};
+
+const handleMediaInfoButtonClick = () => {
+  if (['Series', 'Season'].includes(itemDetails.value.item_type)) {
+    return openEpisodeSelector('edit');
   }
+  return openMediaInfoEditor(itemId.value);
 };
 // 1. 获取语言映射表
 const getFallbackMediaInfoLanguageLabel = (language) => {
@@ -2177,6 +2196,7 @@ watch(() => route.params.itemId, (value) => {
   const targetId = String(value || '');
   if (!targetId || targetId === String(itemId.value || '')) return;
   closeMediaInfoEditor();
+  ++renameContextLoadSequence;
   showEpisodeSelector.value = false;
   showRenameEditor.value = false;
   showImageEditor.value = false;

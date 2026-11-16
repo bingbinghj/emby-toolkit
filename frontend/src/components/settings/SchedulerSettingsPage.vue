@@ -75,13 +75,6 @@
           :loading="manualOrderSaving" :disabled="manualOrderSaving || !taskCatalogLoaded" @click="saveManualTaskOrder">保存任务顺序</VBtn>
       </div>
     </div>
-    <VCard v-if="taskHistory.length" class="dashboard-card mt-6" title="最近任务" data-testid="scheduler-task-history">
-      <VList class="scheduler-history-list">
-        <VListItem v-for="task in taskHistory" :key="task.task_id" :data-task-id="task.task_id" :title="task.last_action || '历史任务'" :subtitle="`${taskStateText(task.state)} · ${task.message || ''}`">
-          <template #append><VBtn variant="text" size="small" @click="openTaskResult(task)">查看结果</VBtn></template>
-        </VListItem>
-      </VList>
-    </VCard>
     <VDialog :model-value="taskResultOpen" max-width="800" scrollable :fullscreen="!mdAndUp" @update:model-value="open => { if (!open) closeTaskResult(); }">
       <VCard>
         <VCardTitle class="d-flex align-center ga-3"><span class="flex-grow-1 text-wrap">{{ taskResultTarget?.last_action || '任务结果' }}</span><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭任务结果" @click="closeTaskResult" /></VCardTitle>
@@ -204,7 +197,6 @@ let taskResultGeneration = 0, taskResultController = null;
 const isTerminalTask = task => Boolean(task?.task_id && task.is_running === false
   && ['completed', 'completed_with_warnings', 'failed', 'cancelled'].includes(task.state));
 const taskStateText = state => ({ completed: '已完成', completed_with_warnings: '已完成，有提醒', failed: '失败', cancelled: '已停止' }[state] || '结果尚未确认');
-const taskHistory = computed(() => Array.isArray(backgroundTaskStatus.value.history) ? backgroundTaskStatus.value.history.filter(isTerminalTask) : []);
 const taskResultFeedback = computed(() => {
   const task = taskResult.value;
   if (!task) return null;
@@ -540,7 +532,6 @@ watch([() => configModel.value?.tg_menu_tasks, availableTasksForTgMenu], ([saved
 .scheduler-task-grid :deep(.sortable-ghost) { opacity: .4; }
 .temp-task-name { margin: 0; padding-inline-end: 2rem; line-height: 1.5; overflow-wrap: anywhere; }
 .temp-task-description { margin: 6px 0 0; font-size: 12px; line-height: 1.6; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); overflow-wrap: anywhere; white-space: normal; }
-.scheduler-history-list { max-height: 320px; overflow-y: auto; }
 .scheduler-progress { margin-block-start: 8px; max-inline-size: 320px; }
 .scheduler-progress-meta { display: flex; justify-content: space-between; color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: 11px; gap: 12px; margin-block-start: 4px; }
 .scheduler-progress-meta span { min-inline-size: 0; overflow-wrap: anywhere; white-space: normal; }

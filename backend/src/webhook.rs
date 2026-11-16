@@ -1245,6 +1245,7 @@ pub async fn process_emby(
                     context.complete(&key, &report).await?;
                 }
             }
+            crate::moviepilot_ingest::clear_pending(state, member).await?;
         }
     }
     let mut result = if let Some(report) = context.completed("emby_feedback").await? {
@@ -1510,8 +1511,6 @@ fn extraction_state_label(report: &Value) -> &'static str {
 
 fn extraction_ready(finalization: &Value) -> bool {
     finalization["metadata_refresh"]["completed"] == true
-        && (finalization["title_fill"]["completed"] == true
-            || finalization["title_fill"]["skipped"] == true)
 }
 
 async fn automatic_extraction(
@@ -1735,13 +1734,13 @@ mod automatic_credits_tests {
     }
 
     #[test]
-    fn disabled_title_fill_requires_verified_refresh_and_enabled_fill_requires_completion() {
+    fn title_field_warnings_do_not_gate_configured_extraction_after_metadata_ingestion() {
         let disabled = json!({"title_fill":{"completed":false,"skipped":true},"metadata_refresh":{"completed":true}});
         assert!(extraction_ready(&disabled));
         let mut unverified = disabled;
         unverified["metadata_refresh"]["completed"] = json!(false);
         assert!(!extraction_ready(&unverified));
-        assert!(!extraction_ready(
+        assert!(extraction_ready(
             &json!({"title_fill":{"completed":false,"skipped":1},"metadata_refresh":{"completed":true}})
         ));
         assert!(extraction_ready(
@@ -1753,7 +1752,7 @@ mod automatic_credits_tests {
     }
 
     #[tokio::test]
-    async fn unfinished_titles_skip_all_three_extraction_stages() {
+    async fn unconfirmed_metadata_refresh_skips_all_three_extraction_stages() {
         let fixture = fixture::Fixture::new().await;
         *fixture.state.config.write().await = json!({"auto_extract_intro_fingerprint_on_ingest":true,"auto_extract_credits_on_ingest":true,"auto_extract_video_thumbnails_on_ingest":true});
         let context = crate::jobs::JobContext::for_recovery(None).await;
@@ -2021,6 +2020,10 @@ async fn ensure_moviepilot_media_info(
                 }
             }
         }
+        pending = missing_moviepilot_media_info(state, files, context).await?;
+        if pending.is_empty() {
+            return Ok(());
+        }
         context.sleep(Duration::from_secs_f64(interval)).await?;
         pending = missing_moviepilot_media_info(state, files, context).await?;
     }
@@ -2040,11 +2043,28 @@ pub async fn process_moviepilot(
     event: &Value,
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
+    process_moviepilot_inner(state, event, context, false).await
+}
+
+pub(crate) async fn process_reorganize(
+    state: &AppState,
+    event: &Value,
+    context: &crate::jobs::JobContext,
+) -> Result<Value> {
+    process_moviepilot_inner(state, event, context, true).await
+}
+
+async fn process_moviepilot_inner(
+    state: &AppState,
+    event: &Value,
+    context: &crate::jobs::JobContext,
+    reorganize: bool,
+) -> Result<Value> {
     let saved_scope = context.plan("moviepilot_scope").await?;
     let awaiting_emby = saved_scope
         .as_ref()
         .and_then(|scope| scope["awaiting_emby"].as_bool())
-        .unwrap_or(state.config.read().await["emby_webhook_ingest_enabled"] == true);
+        .unwrap_or(!reorganize && state.config.read().await["emby_webhook_ingest_enabled"] == true);
     let mut files = saved_scope
         .as_ref()
         .map(|scope| list(&scope["files"]))
@@ -2118,6 +2138,7 @@ pub async fn process_moviepilot(
         files.len() - new_files.len()
     );
     if !new_files.is_empty()
+        && !reorganize
         && context
             .completed("moviepilot_library_scan")
             .await?
@@ -2152,13 +2173,14 @@ pub async fn process_moviepilot(
             .save_plan(&attempt_key, &json!({"path":path,"skipped":false}))
             .await?;
         let mut found = None;
-        for attempt in 0..90 {
+        let attempts = if reorganize { 1 } else { 90 };
+        for attempt in 0..attempts {
             context.checkpoint().await?;
             found = moviepilot_item(state, path).await?;
             if found.is_some() {
                 break;
             }
-            if attempt < 89 {
+            if attempt + 1 < attempts {
                 context.sleep(Duration::from_secs(2)).await?;
             }
         }
@@ -2190,13 +2212,15 @@ pub async fn process_moviepilot(
             let expected: crate::moviepilot_ingest::Identity =
                 serde_json::from_value(original["identity"].clone())
                     .map_err(|_| ApiError::bad("MoviePilot原文件实体记录无效"))?;
-            if identity.revision() != expected.revision() {
+            if !identity.same_file(&expected) {
                 return Err(ApiError::bad(
                     "媒体在任务中断期间变化，已停止原任务，请重新提交当前文件",
                 ));
             }
         }
         if crate::moviepilot_ingest::completed(state, &identity).await?
+            && !identity.entity.is_null()
+            && !reorganize
             && !retry_files.contains(path)
             && original.is_none()
         {
@@ -2205,34 +2229,12 @@ pub async fn process_moviepilot(
                 .await?;
             continue;
         }
-        let initial = if let Some(original) = &original {
-            original["initial"]
-                .as_bool()
-                .ok_or_else(|| ApiError::bad("MoviePilot原提取阶段记录无效"))?
-        } else {
-            identity.cloud.is_none()
-                && item["Type"] != "Video"
-                && list(&item["MediaSources"]).len() == 1
-                && new_files.contains(file)
-                && !tokio::fs::try_exists(std::path::Path::new(path).with_file_name(format!(
-                    "{}-mediainfo.json",
-                    std::path::Path::new(path)
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                )))
-                .await?
-        };
         if original.is_none() {
             context
-                .save_plan(&file_key, &json!({"identity":identity,"initial":initial}))
+                .save_plan(&file_key, &json!({"identity":identity}))
                 .await?;
         }
-        if initial {
-            initial_files.push(file.clone());
-        } else {
-            crate::moviepilot_ingest::ensure_media(state, &identity, context).await?;
-        }
+        initial_files.push(file.clone());
         changed.push(identity);
         let id = if item["Type"] == "Episode" {
             string(&item, "SeriesId")
@@ -2265,7 +2267,7 @@ pub async fn process_moviepilot(
             .is_none()
     {
         tracing::info!(
-            "MoviePilot 媒体信息提取开始：新增文件 {} 个",
+            "MoviePilot 媒体信息提取开始：本批文件 {} 个",
             initial_files.len()
         );
         let revisions = changed
@@ -2291,14 +2293,12 @@ pub async fn process_moviepilot(
         }
         ensure_moviepilot_media_info(state, &initial_files, context).await?;
         tracing::info!(
-            "MoviePilot 媒体信息提取完成：新增文件 {} 个",
+            "MoviePilot 媒体信息提取完成：本批文件 {} 个",
             initial_files.len()
         );
     }
     for identity in &changed {
-        if initial_files.iter().any(|file| file == &identity.path) {
-            crate::moviepilot_ingest::remember_initial(state, identity, context).await?;
-        }
+        crate::moviepilot_ingest::remember_initial(state, identity, context).await?;
     }
     if !initial_files.is_empty() {
         context
@@ -2343,14 +2343,18 @@ pub async fn process_moviepilot(
             if let Some(report) = context.completed(&key).await? {
                 return Ok(report);
             }
-            let prepared = crate::ingest::prepare_cached_report(
+            let prepared = if reorganize {
+                None
+            } else {
+                crate::ingest::prepare_cached_report(
                 state,
                 &item,
                 &episodes,
                 event["episode_group"].as_str().filter(|s| !s.is_empty()),
                 context,
             )
-            .await?;
+            .await?
+            };
             let report = if let Some(report) = prepared {
                 report
             } else {
@@ -2387,10 +2391,9 @@ pub async fn process_moviepilot(
                 };
                 crate::versions::reconcile(state, &current).await?;
                 let result = crate::ingest::feedback(state, &id, &episodes, true, context).await?;
-                // 新绑定可能直到回流才建立；再次完整回读后只登记已验收媒体阶段。
+                // 新绑定可能直到回流才建立；登记神医提取阶段，不增加字段回读准入检查。
                 for identity in changed.iter().filter(|identity| {
-                    (identity.id == id || episodes.contains(&identity.id))
-                        && !initial_files.iter().any(|file| file == &identity.path)
+                    identity.id == id || episodes.contains(&identity.id)
                 }) {
                     crate::moviepilot_ingest::remember_initial(state, identity, context).await?;
                 }
@@ -2542,7 +2545,7 @@ pub async fn process_moviepilot(
                 context.complete(&key, &identity.revision()).await?;
             } else if !crate::moviepilot_ingest::completed(state, identity).await? {
                 return Err(ApiError::bad(
-                    "重启后已完成文件的媒体回读不一致，未发送成功通知",
+                    "重启后原文件入库完成记录发生变化，未发送成功通知",
                 ));
             }
         }
@@ -2565,134 +2568,6 @@ pub async fn process_moviepilot(
             warning_summary(&result)
         ));
     }
-    Ok(result)
-}
-
-/// 复用正常入库收尾及现有自动任务，逐阶段恢复并在文件验收后登记通知。
-pub(crate) async fn finalize_reorganize_ingest(
-    state: &AppState,
-    item: &Value,
-    episode_ids: &[String],
-    identities: &[crate::moviepilot_ingest::Identity],
-    context: &crate::jobs::JobContext,
-) -> Result<Value> {
-    let context = context.scoped("organize-ingest");
-    let id = string(item, "Id");
-    let series = item["Type"] == "Series" && !episode_ids.is_empty();
-    if identities.is_empty()
-        || item["Type"] == "Series" && !series
-        || series
-            && identities
-                .iter()
-                .any(|identity| !episode_ids.contains(&identity.id))
-        || !series && !identities.iter().any(|identity| identity.id == id)
-    {
-        return Err(ApiError::bad(
-            "重新整理的入库文件范围未确认，未扩大处理范围",
-        ));
-    }
-    for identity in identities {
-        crate::moviepilot_ingest::unchanged(state, identity, &context).await?;
-        if !crate::moviepilot_ingest::media_ready(state, identity).await? {
-            return Err(ApiError::bad(
-                "重新整理的媒体信息尚未通过当前文件与 Emby 回读验收，未继续入库收尾",
-            ));
-        }
-    }
-    let mut notices = IngestNotices::new();
-    let final_ids = if series {
-        vec![id.clone()]
-    } else {
-        identities
-            .iter()
-            .map(|identity| identity.id.clone())
-            .collect()
-    };
-    let mut finalizations = vec![];
-    for target in final_ids {
-        let current = details(
-            state,
-            &target,
-            "Id,Type,Name,Path,ProviderIds,ProductionYear,ImageTags",
-        )
-        .await?;
-        if current["Id"] != target
-            || current["Type"] != item["Type"]
-            || current["ProviderIds"]["Tmdb"] != item["ProviderIds"]["Tmdb"]
-        {
-            return Err(ApiError::bad(
-                "重新整理的作品或版本绑定已变化，未对其他作品执行收尾",
-            ));
-        }
-        let key = format!("finalization:{target}");
-        let report = if let Some(report) = context.completed(&key).await? {
-            collect_ingest_notice(&mut notices, &current, &report["title_fill"], episode_ids);
-            report
-        } else {
-            let report = Box::pin(finalize_inner(
-                state,
-                &target,
-                episode_ids,
-                true,
-                &context,
-                Some(&mut notices),
-                Some(identities),
-            ))
-            .await?;
-            context.complete(&key, &report).await?;
-            report
-        };
-        finalizations.push(json!({"item_id":target,"report":report}));
-    }
-    let ready = finalizations
-        .iter()
-        .all(|item| extraction_ready(&item["report"]));
-    let mut finalization = finalizations[0]["report"].clone();
-    for report in finalizations.iter().skip(1) {
-        add_report_warnings(&mut finalization, &report["report"]);
-    }
-    if finalizations.len() > 1 {
-        finalization["versions"] = json!(finalizations);
-    }
-    for identity in identities {
-        crate::moviepilot_ingest::unchanged(state, identity, &context).await?;
-        if !crate::moviepilot_ingest::media_ready(state, identity).await? {
-            return Err(ApiError::bad(
-                "重新整理收尾后的媒体流或章节回读不一致，未启动后续提取或发送成功通知",
-            ));
-        }
-    }
-    let automatic = if let Some(report) = context.completed("automatic-extraction").await? {
-        report
-    } else {
-        let report = Box::pin(automatic_extraction(
-            state,
-            series,
-            item["Type"] == "Movie" || series,
-            episode_ids,
-            ready,
-            &format!("《{}》", string(item, "Name")),
-            &context,
-        ))
-        .await?;
-        context.complete("automatic-extraction", &report).await?;
-        report
-    };
-    for identity in identities {
-        let key = format!("finished:{}", identity.id);
-        if context.completed(&key).await?.is_none() {
-            crate::moviepilot_ingest::finish(state, identity, &context).await?;
-            context.complete(&key, &identity.revision()).await?;
-        } else if !crate::moviepilot_ingest::completed(state, identity).await? {
-            return Err(ApiError::bad(
-                "重新整理已完成文件的媒体回读不一致，未发送成功通知",
-            ));
-        }
-    }
-    let mut result = json!({"finalization":finalization});
-    add_report_warnings(&mut result, &finalization);
-    add_automatic_result(&mut result, automatic);
-    deliver_notices(state, notices, true, identities, &context, &mut result).await?;
     Ok(result)
 }
 
@@ -2821,7 +2696,6 @@ async fn finalize_inner(
         json!({})
     };
     let confirmed = std::sync::atomic::AtomicBool::new(true);
-    let entered = std::sync::atomic::AtomicBool::new(false);
     let recovery = state
         .data_dir
         .join("backups/media-info-reload")
@@ -2857,10 +2731,11 @@ async fn finalize_inner(
         let protection = match protection {
             Ok(protection) => protection,
             Err(error)
-                if crate::emby::requires_metadata_only(&error)
+                if !context.is_cancelled()
                     && refresh_guard.0.load(std::sync::atomic::Ordering::Acquire) =>
             {
                 // 原生 Refresh 会展开关联版本；只读准备失败后改走原 ID 元数据接口。
+                tracing::info!("入库元数据使用定点更新，媒体字段问题不阻断流程：{}", error.1);
                 if !tokio::fs::try_exists(refresh_guard.1.join("original-settings.json")).await? {
                     tokio::fs::remove_dir_all(refresh_guard.1).await?;
                 }
@@ -2954,7 +2829,6 @@ async fn finalize_inner(
             state,
             "restore_media_info",
             || {
-                entered.store(true, std::sync::atomic::Ordering::Release);
                 Box::pin(crate::titles::fill_in_job_with_refresh(
                     state,
                     &targets,
@@ -2991,17 +2865,18 @@ async fn finalize_inner(
                 let _ = tokio::fs::remove_dir_all(&recovery).await;
                 report
             }
-            Err(error)
-                if !entered.load(std::sync::atomic::Ordering::Acquire)
-                    && !context.is_cancelled()
-                    && error.0 != StatusCode::CONFLICT =>
-            {
+            Err(error) if !context.is_cancelled() => {
                 tracing::warn!(
-                    "入库标题临时配置不可用：《{media_name}》，{}；继续最终元数据刷新",
+                    "入库标题处理未完成：《{media_name}》，{}；继续最终元数据更新",
                     error.1
                 );
-                final_refresh(false).await?;
-                let _ = tokio::fs::remove_dir_all(&recovery).await;
+                Box::pin(crate::emby::finalize_metadata_only_targets(
+                    state, &item, episode_ids, context,
+                )).await?;
+                refresh_completed.store(true, std::sync::atomic::Ordering::Release);
+                if confirmed.load(std::sync::atomic::Ordering::Acquire) {
+                    let _ = tokio::fs::remove_dir_all(&recovery).await;
+                }
                 json!({"completed":false,"failed":1,"pending":[{"reason":error.1}]})
             }
             Err(error) => {

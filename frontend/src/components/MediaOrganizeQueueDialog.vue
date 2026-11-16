@@ -17,16 +17,16 @@
         <template v-if="queue.items.length">
           <section class="queue-overall app-surface-shape" aria-label="整体进度">
             <span class="queue-overall-label">整体进度</span>
-            <span class="queue-overall-count">本页已完成 {{ completedCount }} / {{ queue.items.length }}</span>
-            <span class="queue-overall-value">{{ Math.round(overallProgress) }}%</span>
-            <VProgressLinear class="queue-overall-progress" :model-value="overallProgress" color="primary" bg-color="secondary" height="6" rounded />
+            <span class="queue-overall-count">本页剩余 {{ queue.items.length }} 项</span>
+            <span class="queue-overall-value">{{ overallUnknown ? '进度未确认' : Math.round(overallProgress) + '%' }}</span>
+            <VProgressLinear class="queue-overall-progress" :model-value="overallProgress" :indeterminate="overallIndeterminate" color="primary" bg-color="secondary" height="6" rounded />
           </section>
           <div class="queue-pending-summary text-caption text-medium-emphasis">等待 {{ queue.queuedCount }} 项 · 正在处理 {{ queue.runningCount }} 项</div>
           <div class="queue-main">
             <nav class="queue-media-list" aria-label="队列媒体列表">
               <button v-for="group in groups" :key="group.key" type="button" class="queue-media-button" :class="{ selected: group.key === activeGroupKey }" :aria-current="group.key === activeGroupKey ? 'true' : undefined" @click="activeGroupKey = group.key">
                 <VAvatar rounded width="68" height="102"><VImg v-if="group.poster" :src="group.poster" :alt="group.title" cover /><VIcon v-else icon="mdi-movie-open-outline" /></VAvatar>
-                <div class="queue-media-copy"><div class="queue-media-title font-weight-medium" :title="group.title">{{ group.title }}</div><div class="queue-media-meta text-caption text-medium-emphasis"><span>已完成 {{ group.completed }} / {{ group.tasks.length }}</span><span class="text-primary">{{ Math.round(group.progress) }}%</span></div><VProgressLinear :model-value="group.progress" color="primary" bg-color="secondary" height="4" rounded /></div>
+                <div class="queue-media-copy"><div class="queue-media-title font-weight-medium" :title="group.title">{{ group.title }}</div><div class="queue-media-meta text-caption text-medium-emphasis"><span>剩余 {{ group.tasks.length }} 项</span><span class="text-primary">{{ group.unknown ? '进度未确认' : Math.round(group.progress) + '%' }}</span></div><VProgressLinear :model-value="group.progress" :indeterminate="group.indeterminate" color="primary" bg-color="secondary" height="4" rounded /></div>
               </button>
             </nav>
             <section v-if="activeGroup" class="queue-detail">
@@ -37,7 +37,7 @@
                 <VIcon class="queue-task-state-icon" :icon="statusIcon(task)" :color="statusPresentation(task).color" size="22" />
                 <div class="queue-task-copy"><div class="queue-task-name font-weight-medium" :title="taskTitle(task)">{{ taskTitle(task) }}</div><div class="text-caption text-medium-emphasis mt-1">{{ operationLabel(task.mode) }}</div><div v-if="task.message" class="text-body-2 text-wrap mt-2">{{ task.message }}</div><div v-for="(detail, index) in resultDetails(task)" :key="index" class="text-caption text-wrap mt-1">{{ detail }}</div></div>
                 <div class="queue-task-status"><VChip size="small" variant="tonal" :color="statusPresentation(task).color">{{ statusPresentation(task).title }}</VChip></div>
-                <div class="queue-task-progress"><template v-if="task.status === 'running'"><VProgressLinear v-if="task.progress_known || !progressHeld(task)" :model-value="task.progress_known ? task.progress : undefined" :indeterminate="!task.progress_known && !progressHeld(task)" color="primary" bg-color="secondary" height="5" rounded /><div class="text-caption mt-1">{{ task.progress_known ? Math.round(task.progress) + '%' : progressHeld(task) ? statusPresentation(task).title : '处理中' }}{{ task.current_action ? ' · ' + task.current_action : '' }}</div></template><span v-else-if="task.status === 'completed'" class="text-caption text-success">100%</span><span v-else class="text-caption text-medium-emphasis">—</span></div>
+                <div class="queue-task-progress"><template v-if="task.status === 'running'"><VProgressLinear v-if="task.progress_known || !progressHeld(task)" :model-value="task.progress_known ? task.progress : undefined" :indeterminate="!task.progress_known && !progressHeld(task)" color="primary" bg-color="secondary" height="5" rounded /><div class="text-caption mt-1">{{ task.progress_known ? Math.round(task.progress) + '%' : progressHeld(task) ? statusPresentation(task).title : '处理中' }}{{ task.current_action ? ' · ' + task.current_action : '' }}</div></template><span v-else-if="task.status === 'queued'" class="text-caption text-medium-emphasis">等待执行</span><span v-else-if="task.status === 'completed'" class="text-caption text-success">100%</span><span v-else class="text-caption text-medium-emphasis">—</span></div>
                 <div class="queue-task-actions"><VBtn v-if="['queued', 'running'].includes(task.status)" icon="mdi-close-circle-outline" variant="text" size="small" :aria-label="'取消等待任务 ' + taskTitle(task)" :disabled="task.status !== 'queued' || Boolean(queue.actionId)" :loading="queue.actionId === task.id" @click="queue.cancel(task)" /><VBtn v-else-if="['failed', 'interrupted', 'cancelled'].includes(task.status)" icon="mdi-replay" variant="text" size="small" :aria-label="'重试任务 ' + taskTitle(task)" :disabled="Boolean(queue.actionId) || activeItemModes.has(task.item_id + ':' + task.mode)" :loading="queue.actionId === task.id" @click="queue.retry(task)" /></div>
               </article>
               </div>
@@ -65,6 +65,8 @@ const executionState = task => task.status !== 'running' ? task.status
       : task.pause_requested || task.job_state === 'pausing' ? 'pausing' : 'running';
 const statusPresentation = task => ({ queued: { title: '等待处理', color: 'secondary' }, running: { title: '正在处理', color: 'primary' }, paused: { title: '已暂停', color: 'warning' }, pausing: { title: '暂停中', color: 'warning' }, stopping: { title: '停止中', color: 'warning' }, completed: { title: '已完成', color: 'success' }, failed: { title: '失败', color: 'error' }, cancelled: { title: '已取消', color: 'warning' }, interrupted: { title: '已中断', color: 'warning' } }[executionState(task)] || { title: '状态未确认', color: 'warning' });
 const progressHeld = task => ['paused', 'pausing', 'stopping'].includes(executionState(task));
+const progressUnknown = task => task.status === 'running' && task.progress_known !== true;
+const progressValue = task => task.status === 'completed' ? 100 : task.status === 'running' && task.progress_known === true ? task.progress : 0;
 const statusIcon = task => ({ queued: 'mdi-clock-outline', running: 'mdi-progress-clock', paused: 'mdi-pause-circle-outline', pausing: 'mdi-pause-circle-outline', stopping: 'mdi-stop-circle-outline', completed: 'mdi-check-circle-outline', failed: 'mdi-alert-outline', cancelled: 'mdi-cancel', interrupted: 'mdi-alert-outline' }[executionState(task)] || 'mdi-help-circle-outline');
 const taskTitle = task => {
   const item = task.item_json;
@@ -87,14 +89,15 @@ const groups = computed(() => {
     values.get(key).tasks.push(task);
   }
   return [...values.values()].map(group => {
-    const completed = group.tasks.filter(task => task.status === 'completed').length;
-    return { ...group, completed, progress: 100 * completed / group.tasks.length };
+    return { ...group, progress: group.tasks.reduce((sum, task) => sum + progressValue(task), 0) / group.tasks.length,
+      unknown: group.tasks.some(progressUnknown), indeterminate: group.tasks.some(task => progressUnknown(task) && !progressHeld(task)) };
   });
 });
 const activeGroup = computed(() => groups.value.find(group => group.key === activeGroupKey.value));
 const activeItemModes = computed(() => new Set(props.queue.items.filter(task => ['queued', 'running'].includes(task.status)).map(task => task.item_id + ':' + task.mode)));
-const completedCount = computed(() => props.queue.items.filter(task => task.status === 'completed').length);
-const overallProgress = computed(() => props.queue.items.length ? 100 * completedCount.value / props.queue.items.length : 0);
+const overallProgress = computed(() => props.queue.items.length ? props.queue.items.reduce((sum, task) => sum + progressValue(task), 0) / props.queue.items.length : 0);
+const overallUnknown = computed(() => props.queue.items.some(progressUnknown));
+const overallIndeterminate = computed(() => props.queue.items.some(task => progressUnknown(task) && !progressHeld(task)));
 const pages = computed(() => Math.max(1, Math.ceil(props.queue.total / props.queue.pageSize)));
 const changePage = page => { props.queue.page = page; void props.queue.refresh(); };
 watch(groups, values => { if (!values.some(group => group.key === activeGroupKey.value)) activeGroupKey.value = values[0]?.key || ''; }, { immediate: true });

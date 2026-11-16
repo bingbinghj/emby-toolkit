@@ -35,6 +35,59 @@ fn text(data: &Value, field: &str, default: &str) -> String {
         .to_string()
 }
 
+fn positive_i32(value: &Value) -> Option<i32> {
+    let value = value.as_i64().or_else(|| value.as_str()?.parse().ok())?;
+    i32::try_from(value).ok().filter(|value| *value > 0)
+}
+
+fn rational(value: &Value) -> Option<(u64, u64)> {
+    let (numerator, denominator) = value.as_str()?.split_once(':')?;
+    let (numerator, denominator) = (numerator.parse().ok()?, denominator.parse().ok()?);
+    (numerator > 0 && denominator > 0).then_some((numerator, denominator))
+}
+
+pub(crate) fn normalized_aspect(value: &Value) -> Option<String> {
+    let (numerator, denominator) = rational(value)?;
+    let (mut left, mut right) = (numerator, denominator);
+    while right != 0 {
+        (left, right) = (right, left % right);
+    }
+    Some(format!("{}:{}", numerator / left, denominator / left))
+}
+
+fn video_aspect(raw: &Value, width: i64, height: i64) -> (String, bool) {
+    let sample = rational(&raw["sample_aspect_ratio"]);
+    let anamorphic = sample.is_some_and(|(numerator, denominator)| numerator != denominator);
+    if rational(&raw["display_aspect_ratio"]).is_some() {
+        return (string(raw, "display_aspect_ratio"), anamorphic);
+    }
+    if width > 0
+        && height > 0
+        && let Some((numerator, denominator)) = sample
+        && let (Some(numerator), Some(denominator)) = (
+            (width as u64).checked_mul(numerator),
+            (height as u64).checked_mul(denominator),
+        )
+    {
+        let (mut left, mut right) = (numerator, denominator);
+        while right != 0 {
+            (left, right) = (right, left % right);
+        }
+        return (
+            format!("{}:{}", numerator / left, denominator / left),
+            anamorphic,
+        );
+    }
+    (
+        if width > 0 && height > 0 {
+            format!("{width}:{height}")
+        } else {
+            String::new()
+        },
+        anamorphic,
+    )
+}
+
 // Emby 4.10.2 computes these readonly fields from the imported enum values.
 pub(crate) fn native_video_range_fields(
     extended_type: &str,
@@ -76,9 +129,11 @@ pub(crate) fn native_internal_subtitle_fields(codec: &str, index: i64) -> (bool,
     let codec = codec.to_lowercase();
     let text = !codec.is_empty()
         && !["dvb_teletext", "dvb_subtitle", "dvbsub", "dvd_subtitle", "dvdsub",
-            "hdmv_pgs_subtitle", "pgssub", "xsub", "sub", "sup"].contains(&codec.as_str())
+            "hdmv_pgs_subtitle", "pgssub", "xsub", "sub", "sup",
+        ].contains(&codec.as_str())
         && !codec.contains("pgs") && !codec.contains("dvbsub");
-    (text, if index >= 100 { "VideoSideData" } else { "InternalStream" })
+    (text, if index >= 100 { "VideoSideData" } else { "InternalStream" },
+    )
 }
 
 pub fn build(probe: &Value, node: &Value, mappings: &Value) -> Option<Value> {
@@ -126,11 +181,12 @@ pub fn build(probe: &Value, node: &Value, mappings: &Value) -> Option<Value> {
         let tags = &raw["tags"];
         let forced = integer(&raw["disposition"]["forced"]) != 0;
         let default = integer(&raw["disposition"]["default"]) != 0;
+        let hearing_impaired = integer(&raw["disposition"]["hearing_impaired"]) != 0;
         let index = raw
             .get("index")
             .map(integer)
             .unwrap_or(streams.len() as i64);
-        let mut stream = json!({"Codec":codec,"Index":index,"IsForced":forced,"Protocol":"File","TimeBase":text(&raw,"time_base","1/1000"),"IsDefault":default,"IsExternal":false,"IsInterlaced":false,"AttachmentSize":0,"ExtendedVideoType":"None","IsHearingImpaired":false,"ExtendedVideoSubType":"None","IsTextSubtitleStream":false,"SupportsExternalStream":false,"ExtendedVideoSubTypeDescription":"None"});
+        let mut stream = json!({"Codec":codec,"Index":index,"IsForced":forced,"Protocol":"File","TimeBase":text(&raw,"time_base","1/1000"),"IsDefault":default,"IsExternal":false,"IsInterlaced":false,"AttachmentSize":0,"ExtendedVideoType":"None","IsHearingImpaired":hearing_impaired,"ExtendedVideoSubType":"None","IsTextSubtitleStream":false,"SupportsExternalStream":false,"ExtendedVideoSubTypeDescription":"None"});
         match kind.as_str() {
             "video" => {
                 let width = integer(&raw["width"]);
@@ -220,7 +276,12 @@ pub fn build(probe: &Value, node: &Value, mappings: &Value) -> Option<Value> {
                 } else {
                     fps
                 };
-                let fields = json!({"Type":"Video","Level":integer(&raw["level"]),"Title":text(tags,"title",""),"Width":width,"Height":height,"BitRate":if integer(&raw["bit_rate"])==0{bitrate}else{integer(&raw["bit_rate"])},"Profile":text(&raw,"profile",""),"BitDepth":depth,"RefFrames":raw.get("refs").map(integer).unwrap_or(1),"ColorSpace":raw["colorspace"].as_str().or_else(||raw["color_space"].as_str()).unwrap_or(""),"VideoRange":video_range,"AspectRatio":if width!=0&&height!=0{format!("{width}:{height}")}else{String::new()},"PixelFormat":pixel,"DisplayTitle":([resolution,effect.into(),codec.to_uppercase()].iter().filter(|s|!s.is_empty()).cloned().collect::<Vec<_>>().join(" ")),"IsAnamorphic":false,"ColorTransfer":transfer,"RealFrameRate":fps,"AverageFrameRate":fps,"ColorPrimaries":primaries,"ExtendedVideoType":extended,"ExtendedVideoSubType":subtype,"ExtendedVideoSubTypeDescription":description});
+                let (aspect, anamorphic) = video_aspect(&raw, width, height);
+                let interlaced = matches!(
+                    string(&raw, "field_order").as_str(),
+                    "tt" | "bb" | "tb" | "bt"
+                );
+                let fields = json!({"Type":"Video","Level":integer(&raw["level"]),"Title":text(tags,"title",""),"Width":width,"Height":height,"BitRate":if integer(&raw["bit_rate"])==0{bitrate}else{integer(&raw["bit_rate"])},"Profile":text(&raw,"profile",""),"BitDepth":depth,"RefFrames":positive_i32(&raw["refs"]),"ColorSpace":raw["colorspace"].as_str().or_else(||raw["color_space"].as_str()).unwrap_or(""),"VideoRange":video_range,"AspectRatio":aspect,"PixelFormat":pixel,"DisplayTitle":([resolution,effect.into(),codec.to_uppercase()].iter().filter(|s|!s.is_empty()).cloned().collect::<Vec<_>>().join(" ")),"IsAnamorphic":anamorphic,"IsInterlaced":interlaced,"ColorTransfer":transfer,"RealFrameRate":fps,"AverageFrameRate":fps,"ColorPrimaries":primaries,"ExtendedVideoType":extended,"ExtendedVideoSubType":subtype,"ExtendedVideoSubTypeDescription":description});
                 stream
                     .as_object_mut()
                     .unwrap()
@@ -233,7 +294,7 @@ pub fn build(probe: &Value, node: &Value, mappings: &Value) -> Option<Value> {
                     tags["title"].as_str().unwrap_or(""),
                     capital,
                     tags["DisplayTitle"].as_str().unwrap_or(""),
-                    tags["IsHearingImpaired"] == true,
+                    hearing_impaired,
                     mappings,
                 );
                 let title = text(tags, "title", "");
@@ -252,22 +313,23 @@ pub fn build(probe: &Value, node: &Value, mappings: &Value) -> Option<Value> {
                 };
                 if kind == "audio" {
                     let channels = integer(&raw["channels"]);
-                    let layout = match channels {
+                    let explicit_layout = string(&raw, "channel_layout");
+                    let layout = if !explicit_layout.trim().is_empty() {
+                        explicit_layout
+                            .split('(')
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .to_string()
+                    } else {
+                        match channels {
                         8 => "7.1".into(),
                         7 => "6.1".into(),
                         6 => "5.1".into(),
                         2 => "stereo".into(),
                         1 => "mono".into(),
-                        _ => {
-                            if string(&raw, "channel_layout").is_empty() {
-                                if channels != 0 {
-                                    channels.to_string()
-                                } else {
-                                    String::new()
-                                }
-                            } else {
-                                string(&raw, "channel_layout").replace("(side)", "")
-                            }
+                        _ if channels != 0 => channels.to_string(),
+                            _ => String::new(),
                         }
                     };
                     let profile = string(&raw, "profile");
@@ -338,9 +400,57 @@ pub fn build(probe: &Value, node: &Value, mappings: &Value) -> Option<Value> {
                     // text formats and subtitles carried in video side data.
                     let (text, location) = native_internal_subtitle_fields(&codec, index);
                     stream["IsTextSubtitleStream"] = json!(text);
+                    stream["SupportsExternalStream"] = json!(text);
                     stream["SubtitleLocationType"] = json!(location);
+                    for (field, key) in [("Width", "width"), ("Height", "height")] {
+                        if let Some(value) = positive_i32(&raw[key]) {
+                            stream[field] = json!(value);
+                        }
+                    }
                 }
                 stream["DisplayTitle"] = json!(display_parts.join(" "));
+            }
+            "attachment" => {
+                let mut size = None;
+                for field in ["attachment_size", "extradata_size"] {
+                    if raw[field].is_null() {
+                        continue;
+                    }
+                    let current = raw[field]
+                        .as_i64()
+                        .or_else(|| raw[field].as_str()?.parse().ok())?;
+                    let current = i32::try_from(current).ok()?;
+                    if size.is_some_and(|previous| previous != current) {
+                        return None;
+                    }
+                    size = Some(current);
+                }
+                for (field, key) in [
+                    ("Path", "filename"),
+                    ("MimeType", "mimetype"),
+                    ("Title", "title"),
+                ] {
+                    stream[field] = if tags[key].is_null() {
+                        Value::Null
+                    } else {
+                        json!(tags[key].as_str()?)
+                    };
+                }
+                stream["Codec"] = if raw["codec_name"].is_null() {
+                    Value::Null
+                } else {
+                    json!(raw["codec_name"].as_str()?.to_lowercase())
+                };
+                if let Some(extension) = stream["Path"]
+                    .as_str()
+                    .and_then(|name| std::path::Path::new(name).extension())
+                    .and_then(|extension| extension.to_str())
+                    .filter(|extension| !extension.is_empty())
+                {
+                    stream["Codec"] = json!(extension.to_lowercase());
+                }
+                stream["Type"] = json!("Attachment");
+                stream["AttachmentSize"] = json!(size);
             }
             _ => continue,
         }

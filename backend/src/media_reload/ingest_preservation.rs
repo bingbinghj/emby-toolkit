@@ -16,6 +16,7 @@ pub(crate) struct Guard {
     parent: Value,
     scope: BTreeMap<String, Value>,
     selected_ids: Vec<String>,
+    require_clear_scope: bool,
 }
 
 fn observed_scope(members: &[Value]) -> BTreeMap<String, Value> {
@@ -144,9 +145,9 @@ fn metadata_binding_asset(original: &Value, current: &Value) -> bool {
             let valid = current[field].is_null() || if field == "source_library_id" {
                 current[field].is_string()
             } else {
-                current[field].as_array().is_some_and(|ids| ids.iter().all(|id| {
-                    id.as_str().is_some_and(|value| !value.is_empty())
-                }))
+                current[field].as_array().is_some_and(|ids| {
+                        ids.iter().all(|id| id.as_str().is_some_and(|value| !value.is_empty()))
+                    })
             };
             if !valid { return false; }
             original.as_object_mut().unwrap().remove(field);
@@ -171,8 +172,11 @@ async fn metadata_target_details(
     let mut checked = target.clone();
     checked.asset = target.asset.as_ref().map(|_| binding.asset.clone());
     let live = identity_details(state, &checked).await?;
-    if ["SeriesId", "ParentId"].iter().any(|field| before.get(*field).is_some_and(|value| *value != live[*field])) {
-        return Err(conflict("原媒体所属剧集或父项在元数据刷新期间变化，恢复材料已保留"));
+    if ["SeriesId", "ParentId"].iter().any(|field| {
+        before.get(*field).is_some_and(|value| *value != live[*field])
+    }) {
+        return Err(conflict("原媒体所属剧集或父项在元数据刷新期间变化，恢复材料已保留",
+        ));
     }
     if let Some(original) = &target.asset {
         let added_library = string(original, "source_library_id").is_empty()
@@ -191,7 +195,8 @@ async fn metadata_target_details(
                 let (parents, guid) = if item["Type"] == "Movie" {
                     crate::emby::ancestor_context(state, &item, Some(&library)).await
                 } else { (std::collections::HashMap::new(), String::new()) };
-                let parsed = crate::assets::parse_with_cache(&item, &parents, &guid, &json!([]), &Value::Null);
+                let parsed = crate::assets::parse_with_cache(&item, &parents, &guid, &json!([]), &Value::Null,
+                );
                 if parsed["ancestor_ids"] != binding.asset["ancestor_ids"] {
                     return Err(conflict("新增祖先绑定与原生媒体树不一致"));
                 }
@@ -232,7 +237,7 @@ pub(crate) async fn finish_saved_guard(
             saved["asset"] = json!(checked.asset);
         }
     }
-    let (targets, requested) = prepare_recovery_json(state, recovery, &record, None).await?;
+    let (targets, requested) = prepare_recovery_json(state, recovery, &record).await?;
     let owners = targets
         .iter()
         .map(|target| target.id.clone())
@@ -296,6 +301,7 @@ pub(crate) async fn finish_saved_guard(
         parent: Value::Null,
         scope: BTreeMap::new(),
         selected_ids: vec![],
+        require_clear_scope: record["require_clear_scope"] != false,
     };
     let finishing = JobContext::for_recovery(Some(context)).await;
     let pending = recovery.join("pending-scan.json");
@@ -422,8 +428,10 @@ impl Guard {
                     "原媒体流、章节或身份在入库刷新准备期间变化，备份已保留",
                 ));
             }
-            ensure_single_clear_scope_prepared(state, target, &live, context, &mut inventory)
+            if self.require_clear_scope {
+                ensure_single_clear_scope_prepared(state, target, &live, context, &mut inventory)
                 .await?;
+            }
         }
         for saved in self.files.values() {
             if tokio::fs::read(&saved.path).await? != snapshot_bytes(saved).await? {
@@ -500,7 +508,7 @@ pub(crate) async fn capture(
     context: &JobContext,
     recovery: &Path,
 ) -> Result<Guard> {
-    capture_inner(state, item, context, recovery, false, &[]).await
+    capture_inner(state, item, context, recovery, false, &[], true).await
 }
 
 pub(crate) async fn capture_strict(
@@ -509,7 +517,7 @@ pub(crate) async fn capture_strict(
     context: &JobContext,
     recovery: &Path,
 ) -> Result<Guard> {
-    capture_inner(state, item, context, recovery, true, &[]).await
+    capture_inner(state, item, context, recovery, true, &[], false).await
 }
 
 pub(crate) async fn capture_targets(
@@ -524,7 +532,7 @@ pub(crate) async fn capture_targets(
     } else {
         // A submitted subset refresh needs real JSON/stream recovery evidence
         // even when its selected episode has no chapter or BIF files yet.
-        capture_inner(state, item, context, recovery, true, selected_ids).await
+        capture_inner(state, item, context, recovery, true, selected_ids, true).await
     }
 }
 
@@ -535,6 +543,7 @@ async fn capture_inner(
     recovery: &Path,
     force_media: bool,
     selected_ids: &[String],
+    require_clear_scope: bool,
 ) -> Result<Guard> {
     context.checkpoint().await?;
     let connection = connection(&*state.config.read().await);
@@ -573,6 +582,7 @@ async fn capture_inner(
         parent: item.clone(),
         scope: observed_scope(&members),
         selected_ids: selected_ids.to_vec(),
+        require_clear_scope,
     };
     let mut json_files = vec![];
     let mut unused_bifs = BTreeMap::new();
@@ -654,7 +664,7 @@ async fn capture_inner(
         {
             continue;
         }
-        let binding = media_edit::repair_target(state, &id).await?;
+        let mut binding = media_edit::repair_target(state, &id).await?;
         if binding.path != target.path {
             return Err(conflict("入库原资源的媒体路径在准备期间变化，未提交刷新"));
         }
@@ -662,6 +672,13 @@ async fn capture_inner(
         target.source = crate::media_paths::strm_target(&target.path).await;
         target.sha = binding.sha.clone();
         target.asset = (!binding.kind.is_empty()).then_some(binding.asset.clone());
+        if !require_clear_scope {
+            // This snapshot protects existing resources during metadata-only
+            // refresh. It does not accept them as a completed new-file import.
+            if let Some(asset) = binding.asset.as_object_mut() {
+                asset.remove("moviepilot_media_pending");
+            }
+        }
         target.info = media_info::restore_json(&media_edit::load(state, &binding).await?)?;
         let live = identity_details(state, &target).await?;
         media_info::preserve_live_streams(
@@ -670,7 +687,9 @@ async fn capture_inner(
             &[&target.path, target.source.as_deref().unwrap_or("")],
         )?;
         media_info::preserve_chapters(&mut target.info, &live["Chapters"])?;
-        ensure_single_clear_scope_prepared(state, &target, &live, context, &mut inventory).await?;
+        if require_clear_scope {
+            ensure_single_clear_scope_prepared(state, &target, &live, context, &mut inventory).await?;
+        }
         let has_images = media_edit::list(&live["Chapters"])
             .iter()
             .any(|chapter| !string(chapter, "ImageTag").is_empty());
@@ -736,7 +755,7 @@ async fn capture_inner(
     }
     if guard.protected() {
         let record = json!({"target_ids":guard.targets.iter().map(|target| &target.id).collect::<Vec<_>>(),
-            "preparation_kind":"ingest-resource-guard","owner_task_id":context.id,"selected_ids":selected_ids,
+            "preparation_kind":"ingest-resource-guard","owner_task_id":context.id,"selected_ids":selected_ids,"require_clear_scope":require_clear_scope,
             "connection_sha256":format!("{:x}",Sha256::digest(guard.connection.to_string().as_bytes())),
             "refresh_parent":{"Id":guard.parent["Id"],"Type":guard.parent["Type"],"Path":guard.parent["Path"]},
             "refresh_ancestors":refresh_ancestors,

@@ -127,7 +127,8 @@ fn legacy_video_fields(stream: &Value) -> bool {
         || stream["ExtendedVideoType"] == "DolbyVision"
             && (stream["VideoRange"] == "DolbyVision HDR10"
                 || ["DoviProfile1", "DoviProfile2", "DoviProfile3", "DoviProfile4",
-                    "DoviProfile5", "DoviProfile6", "DoviProfile7", "DoviProfile8", "DoviProfile9"]
+                    "DoviProfile5", "DoviProfile6", "DoviProfile7", "DoviProfile8", "DoviProfile9",
+                ]
                     .contains(&stream["ExtendedVideoSubType"].as_str().unwrap_or("")))
 }
 
@@ -192,6 +193,7 @@ fn repair_cached_subtitle_fields(mut info: Value) -> Value {
             let Some(index) = stream["Index"].as_i64().filter(|index| i32::try_from(*index).is_ok()) else { continue; };
             let (text, location) = crate::probe::native_internal_subtitle_fields(codec, index);
             stream["IsTextSubtitleStream"] = json!(text);
+            stream["SupportsExternalStream"] = json!(text);
             stream["SubtitleLocationType"] = json!(location);
         }
     }
@@ -424,7 +426,8 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
                 .cloned()
                 .unwrap_or_else(|| crate::media_order::key(&json!({"Name":path.to_string_lossy()})))
         });
-        context.save_plan("media-restore-files", &json!({"assets":assets,"labels":labels})).await?;
+        context.save_plan("media-restore-files", &json!({"assets":assets,"labels":labels}),
+            ).await?;
         assets
     };
     let total = assets.len();
@@ -658,14 +661,16 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
         let body =
             json!({"mediainfo":full_rebuilt[&first],"target_item_ids":ids,"stream_patches":[]});
         let saved = if let Some(previous) = context.completed("media-restore-full-save").await? {
-            Ok((previous["status"].as_u64().unwrap_or(500) as u16, previous["report"].clone()))
+            Ok((previous["status"].as_u64().unwrap_or(500) as u16, previous["report"].clone(),
+            ))
         } else {
             crate::media_save::save_with_rebuilt(state, &first, &body, &full_rebuilt, context).await
         };
         match saved {
             Ok((status, report)) => {
                 if status < 400 && report["failures"].as_array().is_none_or(Vec::is_empty) {
-                    let task_result = restore_report(updated + full_paths.len(), &ids, &pending_import, &[], &report, &[]);
+                    let task_result = restore_report(updated + full_paths.len(), &ids, &pending_import, &[], &report, &[],
+                    );
                     context.complete("media-restore-full-save", &json!({"status":status,"report":report,"ids":ids,"task_result":task_result})).await?;
                     updated += full_paths.len();
                     verified_ids.extend(ids);
@@ -689,7 +694,8 @@ async fn restore_files(state: &AppState, full: bool, context: &JobContext) -> Re
             Err(error) => failures.push(format!("本地 JSON 已恢复，原生导入尚未确认：{}", error.1)),
         }
     }
-    let report = restore_report(updated, &verified_ids, &pending_import, &deferred_ids, &full_report, &failures);
+    let report = restore_report(updated, &verified_ids, &pending_import, &deferred_ids, &full_report, &failures,
+    );
     if failures.is_empty() {
         context.complete("media-restore-result", &report).await?;
     }
@@ -753,7 +759,8 @@ async fn restore_imports(
             )));
         }
         let live =
-            crate::media_edit::details(state, id, "Id,Path,Size,MediaSources,MediaStreams,Chapters").await?;
+            crate::media_edit::details(state, id, "Id,Path,Size,MediaSources,MediaStreams,Chapters",
+        ).await?;
         if live["Id"] != *id || string(&live, "Path") != target.path {
             return Err(ApiError::bad(format!(
                 "{id}：恢复前 Emby 路径或身份变化，未启动导入"
@@ -761,10 +768,12 @@ async fn restore_imports(
         }
         crate::identity::verify(&json!({"size_bytes":live["Size"]}), &target.info)?;
         let chapters = &crate::media_info::object(&target.info).unwrap()["Chapters"];
-        if crate::media_info::stream_differences(&target.info, &live, &[&target.path, &target.source]).is_empty()
+        if crate::media_info::stream_differences(&target.info, &live, &[&target.path, &target.source],
+        ).is_empty()
             && crate::media_info::chapters_restored(chapters, &live["Chapters"])
         {
-            context.complete(&completion_key, &json!({"path":target.path,"source":target.source})).await?;
+            context.complete(&completion_key, &json!({"path":target.path,"source":target.source}),
+                ).await?;
         } else {
             pending.insert(id.clone());
         }
@@ -811,7 +820,8 @@ async fn restore_imports(
                 differences.push("章节或片头片尾标记未恢复".into());
             }
             if differences.is_empty() {
-                context.complete(&format!("media-restore-import:{id}"), &json!({"path":path,"source":source})).await?;
+                context.complete(&format!("media-restore-import:{id}"), &json!({"path":path,"source":source}),
+                    ).await?;
                 pending.remove(&id);
             } else {
                 last = format!("{id}：{}", differences.join("；"));

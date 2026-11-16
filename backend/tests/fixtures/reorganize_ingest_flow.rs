@@ -446,6 +446,170 @@ async fn metadata_only_restart_keeps_original_related_resource_snapshot_after_a_
     fixture.close().await;
 }
 
+async fn current_reorganize_fixture() -> Fixture {
+    let mut fixture = Fixture::new(&["complete"], false, false).await;
+    fixture.configure_cloud_wash().await;
+    fixture
+        .cloud_version("10001", &"A".repeat(40), "hevc")
+        .await;
+    sqlx::query("UPDATE p115_mediainfo_cache SET raw_ffprobe_json=jsonb_set(raw_ffprobe_json,'{format,duration}','\"120\"') WHERE sha1=$1")
+        .bind("A".repeat(40)).execute(&fixture.state.db).await.unwrap();
+    configure_ingest_metadata(&fixture, "101").await;
+    fixture
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; all media and metadata APIs stay localhost"]
+async fn moviepilot_remote_media_without_etag_enters_native_ingestion_without_a_field_stage() {
+    let fixture = current_reorganize_fixture().await;
+    let metadata = prepare_reorganize_chain(&fixture, false).await;
+    fixture.state.save_config(&json!({"monitor_sha1_pc_search":false,
+        "auto_extract_intro_fingerprint_on_ingest":false,"auto_extract_credits_on_ingest":false,
+        "auto_extract_video_thumbnails_on_ingest":false})).await.unwrap();
+    // An ordinary HTTP source is not required to support HEAD or ETag.
+    let source = "http://127.0.0.1:9/native-fixture.mkv";
+    std::fs::write(fixture.files[0].as_str().unwrap(), source).unwrap();
+    fixture.host.items.lock().await.get_mut("101").unwrap()["MediaSources"][0]["Path"] = json!(source);
+    let before = *fixture.host.info_runs.lock().await;
+    let event = json!({"source":"moviepilot","media_type":"series","tmdb_id":"101",
+        "files":[fixture.files[0]],"batch_key":"remote-no-etag"});
+    let result = fixture.run_moviepilot_event(event).await;
+    assert_eq!(result["state"], "completed", "{result}");
+    assert_eq!(*fixture.host.info_runs.lock().await, before + 1);
+    assert!(fixture.host.sync_imports.lock().await.is_empty());
+    assert!(fixture.host.file_imports.lock().await.is_empty());
+    assert!(!result["result"]["warning_details"].to_string().contains("字段补充"), "{result}");
+    metadata.abort();
+    fixture.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; missing native technical fields stay localhost"]
+async fn reorganize_missing_native_technical_fields_does_not_add_a_field_stage_or_reminders() {
+    let fixture = current_reorganize_fixture().await;
+    let metadata = prepare_reorganize_chain(&fixture, false).await;
+    {
+        let mut items = fixture.host.items.lock().await;
+        let item = items.get_mut("101").unwrap();
+        for stream in item["MediaStreams"].as_array_mut().unwrap() {
+            for field in ["Title", "RefFrames", "AspectRatio", "ColorSpace", "ColorTransfer", "ColorPrimaries", "VideoRange"] {
+                stream.as_object_mut().unwrap().remove(field);
+            }
+        }
+        item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
+    }
+    let before_json = std::fs::read(fixture.sidecar_path()).unwrap();
+    let row = public_reorganize_queue(&fixture).await;
+    assert_eq!(row["status"], "completed", "{row}");
+    assert_eq!(row["result"]["finalization"]["metadata_refresh"]["completed"], true, "{row}");
+    assert!(!row["result"]["warning_details"].to_string().contains("字段补充"), "{row}");
+    assert!(fixture.host.sync_imports.lock().await.is_empty());
+    assert!(fixture.host.file_imports.lock().await.is_empty());
+    assert_eq!(std::fs::read(fixture.sidecar_path()).unwrap(), before_json);
+    metadata.abort();
+    fixture.close().await;
+}
+
+async fn configure_ingest_metadata(fixture: &Fixture, id: &str) {
+    let guid = uuid::Uuid::new_v4().simple().to_string();
+    let root = fixture._directory.path().join("metadata");
+    std::fs::create_dir_all(root.join("library").join(&guid[..2]).join(&guid)).unwrap();
+    fixture.host.items.lock().await.get_mut(id).unwrap()["Guid"] = json!(guid);
+    fixture
+        .state
+        .save_config(&json!({"emby_metadata_path":root}))
+        .await
+        .unwrap();
+}
+
+async fn emby_untitled_admission(event_name: &str, pending: bool) {
+    let fixture = current_reorganize_fixture().await;
+    let metadata = prepare_reorganize_chain(&fixture, false).await;
+    fixture
+        .state
+        .save_config(&json!({"p115_generate_mediainfo":true,
+        "auto_fill_language_titles_on_ingest":true,"auto_extract_intro_fingerprint_on_ingest":false,
+        "auto_extract_credits_on_ingest":false,"auto_extract_video_thumbnails_on_ingest":false,
+        "monitor_sha1_pc_search":false}))
+        .await
+        .unwrap();
+    let mut info: Value =
+        serde_json::from_slice(&std::fs::read(fixture.sidecar_path()).unwrap()).unwrap();
+    for stream in info[0]["MediaSourceInfo"]["MediaStreams"]
+        .as_array_mut()
+        .unwrap()
+    {
+        if matches!(stream["Type"].as_str(), Some("Video" | "Audio")) {
+            stream["Title"] = json!("");
+        }
+    }
+    {
+        let mut items = fixture.host.items.lock().await;
+        import_fixture_info(items.get_mut("101").unwrap(), &info);
+    }
+    std::fs::write(fixture.sidecar_path(), serde_json::to_vec(&info).unwrap()).unwrap();
+    sqlx::query("UPDATE p115_mediainfo_cache SET mediainfo_json=$1 WHERE sha1=$2")
+        .bind(&info)
+        .bind("A".repeat(40))
+        .execute(&fixture.state.db)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE media_metadata SET asset_details_json=jsonb_set(asset_details_json,'{0,moviepilot_media_pending}',$1::jsonb) WHERE tmdb_id='1011' AND item_type='Episode'")
+        .bind(json!(pending)).execute(&fixture.state.db).await.unwrap();
+    let event = json!({"id":"301","episode_ids":["101"],"event":event_name,
+        "source":"emby","original":{"Id":"101","Type":"Episode"}});
+    let work = fixture.state.clone();
+    let task = fixture
+        .state
+        .jobs
+        .submit("Emby 空标题入库回归", move |context| async move {
+            Box::pin(webhook::process_emby(&work, &event, &context)).await
+        })
+        .await
+        .unwrap();
+    let result = fixture.wait_for_job(&task).await;
+    let current = fixture.host.items.lock().await["101"].clone();
+    let still_pending: bool = sqlx::query_scalar("SELECT COALESCE((asset_details_json->0->>'moviepilot_media_pending')::boolean,false) FROM media_metadata WHERE tmdb_id='1011' AND item_type='Episode'")
+        .fetch_one(&fixture.state.db).await.unwrap();
+    metadata.abort();
+    fixture.close().await;
+    assert_eq!(result["state"], "completed", "{event_name}: {result}");
+    assert_eq!(
+        result["result"]["finalization"]["metadata_refresh"]["completed"], true,
+        "{result}"
+    );
+    assert_eq!(
+        result["result"]["finalization"]["title_fill"]["completed"], true,
+        "{result}"
+    );
+    assert!(
+        current["MediaStreams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|stream| {
+                stream["Type"] == "Audio" && !stream["Title"].as_str().unwrap_or("").is_empty()
+            }),
+        "title filling follows admission: {current}"
+    );
+    assert!(
+        !still_pending,
+        "an Emby retry must finish the pending media stage"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; actual Emby item.add and title filling stay localhost"]
+async fn emby_item_add_accepts_untitled_tracks_and_runs_title_filling() {
+    emby_untitled_admission("item.add", false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; actual Emby library.new resumes a pending local media stage"]
+async fn emby_library_new_accepts_untitled_tracks_and_retries_pending_ingestion() {
+    emby_untitled_admission("library.new", true).await;
+}
+
 async fn prepare_reorganize_chain(fixture: &Fixture, titles: bool) -> tokio::task::JoinHandle<()> {
     fixture.configure_series_chain().await;
     fixture
@@ -459,6 +623,17 @@ async fn prepare_reorganize_chain(fixture: &Fixture, titles: bool) -> tokio::tas
         initial["state"], "completed",
         "prepare current media through the real ingestion entry: {initial}"
     );
+    // Native extraction leaves these already imported files unchanged.
+    // Do not replay the fixture's initial sample over E200 or edited fields.
+    fixture.host.native_generated_info.lock().await.clear();
+    // The organizer receives previously ingested content with a valid marker.
+    let mut info: Value = serde_json::from_slice(&std::fs::read(fixture.sidecar_path()).unwrap()).unwrap();
+    let marker = json!({"Name":"片尾","MarkerType":"CreditsStart","StartPositionTicks":750_000_000_u64});
+    if !info[0]["Chapters"].as_array().unwrap().iter().any(|chapter| chapter["MarkerType"]=="CreditsStart") {
+        info[0]["Chapters"].as_array_mut().unwrap().push(marker.clone());
+        fixture.host.items.lock().await.get_mut("101").unwrap()["Chapters"].as_array_mut().unwrap().push(marker);
+        std::fs::write(fixture.sidecar_path(), serde_json::to_vec(&info).unwrap()).unwrap();
+    }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}/tmdb", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -538,7 +713,7 @@ async fn public_reorganize_queue(fixture: &Fixture) -> Value {
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL; all ingestion, metadata and native tasks stay localhost"]
 async fn reorganize_public_queue_runs_complete_ingestion_and_configured_native_stages() {
-    let fixture = Fixture::new(&["complete"], false, false).await;
+    let fixture = current_reorganize_fixture().await;
     let metadata = prepare_reorganize_chain(&fixture, false).await;
     let row = public_reorganize_queue(&fixture).await;
     assert_eq!(row["status"], "completed", "{row}");
@@ -585,7 +760,7 @@ async fn reorganize_public_queue_runs_complete_ingestion_and_configured_native_s
         .fetch_one(&fixture.state.db).await.unwrap();
     assert_eq!(
         marked["id"], "101",
-        "completion requires final native readback: {row}"
+        "completion follows the original native ingestion stages: {row}"
     );
     let info: Value =
         serde_json::from_slice(&std::fs::read(fixture.sidecar_path()).unwrap()).unwrap();
@@ -602,10 +777,31 @@ async fn reorganize_public_queue_runs_complete_ingestion_and_configured_native_s
 }
 
 #[tokio::test]
+#[ignore = "requires disposable PostgreSQL; a fresh organizer attempt reruns native extraction and the complete ingestion workflow"]
+async fn reorganize_previously_completed_media_reruns_media_import_and_configured_ingestion() {
+    let fixture = current_reorganize_fixture().await;
+    let metadata = prepare_reorganize_chain(&fixture, false).await;
+    let before = *fixture.host.info_runs.lock().await;
+    let result = public_reorganize_queue(&fixture).await;
+    let after = *fixture.host.info_runs.lock().await;
+    let starts = fixture.host.native_starts.lock().await.clone();
+    metadata.abort();
+    fixture.close().await;
+    assert_eq!(result["status"], "completed", "{result}");
+    assert_eq!(after, before + 1,
+        "a new organizer request reruns the original native media extraction: {result}");
+    assert_eq!(starts, vec!["intro", "thumb"]);
+    assert_eq!(
+        result["result"]["finalization"]["metadata_refresh"]["completed"],
+        true
+    );
+}
+
+#[tokio::test]
 #[ignore = "requires disposable PostgreSQL; all ingestion and native requests stay localhost"]
-async fn reorganize_public_queue_rejects_native_drift_after_automatic_processing_without_success_marker()
+async fn reorganize_public_queue_does_not_add_field_reminders_to_completed_ingestion()
  {
-    let fixture = Fixture::new(&["complete"], false, false).await;
+    let fixture = current_reorganize_fixture().await;
     let metadata = prepare_reorganize_chain(&fixture, false).await;
     sqlx::query("UPDATE media_metadata SET asset_details_json=jsonb_set(asset_details_json,'{0,moviepilot_ingest_identity}','null') WHERE tmdb_id='1011' AND item_type='Episode'")
         .execute(&fixture.state.db).await.unwrap();
@@ -614,7 +810,8 @@ async fn reorganize_public_queue_rejects_native_drift_after_automatic_processing
         .corrupt_size_on_native_start
         .store(true, Ordering::SeqCst);
     let row = public_reorganize_queue(&fixture).await;
-    assert_eq!(row["status"], "failed", "{row}");
+    assert_eq!(row["status"], "completed", "{row}");
+    assert!(!row["result"]["warning_details"].to_string().contains("字段补充"), "{row}");
     assert!(
         fixture
             .host
@@ -627,7 +824,7 @@ async fn reorganize_public_queue_rejects_native_drift_after_automatic_processing
     );
     let marked: Value = sqlx::query_scalar("SELECT asset_details_json->0->'moviepilot_ingest_identity' FROM media_metadata WHERE tmdb_id='1011' AND item_type='Episode'")
         .fetch_one(&fixture.state.db).await.unwrap();
-    assert!(marked.is_null(), "{marked}");
+    assert_eq!(marked["id"], "101", "{marked}");
     metadata.abort();
     fixture.close().await;
 }
@@ -635,7 +832,7 @@ async fn reorganize_public_queue_rejects_native_drift_after_automatic_processing
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL; all ingestion, metadata and native requests stay localhost"]
 async fn reorganize_public_queue_does_not_extract_when_actual_final_refresh_fails() {
-    let fixture = Fixture::new(&["complete"], false, false).await;
+    let fixture = current_reorganize_fixture().await;
     let metadata = prepare_reorganize_chain(&fixture, false).await;
     fixture
         .host
@@ -664,7 +861,7 @@ async fn reorganize_public_queue_does_not_extract_when_actual_final_refresh_fail
 #[ignore = "requires disposable PostgreSQL; unfinished reorder/recovery only checks existing localhost media"]
 async fn reorganize_restart_reuses_verified_stages_and_cleans_uuid_recovery_without_repeating_native_work()
  {
-    let fixture = Fixture::new(&["complete"], false, false).await;
+    let fixture = current_reorganize_fixture().await;
     let metadata = prepare_reorganize_chain(&fixture, false).await;
     let row = public_reorganize_queue(&fixture).await;
     assert_eq!(row["status"], "completed", "{row}");
@@ -709,9 +906,10 @@ async fn reorganize_restart_reuses_verified_stages_and_cleans_uuid_recovery_with
         .bind(task).execute(&fixture.state.db).await.unwrap();
     sqlx::query("UPDATE media_organize_queue SET status='running',result=NULL,completed_at=NULL WHERE id=$1")
         .bind(row["id"].as_str().unwrap()).execute(&fixture.state.db).await.unwrap();
-    let restarted = AppState::new(fixture.state.db.clone(), fixture.state.data_dir.clone())
+    let mut restarted = AppState::new(fixture.state.db.clone(), fixture.state.data_dir.clone())
         .await
         .unwrap();
+    restarted.p115 = fixture.state.p115.clone();
     tokio::time::timeout(
         Duration::from_secs(60),
         restarted.jobs.resume_pending(
@@ -749,9 +947,9 @@ async fn reorganize_restart_reuses_verified_stages_and_cleans_uuid_recovery_with
         resumed_notices, notices,
         "resume must not register a duplicate notification"
     );
-    let finished: Vec<String> = sqlx::query_scalar("SELECT step_key FROM durable_job_steps WHERE job_id=$1 AND step_key LIKE 'completed:organize-ingest:finished:%'")
+    let finished: Vec<String> = sqlx::query_scalar("SELECT step_key FROM durable_job_steps WHERE job_id=$1 AND step_key LIKE 'completed:moviepilot_finished:%'")
         .bind(task).fetch_all(&fixture.state.db).await.unwrap();
-    assert_eq!(finished, vec!["completed:organize-ingest:finished:101"]);
+    assert_eq!(finished, vec!["completed:moviepilot_finished:101"]);
     metadata.abort();
     fixture.close().await;
 }

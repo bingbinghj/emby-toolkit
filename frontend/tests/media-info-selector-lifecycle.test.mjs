@@ -4,8 +4,8 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const page = readFileSync(new URL('../src/components/MediaEditPage.vue', import.meta.url), 'utf8');
-const start = page.indexOf('const handleMediaInfoButtonClick = ');
-const end = page.indexOf('\n};', start) + 4;
+const start = page.indexOf('const openEpisodeSelector = ');
+const end = page.indexOf('// 1. 获取语言映射表', start);
 const deferred = () => {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -17,6 +17,7 @@ function fixture() {
   const context = vm.createContext({
     itemId: { value: 'A' }, itemDetails: { value: { item_type: 'Series' } },
     showEpisodeSelector: { value: false }, isFetchingEpisodes: { value: false },
+    episodeSelectorMode: { value: 'edit' },
     episodesList: { value: [] }, selectedSeasonNumber: { value: null },
     episodeSeasonGroups: { value: [{ season_number: 1 }] }, selectedBatchVersionIndex: { value: null },
     mediaDetailsLoadSequence: 1, episodeSelectorLoadSequence: 0,

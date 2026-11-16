@@ -8,18 +8,20 @@ const result = {
 const summary = ({ result: _result, ...task }) => task;
 const saved = summary(result);
 const setup = api => {
+  api.respond('GET', '/api/tasks/available', [{ key: 'actor-translation', name: '翻译演员', category: 'metadata', category_name: '元数据' }]);
   api.setTask({ ...saved, history: [saved] });
   api.respond('GET', '/api/tasks/result/saved-task-A', result);
 };
 const resultReads = api => api.requests.filter(request => request.method === 'GET' && request.path === '/api/tasks/result/saved-task-A').length;
-const historyResult = page => page.getByTestId('scheduler-task-history').locator('[data-task-id="saved-task-A"]').getByRole('button', { name: '查看结果', exact: true });
+const cardResult = page => page.locator('[data-task-key="actor-translation"]').getByRole('button', { name: '查看结果', exact: true });
 
-test('reentering task center opens persisted failures and warnings from the original history task', async ({ page, api }) => {
+test('reentering task center opens persisted failures from the task card without a recent-task panel', async ({ page, api }) => {
   setup(api);
   await page.goto('/settings/scheduler');
   await expect(page.getByTestId('scheduler-current-task')).toHaveCount(0);
   await expect(page.getByText('Telegram 快捷菜单', { exact: true })).toBeVisible();
-  await historyResult(page).click();
+  await expect(page.getByTestId('scheduler-task-history')).toHaveCount(0);
+  await cardResult(page).click();
   let dialog = page.getByRole('dialog');
   await expect(dialog.getByTestId('scheduler-task-result')).toContainText('失败');
   await expect(dialog.getByTestId('scheduler-task-result')).toContainText('media-A：姓名译文缺失');
@@ -30,7 +32,8 @@ test('reentering task center opens persisted failures and warnings from the orig
   await page.goto('/dashboard');
   await page.goto('/settings/scheduler');
   await expect(page.getByTestId('scheduler-current-task')).toHaveCount(0);
-  await historyResult(page).click();
+  await expect(page.getByTestId('scheduler-task-history')).toHaveCount(0);
+  await cardResult(page).click();
   dialog = page.getByRole('dialog');
   await expect(dialog.getByTestId('scheduler-task-result')).toContainText('media-A：姓名译文缺失');
   await expect(dialog.getByTestId('scheduler-task-result')).toContainText('图片暂未恢复');
@@ -39,12 +42,12 @@ test('reentering task center opens persisted failures and warnings from the orig
   await expect(dialog).toHaveCount(0);
 });
 
-test('the latest history result remains selected while a new current task starts', async ({ page, api }) => {
+test('the selected task-card result remains selected while a new current task starts', async ({ page, api }) => {
   setup(api);
   await page.goto('/settings/scheduler');
   await expect.poll(() => resultReads(api)).toBeGreaterThan(0);
   const pending = api.defer('GET', '/api/tasks/result/saved-task-A');
-  await historyResult(page).click();
+  await cardResult(page).click();
   await pending.started;
   api.setTask({ task_id: 'new-task-B', state: 'running', is_running: true, last_action: '备份媒体信息', current_action: '读取新媒体',
     progress: 20, progress_known: true, message: '新任务处理中', history: [saved], logs: [] });
@@ -57,12 +60,12 @@ test('the latest history result remains selected while a new current task starts
   await expect(dialog.getByTestId('scheduler-task-result')).toContainText('图片暂未恢复');
 });
 
-test('a result read failure can be retried inside the same history result dialog', async ({ page, api }) => {
+test('a result read failure can be retried inside the same task-card result dialog', async ({ page, api }) => {
   setup(api);
   api.respond('GET', '/api/tasks/result/saved-task-A', { error: '任务结果暂时无法读取' }, 503);
   await page.goto('/settings/scheduler');
   await expect(page.getByTestId('scheduler-current-task')).toHaveCount(0);
-  await historyResult(page).click();
+  await cardResult(page).click();
   const dialog = page.getByRole('dialog');
   await expect(dialog).toContainText('任务结果暂时无法读取');
   await expect(dialog.getByTestId('scheduler-task-result')).toHaveCount(0);

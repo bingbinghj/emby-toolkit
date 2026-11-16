@@ -72,8 +72,7 @@ test('single-episode extraction does not claim whole-library task progress', asy
   api.setTask({ ...completed, history: [completed] });
   await expect(row.getByText('待执行', { exact: true })).toBeVisible();
   await expect(row.getByRole('button', { name: '查看结果', exact: true })).toHaveCount(0);
-  await page.getByTestId('scheduler-task-history').locator('[data-task-id="single-episode-credits"]').getByRole('button', { name: '查看结果', exact: true }).click();
-  await expect(page.getByTestId('scheduler-task-result')).toContainText('当前集片尾已验收');
+  await expect(page.getByTestId('scheduler-task-history')).toHaveCount(0);
 });
 
 test('mobile tasks use MP cards and keep long names, help and rounded controls fully visible', async ({ page, api }) => {

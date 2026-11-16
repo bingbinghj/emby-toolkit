@@ -99,7 +99,7 @@ export function useMediaOrganizeQueue({ client = axios, onSettled = () => {} } =
         ? data?.item?.id === item.id && data.item.item_id === item.item_id && data.item.mode === item.mode && data.item.status === 'cancelled'
         : status === 202 && queueReceiptMatches(data, [item.item_id], item.mode);
       if (!confirmed) throw new Error('队列操作结果尚未确认，请重新检查');
-      queue.actionMessage = data?.message || (operation === 'cancel' ? '等待任务已取消' : '已重新加入整理队列');
+      queue.actionMessage = operation === 'cancel' ? data?.message || '等待任务已取消' : '';
       invalidateRequest();
       if (!active || session !== generation) return;
       await refresh();

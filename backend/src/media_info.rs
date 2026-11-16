@@ -2,6 +2,17 @@ use crate::error::{ApiError, Result};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+pub(crate) fn nullable_text_equal(expected: &Value, actual: &Value) -> bool {
+    expected == actual
+        || (expected == "" && actual.is_null())
+        || (expected.is_null() && actual == "")
+}
+
+pub(crate) fn aspect_equal(expected: &Value, actual: &Value) -> bool {
+    nullable_text_equal(expected, actual)
+        || matches!((crate::probe::normalized_aspect(expected), crate::probe::normalized_aspect(actual)), (Some(expected), Some(actual)) if expected == actual)
+}
+
 pub fn object(value: &Value) -> Option<&Value> {
     match value {
         Value::Object(_) => Some(value),

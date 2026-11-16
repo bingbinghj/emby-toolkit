@@ -220,6 +220,7 @@ async fn reused_subtitle_cache_recomputes_only_proven_internal_getters() {
     let after = f.read().await;
     let mut expected = info.clone();
     expected[0]["MediaSourceInfo"]["MediaStreams"][2]["IsTextSubtitleStream"] = json!(true);
+    expected[0]["MediaSourceInfo"]["MediaStreams"][2]["SupportsExternalStream"] = json!(true);
     expected[0]["MediaSourceInfo"]["MediaStreams"][2]["SubtitleLocationType"] =
         json!("VideoSideData");
     assert_eq!(task["state"], "completed", "{task}");
@@ -252,6 +253,48 @@ async fn reused_subtitle_cache_recomputes_only_proven_internal_getters() {
         assert_eq!(f.read().await, before);
     }
     f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; capability projection preserves editable track values"]
+async fn reused_internal_subtitle_cache_repairs_capability_without_rewriting_track_edits() {
+    for (codec, capability) in [
+        ("ASS", true),
+        ("SUBRIP", true),
+        ("TTML", true),
+        ("PGSSUB", false),
+    ] {
+        let f = Fixture::new().await;
+        let mut info =
+            emby_toolkit::probe::build(&raw_hdr(), &json!({"fn":"episode.mkv"}), &json!([]))
+                .unwrap();
+        info[0]["MediaSourceInfo"]["MediaStreams"][1]["ChannelLayout"] = json!("用户保留的布局");
+        info[0]["MediaSourceInfo"]["MediaStreams"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+            "Type":"Subtitle","Codec":codec,"Index":2,"IsExternal":false,
+            "IsTextSubtitleStream":capability,"SubtitleLocationType":"InternalStream",
+            "SupportsExternalStream":!capability,"IsHearingImpaired":true,
+            "Title":"用户字幕标题","Language":"chi","UserExtension":{"keep":true}}));
+        f.seed(&info, &Value::Null).await;
+        let before = f.read().await;
+        let task = f.restore().await;
+        let after = f.read().await;
+        f.close().await;
+        let mut expected = info;
+        expected[0]["MediaSourceInfo"]["MediaStreams"][2]["SupportsExternalStream"] =
+            json!(capability);
+        assert_eq!(task["state"], "completed", "{codec}: {task}");
+        assert_eq!(
+            task["result"], expected,
+            "{codec}: editable values must remain intact"
+        );
+        assert_eq!(
+            after, before,
+            "{codec}: repaired projection must not overwrite cache"
+        );
+    }
 }
 
 #[cfg(unix)]

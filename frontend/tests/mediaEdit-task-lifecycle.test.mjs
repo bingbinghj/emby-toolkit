@@ -121,6 +121,7 @@ test('a duplicate upload cannot submit another request or clear the first loadin
 
 test('navigating to another media closes the previous URL prompt', () => {
   const f = fixture('uploadImagePayload');
+  f.context.renameContextLoadSequence = 0;
   for (const name of ['showEpisodeSelector', 'showRenameEditor', 'showImageEditor', 'showAddActorModal', 'showTmdbSelector']) f.context[name] = { value: false };
   for (const name of ['imagePreview', 'tmdbImagesCache', 'creditsExtractionFeedback']) f.context[name] = { value: null };
   f.context.closeMediaInfoEditor = () => {};

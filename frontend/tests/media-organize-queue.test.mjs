@@ -267,7 +267,7 @@ test('a confirmed retry starts a fresh read without waiting for an abort-ignorin
   assert.equal(queue.items[0].id, 'queue-retry');
   assert.equal(queue.items[0].status, 'queued');
   assert.equal(queue.queuedCount, 1);
-  assert.equal(queue.actionMessage, '已重新入队');
+  assert.equal(queue.actionMessage, '');
   old.resolve({ data: snapshot([item('failed')]) }); await stale;
   assert.equal(queue.items[0].id, 'queue-retry');
   assert.equal(queue.queuedCount, 1);
@@ -411,5 +411,5 @@ test('restarting during an old retry releases its action lock without overwritin
   current.resolve(retryReceipt('新重试已入队')); await second;
   assert.equal(retries, 2);
   assert.equal(queue.actionId, '');
-  assert.equal(queue.actionMessage, '新重试已入队');
+  assert.equal(queue.actionMessage, '');
 });

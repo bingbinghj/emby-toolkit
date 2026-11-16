@@ -63,10 +63,33 @@ pub(crate) async fn run_organize_item(
     context: &JobContext,
 ) -> Result<Value> {
     match mode {
-        "reprocess" => Box::pin(reprocess_inner(state, id, "", context, true)).await,
+        "reprocess" => Box::pin(reorganize_ingest(state, id, context)).await,
         "rescrape" => Box::pin(crate::media_rescrape::run(state, id, context)).await,
         _ => Err(ApiError::bad("整理模式无效")),
     }
+}
+
+async fn reorganize_ingest(state: &AppState, id: &str, context: &JobContext) -> Result<Value> {
+    let requested = details(state, id, "Id,Type,Path,ProviderIds,SeriesId,ParentId").await?;
+    let ids = crate::revalidation::scope(state, id, context).await?;
+    let mut files = vec![];
+    for id in ids {
+        context.checkpoint().await?;
+        let item = details(state, &id, "Id,Type,Path").await?;
+        files.push(json!(string(&item, "Path")));
+    }
+    let item = series_parent(state, requested).await?;
+    let event = json!({"source":"moviepilot","files":files,
+        "tmdb_id":item["ProviderIds"]["Tmdb"],"episode_group":null,
+        "media_type":if item["Type"]=="Series" {"series"} else {"movie"}});
+    let mut report = crate::webhook::process_reorganize(state, &event, context).await?;
+    report["finalization"] = report["finalizations"][0]["report"].clone();
+    if crate::media_edit::list(&report["failures"]).is_empty() {
+        let warnings = report["warnings"].as_u64().unwrap_or(0);
+        report["message"] = json!(if warnings == 0 { "重新整理入库流程已完成".to_string() }
+            else { format!("重新整理入库流程已完成，有 {warnings} 条提醒") });
+    }
+    Ok(report)
 }
 
 async fn submit(
@@ -212,14 +235,13 @@ pub async fn reprocess(
     reason: &str,
     context: &JobContext,
 ) -> Result<Value> {
-    Box::pin(reprocess_inner(state, id, reason, context, false)).await
+    Box::pin(reprocess_inner(state, id, reason, context)).await
 }
 async fn reprocess_inner(
     state: &AppState,
     id: &str,
     reason: &str,
     context: &JobContext,
-    file_refresh: bool,
 ) -> Result<Value> {
     context.checkpoint().await?;
     let requested = details(
@@ -238,15 +260,7 @@ async fn reprocess_inner(
     if matches!(requested["Type"].as_str(), Some("Series" | "Season")) && ids.is_empty() {
         return Err(ApiError::bad("无法确定在库季集范围，禁止全季处理"));
     }
-    let bound_movie = requested["Type"] == "Movie"
-        && (!file_refresh
-            || sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM media_metadata WHERE emby_item_ids_json @> $1::jsonb)",
-            )
-            .bind(json!([id]))
-            .fetch_one(&state.db)
-            .await?);
-    if bound_movie {
+    if requested["Type"] == "Movie" {
         let target = crate::media_edit::target(state, id).await?;
         for version in target.versions {
             let version = string(&version, "emby_id");
@@ -256,50 +270,7 @@ async fn reprocess_inner(
         }
     }
     let mut rebuilt = std::collections::BTreeMap::new();
-    let mut current_identities = vec![];
-    if file_refresh {
-        // Reorganize must inspect the current entity, rather than rebuilding
-        // an old raw-ffprobe cache under an unchanged FUSE path or Item ID.
-        for asset in &ids {
-            let current = details(
-                state,
-                asset,
-                "Id,Type,Name,Path,Size,MediaSources,MediaStreams,Chapters",
-            )
-            .await?;
-            if current["Id"] != asset.as_str()
-                || !matches!(current["Type"].as_str(), Some("Movie" | "Episode"))
-            {
-                return Err(ApiError::bad("重新整理的原生媒体身份或类型未确认"));
-            }
-            let identity = crate::moviepilot_ingest::observe(state, &current, context).await?;
-            current_identities.push(identity);
-        }
-        let selection = json!(
-            current_identities
-                .iter()
-                .map(|identity| (identity.id.clone(), identity.revision()))
-                .collect::<std::collections::BTreeMap<_, _>>()
-        );
-        if let Some(original) = context.plan("organize-current-identities").await? {
-            if original != selection {
-                return Err(ApiError::bad(
-                    "重新整理的原文件实体在中断期间变化，未继续原入库流程",
-                ));
-            }
-        } else {
-            context
-                .save_plan("organize-current-identities", &selection)
-                .await?;
-        }
-        for identity in &current_identities {
-            Box::pin(crate::moviepilot_ingest::ensure_media(
-                state, identity, context,
-            ))
-            .await?;
-        }
-    } else {
-        for asset in &ids {
+    for asset in &ids {
             context.checkpoint().await?;
             let target = crate::media_edit::target(state, asset).await?;
             let final_path = sidecar(state, &target).await?;
@@ -364,7 +335,6 @@ async fn reprocess_inner(
                 rebuilt.insert(asset.clone(), info);
             }
         }
-    }
     if missing {
         return crate::ingest::feedback(state, id, &ids, true, context).await;
     }
@@ -372,31 +342,14 @@ async fn reprocess_inner(
     let mut rebuild_warning_details = vec![];
     if let Some(first) = rebuilt.keys().next() {
         let body = json!({"mediainfo":rebuilt[first],"target_item_ids":ids,"stream_patches":[]});
-        let (status, result) = if file_refresh {
-            Box::pin(crate::media_save::save_rebuilt_files(
+        let (status, result) = Box::pin(crate::media_save::save_with_rebuilt(
                 state, first, &body, &rebuilt, context,
             ))
-            .await?
-        } else {
-            Box::pin(crate::media_save::save_with_rebuilt(
-                state, first, &body, &rebuilt, context,
-            ))
-            .await?
-        };
+            .await?;
         ensure_rebuild_completed(status, &result)?;
         rebuild_warnings = result["warnings"].as_u64().unwrap_or(0);
         rebuild_warning_details = crate::media_edit::list(&result["warning_details"]);
     }
-    let requested = if file_refresh {
-        details(
-            state,
-            id,
-            "Id,Name,Type,Path,People,ProviderIds,Genres,MediaSources,SeriesId,ParentId",
-        )
-        .await?
-    } else {
-        requested
-    };
     let single_episode = requested["Type"] == "Episode";
     let item = series_parent(state, requested).await?;
     let episodes = if item["Type"] == "Series" {
@@ -404,26 +357,12 @@ async fn reprocess_inner(
     } else {
         vec![]
     };
-    let completed_metadata = if file_refresh {
-        context.completed("organize-metadata-result").await?
-    } else {
-        None
-    };
-    let mut result = if let Some(report) = completed_metadata {
-        report
-    } else if single_episode {
+    let mut result = if single_episode {
         Box::pin(scrape_episode_scope(
             state,
             &item,
             &episodes,
-            context,
-            !file_refresh,
-        ))
-        .await?
-    } else if file_refresh {
-        Box::pin(crate::ingest::scrape_for_ingest(
-            state, &item, &episodes, None, context,
-        ))
+            context, true))
         .await?
     } else {
         Box::pin(crate::ingest::scrape(
@@ -431,37 +370,6 @@ async fn reprocess_inner(
         ))
         .await?
     };
-    if file_refresh {
-        context
-            .complete("organize-metadata-result", &result)
-            .await?;
-        if result["status"] != "ignored_library" {
-            for identity in &current_identities {
-                crate::moviepilot_ingest::remember_initial(state, identity, context).await?;
-            }
-            let finalization = Box::pin(crate::webhook::finalize_reorganize_ingest(
-                state,
-                &item,
-                &episodes,
-                &current_identities,
-                context,
-            ))
-            .await?;
-            let warnings = result["warnings"].as_u64().unwrap_or(0)
-                + finalization["warnings"].as_u64().unwrap_or(0);
-            let mut details = crate::media_edit::list(&result["warning_details"]);
-            details.extend(crate::media_edit::list(&finalization["warning_details"]));
-            result["finalization"] = finalization["finalization"].clone();
-            result["automatic_extraction"] = finalization["automatic_extraction"].clone();
-            result["warnings"] = json!(warnings);
-            result["warning_details"] = json!(details);
-            result["message"] = json!(if warnings == 0 {
-                "重新整理入库完成，媒体信息、元数据及入库收尾已验收".to_string()
-            } else {
-                format!("重新整理入库完成，有 {warnings} 条后处理提醒，请查看任务结果")
-            });
-        }
-    }
     if rebuild_warnings > 0 || !rebuild_warning_details.is_empty() {
         result["warnings"] = json!(result["warnings"].as_u64().unwrap_or(0) + rebuild_warnings);
         let mut details = crate::media_edit::list(&result["warning_details"]);

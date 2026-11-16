@@ -23,9 +23,11 @@ async fn legacy_range_proxy(
     let response = forwarded.send().await.unwrap();
     let status = response.status();
     let content_type = response.headers().get("content-type").cloned();
-    let body = response.bytes().await.unwrap();
-    if method == reqwest::Method::POST && path == "/Items/101/Refresh"
-        && uri.contains("ReplaceThumbnailImages=") && status.is_success()
+    let mut body = response.bytes().await.unwrap().to_vec();
+    let sync = path == "/Items/SyncMediaInfo" && uri.contains("Id=101");
+    if method == reqwest::Method::POST && status.is_success()
+        && (sync || path == "/Items/101/Refresh"
+        && uri.contains("ReplaceThumbnailImages="))
     {
         let missing = *host.resource_fault.lock().await == "ignore-hdr-classification";
         let mut items = host.items.lock().await;
@@ -54,10 +56,24 @@ async fn legacy_range_proxy(
                 };
             }
         }
+        if sync {
+            let mut exported: Value = serde_json::from_slice(&body).unwrap();
+            exported[0]["MediaSourceInfo"]["MediaStreams"] = item["MediaStreams"].clone();
+            body = serde_json::to_vec(&exported).unwrap();
+            std::fs::write(fixture_sidecar_path(item), &body).unwrap();
+        }
     }
     let mut response = Response::builder().status(status);
     if let Some(content_type) = content_type { response = response.header("content-type", content_type); }
     response.body(Body::from(body)).unwrap()
+}
+
+fn fixture_sidecar_path(item: &Value) -> std::path::PathBuf {
+    let path = std::path::Path::new(item["Path"].as_str().unwrap());
+    path.with_file_name(format!(
+        "{}-mediainfo.json",
+        path.file_stem().unwrap().to_string_lossy()
+    ))
 }
 
 async fn legacy_database_pending_range_fixture() -> (Fixture, tokio::task::JoinHandle<()>) {
@@ -67,7 +83,8 @@ async fn legacy_database_pending_range_fixture() -> (Fixture, tokio::task::JoinH
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bootstrap_base = format!("http://{}/tmdb", listener.local_addr().unwrap());
     let bootstrap = tokio::spawn(async move {
-        axum::serve(listener, Router::new().route("/tmdb/{*path}", get(reorganize_fixture_metadata)))
+        axum::serve(listener, Router::new().route("/tmdb/{*path}", get(reorganize_fixture_metadata)),
+        )
             .await.unwrap();
     });
     fixture.state.save_config(&json!({"tmdb_api_base_url":bootstrap_base,"tmdb_api_key":"fixture"}))
@@ -79,6 +96,7 @@ async fn legacy_database_pending_range_fixture() -> (Fixture, tokio::task::JoinH
     fixture.files.extend(neighbor_files);
     bootstrap.abort();
     fixture.configure_cloud_wash().await;
+    configure_ingest_metadata(&fixture, "101").await;
     let sha = "A".repeat(40);
     fixture.cloud_version("10001", &sha, "hevc").await;
     let raw = json!({"format":{"format_name":"matroska,webm","size":"1286350287","duration":"1156.01"},
@@ -100,7 +118,8 @@ async fn legacy_database_pending_range_fixture() -> (Fixture, tokio::task::JoinH
     video["ExtendedVideoType"] = json!("None");
     video["ExtendedVideoSubType"] = json!("None");
     video["ExtendedVideoSubTypeDescription"] = json!("None");
-    std::fs::write(fixture.sidecar_path(), serde_json::to_vec(&previous).unwrap()).unwrap();
+    std::fs::write(fixture.sidecar_path(), serde_json::to_vec(&previous).unwrap(),
+    ).unwrap();
     {
         let mut items = fixture.host.items.lock().await;
         let item = items.get_mut("101").unwrap();
@@ -137,29 +156,29 @@ async fn legacy_database_pending_range_fixture() -> (Fixture, tokio::task::JoinH
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL; observed E200 HDR import and native getter stay localhost"]
-async fn reorganize_database_pending_hdr_episode_rebuilds_writable_types_and_preserves_neighbor() {
+async fn reorganize_database_pending_hdr_difference_does_not_add_a_field_stage_or_touch_neighbor() {
     let (fixture, upstream) = legacy_database_pending_range_fixture().await;
     let neighbor = fixture.host.items.lock().await["102"].clone();
-    let neighbor_json = std::fs::read(std::path::Path::new(fixture.files[1].as_str().unwrap()).with_file_name("102-mediainfo.json")).unwrap();
+    let neighbor_json = std::fs::read(std::path::Path::new(fixture.files[1].as_str().unwrap()).with_file_name("102-mediainfo.json"),
+    ).unwrap();
     let neighbor_bif = std::fs::read(&fixture.host.wash_bif_paths.lock().await["102"]).unwrap();
     let result = public_reorganize_queue(&fixture).await;
     let native = fixture.host.items.lock().await["101"].clone();
     let saved: Value = serde_json::from_slice(&std::fs::read(fixture.sidecar_path()).unwrap()).unwrap();
     let pending: bool = sqlx::query_scalar("SELECT COALESCE((asset_details_json->0->>'moviepilot_media_pending')::boolean,false) FROM media_metadata WHERE item_type='Episode' AND tmdb_id='1011'")
         .fetch_one(&fixture.state.db).await.unwrap();
-    let imports = fixture.host.file_imports.lock().await.clone();
+    let imports = fixture.host.sync_imports.lock().await.clone();
     let unchanged_neighbor = fixture.host.items.lock().await["102"].clone();
-    let unchanged_json = std::fs::read(std::path::Path::new(fixture.files[1].as_str().unwrap()).with_file_name("102-mediainfo.json")).unwrap();
+    let unchanged_json = std::fs::read(std::path::Path::new(fixture.files[1].as_str().unwrap()).with_file_name("102-mediainfo.json"),
+    ).unwrap();
     let unchanged_bif = std::fs::read(&fixture.host.wash_bif_paths.lock().await["102"]).unwrap();
     fixture.close().await; upstream.abort();
     assert_eq!(result["status"], "completed", "{result}");
-    assert!(!pending, "only the verified corrected import clears the pending media stage");
-    assert_eq!(imports, vec!["101"]);
-    for video in [&native["MediaStreams"][0], &saved[0]["MediaSourceInfo"]["MediaStreams"][0]] {
-        assert_eq!(video["ExtendedVideoType"], "Hdr10");
-        assert_eq!(video["ExtendedVideoSubType"], "Hdr10");
-        assert_eq!(video["VideoRange"], "HDR 10");
-    }
+    assert!(!pending, "the obsolete field gate is retired after the original ingestion flow");
+    assert!(imports.is_empty(), "ingestion must not add a media-edit import: {imports:?}");
+    assert_eq!(native["MediaStreams"][0]["VideoRange"], "SDR");
+    assert_eq!(saved[0]["MediaSourceInfo"]["MediaStreams"][0]["VideoRange"], "HDR10");
+    assert_eq!(native["MediaStreams"][0]["ExtendedVideoType"], "None");
     assert_eq!(native["IndexNumber"], 200);
     assert_eq!(native["MediaStreams"].as_array().unwrap().len(), 2);
     assert_eq!(native["Chapters"].as_array().unwrap().len(), 3);
@@ -167,20 +186,66 @@ async fn reorganize_database_pending_hdr_episode_rebuilds_writable_types_and_pre
 }
 
 #[tokio::test]
-#[ignore = "requires disposable PostgreSQL; missing native HDR fields must fail strict readback"]
-async fn reorganize_database_pending_hdr_refuses_when_writable_types_do_not_persist() {
+#[ignore = "requires disposable PostgreSQL; untitled E200 native export must reach configured title filling"]
+async fn reorganize_untitled_native_tracks_run_title_fill_and_configured_followup_stages() {
+    let (fixture, upstream) = legacy_database_pending_range_fixture().await;
+    fixture
+        .host
+        .native_empty_titles
+        .store(true, Ordering::SeqCst);
+    fixture
+        .state
+        .save_config(&json!({"auto_fill_language_titles_on_ingest":true,
+            "auto_extract_intro_fingerprint_on_ingest":true,"auto_extract_credits_on_ingest":true,
+            "auto_extract_video_thumbnails_on_ingest":true}))
+        .await
+        .unwrap();
+    let neighbor = fixture.host.items.lock().await["102"].clone();
+    let result = public_reorganize_queue(&fixture).await;
+    let native = fixture.host.items.lock().await["101"].clone();
+    let after_neighbor = fixture.host.items.lock().await["102"].clone();
+    let imports = fixture.host.sync_imports.lock().await.clone();
+    let starts = fixture.host.native_starts.lock().await.clone();
+    fixture.close().await;
+    upstream.abort();
+    assert_eq!(result["status"], "completed", "{result}");
+    assert_eq!(
+        result["result"]["finalization"]["title_fill"]["completed"], true,
+        "{result}"
+    );
+    assert_ne!(
+        result["result"]["finalization"]["title_fill"]["skipped"], true,
+        "{result}"
+    );
+    assert_eq!(
+        starts,
+        vec!["intro", "thumb"],
+        "configured native stages follow title filling: {result}"
+    );
+    assert!(imports.iter().all(|id| id == "101"), "configured title and credits processing must stay on the selected file: {imports:?}");
+    assert_eq!(native["IndexNumber"], 200);
+    assert!(native["MediaStreams"].as_array().unwrap().iter().any(|stream| stream["Type"] == "Audio" && !stream["Title"].as_str().unwrap_or("").is_empty()));
+    assert_eq!(after_neighbor, neighbor);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; missing native HDR fields are not an ingestion gate"]
+async fn reorganize_database_pending_hdr_does_not_add_field_reminders_or_block_ingestion() {
     let (fixture, upstream) = legacy_database_pending_range_fixture().await;
     *fixture.host.resource_fault.lock().await = "ignore-hdr-classification".into();
     let result = public_reorganize_queue(&fixture).await;
     let pending: bool = sqlx::query_scalar("SELECT COALESCE((asset_details_json->0->>'moviepilot_media_pending')::boolean,false) FROM media_metadata WHERE item_type='Episode' AND tmdb_id='1011'")
         .fetch_one(&fixture.state.db).await.unwrap();
     let native = fixture.host.items.lock().await["101"].clone();
-    let imports = fixture.host.file_imports.lock().await.clone();
+    let imports = fixture.host.sync_imports.lock().await.clone();
     fixture.close().await; upstream.abort();
-    assert_eq!(result["status"], "failed", "{result}");
-    assert_eq!(imports, vec!["101"], "the negative reaches the real file-import POST");
-    assert!(result["message"].as_str().unwrap().contains("新版媒体流或章节尚未通过 Emby 回读验收"), "{result}");
-    assert!(pending, "missing HDR fields cannot publish the media success marker");
+    assert_eq!(result["status"], "completed", "{result}");
+    assert!(result["result"]["failures"].as_array().unwrap().is_empty(), "{result}");
+    assert_eq!(result["result"]["warnings"].as_u64().unwrap_or(0), 0, "{result}");
+    assert_eq!(result["result"]["finalization"]["metadata_refresh"]["completed"], true, "{result}");
+    assert!(imports.is_empty(), "no extra field import: {imports:?}");
+    assert!(!pending, "an obsolete field gate must not remain after ingestion");
+    assert!(!result["result"]["warning_details"].to_string().contains("字段补充"), "{result}");
     assert_eq!(native["MediaStreams"][0]["ExtendedVideoType"], "None");
     assert_eq!(native["MediaStreams"][0]["VideoRange"], "SDR");
 }

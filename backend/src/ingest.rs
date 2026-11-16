@@ -582,7 +582,8 @@ async fn process(
     let keywords = crate::db::setting(&state.db, "keyword_mapping")
         .await?
         .unwrap_or(defaults["DEFAULT_KEYWORD_MAPPING"].clone());
-    let movie_paths = if let Some(target) = metadata_target.filter(|_| kind == "Movie") {
+    let file_target = metadata_target.or_else(|| (pending && kind == "Movie").then_some(&*item));
+    let movie_paths = if let Some(target) = file_target.filter(|_| kind == "Movie") {
         vec![std::path::PathBuf::from(string(target, "Path"))]
     } else if kind == "Movie" {
         crate::nfo_files::movie_paths(state, item, &payload).await?
@@ -590,7 +591,7 @@ async fn process(
         vec![]
     };
     context.checkpoint().await?;
-    let media_paths = metadata_target
+    let media_paths = file_target
         .map(|target| vec![std::path::PathBuf::from(string(target, "Path"))])
         .unwrap_or_else(|| {
             if kind == "Series" && !episode_ids.is_empty() {
@@ -616,7 +617,7 @@ async fn process(
         ..Default::default()
     };
     let written = crate::nfo_files::sync(&kind, item, &payload, &cast, &options).await?;
-    let image_report = if let Some(target) = metadata_target {
+    let image_report = if let Some(target) = file_target {
         crate::images::download_target_report(state, &kind, &tmdb, item, &payload, context, target)
             .await?
     } else if kind == "Series" && !episode_ids.is_empty() {
@@ -1045,7 +1046,7 @@ pub async fn prepare_cached_report(
         .into_iter()
         .collect::<Vec<_>>();
     let movie_paths = if kind == "Movie" {
-        crate::nfo_files::movie_paths(state, item, &payload).await?
+        vec![std::path::PathBuf::from(string(item, "Path"))]
     } else {
         vec![]
     };

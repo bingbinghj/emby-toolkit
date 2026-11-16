@@ -41,9 +41,11 @@ pub(crate) struct WriteReport {
     pub failed_works: BTreeSet<(String, String)>,
 }
 
+#[cfg(test)]
 pub(crate) async fn sync_upsert(state: &AppState, records: &mut [Value]) -> Result<WriteReport> {
     write(state, records, true, true, None).await
 }
+
 pub(crate) async fn prepare_sync_records(
     state: &AppState,
     records: &[Value],

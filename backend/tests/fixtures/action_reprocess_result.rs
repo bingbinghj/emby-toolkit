@@ -166,6 +166,12 @@ async fn reorganize_proxy(
         proxy.writes.lock().await.push(path.clone());
     }
     if method == axum::http::Method::GET {
+        if matches!(path.as_str(), "/Users/user/Items/61616" | "/Users/user/Items/61617") {
+            let mut item = if path.ends_with("61617") { proxy.related.lock().await.clone() }
+                else { proxy.original.item.lock().await.clone() };
+            item["LockData"] = json!(false);
+            return Json(api_item(item)).into_response();
+        }
         if path == "/swagger.json" {
             let mut contract: Value =
                 serde_json::from_str(include_str!("pro_sync_contract.json")).unwrap();
@@ -214,6 +220,7 @@ async fn reorganize_proxy(
                     query
                         .get("Ids")
                         .is_none_or(|ids| ids.split(',').any(|id| native_item_id_matches(item, id)))
+                        && query.get("Path").is_none_or(|path| item["Path"] == *path)
                 })
                 .map(api_item)
                 .collect::<Vec<_>>();
@@ -228,6 +235,21 @@ async fn reorganize_proxy(
         if path == "/Users/user/Items/61617/SpecialFeatures" {
             return Json(json!([])).into_response();
         }
+    }
+    if method == axum::http::Method::POST && matches!(path.as_str(), "/Items/61616" | "/Items/61617") {
+        let body = axum::body::to_bytes(request.into_body(), 1024 * 1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        let mut item = if path.ends_with("61617") { proxy.related.lock().await }
+            else { proxy.original.item.lock().await };
+        for field in ["Name", "OriginalTitle", "Overview", "ProductionYear", "PremiereDate", "Genres", "People", "ProviderIds", "Tags", "TagItems", "Studios", "Taglines", "LockData", "LockedFields"] {
+            if let Some(value) = body.get(field) { item[field] = value.clone(); }
+        }
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    if method == axum::http::Method::POST && path == "/ScheduledTasks/Running/media" {
+        // The original native media task is a no-op for these already imported files.
+        proxy.original.starts.fetch_add(1, Ordering::SeqCst);
+        return StatusCode::NO_CONTENT.into_response();
     }
     if method == axum::http::Method::POST
         && matches!(
@@ -412,7 +434,7 @@ async fn reorganize_source(
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
-async fn selected_movie_reorganizes_its_related_versions_and_scrapes_without_touching_another_movie()
+async fn selected_movie_reruns_ingestion_without_touching_its_related_version_or_another_movie()
  {
     let mut f = Fixture::new(false).await;
     f.single_audio("eng", "旧英语").await;
@@ -435,11 +457,12 @@ async fn selected_movie_reorganizes_its_related_versions_and_scrapes_without_tou
         item["MediaSources"][0]["Size"] = json!(size);
         item["Chapters"] = json!([]);
     }
-    f.original[0]["MediaSourceInfo"]["Size"] = json!(size);
-    f.original[0]["Chapters"] = json!([]);
+    let mut current_info: Value = serde_json::from_slice(&tokio::fs::read(f.directory.path().join("61616-mediainfo.json")).await.unwrap()).unwrap();
+    current_info[0]["MediaSourceInfo"]["Size"] = json!(size);
+    current_info[0]["Chapters"] = json!([]);
     tokio::fs::write(
         f.directory.path().join("61616-mediainfo.json"),
-        f.original.to_string(),
+        current_info.to_string(),
     )
     .await
     .unwrap();
@@ -525,7 +548,7 @@ async fn selected_movie_reorganizes_its_related_versions_and_scrapes_without_tou
     )
     .await
     .unwrap();
-    f.state.save_config(&json!({"emby_server_url":base,"tmdb_api_base_url":base,"tmdb_api_key":"fixture","monitor_sha1_pc_search":true,"cd2_media_root":"/cd2","p115_fingerprint_media_root_cid":"9","p115_api_priority":"cookie","douban_enable_online_api":false,"ai_api_key":"","item_delay":0})).await.unwrap();
+    f.state.save_config(&json!({"emby_server_url":base,"tmdb_api_base_url":base,"tmdb_api_key":"fixture","monitor_sha1_pc_search":true,"cd2_media_root":"/cd2","p115_fingerprint_media_root_cid":"9","p115_api_priority":"cookie","douban_enable_online_api":false,"ai_api_key":"","item_delay":0,"auto_fill_language_titles_on_ingest":false,"auto_repair_truehd_core_on_ingest":false,"auto_extract_intro_fingerprint_on_ingest":false,"auto_extract_credits_on_ingest":false,"auto_extract_video_thumbnails_on_ingest":false})).await.unwrap();
     let token = f.state.sessions.sign(&crate::auth::Session {
         user_id: "fixture-operator".into(),
         name: "Fixture Operator".into(),
@@ -606,16 +629,16 @@ async fn selected_movie_reorganizes_its_related_versions_and_scrapes_without_tou
         "{outcome}"
     );
     assert!(outcome["status"] == "completed", "{outcome}");
-    assert_eq!(primary_language, "jpn");
-    assert_eq!(related_language, "jpn");
+    assert_eq!(primary_language, "eng");
+    assert_eq!(related_language, "eng");
     assert_eq!(
         imports,
-        vec!["61616", "61617"],
-        "each selected native version must import its verified current file JSON"
+        Vec::<String>::new(),
+        "the original ingestion workflow does not add a media-edit import"
     );
     assert_eq!(actual_title.as_deref(), Some("重新整理后电影"));
     assert!(nfo.contains("重新整理后电影"), "{nfo}");
-    assert!(related_nfo.contains("重新整理后电影"), "{related_nfo}");
+    assert!(related_nfo.is_empty(), "an unselected version must not get a new NFO: {related_nfo}");
     assert_eq!(other_nfo_bytes, b"unrelated NFO bytes");
     assert_eq!(actual_other, original_other);
     assert_eq!(other_bytes, b"unrelated playback");

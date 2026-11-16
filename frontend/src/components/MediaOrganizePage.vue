@@ -44,7 +44,7 @@
         <VProgressLinear v-if="loadingItems" indeterminate />
         <VVirtualScroll :key="loadedQuery" :items="items" :item-height="160" :height="largePage ? listHeight : undefined" :renderless="!largePage" class="history-card-scroll">
           <template #default="{ item, itemRef }">
-            <div :ref="itemRef" class="history-card-wrapper">
+            <div :key="item.id" :ref="itemRef" class="history-card-wrapper">
               <VCard variant="outlined" class="history-card">
                 <VCardText class="history-card-body">
                   <VCheckboxBtn :model-value="selectedIds.includes(item.id)" :disabled="!canSelectRecord(item)" :aria-label="`选择 ${itemTitle(item)}`" @update:model-value="toggleSelection(item, $event)" />
@@ -69,7 +69,7 @@
       </div>
       <VDataTableVirtual v-else :key="loadedQuery" :headers="headers" :items="items" item-value="id" :loading="loadingItems" density="compact" height="100%" :item-height="100" class="organize-items-desktop" hide-default-header hide-default-footer data-testid="organize-items">
         <template #item="{ item, columns, itemRef }">
-          <tr :ref="itemRef" class="organize-record-row"><td :colspan="columns.length">
+          <tr :key="item.id" :ref="itemRef" class="organize-record-row"><td :colspan="columns.length">
             <VCard class="organize-record" :class="{ 'organize-record--selected': selectedIds.includes(item.id) }">
               <VCheckbox :model-value="selectedIds.includes(item.id)" :disabled="!canSelectRecord(item)" :aria-label="`选择 ${itemTitle(item)}`" density="compact" hide-details @update:model-value="toggleSelection(item, $event)" />
               <VAvatar rounded width="42" height="63"><VImg v-if="poster(item)" :src="poster(item)" :alt="itemTitle(item)" cover /><VIcon v-else icon="mdi-movie-open-outline" /></VAvatar>
@@ -99,8 +99,8 @@
         </VCardItem>
         <VDivider />
         <VCardText>
-          <VSelect v-model="confirmationMode" :items="operationOptions" :disabled="processing" label="整理方式" prepend-inner-icon="mdi-swap-horizontal" :hint="confirmationMode === 'rescrape' ? '更新元数据、NFO 和图片，保留已有媒体信息、音轨和章节。' : '从所选媒体重新执行完整入库流程，包括媒体信息重建、回读验收和元数据增强。'" persistent-hint data-testid="organize-mode" />
-          <VAlert type="info" variant="tonal" density="compact" class="my-4">电影包含关联版本，剧集只处理所选单集。同一媒体的多条记录合并为一次{{ confirmationMode === 'rescrape' ? '刮削' : '整理' }}。</VAlert>
+          <VSelect v-model="confirmationMode" :items="operationOptions" :disabled="processing" label="整理方式" prepend-inner-icon="mdi-swap-horizontal" :hint="confirmationMode === 'rescrape' ? '更新元数据、NFO 和图片，保留已有媒体信息、音轨和章节。' : '重新执行完整入库流程，按当前入库配置处理所选媒体。'" persistent-hint data-testid="organize-mode" />
+          <VAlert type="info" variant="tonal" density="compact" class="my-4">仅处理所选媒体文件，剧集只处理所选单集。同一媒体的多条记录合并为一次{{ confirmationMode === 'rescrape' ? '刮削' : '整理' }}。</VAlert>
           <VList bg-color="transparent" density="compact">
             <VVirtualScroll v-if="confirmationItems.length > 100" :items="confirmationItems" :height="Math.min(listHeight, 384)" :item-height="64" tabindex="0" aria-label="本次整理的媒体" data-testid="organize-confirmation-scroll">
               <template #default="{ item }"><VListItem :title="itemTitle(item)" :subtitle="`${episodeLabel(item) || (item.item_type === 'Movie' ? '电影' : '剧集')} · ${item.item_id}`" /></template>

@@ -132,9 +132,9 @@ async fn queue(
     let offset = (page - 1)
         .checked_mul(size)
         .ok_or_else(|| ApiError::bad("队列分页范围无效"))?;
-    let counts: Value = sqlx::query_scalar("SELECT jsonb_build_object('total',COUNT(*),'queued_count',COUNT(*) FILTER (WHERE status='queued'),'running_count',COUNT(*) FILTER (WHERE status='running')) FROM media_organize_queue")
+    let counts: Value = sqlx::query_scalar("SELECT jsonb_build_object('total',COUNT(*),'queued_count',COUNT(*) FILTER (WHERE status='queued'),'running_count',COUNT(*) FILTER (WHERE status='running')) FROM media_organize_queue WHERE status IN ('queued','running','interrupted')")
         .fetch_one(&state.db).await?;
-    let mut items: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(q)-'operator_id'-'history_ids' FROM media_organize_queue q ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,CASE WHEN status IN ('queued','running') THEN queue_order END ASC,queue_order DESC LIMIT $1 OFFSET $2")
+    let mut items: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(q)-'operator_id'-'history_ids' FROM media_organize_queue q WHERE status IN ('queued','running','interrupted') ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END,CASE WHEN status IN ('queued','running') THEN queue_order END ASC,queue_order DESC LIMIT $1 OFFSET $2")
         .bind(size).bind(offset).fetch_all(&state.db).await?;
     let busy = state.jobs.status().await["is_running"] == true;
     for item in &mut items {

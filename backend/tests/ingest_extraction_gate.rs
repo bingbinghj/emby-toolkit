@@ -147,6 +147,7 @@ struct Host {
     sync_imports: Arc<Mutex<Vec<String>>>,
     skip_sync_import: Arc<AtomicBool>,
     enrich_sync_native: Arc<AtomicBool>,
+    native_empty_titles: Arc<AtomicBool>,
     fail_final_sync_readback: Arc<AtomicBool>,
     skip_file_import: Arc<AtomicBool>,
     native_generated_info: Arc<Mutex<HashMap<String, Value>>>,
@@ -403,6 +404,14 @@ async fn refresh(
             .with_file_name(format!("{id}-mediainfo.json"));
         let info: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         import_fixture_info(item, &info);
+        if host.native_empty_titles.load(Ordering::SeqCst) {
+            for stream in item["MediaStreams"].as_array_mut().unwrap() {
+                if stream["Title"] == "" {
+                    stream.as_object_mut().unwrap().remove("Title");
+                }
+            }
+            item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
+        }
         for (index, chapter) in item["Chapters"]
             .as_array_mut()
             .unwrap()
@@ -453,6 +462,11 @@ async fn clear(State(host): State<Host>, Path(id): Path<String>) -> StatusCode {
     item["MediaStreams"] = json!([]);
     item["MediaSources"][0]["MediaStreams"] = json!([]);
     item["Chapters"] = json!([]);
+    item["Size"] = json!(0);
+    item["RunTimeTicks"] = Value::Null;
+    item["MediaSources"][0]["Size"] = json!(0);
+    item["MediaSources"][0]["RunTimeTicks"] = Value::Null;
+    item["MediaSources"][0]["Chapters"] = json!([]);
     StatusCode::NO_CONTENT
 }
 
@@ -474,7 +488,7 @@ async fn sync_empty_media(
         .iter()
         .position(|source| source["ItemId"] == id)
         .unwrap();
-    if !host.skip_sync_import.load(Ordering::SeqCst) {
+    if !host.skip_sync_import.load(Ordering::SeqCst) && item["Size"] == 0 {
         assert_eq!(
             item["Size"], 0,
             "the verified PRO importer only fills empty media"
@@ -494,6 +508,13 @@ async fn sync_empty_media(
                 .find(|stream| stream["Type"] == "Audio")
                 .map(|stream| stream["Index"].clone())
                 .unwrap_or(Value::Null);
+        }
+        if host.native_empty_titles.load(Ordering::SeqCst) {
+            for stream in source["MediaStreams"].as_array_mut().unwrap() {
+                if stream["Title"] == "" {
+                    stream.as_object_mut().unwrap().remove("Title");
+                }
+            }
         }
         item["MediaStreams"] = source["MediaStreams"].clone();
         item["Size"] = source["Size"].clone();

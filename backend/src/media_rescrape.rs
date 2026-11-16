@@ -10,7 +10,6 @@ use axum::{extract::State, http::StatusCode};
 use reqwest::Method;
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -23,13 +22,6 @@ pub(crate) async fn run(state: &AppState, id: &str, context: &JobContext) -> Res
         return Err(ApiError::bad("重新刮削仅支持明确的电影或分集目标"));
     }
     let binding = crate::media_edit::repair_target(state, id).await?;
-    if binding.asset["moviepilot_media_pending"] == true {
-        return Err(ApiError(
-            StatusCode::CONFLICT,
-            "当前版本换版媒体信息尚未验收，请选择重新整理入库；重新刮削不会重建或接受旧版媒体信息"
-                .into(),
-        ));
-    }
     let path = string(&target, "Path");
     if binding.path != path || !Path::new(&path).is_absolute() {
         return Err(ApiError::bad("重新刮削目标的原生路径未确认"));
@@ -40,9 +32,7 @@ pub(crate) async fn run(state: &AppState, id: &str, context: &JobContext) -> Res
         ));
     }
     let pending = crate::media_recovery::status(State(state.clone())).await?.0;
-    if list(&pending["records"]).iter().any(|record| {
-        record["kind"] != "wash-pending" || list(&record["related_item_ids"]).contains(&json!(id))
-    }) {
+    if list(&pending["records"]).iter().any(|record| record["kind"] != "wash-pending") {
         return Err(ApiError(
             StatusCode::CONFLICT,
             "存在相关媒体或原配置尚未恢复的记录，请先完成恢复或重新整理入库".into(),
@@ -224,7 +214,6 @@ async fn recover_previous(state: &AppState, id: &str, context: &JobContext) -> R
         return Ok(());
     };
     let directory = recovery_directory(state, saved)?;
-    let name = directory.file_name().unwrap().to_str().unwrap();
     if !tokio::fs::try_exists(&directory).await? {
         return Ok(());
     }
@@ -257,18 +246,12 @@ async fn recover_previous(state: &AppState, id: &str, context: &JobContext) -> R
         )
         .await;
     let finishing = JobContext::for_recovery(Some(context)).await;
-    let (status, _) = Box::pin(crate::media_recovery::recover_confirmed(
+    Box::pin(crate::media_reload::ingest_preservation::finish_saved_guard(
         state,
-        &format!("media:{name}"),
-        &finishing,
-        &BTreeMap::new(),
-    ))
+        &directory,
+        &finishing),
+    )
     .await?;
-    if status != 200 {
-        return Err(ApiError::bad(
-            "本次重新刮削的恢复收尾尚未完成，恢复材料仍保留",
-        ));
-    }
     Ok(())
 }
 

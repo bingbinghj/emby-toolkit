@@ -6,9 +6,12 @@ const organizePath = '/api/actions/reorganize';
 const movie = { id: '00000000-0000-4000-8000-000000000101', item_id: '101', name: '队列验证电影', item_type: 'Movie', status: 'success' };
 const episode = { id: '00000000-0000-4000-8000-000000000008', item_id: 'episode-8', name: '第八集', item_type: 'Episode', series_id: 'series-1', series_name: '队列验证电视剧', season_number: 1, episode_number: 8, status: 'success' };
 const row = (id, item = movie, changes = {}) => ({ id, item_id: item.item_id, item_json: { ...item }, mode: 'reprocess', status: 'queued', message: '等待处理', progress: 0, progress_known: false, current_action: '', result: null, ...changes });
-const queuePage = items => ({ items, total: items.length, page: 1, page_size: 100,
-  queued_count: items.filter(item => item.status === 'queued').length,
-  running_count: items.filter(item => item.status === 'running').length });
+const queuePage = items => {
+  const active = items.filter(item => ['queued', 'running', 'interrupted'].includes(item.status));
+  return { items: active, total: active.length, page: 1, page_size: 100,
+    queued_count: active.filter(item => item.status === 'queued').length,
+    running_count: active.filter(item => item.status === 'running').length };
+};
 const historyPage = items => ({ items, total: items.length });
 const task = (page, id) => page.getByTestId('organize-queue-task-' + id);
 const queueRequests = api => api.requests.filter(request => request.method === 'GET' && request.path === queuePath);
@@ -73,7 +76,7 @@ test('rescraping one episode enters the queue immediately without claiming compl
 
 test('running progress distinguishes an unknown percentage from measured progress and a real failed result', async ({ page, api }) => {
   let current = row('progress-task', movie, { status: 'running', progress: 87, progress_known: false, current_action: '读取当前媒体' });
-  api.respond('GET', historyPath, historyPage([]));
+  api.respond('GET', historyPath, () => historyPage(current.status === 'failed' ? [{ ...movie, status: 'failed', message: '媒体回读未通过；核查材料已保留' }] : []));
   api.respond('GET', queuePath, () => queuePage([current]));
   await page.goto('/media-organize');
   await openQueue(page);
@@ -89,11 +92,11 @@ test('running progress distinguishes an unknown percentage from measured progres
   await expect(item.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '37');
   current = { ...current, status: 'failed', message: '媒体回读未通过', result: { failures: ['当前文件身份改变'], warning_details: ['核查材料已保留'] } };
   await refreshQueue(page);
-  await expect(item).toContainText('失败');
-  await expect(item).toContainText('当前文件身份改变');
-  await expect(item).toContainText('核查材料已保留');
-  await expect(item).not.toContainText('已完成');
-  await expect(item.locator('.v-progress-linear')).toHaveCount(0);
+  await expect(item).toHaveCount(0);
+  await expect(page.getByTestId('organize-queue-dialog')).toContainText('当前没有整理任务');
+  await expect(page.locator('.queue-overall')).toHaveCount(0);
+  await page.getByRole('button', { name: '关闭整理队列', exact: true }).click();
+  await expect(page.getByTestId('organize-items')).toContainText('媒体回读未通过；核查材料已保留');
 });
 
 test('pause and stop states preserve measured progress without presenting continued processing', async ({ page, api }) => {
@@ -135,7 +138,7 @@ test('only waiting tasks can be cancelled and double clicks submit one cancellat
   expect(api.requests.filter(request => request.method === 'DELETE' && request.path === queuePath + '/waiting-task')).toHaveLength(1);
   items = items.map(item => item.id === 'waiting-task' ? { ...item, status: 'cancelled', message: '等待任务已取消' } : item);
   pending.release({ item: items.find(item => item.id === 'waiting-task'), message: '等待任务已取消' });
-  await expect(task(page, 'waiting-task')).toContainText('已取消');
+  await expect(task(page, 'waiting-task')).toHaveCount(0);
   await expect(task(page, 'running-task')).toContainText('正在执行');
   expect(api.requests.some(request => request.method === 'DELETE' && request.path === queuePath + '/running-task')).toBe(false);
 });
@@ -157,8 +160,8 @@ test('a cancellation conflict keeps the task visible until its current server st
   await expect(task(page, 'cancel-race').getByRole('button', { name: /取消等待任务/ })).toBeDisabled();
 });
 
-test('retrying a failed scrape submits once and keeps its original operation mode', async ({ page, api }) => {
-  let current = row('retry-scrape', movie, { status: 'failed', mode: 'rescrape', message: '上次刮削失败' });
+test('retrying an interrupted scrape submits once and keeps its original operation mode', async ({ page, api }) => {
+  let current = row('retry-scrape', movie, { status: 'interrupted', mode: 'rescrape', message: '上次刮削中断' });
   let receive, release;
   const started = new Promise(resolve => { receive = resolve; });
   const completion = new Promise(resolve => { release = resolve; });
@@ -182,8 +185,8 @@ test('retrying a failed scrape submits once and keeps its original operation mod
 test('retry blocks the same media and operation while allowing a different queued operation', async ({ page, api }) => {
   api.respond('GET', historyPath, historyPage([]));
   api.respond('GET', queuePath, queuePage([
-    row('old-failure', movie, { status: 'failed', mode: 'reprocess' }),
-    row('old-scrape-failure', movie, { status: 'failed', mode: 'rescrape' }),
+    row('old-failure', movie, { status: 'interrupted', mode: 'reprocess' }),
+    row('old-scrape-failure', movie, { status: 'interrupted', mode: 'rescrape' }),
     row('current-job', movie, { status: 'running', mode: 'reprocess' }),
   ]));
   await page.goto('/media-organize');
@@ -277,8 +280,8 @@ test('actual completion refreshes admission history and preserves returned warni
   const before = api.requests.filter(request => request.path === historyPath).length;
   completed = true;
   await refreshQueue(page);
-  await expect(task(page, 'completion-task')).toContainText('重新刮削已完成');
-  await expect(task(page, 'completion-task')).toContainText('图片待确认');
+  await expect(task(page, 'completion-task')).toHaveCount(0);
+  await expect(page.getByTestId('organize-queue-dialog')).toContainText('当前没有整理任务');
   await page.getByRole('button', { name: '关闭整理队列', exact: true }).click();
   await expect(page.getByTestId('organize-items')).toContainText('媒体已刮削，图片待确认');
   expect(api.requests.filter(request => request.path === historyPath).length).toBeGreaterThan(before);

@@ -580,15 +580,62 @@ async fn episode_rescrape_leaves_parent_and_other_episode_metadata_and_files_unc
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL; all upstreams are localhost"]
-async fn wash_pending_is_rejected_before_metadata_or_original_resources_are_changed() {
+async fn wash_pending_does_not_block_a_metadata_only_rescrape_or_mark_media_ingestion_complete() {
     let f = Fixture::new("Movie").await;
     sqlx::query("UPDATE media_metadata SET asset_details_json=jsonb_set(asset_details_json,'{0,moviepilot_media_pending}','true') WHERE tmdb_id='500' AND item_type='Movie'").execute(&f.state.db).await.unwrap();
     let row = f.run().await;
-    assert_eq!(row["status"], "failed", "{row}");
-    assert!(row.to_string().contains("重新整理入库"), "{row}");
-    assert!(!f.target_path.with_extension("nfo").exists());
-    assert!(f.host.writes.lock().await.is_empty());
-    assert!(f.host.tmdb_reads.lock().await.is_empty());
+    assert_eq!(row["status"], "completed", "{row}");
+    assert!(f.target_path.with_extension("nfo").is_file());
+    assert_eq!(f.host.items.lock().await["101"]["Name"], "新电影标题");
+    let pending: bool = sqlx::query_scalar("SELECT (asset_details_json->0->>'moviepilot_media_pending')::boolean FROM media_metadata WHERE tmdb_id='500' AND item_type='Movie'")
+        .fetch_one(&f.state.db).await.unwrap();
+    assert!(
+        pending,
+        "metadata work must preserve the unfinished media-ingestion flag"
+    );
+    let writes = f.host.writes.lock().await.clone();
+    assert_eq!(
+        writes
+            .iter()
+            .filter(|(action, _)| action.starts_with("refresh:"))
+            .count(),
+        1
+    );
+    assert!(
+        !writes
+            .iter()
+            .any(|(action, _)| action.contains("ClearMediaInfo")
+                || action.contains("SyncMediaInfo")
+                || action.contains("ScheduledTasks")),
+        "{writes:?}"
+    );
+    assert!(!f.host.tmdb_reads.lock().await.is_empty());
+    f.unchanged_resources().await;
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; metadata refresh does not use presentation-key media clearing"]
+async fn metadata_only_rescrape_does_not_require_a_unique_media_clear_scope() {
+    let f = Fixture::new("Movie").await;
+    let sibling_before = {
+        let mut items = f.host.items.lock().await;
+        let sibling = items["101"].clone();
+        let mut sibling = sibling;
+        sibling["Id"] = json!("unselected-version");
+        sibling["Guid"] = json!(uuid::Uuid::new_v4().simple().to_string());
+        sibling["Path"] = json!(f.target_path.with_file_name("unselected.strm"));
+        items.insert("unselected-version".into(), sibling.clone());
+        sibling
+    };
+    let row = f.run().await;
+    assert_eq!(row["status"], "completed", "{row}");
+    assert_eq!(
+        f.host.items.lock().await["unselected-version"],
+        sibling_before
+    );
+    assert!(f.host.writes.lock().await.iter().all(|(action, _)| !action.contains("ClearMediaInfo")
+                && !action.contains("SyncMediaInfo")));
     f.unchanged_resources().await;
     f.close().await;
 }
@@ -711,8 +758,10 @@ async fn reprocess_proxy(
                 return Json(json!([{"Id":"63c322b7-a371-41a3-b11f-04f8418b37d8","Name":"Strm Assistant PRO","Version":"3.0.0.57"}])).into_response();
             }
             "/ScheduledTasks" => {
+                let runs = proxy.host.writes.lock().await.iter()
+                    .filter(|(operation, _)| operation == "/ScheduledTasks/Running/info").count();
                 return Json(json!([
-                    {"Id":"info","Key":"MediaInfoExtractTask","State":"Idle"},
+                    {"Id":"info","Key":"MediaInfoExtractTask","State":"Idle","LastExecutionResult":{"StartTimeUtc":runs.to_string(),"Status":"Completed"}},
                     {"Id":"intro","Key":"IntroFingerprintExtractTask","State":"Idle"},
                     {"Id":"thumb","Key":"VideoThumbnailExtractTask","State":"Idle"}
                 ]))
@@ -739,6 +788,10 @@ async fn reprocess_proxy(
         {
             return Json(json!({"Thumbnails":[]})).into_response();
         }
+    }
+    if method == axum::http::Method::POST && path == "/ScheduledTasks/Running/info" {
+        proxy.host.writes.lock().await.push((path, HashMap::new()));
+        return StatusCode::NO_CONTENT.into_response();
     }
     if method == axum::http::Method::POST && path == "/Items/SyncMediaInfo" {
         let id = query.get("Id").expect("Sync must select one native ItemId");
@@ -1237,7 +1290,7 @@ async fn single_episode_reprocess_rejects_asset_sha_drift_after_metadata_refresh
             .contains("媒体资产身份变化"),
         "{row}"
     );
-    assert_eq!(*proxy.imports.lock().await, vec!["101"]);
+    assert!(proxy.imports.lock().await.is_empty(), "no extra ingestion media import");
     assert_eq!(
         *proxy.binding_faults.lock().await,
         vec!["101"],
@@ -1289,18 +1342,16 @@ async fn single_episode_reprocess_preserves_other_episode_and_other_version() {
     .fetch_one(&f.state.db)
     .await
     .unwrap();
+    let selected_streams = f.host.items.lock().await["101"]["MediaStreams"].clone();
     let row = f.run_scope("101", "reprocess").await;
     assert_eq!(row["status"], "completed", "{row}");
     assert_eq!(
         *proxy.imports.lock().await,
-        vec!["101"],
-        "only the selected file may be imported"
+        Vec::<String>::new(),
+        "the normal native extraction stage needs no additional media-edit import"
     );
     assert_eq!(f.host.items.lock().await["101"]["Name"], "新分集标题");
-    assert_eq!(
-        f.host.items.lock().await["101"]["MediaStreams"][0]["Codec"],
-        "mpeg4"
-    );
+    assert_eq!(f.host.items.lock().await["101"]["MediaStreams"], selected_streams);
     assert!(
         std::fs::read_to_string(f.target_path.with_extension("nfo"))
             .unwrap()
@@ -1388,7 +1439,7 @@ async fn single_episode_reprocess_preserves_other_episode_and_other_version() {
             .iter()
             .any(|(action, _)| action.contains("ClearMediaInfo")
                 || action.contains("SyncMediaInfo")
-                || action.contains("ScheduledTasks")),
+                || (action.contains("ScheduledTasks") && action != "/ScheduledTasks/Running/info")),
         "{writes:?}"
     );
     assert_eq!(
@@ -1449,8 +1500,8 @@ async fn single_episode_reprocess_runs_configured_title_fill_and_preserves_unsel
     }
     drop(items);
     assert!(
-        proxy.imports.lock().await.len() >= 2,
-        "media import and the actual edited title import are both required"
+        !proxy.imports.lock().await.is_empty(),
+        "only the configured title edit needs a native import"
     );
     assert!(proxy.imports.lock().await.iter().all(|id| id == "101"));
     let sync_stages = f
@@ -1485,7 +1536,7 @@ async fn single_episode_reprocess_runs_configured_title_fill_and_preserves_unsel
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL; both linked movie versions use real ffprobe and localhost imports"]
-async fn movie_reprocess_keeps_its_confirmed_linked_version_scope() {
+async fn movie_reprocess_keeps_unselected_linked_versions_unchanged() {
     use sha1::{Digest, Sha1};
     let (f, proxy, server) = reprocess_fixture(&["101"], false).await;
     proxy.selected.lock().await.push("103".into());
@@ -1522,55 +1573,22 @@ async fn movie_reprocess_keeps_its_confirmed_linked_version_scope() {
     drop(items);
     sqlx::query("UPDATE media_metadata SET tmdb_id='500',item_type='Movie',parent_series_tmdb_id=NULL,season_number=NULL,episode_number=NULL,emby_item_ids_json=emby_item_ids_json||'[\"103\"]'::jsonb,asset_details_json=asset_details_json||$1::jsonb,file_sha1_json=file_sha1_json||$2::jsonb,file_pickcode_json=file_pickcode_json||'[\"pc103\"]'::jsonb WHERE tmdb_id='50011' AND item_type='Episode'")
         .bind(json!([{"emby_item_id":"103","path":path,"size_bytes":bytes.len()}])).bind(json!([sha])).execute(&f.state.db).await.unwrap();
+    let unselected = f.host.items.lock().await["103"].clone();
     let row = f.run_scope("101", "reprocess").await;
     assert_eq!(row["status"], "completed", "{row}");
     let imported = proxy.imports.lock().await.clone();
-    assert!(
-        imported.iter().any(|id| id == "101") && imported.iter().any(|id| id == "103"),
-        "{imported:?}: {row}"
-    );
+    assert!(imported.is_empty(), "no additional media import: {imported:?}: {row}");
     let marked: Value = sqlx::query_scalar(
         "SELECT asset_details_json FROM media_metadata WHERE tmdb_id='500' AND item_type='Movie'",
     )
     .fetch_one(&f.state.db)
     .await
     .unwrap();
-    for id in ["101", "103"] {
-        assert!(
-            marked
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|asset| asset["emby_item_id"] == id
-                    && asset["moviepilot_ingest_identity"]["id"] == id),
-            "{marked}"
-        );
-    }
-    let versions = row["result"]["finalization"]["versions"]
-        .as_array()
-        .unwrap();
-    assert_eq!(versions.len(), 2, "{row}");
-    for id in ["101", "103"] {
-        assert!(
-            versions.iter().any(|version| version["item_id"] == id
-                && version["report"]["metadata_refresh"]["completed"] == true),
-            "{row}"
-        );
-        assert!(
-            f.host
-                .writes
-                .lock()
-                .await
-                .iter()
-                .any(|(action, _)| action == &format!("refresh:{id}")),
-            "{row}"
-        );
-        assert_eq!(
-            f.host.items.lock().await[id]["Name"],
-            "新电影标题",
-            "each linked version must actually load the fresh NFO"
-        );
-    }
+    assert!(marked.as_array().unwrap().iter().any(|asset| asset["emby_item_id"] == "101" && asset["moviepilot_ingest_identity"]["id"] == "101"), "{marked}");
+    assert!(!marked.as_array().unwrap().iter().any(|asset| asset["emby_item_id"] == "103" && asset["moviepilot_ingest_identity"]["id"] == "103"), "{marked}");
+    assert_eq!(f.host.items.lock().await["103"], unselected);
+    assert!(!f.host.writes.lock().await.iter().any(|(action, _)| action == "refresh:103"));
+    assert_eq!(row["result"]["finalizations"].as_array().unwrap().len(), 1, "{row}");
     server.abort();
     f.close().await;
 }
@@ -1599,8 +1617,8 @@ async fn verify_failed_first_admission_reprocess(kind: &str) {
     );
     assert_eq!(
         *proxy.imports.lock().await,
-        vec!["101"],
-        "the verified media must only be imported once"
+        Vec::<String>::new(),
+        "first admission must use the normal native extraction stage"
     );
     let bound: Value = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE emby_item_ids_json @> '[\"101\"]'::jsonb AND item_type=$1")
         .bind(kind).fetch_one(&f.state.db).await.unwrap();
