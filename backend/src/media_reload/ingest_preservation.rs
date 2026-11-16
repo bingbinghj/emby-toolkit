@@ -23,6 +23,18 @@ fn observed_scope(members: &[Value]) -> BTreeMap<String, Value> {
     members.iter().map(|member| (string(member, "Id"), json!({"Id":member["Id"],"Type":member["Type"],"Path":member["Path"],"Chapters":member["Chapters"],"MediaStreams":member["MediaStreams"],"MediaSources":member["MediaSources"]}))).collect()
 }
 
+fn ingest_json_preserved(original: &[u8], current: &[u8], path: &Path) -> Result<bool> {
+    let original = parse_recovery_json(original, path)?;
+    let mut current = parse_recovery_json(current, path)?;
+    if original.as_array().is_some_and(|items| items.len() == 1)
+        && current.as_array().is_some_and(|items| items.len() == 1)
+        && media_info::chapters_restored(&original[0]["Chapters"], &current[0]["Chapters"])
+    {
+        current[0]["Chapters"] = original[0]["Chapters"].clone();
+    }
+    Ok(current == original)
+}
+
 async fn members(
     state: &AppState,
     item: &Value,
@@ -448,7 +460,16 @@ impl Guard {
         for target in &self.targets {
             context.checkpoint().await?;
             let (_, live) = metadata_target_details(state, target, &self.observations[&target.id]).await?;
-            let reasons = differences(target, &live);
+            let mut reasons = differences(target, &live);
+            // Emby can append #DB intro/credits markers while refreshing NFO.
+            // Preservation requires the original chapters to survive; additions
+            // do not authorize clearing them or constitute lost media data.
+            if media_info::chapters_restored(
+                &media_info::object(&target.info).unwrap()["Chapters"],
+                &live["Chapters"],
+            ) {
+                reasons.retain(|reason| reason != "章节或片头片尾标记未一致");
+            }
             if !reasons.is_empty() {
                 return Err(conflict(format!(
                     "{}：入库刷新后原媒体信息未保留：{}；全部恢复材料已保留",
@@ -494,7 +515,14 @@ impl Guard {
                 .get(path)
                 .ok_or_else(|| conflict("原媒体 JSON 备份范围未确认"))?;
             check_ancestors(path).await?;
-            if tokio::fs::read(path).await? != snapshot_bytes(saved).await? {
+            let current = tokio::fs::read(path).await?;
+            let original = snapshot_bytes(saved).await?;
+            // Ingest can retain an export with additional native chapters.
+            // Rescraping still requires the original JSON bytes, and cleanup
+            // never rewrites the current JSON to discard newly added markers.
+            if current != original
+                && !(self.require_clear_scope && ingest_json_preserved(&original, &current, path)?)
+            {
                 return Err(conflict("重新刮削期间媒体 JSON 发生变化，原材料已保留"));
             }
         }
@@ -769,4 +797,38 @@ async fn capture_inner(
         tokio::fs::remove_dir(&material).await?;
     }
     Ok(guard)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ingest_json_cleanup_keeps_appended_markers_but_rejects_changed_media_or_lost_chapters() {
+        let original = json!([{"MediaSourceInfo":{"Container":"mkv","Size":1286350287_u64},"Chapters":[
+            {"Name":"片头","MarkerType":"Chapter","StartPositionTicks":0},
+            {"Name":"正片","MarkerType":"Chapter","StartPositionTicks":1240000000_u64},
+            {"Name":"片尾","MarkerType":"Chapter","StartPositionTicks":10660000000_u64}
+        ]}]);
+        let mut exported = original.clone();
+        exported[0]["Chapters"][0]["ChapterIndex"] = json!(0);
+        exported[0]["Chapters"].as_array_mut().unwrap().extend([
+            json!({"Name":"IntroStart#DB","MarkerType":"IntroStart","StartPositionTicks":0}),
+            json!({"Name":"IntroEnd#DB","MarkerType":"IntroEnd","StartPositionTicks":1240000000_u64}),
+            json!({"Name":"CreditsStart#DB","MarkerType":"CreditsStart","StartPositionTicks":10660000000_u64}),
+        ]);
+        let matches = |value: &Value| ingest_json_preserved(
+            &serde_json::to_vec(&original).unwrap(), &serde_json::to_vec(value).unwrap(), Path::new("/fixture/e200-mediainfo.json")
+        ).unwrap();
+        assert!(matches(&exported));
+        let mut missing = exported.clone();
+        missing[0]["Chapters"].as_array_mut().unwrap().remove(1);
+        assert!(!matches(&missing));
+        let mut changed = exported.clone();
+        changed[0]["MediaSourceInfo"]["Container"] = json!("mp4");
+        assert!(!matches(&changed));
+        changed = exported;
+        changed[0]["UnknownProvenance"] = json!("changed");
+        assert!(!matches(&changed));
+    }
 }

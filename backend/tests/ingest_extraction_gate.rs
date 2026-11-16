@@ -297,6 +297,14 @@ async fn items(
     State(host): State<Host>,
     Query(query): Query<HashMap<String, String>>,
 ) -> Json<Value> {
+    // Emby lists only root children by default, so a whole-library media
+    // inventory is empty without Recursive=true.
+    if query.get("IncludeItemTypes").is_some_and(|types| types == "Movie,Episode")
+        && !["Path", "Ids", "ParentId"].iter().any(|key| query.contains_key(*key))
+        && query.get("Recursive").is_none_or(|recursive| recursive != "true")
+    {
+        return Json(json!({"TotalRecordCount":0,"Items":[]}));
+    }
     let items = host
         .items
         .lock()
@@ -355,7 +363,8 @@ async fn refresh(
             host.items.lock().await.get_mut(target).unwrap()["Chapters"] = json!([]);
         }
         if mode == "FullRefresh" {
-            match host.resource_fault.lock().await.as_str() {
+            let fault = host.resource_fault.lock().await.clone();
+            match fault.as_str() {
                 "jpeg" => {
                     host.chapter_images
                         .lock()
@@ -376,6 +385,25 @@ async fn refresh(
                     episode["Chapters"] = json!([]);
                     std::fs::write(host.cover.lock().await.as_ref().unwrap(), jpeg([0, 0, 255]))
                         .unwrap();
+                }
+                "native-db-markers" | "native-db-markers-crash" => {
+                    let mut items = host.items.lock().await;
+                    let episode = items.get_mut("101").unwrap();
+                    episode["Chapters"].as_array_mut().unwrap().extend([
+                        json!({"Name":"IntroStart#DB","MarkerType":"IntroStart","StartPositionTicks":0}),
+                        json!({"Name":"IntroEnd#DB","MarkerType":"IntroEnd","StartPositionTicks":1240000000_u64}),
+                        json!({"Name":"CreditsStart#DB","MarkerType":"CreditsStart","StartPositionTicks":10660000000_u64}),
+                    ]);
+                    let path = std::path::Path::new(episode["Path"].as_str().unwrap());
+                    let path = path.with_file_name("101-mediainfo.json");
+                    let mut info: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                    info[0]["Chapters"] = episode["Chapters"].clone();
+                    std::fs::write(&path, serde_json::to_vec(&info).unwrap()).unwrap();
+                    drop(items);
+                    if fault == "native-db-markers-crash" {
+                        host.metadata_hook_reached.notify_one();
+                        host.metadata_hook_release.notified().await;
+                    }
                 }
                 _ => {}
             }

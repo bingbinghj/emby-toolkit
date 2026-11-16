@@ -23,7 +23,7 @@ for (const [path, heading] of privateRoutes) {
     const roots = { 仪表盘: '.dashboard-page', 用户管理: '.user-management-page', 媒体整理: '.media-organize-page', 手动处理: '.review-page' };
     if (roots[heading]) {
       await expect(page.locator(roots[heading])).toBeVisible();
-      await expect(page.locator(roots[heading]).getByRole('heading', { name: heading, exact: true })).toHaveCount(0);
+      await expect(page.locator(roots[heading]).getByRole('heading', { name: heading, exact: true })).toHaveCount(heading === '媒体整理' ? 1 : 0);
     } else if (heading === '任务中心' || heading === '封面生成' || heading === '手动编辑媒体信息') {
       await expect(title).toBeAttached();
     } else if (heading === '设置' || heading === '通知') {

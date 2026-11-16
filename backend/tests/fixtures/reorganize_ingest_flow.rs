@@ -459,6 +459,122 @@ async fn current_reorganize_fixture() -> Fixture {
 }
 
 #[tokio::test]
+#[ignore = "requires disposable PostgreSQL; reproduces Emby's root-only inventory on localhost"]
+async fn metadata_only_ingest_finds_selected_episode_in_recursive_library_inventory() {
+    let (fixture, event, old, _, _, _) = gaia_empty_version_fixture().await;
+    let result = fixture.run_moviepilot_event(event).await;
+    assert_eq!(result["state"], "completed", "{result}");
+    assert_eq!(fixture.host.items.lock().await["102"], old);
+    assert!(fixture.host.stage_order.lock().await.iter().any(|stage| stage == "metadata-update:101"));
+    fixture.close().await;
+}
+
+async fn e200_db_marker_fixture() -> (Fixture, tokio::task::JoinHandle<()>, Value) {
+    let fixture = current_reorganize_fixture().await;
+    let metadata = prepare_reorganize_chain(&fixture, true).await;
+    fixture.state.save_config(&json!({
+        "auto_repair_truehd_core_on_ingest":false,
+        "auto_extract_intro_fingerprint_on_ingest":false,
+        "auto_extract_credits_on_ingest":false,
+        "auto_extract_video_thumbnails_on_ingest":false
+    })).await.unwrap();
+    let chapters = json!([
+        {"Name":"片头","MarkerType":"Chapter","StartPositionTicks":0},
+        {"Name":"正片","MarkerType":"Chapter","StartPositionTicks":1240000000_u64},
+        {"Name":"片尾","MarkerType":"Chapter","StartPositionTicks":10660000000_u64}
+    ]);
+    {
+        let mut items = fixture.host.items.lock().await;
+        let episode = items.get_mut("101").unwrap();
+        episode["RunTimeTicks"] = json!(11560100000_u64);
+        episode["MediaSources"][0]["RunTimeTicks"] = json!(11560100000_u64);
+        episode["Chapters"] = chapters.clone();
+        episode["MediaSources"][0]["Chapters"] = chapters.clone();
+        let mut info: Value = serde_json::from_slice(&std::fs::read(fixture.sidecar_path()).unwrap()).unwrap();
+        info[0]["Chapters"] = chapters.clone();
+        info[0]["MediaSourceInfo"]["RunTimeTicks"] = json!(11560100000_u64);
+        std::fs::write(fixture.sidecar_path(), serde_json::to_vec(&info).unwrap()).unwrap();
+    }
+    *fixture.host.resource_fault.lock().await = "native-db-markers".into();
+    (fixture, metadata, chapters)
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; reproduces E200 database markers during native refresh on localhost"]
+async fn reorganize_e200_native_database_markers_do_not_mean_original_chapter_loss() {
+    let (fixture, metadata, chapters) = e200_db_marker_fixture().await;
+    let row = public_reorganize_queue(&fixture).await;
+    assert_eq!(row["status"], "completed", "{row}");
+    assert_eq!(row["result"]["finalization"]["warnings"], 0, "{row}");
+    let live = fixture.host.items.lock().await["101"].clone();
+    assert!(emby_toolkit::media_info::chapters_restored(&chapters, &live["Chapters"]));
+    assert!(live["Chapters"].as_array().unwrap().iter().any(|chapter| chapter["Name"] == "CreditsStart#DB"));
+    assert_eq!(live["MediaSources"][0]["Container"], "mkv", "STRM remains the entry path, not the media container");
+    let recovery = media_recovery::status(State(fixture.state.clone())).await.unwrap().0;
+    assert_eq!(recovery["pending"], false, "{recovery}");
+    metadata.abort();
+    fixture.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; native E200 refresh interruption and recovery stay localhost"]
+async fn reorganize_e200_restart_keeps_database_markers_and_releases_previous_settings_guard() {
+    let (mut fixture, metadata, chapters) = e200_db_marker_fixture().await;
+    *fixture.host.resource_fault.lock().await = "native-db-markers-crash".into();
+    let original_settings = fixture.host.configuration.lock().await.clone();
+    let accepted = submit_reorganize(&fixture).await;
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let worker = tokio::spawn(emby_toolkit::media_organize_queue::run(fixture.state.clone(), cancel.clone()));
+    tokio::time::timeout(Duration::from_secs(60), fixture.host.metadata_hook_reached.notified()).await.unwrap();
+    let task = fixture.state.jobs.status().await["task_id"].as_str().unwrap().to_string();
+    let saved: Value = sqlx::query_scalar("SELECT value_json FROM durable_job_steps WHERE job_id=$1 AND step_key LIKE 'plans:%:rescrape-recovery'")
+        .bind(&task).fetch_one(&fixture.state.db).await.unwrap();
+    let guard_path = std::path::PathBuf::from(saved.as_str().unwrap());
+    assert_eq!(guard_path.parent(), Some(fixture.state.data_dir.join("backups/media-info-reload").as_path()));
+    let legacy_copy = fixture._directory.path().join("old-version-guard");
+    assert!(std::process::Command::new("cp").arg("-a").arg(&guard_path).arg(&legacy_copy).status().unwrap().success());
+    let manager = fixture.state.jobs.clone();
+    let stopping = tokio::spawn(async move { manager.shutdown().await; });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while fixture.state.jobs.result(&task).await.unwrap()["state"] != "interrupted" {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    *fixture.host.resource_fault.lock().await = String::new();
+    fixture.host.metadata_hook_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(60), stopping).await.unwrap().unwrap();
+    cancel.cancel();
+    worker.await.unwrap();
+    // The fixed live guard can finish during shutdown. Restore the exact
+    // earlier guard snapshot to model a record left by the old strict check.
+    if guard_path.exists() {
+        std::fs::remove_dir_all(&guard_path).unwrap();
+    }
+    assert!(std::process::Command::new("cp").arg("-a").arg(&legacy_copy).arg(&guard_path).status().unwrap().success());
+    let before = fixture.host.items.lock().await["101"].clone();
+    assert!(emby_toolkit::media_info::chapters_restored(&chapters, &before["Chapters"]));
+    assert_eq!(before["Chapters"].as_array().unwrap().len(), 6);
+    let pending = media_recovery::status(State(fixture.state.clone())).await.unwrap().0;
+    assert_eq!(pending["pending"], true, "interrupted refresh must retain its original recovery evidence: {pending}");
+    let info_runs = *fixture.host.info_runs.lock().await;
+    let mut restarted = AppState::new(fixture.state.db.clone(), fixture.state.data_dir.clone()).await.unwrap();
+    restarted.p115 = fixture.state.p115.clone();
+    fixture.state = restarted.clone();
+    tokio::time::timeout(Duration::from_secs(120), restarted.jobs.resume_pending(restarted.clone(), tokio_util::sync::CancellationToken::new())).await.unwrap().unwrap();
+    let result = restarted.jobs.result(&task).await.unwrap();
+    assert_eq!(result["state"], "completed", "{result}");
+    assert_eq!(*fixture.host.info_runs.lock().await, info_runs, "restart must reuse completed media extraction");
+    let row: Value = sqlx::query_scalar("SELECT to_jsonb(q) FROM media_organize_queue q WHERE id=$1")
+        .bind(accepted["queue_ids"][0].as_str().unwrap()).fetch_one(&fixture.state.db).await.unwrap();
+    assert_eq!(row["status"], "completed", "{row}");
+    assert_eq!(fixture.host.items.lock().await["101"]["Chapters"], before["Chapters"]);
+    assert_eq!(*fixture.host.configuration.lock().await, original_settings);
+    assert_eq!(media_recovery::status(State(fixture.state.clone())).await.unwrap().0["pending"], false);
+    metadata.abort();
+    fixture.close().await;
+}
+
+#[tokio::test]
 #[ignore = "requires disposable PostgreSQL; all media and metadata APIs stay localhost"]
 async fn moviepilot_remote_media_without_etag_enters_native_ingestion_without_a_field_stage() {
     let fixture = current_reorganize_fixture().await;
@@ -658,7 +774,7 @@ async fn prepare_reorganize_chain(fixture: &Fixture, titles: bool) -> tokio::tas
     server
 }
 
-async fn public_reorganize_queue(fixture: &Fixture) -> Value {
+async fn submit_reorganize(fixture: &Fixture) -> Value {
     let session = fixture.state.sessions.sign(&emby_toolkit::auth::Session {
         user_id: "operator".into(),
         name: "Test Operator".into(),
@@ -683,6 +799,11 @@ async fn public_reorganize_queue(fixture: &Fixture) -> Value {
         .await
         .unwrap();
     let accepted: Value = serde_json::from_slice(&body).unwrap();
+    accepted
+}
+
+async fn public_reorganize_queue(fixture: &Fixture) -> Value {
+    let accepted = submit_reorganize(fixture).await;
     let id = accepted["queue_ids"][0].as_str().unwrap();
     let cancel = tokio_util::sync::CancellationToken::new();
     let worker = tokio::spawn(emby_toolkit::media_organize_queue::run(

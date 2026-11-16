@@ -178,15 +178,7 @@ async fn import_json(h: &Host, ids: &[String]) {
             Some(data) => data,
             None => continue,
         };
-        item["MediaStreams"] = data[0]["MediaSourceInfo"]["MediaStreams"].clone();
-        item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
-        item["Size"] = data[0]["MediaSourceInfo"]["Size"].clone();
-        item["Chapters"] = data[0]["Chapters"].clone();
-        if !item["Chapters"].as_array().unwrap().is_empty()
-            && h.root.join(format!("{id}-320-10.bif")).is_file()
-        {
-            item["Chapters"][0]["ImageTag"] = json!(format!("image-{}", data[0]["EpisodeProof"]));
-        }
+        apply_pro_bundle(&h.root, id, item, &data[0]);
     }
 }
 fn filter_pro_bundle(bundle: &mut Value) {
@@ -214,12 +206,14 @@ fn filter_pro_bundle(bundle: &mut Value) {
         });
 }
 fn apply_pro_bundle(root: &Path, id: &str, item: &mut Value, bundle: &Value) {
+    let mut source = bundle["MediaSourceInfo"].clone();
+    for field in ["Id", "ItemId", "Path"] {
+        source[field] = item["MediaSources"][0][field].clone();
+    }
+    item["MediaSources"][0] = source;
     item["MediaStreams"] = bundle["MediaSourceInfo"]["MediaStreams"].clone();
-    item["MediaSources"][0]["MediaStreams"] = item["MediaStreams"].clone();
     item["Size"] = bundle["MediaSourceInfo"]["Size"].clone();
     item["RunTimeTicks"] = bundle["MediaSourceInfo"]["RunTimeTicks"].clone();
-    item["MediaSources"][0]["Size"] = bundle["MediaSourceInfo"]["Size"].clone();
-    item["MediaSources"][0]["RunTimeTicks"] = bundle["MediaSourceInfo"]["RunTimeTicks"].clone();
     item["Chapters"] = bundle["Chapters"].clone();
     if !item["Chapters"].as_array().unwrap().is_empty()
         && root.join(format!("{id}-320-10.bif")).is_file()
@@ -720,9 +714,8 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
                 .await
                 .push(configuration.clone());
             *h.configuration.lock().await = configuration;
-            if ignore_file_change_active(&h).await {
-                h.guarded_run.store(true, Ordering::SeqCst);
-            }
+            h.guarded_run
+                .store(ignore_file_change_active(&h).await, Ordering::SeqCst);
             return Json(json!({})).into_response();
         }
     }
@@ -863,7 +856,13 @@ impl Fixture {
                 serde_json::to_vec(&backup).unwrap(),
             )
             .unwrap();
-            host.items.lock().await.insert(id.clone(),json!({"Id":id,"Guid":native_guid(&path,"Episode"),"PresentationUniqueKey":format!("episode-{id}"),"Type":"Episode","SeriesId":"series","Name":format!("episode{index}"),"IndexNumber":index+1,"ParentIndexNumber":1,"Path":path,"Size":1000+index,"PartCount":1,"MediaStreams":streams,"MediaSources":[{"Id":format!("mediasource_{id}"),"ItemId":id,"Path":playback,"MediaStreams":streams}],"Chapters":chapters}));
+            let mut source = backup[0]["MediaSourceInfo"].clone();
+            source["Id"] = json!(format!("mediasource_{id}"));
+            source["ItemId"] = json!(id);
+            source["Path"] = json!(playback);
+            source["MediaStreams"] = streams.clone();
+            // These small fixtures are below PRO's complete-media threshold.
+            host.items.lock().await.insert(id.clone(),json!({"Id":id,"Guid":native_guid(&path,"Episode"),"PresentationUniqueKey":format!("episode-{id}"),"Type":"Episode","SeriesId":"series","Name":format!("episode{index}"),"IndexNumber":index+1,"ParentIndexNumber":1,"Path":path,"Size":1000+index,"RunTimeTicks":source["RunTimeTicks"],"PartCount":1,"MediaStreams":streams,"MediaSources":[source],"Chapters":chapters}));
             sqlx::query("INSERT INTO media_metadata(tmdb_id,item_type,emby_item_ids_json,asset_details_json,file_sha1_json,file_pickcode_json) VALUES($1,'Episode',$2,$3,$4,$5)").bind(format!("fixture-{index}")).bind(json!([id])).bind(json!([{"emby_item_id":id,"path":path,"size_bytes":1000+index}])).bind(json!([format!("{:040X}",index+1)])).bind(json!([null])).execute(&state.db).await.unwrap();
         }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1036,6 +1035,8 @@ impl Fixture {
             ));
             item["ProductionYear"] = json!(1998);
             item["ProviderIds"] = json!({"Tmdb":"gaia-movie-fixture"});
+            item["LockData"] = json!(false);
+            item["LockedFields"] = json!([]);
         }
         sqlx::query(
             "UPDATE media_metadata SET item_type='Movie' WHERE emby_item_ids_json @> $1::jsonb",
@@ -1047,6 +1048,22 @@ impl Fixture {
         self.enable_real_finalize().await;
     }
     async fn enable_real_finalize(&self) {
+        // finalize is called after scraping has written the selected files' NFO.
+        for item in self.host.items.lock().await.values() {
+            if let Some(path) = item["Path"].as_str()
+                && matches!(item["Type"].as_str(), Some("Movie" | "Episode"))
+            {
+                let xml = if item["Type"] == "Movie" {
+                    format!(
+                        "<movie><title>{}</title><year>1998</year></movie>",
+                        item["Name"].as_str().unwrap()
+                    )
+                } else {
+                    format!("<episodedetails><title>{}</title><season>1</season><episode>{}</episode></episodedetails>", item["Name"].as_str().unwrap(), item["IndexNumber"])
+                };
+                std::fs::write(Path::new(path).with_extension("nfo"), xml).unwrap();
+            }
+        }
         self.state
             .save_config(&json!({
                 "auto_fill_language_titles_on_ingest":true,"monitor_sha1_pc_search":false,
@@ -1518,7 +1535,7 @@ async fn native_titles_without_etk_bindings_are_saved_and_verified() {
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
-async fn native_title_fallback_keeps_file_identity_checks() {
+async fn native_title_identity_mismatch_keeps_json_and_still_finishes_ingestion() {
     let f = Fixture::new(&["gaia"]).await;
     f.make_movie().await;
     sqlx::query("DELETE FROM media_metadata")
@@ -1531,10 +1548,14 @@ async fn native_title_fallback_keeps_file_identity_checks() {
     let result = f.wait_job(&task).await;
     let after = f.files();
     let refreshes = f.host.refreshes.lock().await.clone();
+    let syncs = f.host.syncs.lock().await.clone();
     f.close().await;
-    assert_eq!(result["state"], "failed", "{result}");
+    assert_eq!(result["state"], "completed_with_warnings", "{result}");
+    assert_eq!(result["result"]["metadata_refresh"]["completed"], true, "{result}");
+    assert_eq!(result["result"]["title_fill"]["completed"], false, "{result}");
     assert_eq!(before, after);
     assert!(refreshes.is_empty());
+    assert!(syncs.is_empty());
 }
 
 #[tokio::test]

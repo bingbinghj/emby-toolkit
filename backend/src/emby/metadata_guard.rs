@@ -137,7 +137,9 @@ impl RelatedGuard {
             state,
             &[
                 ("IncludeItemTypes", "Movie,Episode".into()),
-                ("Fields", FIELDS.into()),
+                ("Recursive", "true".into()),
+                // Read full media fields only for the related versions below.
+                ("Fields", "Id,Type,Path,PresentationUniqueKey,MediaSources".into()),
             ],
             context,
         )
