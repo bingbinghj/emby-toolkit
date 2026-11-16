@@ -81,12 +81,8 @@ async fn deliver_notices(
         if context.completed(&key).await?.is_some() {
             continue;
         }
-        for identity in identities
-            .iter()
-            .filter(|identity| ids.contains(&identity.id))
-        {
-            crate::moviepilot_ingest::unchanged(state, identity, context).await?;
-        }
+        crate::moviepilot_ingest::unchanged_many(state, identities, Some(("", &ids)), context)
+            .await?;
         context.checkpoint().await?;
         let result = crate::notifications::media(
             state,
@@ -149,6 +145,7 @@ impl Service {
         members: &[Value],
         context: &crate::jobs::JobContext,
     ) -> Result<BTreeSet<String>> {
+        context.refresh_ingest_directories().await;
         let key = format!("emby_prepared:{top_id}");
         if let Some(saved) = context.completed(&key).await? {
             let covered: BTreeSet<String> = serde_json::from_value(saved["ids"].clone())
@@ -1891,6 +1888,7 @@ async fn missing_moviepilot_media_info(
     files: &[Value],
     context: &crate::jobs::JobContext,
 ) -> Result<BTreeMap<String, Option<String>>> {
+    let config = state.config.read().await.clone();
     let mut pending = BTreeMap::new();
     for file in files {
         context.checkpoint().await?;
@@ -1907,8 +1905,12 @@ async fn missing_moviepilot_media_info(
         let has_video = item
             .as_ref()
             .is_some_and(crate::media_preflight::valid_video);
-        // Python requires the JSON sidecar when the original local file is visible.
-        if tokio::fs::try_exists(media_path).await.unwrap_or(false) || !has_video {
+        // Local ingestion uses the sidecar; a mounted cloud source can use
+        // Emby's video data without requiring a JSON beside the cloud file.
+        if !has_video
+            || !crate::media_save::protected(&config, path)
+                && tokio::fs::try_exists(media_path).await.unwrap_or(false)
+        {
             pending.insert(path.into(), item.as_ref().map(|item| string(item, "Id")));
         }
     }
@@ -1932,7 +1934,7 @@ async fn sync_moviepilot_media_info(
                 .post(format!("{}/{endpoint}", base.trim_end_matches('/')))
                 .header("X-Emby-Token", &key)
                 .query(&[("Path", path)])
-                .json(&Value::Null)
+                .header("Content-Type", "application/json")
                 .timeout(Duration::from_secs(600)),
         )
         .await?;
@@ -1983,6 +1985,7 @@ mod extraction_thread_tests {
             .unwrap();
         assert!(released.elapsed() >= Duration::from_millis(900));
         assert_eq!(fixture.calls.load(Ordering::SeqCst), 1);
+        assert!(fixture.bodies.lock().await[0].is_empty());
     }
 }
 
@@ -2297,6 +2300,7 @@ async fn process_moviepilot_inner(
             initial_files.len()
         );
     }
+    crate::moviepilot_ingest::unchanged_many(state, &changed, None, context).await?;
     for identity in &changed {
         crate::moviepilot_ingest::remember_initial(state, identity, context).await?;
     }
@@ -2332,12 +2336,8 @@ async fn process_moviepilot_inner(
             "MoviePilot 单组增强开始：《{media_name}》，Emby {id}，目标分集 {} 个",
             episodes.len()
         );
-        for identity in changed
-            .iter()
-            .filter(|identity| identity.id == id || episodes.contains(&identity.id))
-        {
-            crate::moviepilot_ingest::unchanged(state, identity, context).await?;
-        }
+        crate::moviepilot_ingest::unchanged_many(state, &changed, Some((&id, &episodes)), context)
+            .await?;
         let preparation = async {
             let key = format!("moviepilot_prepared:{id}");
             if let Some(report) = context.completed(&key).await? {
@@ -2347,13 +2347,13 @@ async fn process_moviepilot_inner(
                 None
             } else {
                 crate::ingest::prepare_cached_report(
-                state,
-                &item,
-                &episodes,
-                event["episode_group"].as_str().filter(|s| !s.is_empty()),
-                context,
-            )
-            .await?
+                    state,
+                    &item,
+                    &episodes,
+                    event["episode_group"].as_str().filter(|s| !s.is_empty()),
+                    context,
+                )
+                .await?
             };
             let report = if let Some(report) = prepared {
                 report
@@ -2378,12 +2378,13 @@ async fn process_moviepilot_inner(
                 if let Some(result) = context.completed(&key).await? {
                     return Ok(result);
                 }
-                for identity in changed
-                    .iter()
-                    .filter(|identity| identity.id == id || episodes.contains(&identity.id))
-                {
-                    crate::moviepilot_ingest::unchanged(state, identity, context).await?;
-                }
+                crate::moviepilot_ingest::unchanged_many(
+                    state,
+                    &changed,
+                    Some((&id, &episodes)),
+                    context,
+                )
+                .await?;
                 let current = if episodes.is_empty() {
                     vec![id.clone()]
                 } else {
@@ -2392,9 +2393,11 @@ async fn process_moviepilot_inner(
                 crate::versions::reconcile(state, &current).await?;
                 let result = crate::ingest::feedback(state, &id, &episodes, true, context).await?;
                 // 新绑定可能直到回流才建立；登记神医提取阶段，不增加字段回读准入检查。
-                for identity in changed.iter().filter(|identity| {
-                    identity.id == id || episodes.contains(&identity.id)
-                }) {
+                context.refresh_ingest_directories().await;
+                for identity in changed
+                    .iter()
+                    .filter(|identity| identity.id == id || episodes.contains(&identity.id))
+                {
                     crate::moviepilot_ingest::remember_initial(state, identity, context).await?;
                 }
                 crate::versions::reconcile(state, &current).await?;
@@ -2413,12 +2416,13 @@ async fn process_moviepilot_inner(
                     updated += result["updated"].as_u64().unwrap_or(0);
                     add_report_warnings(&mut postprocessing, &result);
                     if !awaiting_emby {
-                        for identity in changed
-                            .iter()
-                            .filter(|identity| identity.id == id || episodes.contains(&identity.id))
-                        {
-                            crate::moviepilot_ingest::unchanged(state, identity, context).await?;
-                        }
+                        crate::moviepilot_ingest::unchanged_many(
+                            state,
+                            &changed,
+                            Some((&id, &episodes)),
+                            context,
+                        )
+                        .await?;
                         let key = format!("moviepilot_finalized:{id}");
                         let finalized = if let Some(report) = context.completed(&key).await? {
                             let current=details(state,&id,"Id,Type,Name,Path,ProviderIds,ProductionYear,ImageTags,MediaSources,MediaStreams").await?;
@@ -2494,9 +2498,7 @@ async fn process_moviepilot_inner(
             }
         }
     }
-    for identity in &changed {
-        crate::moviepilot_ingest::unchanged(state, identity, context).await?;
-    }
+    crate::moviepilot_ingest::unchanged_many(state, &changed, None, context).await?;
     tracing::info!(
         "MoviePilot 后置增强处理结束：TMDb {tmdb}，更新 {updated} 条，入库失败 {} 项，后处理警告 {} 条",
         failures.len(),
@@ -2538,6 +2540,7 @@ async fn process_moviepilot_inner(
         Value::Null
     };
     if failures.is_empty() {
+        context.refresh_ingest_directories().await;
         for identity in &changed {
             let key = format!("moviepilot_finished:{}", identity.id);
             if context.completed(&key).await?.is_none() {
@@ -2600,12 +2603,13 @@ async fn finalize_inner(
     )
     .await?;
     if let Some(identities) = identities {
-        for identity in identities
-            .iter()
-            .filter(|identity| identity.id == id || episode_ids.contains(&identity.id))
-        {
-            crate::moviepilot_ingest::unchanged(state, identity, context).await?;
-        }
+        crate::moviepilot_ingest::unchanged_many(
+            state,
+            identities,
+            Some((id, episode_ids)),
+            context,
+        )
+        .await?;
     }
     let media_name = string(&item, "Name");
     let targets = if item["Type"] == "Movie" {
@@ -2735,7 +2739,10 @@ async fn finalize_inner(
                     && refresh_guard.0.load(std::sync::atomic::Ordering::Acquire) =>
             {
                 // 原生 Refresh 会展开关联版本；只读准备失败后改走原 ID 元数据接口。
-                tracing::info!("入库元数据使用定点更新，媒体字段问题不阻断流程：{}", error.1);
+                tracing::info!(
+                    "入库元数据使用定点更新，媒体字段问题不阻断流程：{}",
+                    error.1
+                );
                 if !tokio::fs::try_exists(refresh_guard.1.join("original-settings.json")).await? {
                     tokio::fs::remove_dir_all(refresh_guard.1).await?;
                 }
@@ -2753,12 +2760,13 @@ async fn finalize_inner(
         };
         let refresh = || async {
             if let Some(identities) = identities {
-                for identity in identities
-                    .iter()
-                    .filter(|identity| identity.id == id || episode_ids.contains(&identity.id))
-                {
-                    crate::moviepilot_ingest::unchanged(state, identity, context).await?;
-                }
+                crate::moviepilot_ingest::unchanged_many(
+                    state,
+                    identities,
+                    Some((id, episode_ids)),
+                    context,
+                )
+                .await?;
             }
             protection.check(state, context).await?;
             // Publish after entering the existing settings guard, whose entry
@@ -2871,8 +2879,12 @@ async fn finalize_inner(
                     error.1
                 );
                 Box::pin(crate::emby::finalize_metadata_only_targets(
-                    state, &item, episode_ids, context,
-                )).await?;
+                    state,
+                    &item,
+                    episode_ids,
+                    context,
+                ))
+                .await?;
                 refresh_completed.store(true, std::sync::atomic::Ordering::Release);
                 if confirmed.load(std::sync::atomic::Ordering::Acquire) {
                     let _ = tokio::fs::remove_dir_all(&recovery).await;
@@ -2965,12 +2977,13 @@ async fn finalize_inner(
         warning_details.push(reason);
     }
     if let Some(identities) = identities {
-        for identity in identities
-            .iter()
-            .filter(|identity| identity.id == id || episode_ids.contains(&identity.id))
-        {
-            crate::moviepilot_ingest::unchanged(state, identity, context).await?;
-        }
+        crate::moviepilot_ingest::unchanged_many(
+            state,
+            identities,
+            Some((id, episode_ids)),
+            context,
+        )
+        .await?;
     }
     let notification = if let Some(notices) = notices {
         collect_ingest_notice(notices, &item, &title_report, episode_ids);

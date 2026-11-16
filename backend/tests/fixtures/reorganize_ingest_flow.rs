@@ -41,6 +41,9 @@ async fn metadata_only_mock_post(
     Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> StatusCode {
+    if *host.resource_fault.lock().await == "metadata-post-fail" {
+        return StatusCode::BAD_REQUEST;
+    }
     let mut items = host.items.lock().await;
     let item = items.get_mut(&id).unwrap();
     assert_eq!(
@@ -118,6 +121,11 @@ async fn metadata_only_mock_post(
             "metadata-associated" => {
                 host.items.lock().await.get_mut("102").unwrap()["Chapters"] = json!([])
             }
+            "metadata-cloud-swap" => {
+                if let Some(next) = host.cloud_swap_after_import.lock().await.take() {
+                    *host.cloud_files.lock().await = vec![next];
+                }
+            }
             "metadata-new-bif" | "metadata-crash-resource" => {
                 let old = host.items.lock().await["102"].clone();
                 let path = std::path::Path::new(old["Path"].as_str().unwrap());
@@ -192,7 +200,7 @@ async fn metadata_only_ingest_keeps_obsolete_native_version_when_its_local_direc
     assert_eq!(std::fs::read(&chapter).unwrap(), jpeg_bytes);
     let result = fixture.run_moviepilot_event(event).await;
     assert_eq!(result["state"], "completed", "{result}");
-    assert_eq!(*fixture.host.sync_imports.lock().await, vec!["101"]);
+    assert!(fixture.host.sync_imports.lock().await.is_empty());
     assert_eq!(fixture.host.items.lock().await["101"]["Size"], 1000);
     assert_eq!(
         fixture.host.items.lock().await["101"]["MediaStreams"][0]["Codec"],
@@ -524,25 +532,60 @@ async fn reorganize_e200_restart_keeps_database_markers_and_releases_previous_se
     let original_settings = fixture.host.configuration.lock().await.clone();
     let accepted = submit_reorganize(&fixture).await;
     let cancel = tokio_util::sync::CancellationToken::new();
-    let worker = tokio::spawn(emby_toolkit::media_organize_queue::run(fixture.state.clone(), cancel.clone()));
-    tokio::time::timeout(Duration::from_secs(60), fixture.host.metadata_hook_reached.notified()).await.unwrap();
-    let task = fixture.state.jobs.status().await["task_id"].as_str().unwrap().to_string();
+    let worker = tokio::spawn(emby_toolkit::media_organize_queue::run(
+        fixture.state.clone(),
+        cancel.clone(),
+    ));
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        fixture.host.metadata_hook_reached.notified(),
+    )
+    .await
+    .unwrap();
+    let task = fixture.state.jobs.status().await["task_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let saved: Value = sqlx::query_scalar("SELECT value_json FROM durable_job_steps WHERE job_id=$1 AND step_key LIKE 'plans:%:rescrape-recovery'")
         .bind(&task).fetch_one(&fixture.state.db).await.unwrap();
     let guard_path = std::path::PathBuf::from(saved.as_str().unwrap());
-    assert_eq!(guard_path.parent(), Some(fixture.state.data_dir.join("backups/media-info-reload").as_path()));
+    assert_eq!(
+        guard_path.parent(),
+        Some(
+            fixture
+                .state
+                .data_dir
+                .join("backups/media-info-reload")
+                .as_path()
+        )
+    );
     let legacy_copy = fixture._directory.path().join("old-version-guard");
-    assert!(std::process::Command::new("cp").arg("-a").arg(&guard_path).arg(&legacy_copy).status().unwrap().success());
+    assert!(
+        std::process::Command::new("cp")
+            .arg("-a")
+            .arg(&guard_path)
+            .arg(&legacy_copy)
+            .status()
+            .unwrap()
+            .success()
+    );
     let manager = fixture.state.jobs.clone();
-    let stopping = tokio::spawn(async move { manager.shutdown().await; });
+    let stopping = tokio::spawn(async move {
+        manager.shutdown().await;
+    });
     tokio::time::timeout(Duration::from_secs(10), async {
         while fixture.state.jobs.result(&task).await.unwrap()["state"] != "interrupted" {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     *fixture.host.resource_fault.lock().await = String::new();
     fixture.host.metadata_hook_release.notify_one();
-    tokio::time::timeout(Duration::from_secs(60), stopping).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(60), stopping)
+        .await
+        .unwrap()
+        .unwrap();
     cancel.cancel();
     worker.await.unwrap();
     // The fixed live guard can finish during shutdown. Restore the exact
@@ -550,26 +593,71 @@ async fn reorganize_e200_restart_keeps_database_markers_and_releases_previous_se
     if guard_path.exists() {
         std::fs::remove_dir_all(&guard_path).unwrap();
     }
-    assert!(std::process::Command::new("cp").arg("-a").arg(&legacy_copy).arg(&guard_path).status().unwrap().success());
+    assert!(
+        std::process::Command::new("cp")
+            .arg("-a")
+            .arg(&legacy_copy)
+            .arg(&guard_path)
+            .status()
+            .unwrap()
+            .success()
+    );
     let before = fixture.host.items.lock().await["101"].clone();
-    assert!(emby_toolkit::media_info::chapters_restored(&chapters, &before["Chapters"]));
+    assert!(emby_toolkit::media_info::chapters_restored(
+        &chapters,
+        &before["Chapters"]
+    ));
     assert_eq!(before["Chapters"].as_array().unwrap().len(), 6);
-    let pending = media_recovery::status(State(fixture.state.clone())).await.unwrap().0;
-    assert_eq!(pending["pending"], true, "interrupted refresh must retain its original recovery evidence: {pending}");
+    let pending = media_recovery::status(State(fixture.state.clone()))
+        .await
+        .unwrap()
+        .0;
+    assert_eq!(
+        pending["pending"], true,
+        "interrupted refresh must retain its original recovery evidence: {pending}"
+    );
     let info_runs = *fixture.host.info_runs.lock().await;
-    let mut restarted = AppState::new(fixture.state.db.clone(), fixture.state.data_dir.clone()).await.unwrap();
+    let mut restarted = AppState::new(fixture.state.db.clone(), fixture.state.data_dir.clone())
+        .await
+        .unwrap();
     restarted.p115 = fixture.state.p115.clone();
     fixture.state = restarted.clone();
-    tokio::time::timeout(Duration::from_secs(120), restarted.jobs.resume_pending(restarted.clone(), tokio_util::sync::CancellationToken::new())).await.unwrap().unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(120),
+        restarted.jobs.resume_pending(
+            restarted.clone(),
+            tokio_util::sync::CancellationToken::new(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let result = restarted.jobs.result(&task).await.unwrap();
     assert_eq!(result["state"], "completed", "{result}");
-    assert_eq!(*fixture.host.info_runs.lock().await, info_runs, "restart must reuse completed media extraction");
-    let row: Value = sqlx::query_scalar("SELECT to_jsonb(q) FROM media_organize_queue q WHERE id=$1")
-        .bind(accepted["queue_ids"][0].as_str().unwrap()).fetch_one(&fixture.state.db).await.unwrap();
+    assert_eq!(
+        *fixture.host.info_runs.lock().await,
+        info_runs,
+        "restart must reuse completed media extraction"
+    );
+    let row: Value =
+        sqlx::query_scalar("SELECT to_jsonb(q) FROM media_organize_queue q WHERE id=$1")
+            .bind(accepted["queue_ids"][0].as_str().unwrap())
+            .fetch_one(&fixture.state.db)
+            .await
+            .unwrap();
     assert_eq!(row["status"], "completed", "{row}");
-    assert_eq!(fixture.host.items.lock().await["101"]["Chapters"], before["Chapters"]);
+    assert_eq!(
+        fixture.host.items.lock().await["101"]["Chapters"],
+        before["Chapters"]
+    );
     assert_eq!(*fixture.host.configuration.lock().await, original_settings);
-    assert_eq!(media_recovery::status(State(fixture.state.clone())).await.unwrap().0["pending"], false);
+    assert_eq!(
+        media_recovery::status(State(fixture.state.clone()))
+            .await
+            .unwrap()
+            .0["pending"],
+        false
+    );
     metadata.abort();
     fixture.close().await;
 }
@@ -608,7 +696,15 @@ async fn reorganize_missing_native_technical_fields_does_not_add_a_field_stage_o
         let mut items = fixture.host.items.lock().await;
         let item = items.get_mut("101").unwrap();
         for stream in item["MediaStreams"].as_array_mut().unwrap() {
-            for field in ["Title", "RefFrames", "AspectRatio", "ColorSpace", "ColorTransfer", "ColorPrimaries", "VideoRange"] {
+            for field in [
+                "Title",
+                "RefFrames",
+                "AspectRatio",
+                "ColorSpace",
+                "ColorTransfer",
+                "ColorPrimaries",
+                "VideoRange",
+            ] {
                 stream.as_object_mut().unwrap().remove(field);
             }
         }

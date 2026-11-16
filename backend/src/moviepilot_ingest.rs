@@ -128,6 +128,22 @@ pub(crate) async fn unchanged(
     Ok(())
 }
 
+pub(crate) async fn unchanged_many(
+    state: &AppState,
+    identities: &[Identity],
+    scope: Option<(&str, &[String])>,
+    context: &JobContext,
+) -> Result<()> {
+    context.refresh_ingest_directories().await;
+    for identity in identities {
+        if scope.is_some_and(|(id, ids)| identity.id != id && !ids.contains(&identity.id)) {
+            continue;
+        }
+        unchanged(state, identity, context).await?;
+    }
+    Ok(())
+}
+
 async fn slot(state: &AppState, id: &str) -> Result<Option<(Value, usize)>> {
     let row:Option<Value>=sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE item_type IN ('Movie','Episode') AND emby_item_ids_json @> $1::jsonb LIMIT 1")
         .bind(json!([id])).fetch_optional(&state.db).await?;
@@ -186,7 +202,11 @@ async fn write_identity(
         pcs.resize(assets.len(), Value::Null);
         shas.resize(assets.len(), Value::Null);
         if string(&assets[index], "path") != identity.path {
-            return Err(ApiError::bad("当前媒体绑定路径已变化，停止记录入库完成"));
+            if complete {
+                return Err(ApiError::bad("当前媒体绑定路径已变化，停止记录入库完成"));
+            }
+            // The ordinary ingestion flow has not rebound an existing ID yet.
+            continue;
         }
         if let Some(cloud) = &identity.cloud
             && (media || complete)

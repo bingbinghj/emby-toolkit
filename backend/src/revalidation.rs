@@ -14,6 +14,10 @@ use std::{
     future::Future,
 };
 
+#[cfg(test)]
+#[path = "revalidation/ingest_tests.rs"]
+mod ingest_tests;
+
 fn text(data: &Value, keys: &[&str]) -> String {
     keys.iter()
         .find_map(|key| match &data[*key] {
@@ -107,6 +111,7 @@ struct Resolver<'a> {
     directories: BTreeMap<String, Vec<Value>>,
     source: &'static str,
     allow_search: bool,
+    cache_files: bool,
 }
 impl<'a> Resolver<'a> {
     fn new(audit: Option<&'a AuditReader<'a>>) -> Self {
@@ -118,6 +123,7 @@ impl<'a> Resolver<'a> {
             directories: BTreeMap::new(),
             source: "现场查询",
             allow_search: audit.is_none(),
+            cache_files: false,
         }
     }
     async fn request<T>(&mut self, future: impl Future<Output = Result<T>>) -> Result<T> {
@@ -220,7 +226,7 @@ pub async fn resolve(
     resolve_with_reader(state, target, path, None).await
 }
 
-/// Admission checks the occupant of the final path, including HTTP STRM whose
+/// Observe the occupant of the final path, including HTTP STRM whose
 /// old PickCode can remain alive after MP has replaced the same cloud filename.
 pub(crate) async fn resolve_ingest(
     state: &AppState,
@@ -230,10 +236,30 @@ pub(crate) async fn resolve_ingest(
 ) -> Result<(Value, Option<String>)> {
     let config = state.config.read().await.clone();
     let parts = relative(target, &config).or_else(|_| relative(path, &config))?;
-    let mut resolver = Resolver::new(None);
-    resolver.context = Some(context);
-    resolver.allow_search = false;
-    let result = locate(state, &config, &parts, &mut resolver).await?;
+    let scope = [
+        string(&config, "p115_fingerprint_media_root_cid"),
+        string(&config, "cd2_media_root"),
+        string(&config, "local_strm_root"),
+    ];
+    let result = loop {
+        context.checkpoint().await?;
+        let generation = context.pause_generation();
+        let mut cached = context.ingest_directories.lock().await;
+        if cached.0 != generation || cached.1 != scope {
+            *cached = (generation, scope.clone(), BTreeMap::new());
+        }
+        let mut resolver = Resolver::new(None);
+        resolver.context = Some(context);
+        resolver.allow_search = false;
+        resolver.cache_files = true;
+        resolver.directories = cached.2.clone();
+        let result = locate(state, &config, &parts, &mut resolver).await?;
+        if context.pause_generation() != generation {
+            continue;
+        }
+        cached.2 = resolver.directories;
+        break result;
+    };
     if let Some(pc) = fingerprints::pickcode(target)
         && result.0["pick_code"] != pc
     {
@@ -368,10 +394,10 @@ async fn locate(
     let mut parent = root.clone();
     for (index, part) in parts.iter().enumerate() {
         let last = index + 1 == parts.len();
-        // Reuse complete intermediate directories only within this batch. File
-        // listings stay fresh so a later Item cannot inherit an older PC/SHA1.
+        // Ingestion reuses a complete snapshot for this pass, then refreshes it
+        // before publishing. Other callers keep final file listings fresh.
         let all = match if resolver.audit.is_none()
-            && !last
+            && (!last || resolver.cache_files)
             && resolver.directories.contains_key(&parent)
         {
             Ok(resolver.directories[&parent].clone())
@@ -389,7 +415,7 @@ async fn locate(
                 return Err(error);
             }
         };
-        if resolver.audit.is_none() && !last {
+        if resolver.audit.is_none() && (!last || resolver.cache_files) {
             resolver
                 .directories
                 .entry(parent.clone())

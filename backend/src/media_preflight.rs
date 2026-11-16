@@ -66,15 +66,16 @@ async fn sync(state: &AppState, id: &str, data: &Value, context: &JobContext) ->
     let base = string(&config, "emby_server_url");
     let key = string(&config, "emby_api_key");
     for endpoint in ["emby/Items/SyncMediaInfo", "Items/SyncMediaInfo"] {
-        let response = crate::emby::send(
-            state
-                .http
-                .post(format!("{}/{endpoint}", base.trim_end_matches('/')))
-                .query(&[("Id", id), ("api_key", key.as_str())])
-                .json(data)
-                .timeout(Duration::from_secs(600)),
-        )
-        .await?;
+        let mut request = state
+            .http
+            .post(format!("{}/{endpoint}", base.trim_end_matches('/')))
+            .query(&[("Id", id), ("api_key", key.as_str())])
+            .header("Content-Type", "application/json")
+            .timeout(Duration::from_secs(600));
+        if !data.is_null() {
+            request = request.json(data);
+        }
+        let response = crate::emby::send(request).await?;
         if endpoint.starts_with("emby/") && response.status() == reqwest::StatusCode::NOT_FOUND {
             continue;
         }
@@ -319,6 +320,23 @@ mod extraction_thread_tests {
     use std::sync::atomic::Ordering;
     mod support {
         include!("../tests/support/extraction_threads.rs");
+    }
+
+    #[tokio::test]
+    async fn preflight_sync_preserves_cached_json_and_uses_empty_body_for_extraction() {
+        let fixture = support::Fixture::new().await;
+        let context = JobContext::for_recovery(None).await;
+        let cached = json!([{"MediaSourceInfo":{"Container":"mkv","Size":1000},"Chapters":[]}]);
+        sync(&fixture.state, "61616", &cached, &context)
+            .await
+            .unwrap();
+        sync(&fixture.state, "61616", &Value::Null, &context)
+            .await
+            .unwrap();
+        let bodies = fixture.bodies.lock().await;
+        assert_eq!(serde_json::from_slice::<Value>(&bodies[0]).unwrap(), cached);
+        assert!(bodies[1].is_empty());
+        assert_eq!(fixture.calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

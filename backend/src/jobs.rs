@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 
 type Activity = Arc<std::sync::Mutex<Option<String>>>;
 type ProgressLog = Option<(tokio::time::Instant, Option<u64>, String)>;
+type IngestDirectories = Arc<Mutex<(u64, [String; 3], BTreeMap<String, Vec<Value>>)>>;
 tokio::task_local! {
     static TASK_ACTIVITY: Activity;
     static TASK_CONTEXT: JobContext;
@@ -107,6 +108,7 @@ pub struct JobContext {
     activity: Activity,
     last_progress_log: Arc<std::sync::Mutex<ProgressLog>>,
     pause_generation: Arc<AtomicU64>,
+    pub(crate) ingest_directories: IngestDirectories,
     persistence: Option<PgPool>,
     checkpoint_state: Arc<Mutex<Value>>,
     interrupted: Arc<AtomicBool>,
@@ -162,6 +164,9 @@ impl JobContext {
         let mut context = self.clone();
         context.checkpoint_prefix = format!("{}{prefix}:", self.checkpoint_prefix);
         context
+    }
+    pub(crate) async fn refresh_ingest_directories(&self) {
+        self.ingest_directories.lock().await.2.clear();
     }
     pub async fn for_resume_cleanup(&self) -> Self {
         let mut context = self.clone();
@@ -335,6 +340,7 @@ impl JobContext {
                 .unwrap_or_default(),
             last_progress_log: Arc::new(std::sync::Mutex::new(None)),
             pause_generation: Arc::new(AtomicU64::new(0)),
+            ingest_directories: Arc::default(),
             persistence: None,
             checkpoint_state: Arc::new(Mutex::new(json!({"plans":{},"completed":{}}))),
             interrupted: Arc::new(AtomicBool::new(false)),
@@ -862,6 +868,7 @@ impl JobManager {
             activity: Arc::default(),
             last_progress_log: Arc::default(),
             pause_generation: Arc::new(AtomicU64::new(0)),
+            ingest_directories: Arc::default(),
             persistence: self.persistence.clone(),
             checkpoint_state: Arc::new(Mutex::new(saved.checkpoint.clone())),
             interrupted: Arc::new(AtomicBool::new(false)),
@@ -1098,6 +1105,7 @@ impl JobManager {
             activity: Arc::new(std::sync::Mutex::new(None)),
             last_progress_log: Arc::new(std::sync::Mutex::new(None)),
             pause_generation: Arc::new(AtomicU64::new(0)),
+            ingest_directories: Arc::default(),
             persistence,
             checkpoint_state: Arc::new(Mutex::new(checkpoint)),
             interrupted: Arc::new(AtomicBool::new(false)),

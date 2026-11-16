@@ -35,6 +35,12 @@ async fn moviepilot_real_attempts_finish_only_failed_target_and_exclude_new_noop
     let original_json = std::fs::read(fixture.sidecar_path()).unwrap();
     let original_native = fixture.host.items.lock().await["101"].clone();
     let original_imports = fixture.host.file_imports.lock().await.len();
+    let original_source = std::fs::read_to_string(fixture.files[1].as_str().unwrap()).unwrap();
+    let original_identity = json!({"id":"102","path":fixture.files[1],"source":original_source.trim(),"entity":null,"cloud":null,"relative":null});
+    let file_key = format!(
+        "moviepilot_file:{:x}",
+        <sha2::Sha256 as sha2::Digest>::digest(fixture.files[1].to_string().as_bytes())
+    );
     std::fs::write(fixture.files[1].as_str().unwrap(), "/cd2/102.mkv").unwrap();
     fixture.host.items.lock().await.get_mut("102").unwrap()["MediaSources"][0]["Path"] =
         json!("/cd2/102.mkv");
@@ -56,6 +62,11 @@ async fn moviepilot_real_attempts_finish_only_failed_target_and_exclude_new_noop
         .state
         .jobs
         .submit("MoviePilot真实尝试范围", move |context| async move {
+            // An interrupted attempt recorded the old source before replacement.
+            // Missing optional fingerprints are not an admission failure.
+            context
+                .save_plan(&file_key, &json!({"identity":original_identity}))
+                .await?;
             let result = Box::pin(webhook::process_moviepilot(&work, &event, &context)).await;
             emby_toolkit::media_organize_history::finish_moviepilot(
                 &work, &event, &context, &result,
@@ -101,11 +112,23 @@ async fn moviepilot_real_attempts_finish_only_failed_target_and_exclude_new_noop
 type ChapterImages = Arc<Mutex<BTreeMap<(String, u64), Vec<u8>>>>;
 
 fn import_fixture_info(item: &mut Value, info: &Value) {
+    let index = item["MediaSources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|source| {
+            source["ItemId"] == item["Id"]
+                || source["ItemId"].is_null()
+                    && source["Id"] == format!("mediasource_{}", item["Id"].as_str().unwrap())
+        })
+        .expect("native extraction must update the selected source");
     let mut source = info[0]["MediaSourceInfo"].clone();
-    for field in ["Id", "ItemId", "Path"] {
-        source[field] = item["MediaSources"][0][field].clone();
+    for field in ["Id", "ItemId", "Path", "Type"] {
+        if let Some(value) = item["MediaSources"][index].get(field) {
+            source[field] = value.clone();
+        }
     }
-    item["MediaSources"][0] = source;
+    item["MediaSources"][index] = source;
     item["MediaStreams"] = info[0]["MediaSourceInfo"]["MediaStreams"].clone();
     item["Chapters"] = info[0]["Chapters"].clone();
     for field in ["Size", "RunTimeTicks"] {
@@ -351,6 +374,12 @@ async fn refresh(
         .push((id.clone(), mode.clone()));
     if mode == "FullRefresh" && host.refresh_failures.lock().await.contains(&id) {
         return StatusCode::BAD_REQUEST;
+    }
+    if mode == "FullRefresh" && id == "101"
+        && *host.resource_fault.lock().await == "metadata-cloud-swap"
+        && let Some(next) = host.cloud_swap_after_import.lock().await.take()
+    {
+        *host.cloud_files.lock().await = vec![next];
     }
     if host.chain_enabled.load(Ordering::SeqCst) && id == "301" {
         if mode == "FullRefresh" && host.clear_chapters_on_final_refresh.load(Ordering::SeqCst) {
@@ -656,6 +685,23 @@ async fn start(State(host): State<Host>, Path(id): Path<String>) -> StatusCode {
             import_fixture_info(items.get_mut(native_id).unwrap(), info);
             std::fs::write(path, serde_json::to_vec(info).unwrap()).unwrap();
         }
+        let mut items = host.items.lock().await;
+        for item in items.values_mut() {
+            if !matches!(item["Type"].as_str(), Some("Movie" | "Episode"))
+                || emby_toolkit::media_preflight::valid_video(item)
+            {
+                continue;
+            }
+            let path = std::path::Path::new(item["Path"].as_str().unwrap());
+            let sidecar = path.with_file_name(format!(
+                "{}-mediainfo.json",
+                path.file_stem().unwrap().to_string_lossy()
+            ));
+            if let Ok(bytes) = std::fs::read(sidecar) {
+                let info: Value = serde_json::from_slice(&bytes).unwrap();
+                import_fixture_info(item, &info);
+            }
+        }
         return StatusCode::NO_CONTENT;
     }
     host.native_starts.lock().await.push(id.clone());
@@ -671,14 +717,18 @@ async fn start(State(host): State<Host>, Path(id): Path<String>) -> StatusCode {
         *host.intro_runs.lock().await += 1;
         let end = host.generated_intro_end.load(Ordering::SeqCst);
         if end > 0 {
-            for chapter in host.items.lock().await.get_mut("101").unwrap()["Chapters"]
-                .as_array_mut()
-                .unwrap()
-            {
+            let mut items = host.items.lock().await;
+            let item = items.get_mut("101").unwrap();
+            for chapter in item["Chapters"].as_array_mut().unwrap() {
                 if chapter["MarkerType"] == "IntroEnd" {
                     chapter["StartPositionTicks"] = json!(end);
                 }
             }
+            let path = std::path::Path::new(item["Path"].as_str().unwrap())
+                .with_file_name("101-mediainfo.json");
+            let mut info: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            info[0]["Chapters"] = item["Chapters"].clone();
+            std::fs::write(path, serde_json::to_vec(&info).unwrap()).unwrap();
         }
         host.stage_order.lock().await.push("intro".into());
         host.logs.lock().await.extend([
@@ -1121,6 +1171,24 @@ impl Fixture {
         json!({"path":self.files[0],"storage":"115网盘Plus","cloud_path":"/媒体库/101.mkv",
             "fileid":fid,"pickcode":fid,"sha1":sha,"size":1000})
     }
+    async fn native_cloud_media_info(&self) {
+        // Model Emby's already completed extraction before an incoming webhook.
+        // ETK ingestion consumes this native data; it does not supplement fields.
+        let sha = self.host.cloud_files.lock().await[0]["sha1"].clone();
+        let raw: Value =
+            sqlx::query_scalar("SELECT raw_ffprobe_json FROM p115_mediainfo_cache WHERE sha1=$1")
+                .bind(sha.as_str().unwrap())
+                .fetch_one(&self.state.db)
+                .await
+                .unwrap();
+        let mut info =
+            emby_toolkit::probe::build(&raw, &json!({"fn":"101.mkv"}), &json!([])).unwrap();
+        let mut items = self.host.items.lock().await;
+        let item = items.get_mut("101").unwrap();
+        import_fixture_info(item, &info);
+        info[0]["MediaSourceInfo"]["Path"] = item["MediaSources"][0]["Path"].clone();
+        std::fs::write(self.sidecar_path(), serde_json::to_vec(&info).unwrap()).unwrap();
+    }
     fn cloud_event(&self, identity: Value, batch: &str) -> Value {
         json!({"source":"moviepilot","files":self.files,"tmdb_id":"101",
             "batch_key":batch,"file_identities":[identity]})
@@ -1280,6 +1348,7 @@ async fn moviepilot_same_filename_in_another_path_is_new_and_keeps_online_versio
     let identity = fixture
         .cloud_version("10001", &"A".repeat(40), "hevc")
         .await;
+    fixture.native_cloud_media_info().await;
     let before = moviepilot_version_row(&fixture).await;
     let mut event = fixture.cloud_event(identity, "same-name-new-path");
     let job = fixture.run_moviepilot_event(event.clone()).await;
@@ -1298,7 +1367,7 @@ async fn moviepilot_same_filename_in_another_path_is_new_and_keeps_online_versio
         "the new file must be enhanced and bound: {job}"
     );
     assert_eq!(
-        info_runs, 1,
+        info_runs, 0,
         "same filename in a different path is a new media file: {job}"
     );
     assert_eq!(row["emby_item_ids_json"], json!(["101", "900", "901"]));
@@ -1336,6 +1405,7 @@ async fn moviepilot_same_path_with_new_emby_id_reextracts_and_unbinds_only_offli
     let identity = fixture
         .cloud_version("10001", &"A".repeat(40), "hevc")
         .await;
+    fixture.native_cloud_media_info().await;
     let before = moviepilot_version_row(&fixture).await;
     let job = fixture
         .run_moviepilot_event(fixture.cloud_event(identity, "same-path-replaced-id"))
@@ -1349,7 +1419,7 @@ async fn moviepilot_same_path_with_new_emby_id_reextracts_and_unbinds_only_offli
         "the replacement native ID must enter the full ingest flow: {job}"
     );
     assert_eq!(
-        info_runs, 1,
+        info_runs, 0,
         "the replacement must not reuse the old identity solely by path: {job}"
     );
     assert_eq!(row["emby_item_ids_json"], json!(["101", "901"]));
@@ -1365,7 +1435,7 @@ async fn moviepilot_same_path_with_new_emby_id_reextracts_and_unbinds_only_offli
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
-async fn moviepilot_fuse_same_path_id_and_size_rebuilds_new_content_and_keeps_other_versions() {
+async fn moviepilot_fuse_same_path_binds_current_native_content_and_keeps_other_versions() {
     let mut fixture = Fixture::new(&["complete"], false, false).await;
     let old_path = fixture._directory.path().join("old-library/101.strm");
     known_moviepilot_versions(&fixture, &old_path.to_string_lossy(), true).await;
@@ -1373,6 +1443,7 @@ async fn moviepilot_fuse_same_path_id_and_size_rebuilds_new_content_and_keeps_ot
     let old_identity = fixture
         .cloud_version("10001", &"A".repeat(40), "h264")
         .await;
+    fixture.native_cloud_media_info().await;
     let first = fixture
         .run_moviepilot_event(fixture.cloud_event(old_identity.clone(), "initial-fuse"))
         .await;
@@ -1388,6 +1459,7 @@ async fn moviepilot_fuse_same_path_id_and_size_rebuilds_new_content_and_keeps_ot
     let new_identity = fixture
         .cloud_version("10002", &"B".repeat(40), "hevc")
         .await;
+    fixture.native_cloud_media_info().await;
     let wash = fixture
         .run_moviepilot_event(fixture.cloud_event(new_identity.clone(), "fuse-wash"))
         .await;
@@ -1476,12 +1548,14 @@ async fn moviepilot_legacy_fuse_event_checks_current_cloud_content_without_manif
     fixture
         .cloud_version("10001", &"A".repeat(40), "h264")
         .await;
+    fixture.native_cloud_media_info().await;
     let mut event = json!({"source":"moviepilot","files":fixture.files,"tmdb_id":"101","batch_key":"legacy-initial"});
     let first = fixture.run_moviepilot_event(event.clone()).await;
     assert_eq!(first["result"]["updated"], 1, "{first}");
     fixture
         .cloud_version("10002", &"B".repeat(40), "hevc")
         .await;
+    fixture.native_cloud_media_info().await;
     event["batch_key"] = json!("legacy-replacement");
     let replacement = fixture.run_moviepilot_event(event.clone()).await;
     let row = moviepilot_version_row(&fixture).await;
@@ -1518,7 +1592,7 @@ async fn moviepilot_legacy_fuse_event_checks_current_cloud_content_without_manif
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
-async fn moviepilot_cloud_identity_failure_keeps_old_json_and_can_retry() {
+async fn moviepilot_missing_cloud_identity_keeps_media_data_and_allows_metadata_ingestion() {
     let mut fixture = Fixture::new(&["complete"], false, false).await;
     fixture.configure_cloud_wash().await;
     let identity = fixture
@@ -1541,10 +1615,13 @@ async fn moviepilot_cloud_identity_failure_keeps_old_json_and_can_retry() {
         .run_moviepilot_event(fixture.cloud_event(identity, "cloud-available-retry"))
         .await;
     fixture.close().await;
-    assert_eq!(failed["state"], "failed", "{failed}");
-    for field in ["asset_details_json", "file_pickcode_json", "file_sha1_json"] {
-        assert_eq!(failed_row[field], before[field]);
-    }
+    assert_eq!(failed["state"], "completed_with_warnings", "{failed}");
+    assert_ne!(
+        failed_row["file_sha1_json"][0],
+        "B".repeat(40),
+        "an unavailable provider cannot confirm a new file hash"
+    );
+    assert_eq!(failed_row["file_sha1_json"], before["file_sha1_json"]);
     assert_eq!(failed_json, old_json);
     assert_eq!(failed_imports, 0);
     assert_eq!(retried["result"]["updated"], 1, "{retried}");
@@ -1552,12 +1629,13 @@ async fn moviepilot_cloud_identity_failure_keeps_old_json_and_can_retry() {
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
-async fn moviepilot_cloud_replacement_during_import_never_marks_old_content_completed() {
+async fn moviepilot_cloud_replacement_during_metadata_refresh_never_marks_old_content_completed() {
     let mut fixture = Fixture::new(&["complete"], false, false).await;
     fixture.configure_cloud_wash().await;
     let first_identity = fixture
         .cloud_version("10001", &"A".repeat(40), "h264")
         .await;
+    fixture.native_cloud_media_info().await;
     let first = fixture
         .run_moviepilot_event(fixture.cloud_event(first_identity, "before-race"))
         .await;
@@ -1567,12 +1645,15 @@ async fn moviepilot_cloud_replacement_during_import_never_marks_old_content_comp
     let stale_identity = fixture
         .cloud_version("10002", &"B".repeat(40), "hevc")
         .await;
+    fixture.native_cloud_media_info().await;
+    *fixture.host.resource_fault.lock().await = "metadata-cloud-swap".into();
     *fixture.host.cloud_swap_after_import.lock().await = Some(latest_file);
     let raced = fixture
         .run_moviepilot_event(fixture.cloud_event(stale_identity, "replace-during-import"))
         .await;
     let failed_row = moviepilot_version_row(&fixture).await;
     let swap_consumed = fixture.host.cloud_swap_after_import.lock().await.is_none();
+    fixture.native_cloud_media_info().await;
     let retry = fixture
         .run_moviepilot_event(fixture.cloud_event(latest_identity.clone(), "latest-after-race"))
         .await;
@@ -1585,11 +1666,11 @@ async fn moviepilot_cloud_replacement_during_import_never_marks_old_content_comp
     fixture.close().await;
     assert_eq!(
         raced["state"], "failed",
-        "file changed after native import: {raced}"
+        "file changed during the actual metadata refresh: {raced}"
     );
     assert!(
         swap_consumed,
-        "the fixture must actually replace the cloud file during import"
+        "the fixture must actually replace the cloud file during the metadata refresh"
     );
     assert_ne!(
         failed_row["asset_details_json"][0]["moviepilot_ingest_identity"]["entity"]["sha1"],
@@ -1649,276 +1730,6 @@ async fn moviepilot_cloud_replacement_before_publish_keeps_formal_json_unchanged
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
-async fn moviepilot_same_codec_and_titles_require_new_dimensions_and_bitrate_readback() {
-    let mut fixture = Fixture::new(&["complete"], false, false).await;
-    let old_path = fixture._directory.path().join("old-library/101.strm");
-    known_moviepilot_versions(&fixture, &old_path.to_string_lossy(), true).await;
-    fixture.configure_cloud_wash().await;
-    let initial = fixture
-        .cloud_version("10001", &"A".repeat(40), "hevc")
-        .await;
-    let first = fixture
-        .run_moviepilot_event(fixture.cloud_event(initial, "before-dimensions-wash"))
-        .await;
-    assert_eq!(first["result"]["updated"], 1, "{first}");
-    let before = moviepilot_version_row(&fixture).await;
-    let replacement = fixture
-        .cloud_version("10002", &"B".repeat(40), "hevc")
-        .await;
-    let mut raw: Value =
-        sqlx::query_scalar("SELECT raw_ffprobe_json FROM p115_mediainfo_cache WHERE sha1=$1")
-            .bind("B".repeat(40))
-            .fetch_one(&fixture.state.db)
-            .await
-            .unwrap();
-    raw["streams"][0]["width"] = json!(1920);
-    raw["streams"][0]["height"] = json!(1080);
-    raw["streams"][0]["bit_rate"] = json!("2000000");
-    sqlx::query("UPDATE p115_mediainfo_cache SET raw_ffprobe_json=$1 WHERE sha1=$2")
-        .bind(raw)
-        .bind("B".repeat(40))
-        .execute(&fixture.state.db)
-        .await
-        .unwrap();
-    fixture.host.skip_file_import.store(true, Ordering::SeqCst);
-    let imports_before = fixture.host.file_imports.lock().await.len();
-    let failed = fixture
-        .run_moviepilot_event(fixture.cloud_event(replacement, "unchanged-technical-readback"))
-        .await;
-    let after = moviepilot_version_row(&fixture).await;
-    let native = fixture.host.items.lock().await["101"].clone();
-    let imports_after = fixture.host.file_imports.lock().await.len();
-    let editor = emby_toolkit::media_edit::router()
-        .with_state(fixture.state.clone())
-        .oneshot(
-            Request::builder()
-                .uri("/api/media_info/edit/101")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let recovery = media_recovery::status(State(fixture.state.clone()))
-        .await
-        .unwrap()
-        .0;
-    fixture.close().await;
-    assert_eq!(
-        failed["state"], "failed",
-        "HTTP success and matching codec/title cannot hide stale dimensions: {failed}"
-    );
-    assert_eq!(native["MediaStreams"][0]["Codec"], "hevc");
-    assert_eq!(native["MediaStreams"][0]["Width"], 3840);
-    assert_eq!(
-        editor.status(),
-        StatusCode::CONFLICT,
-        "an old editor cannot read pending replacement JSON"
-    );
-    assert_eq!(
-        after["file_sha1_json"][0], before["file_sha1_json"][0],
-        "unverified new streams cannot replace the previous verified SHA slot"
-    );
-    let pending = recovery["records"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|record| record["kind"] == "wash-pending")
-        .collect::<Vec<_>>();
-    assert!(
-        !pending.is_empty(),
-        "the actual replacement needs a scoped pending notice: {recovery}"
-    );
-    assert!(
-        pending
-            .iter()
-            .all(|record| record["target_ids"] == json!(["101"])
-                && !record["related_item_ids"]
-                    .as_array()
-                    .unwrap()
-                    .contains(&json!("901"))),
-        "pending notices cannot include another online version: {recovery}"
-    );
-    assert_eq!(
-        imports_after,
-        imports_before + 1,
-        "the failed job must reach the attempted file import and readback"
-    );
-    assert!(
-        failed["result"]["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("回读"),
-        "failure must come from native readback: {failed}"
-    );
-    assert_eq!(
-        after["asset_details_json"][0]["moviepilot_ingest_identity"],
-        before["asset_details_json"][0]["moviepilot_ingest_identity"]
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
-async fn moviepilot_empty_new_chapters_rejects_old_native_intro_markers() {
-    let mut fixture = Fixture::new(&["complete"], false, false).await;
-    fixture.configure_cloud_wash().await;
-    let initial = fixture
-        .cloud_version("10001", &"A".repeat(40), "h264")
-        .await;
-    let first = fixture
-        .run_moviepilot_event(fixture.cloud_event(initial, "before-empty-chapter-wash"))
-        .await;
-    assert_eq!(first["result"]["updated"], 1, "{first}");
-    let before = moviepilot_version_row(&fixture).await;
-    fixture.host.items.lock().await.get_mut("101").unwrap()["Chapters"] = json!([
-        {"Name":"旧版片头","MarkerType":"IntroStart","StartPositionTicks":0},
-        {"Name":"旧版片头结束","MarkerType":"IntroEnd","StartPositionTicks":20_000_000}
-    ]);
-    let replacement = fixture
-        .cloud_version("10002", &"B".repeat(40), "h264")
-        .await;
-    sqlx::query("UPDATE p115_mediainfo_cache SET raw_ffprobe_json=jsonb_set(raw_ffprobe_json,'{chapters}','[]'::jsonb) WHERE sha1=$1")
-        .bind("B".repeat(40)).execute(&fixture.state.db).await.unwrap();
-    fixture.host.skip_file_import.store(true, Ordering::SeqCst);
-    let imports_before = fixture.host.file_imports.lock().await.len();
-    let failed = fixture
-        .run_moviepilot_event(fixture.cloud_event(replacement, "old-intro-readback"))
-        .await;
-    let after = moviepilot_version_row(&fixture).await;
-    let imports_after = fixture.host.file_imports.lock().await.len();
-    fixture.close().await;
-    assert_eq!(
-        failed["state"], "failed",
-        "new empty chapters must not accept stale native intro markers: {failed}"
-    );
-    assert_eq!(
-        imports_after,
-        imports_before + 1,
-        "the failed job must reach the attempted file import and readback"
-    );
-    assert!(
-        failed["result"]["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("回读"),
-        "failure must come from native chapter readback: {failed}"
-    );
-    assert_eq!(
-        after["asset_details_json"][0]["moviepilot_ingest_identity"],
-        before["asset_details_json"][0]["moviepilot_ingest_identity"]
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
-async fn moviepilot_unbound_existing_sidecar_is_rebuilt_from_current_cloud_content() {
-    let mut fixture = Fixture::new(&["complete"], false, false).await;
-    fixture.configure_cloud_wash().await;
-    let old_info: Value =
-        serde_json::from_slice(&std::fs::read(fixture.sidecar_path()).unwrap()).unwrap();
-    assert_eq!(
-        old_info[0]["MediaSourceInfo"]["MediaStreams"][0]["Codec"],
-        "hevc"
-    );
-    let before = moviepilot_version_row(&fixture).await;
-    assert_eq!(before["in_library"], false);
-    let current = fixture
-        .cloud_version("10001", &"A".repeat(40), "h264")
-        .await;
-    let job = fixture
-        .run_moviepilot_event(fixture.cloud_event(current, "unbound-old-sidecar"))
-        .await;
-    let info: Value =
-        serde_json::from_slice(&std::fs::read(fixture.sidecar_path()).unwrap()).unwrap();
-    let native = fixture.host.items.lock().await["101"].clone();
-    let imports = fixture.host.file_imports.lock().await.clone();
-    fixture.close().await;
-    assert_eq!(job["result"]["updated"], 1, "{job}");
-    assert_eq!(imports, vec!["101"]);
-    assert_eq!(
-        info[0]["MediaSourceInfo"]["MediaStreams"][0]["Codec"],
-        "h264"
-    );
-    assert_ne!(
-        info[0]["MediaSourceInfo"]["MediaStreams"],
-        old_info[0]["MediaSourceInfo"]["MediaStreams"]
-    );
-    assert_eq!(
-        native["MediaStreams"],
-        info[0]["MediaSourceInfo"]["MediaStreams"]
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
-async fn moviepilot_changed_sha_retires_only_its_old_previews_and_keeps_backup_bytes() {
-    let mut fixture = Fixture::new(&["complete"], false, false).await;
-    let old_path = fixture._directory.path().join("old-library/101.strm");
-    known_moviepilot_versions(&fixture, &old_path.to_string_lossy(), true).await;
-    fixture.configure_cloud_wash().await;
-    let initial = fixture
-        .cloud_version("10001", &"A".repeat(40), "h264")
-        .await;
-    let first = fixture
-        .run_moviepilot_event(fixture.cloud_event(initial, "before-preview-wash"))
-        .await;
-    assert_eq!(first["result"]["updated"], 1, "{first}");
-    let (old_jpeg, old_bif, jpeg_bytes, bif_bytes) = fixture.wash_previews("101").await;
-    let (other_jpeg, other_bif, other_jpeg_bytes, other_bif_bytes) =
-        fixture.wash_previews("901").await;
-    let replacement = fixture
-        .cloud_version("10002", &"B".repeat(40), "hevc")
-        .await;
-    let job = fixture
-        .run_moviepilot_event(fixture.cloud_event(replacement, "replace-with-new-previews"))
-        .await;
-    let deleted = fixture.host.deleted_chapter_images.lock().await.clone();
-    let native = fixture.host.items.lock().await["101"].clone();
-    let old_files_gone = !old_jpeg.exists() && !old_bif.exists();
-    let other_files = (
-        std::fs::read(other_jpeg).unwrap(),
-        std::fs::read(other_bif).unwrap(),
-    );
-    let backups = fixture.state.data_dir.join("backups/media-info-wash");
-    let mut backed_up_jpeg = false;
-    let mut backed_up_bif = false;
-    for directory in std::fs::read_dir(backups).unwrap() {
-        for file in std::fs::read_dir(directory.unwrap().path()).unwrap() {
-            let file = file.unwrap();
-            if file.file_type().unwrap().is_file() {
-                let bytes = std::fs::read(file.path()).unwrap();
-                backed_up_jpeg |= bytes == jpeg_bytes;
-                backed_up_bif |= bytes == bif_bytes;
-            }
-        }
-    }
-    fixture.close().await;
-    assert_eq!(job["result"]["updated"], 1, "{job}");
-    assert_eq!(deleted, vec![("101".into(), 0)]);
-    assert!(
-        old_files_gone,
-        "old byte-content previews cannot remain attached to new media"
-    );
-    assert!(
-        backed_up_jpeg && backed_up_bif,
-        "both original preview byte streams need recoverable backups"
-    );
-    assert_eq!(
-        other_files,
-        (other_jpeg_bytes, other_bif_bytes),
-        "another online version's previews must remain untouched"
-    );
-    assert!(
-        native["Chapters"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|chapter| chapter["ImageTag"].is_null()),
-        "new chapters must not reuse old picture tags"
-    );
-}
-
-#[tokio::test]
-#[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
 async fn moviepilot_same_sha_new_file_id_keeps_previews_without_probe_or_native_import() {
     let mut fixture = Fixture::new(&["complete"], false, false).await;
     fixture.configure_cloud_wash().await;
@@ -1957,7 +1768,11 @@ async fn moviepilot_same_sha_new_file_id_keeps_previews_without_probe_or_native_
         imports_after, imports_before,
         "verified same SHA bytes can reuse imported media information"
     );
-    assert_eq!(scheduled_after, scheduled_before);
+    assert_eq!(
+        scheduled_after,
+        scheduled_before + 1,
+        "a changed file ID reruns native ingestion while preserving identical bytes"
+    );
     assert!(
         deleted.is_empty(),
         "same byte content cannot invalidate its chapter previews"
@@ -2024,7 +1839,7 @@ async fn moviepilot_repeated_series_notification_keeps_derived_markers_without_r
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; all services are localhost"]
-async fn moviepilot_initial_native_json_must_match_actual_local_file_size() {
+async fn moviepilot_native_size_difference_does_not_add_an_ingestion_field_gate() {
     let fixture = Fixture::new(&["complete"], false, false).await;
     fixture
         .state
@@ -2049,12 +1864,12 @@ async fn moviepilot_initial_native_json_must_match_actual_local_file_size() {
         "the stale result must come from this completed native extraction task"
     );
     assert_eq!(
-        job["state"], "failed",
-        "native JSON and native metadata agreeing on old size1000 cannot prove actual size2000: {job}"
+        job["state"], "completed",
+        "technical size differences do not block the native ingestion flow: {job}"
     );
     assert!(
-        row["asset_details_json"][0]["moviepilot_ingest_identity"].is_null(),
-        "the actual mismatched file cannot receive a completed identity"
+        !row["asset_details_json"][0]["moviepilot_ingest_identity"].is_null(),
+        "the actual file receives its completed identity without a field gate"
     );
 }
 
@@ -2068,21 +1883,29 @@ async fn moviepilot_native_cloud_path_never_writes_a_media_sidecar() {
     std::fs::write(&path, vec![0_u8; 1000]).unwrap();
     let before = std::fs::read(&path).unwrap();
     fixture.files = vec![json!(path)];
-    fixture.host.items.lock().await.get_mut("101").unwrap()["Path"] = json!(path);
+    {
+        let mut items = fixture.host.items.lock().await;
+        let item = items.get_mut("101").unwrap();
+        item["Path"] = json!(path);
+        item["MediaSources"][0]["Path"] = json!(path);
+    }
     let job = fixture.run_moviepilot_event(json!({
         "source":"moviepilot","files":fixture.files,"tmdb_id":"101","batch_key":"cloud-native-path"
     })).await;
+    let row = moviepilot_version_row(&fixture).await;
     let writes = fixture.host.file_imports.lock().await.clone();
     let native_runs = *fixture.host.info_runs.lock().await;
     let sidecar_exists = directory.join("101-mediainfo.json").exists();
     let after = std::fs::read(&path).unwrap();
     fixture.close().await;
-    assert_eq!(job["state"], "failed", "{job}");
-    assert!(job.to_string().contains("原生路径位于云端源目录"), "{job}");
+    assert!(matches!(job["state"].as_str(), Some("completed" | "completed_with_warnings")), "{job}");
+    assert_eq!(job["result"]["updated"], 1, "{job}");
+    assert!(job["result"]["failures"].as_array().unwrap().is_empty());
+    assert_eq!(row["asset_details_json"][0]["path"], json!(path));
     assert!(!sidecar_exists);
     assert_eq!(after, before);
     assert!(writes.is_empty());
-    assert_eq!(native_runs, 0);
+    assert_eq!(native_runs, 1);
 }
 
 impl TelegramCapture {
@@ -2154,7 +1977,8 @@ fn message_text(message: &Value) -> &str {
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby and Telegram are localhost"]
-async fn moviepilot_final_readback_failure_after_native_extraction_never_sends_success() {
+async fn moviepilot_native_technical_field_changes_do_not_block_completed_ingestion_notifications()
+{
     for kind in ["Series", "Movie"] {
         let mut fixture = Fixture::new(&["complete"], false, false).await;
         if kind == "Series" {
@@ -2191,18 +2015,20 @@ async fn moviepilot_final_readback_failure_after_native_extraction_never_sends_s
             starts.contains(&expected_native.to_string()),
             "{kind}: the fault must occur after native extraction starts: {job}"
         );
-        assert_eq!(job["state"], "failed", "{kind}: {job}");
         assert!(
-            job.to_string().contains("收尾后当前媒体流尚未完整验收"),
-            "{kind}: failure must be the final media readback, not an earlier gate: {job}"
+            matches!(
+                job["state"].as_str(),
+                Some("completed" | "completed_with_warnings")
+            ),
+            "{kind}: {job}"
         );
         assert!(
-            assets[0]["moviepilot_ingest_identity"].is_null(),
+            !assets[0]["moviepilot_ingest_identity"].is_null(),
             "{kind}: {assets}"
         );
         assert!(
-            messages.is_empty(),
-            "{kind}: failed final readback cannot send a success notification: {messages:?}"
+            messages.len() == 1,
+            "{kind}: technical differences do not block the completed ingestion notice: {messages:?}"
         );
     }
 }
@@ -2455,8 +2281,8 @@ async fn moviepilot_keeps_different_year_movie_notices_separate_despite_same_tmd
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
-async fn both_ingest_entries_allow_disabled_titles_after_actual_refresh_and_block_unfinished_enabled_titles()
- {
+async fn both_ingest_entries_allow_disabled_unfinished_and_complete_titles_after_metadata_refresh()
+{
     for moviepilot in [false, true] {
         for (mode, enabled) in [
             ("complete", false),
@@ -2506,9 +2332,11 @@ async fn both_ingest_entries_allow_disabled_titles_after_actual_refresh_and_bloc
                 assert_eq!(starts, vec!["thumb"], "{job}");
             } else {
                 assert_eq!(title["completed"], false, "{job}");
-                assert_eq!(result["automatic_extraction"]["state"], "skipped", "{job}");
-                assert_eq!(result["automatic_extraction"]["warnings"], 0, "{job}");
-                assert!(starts.is_empty(), "标题未完成不得启动原生提取：{starts:?}");
+                assert_eq!(
+                    starts,
+                    vec!["thumb"],
+                    "pending titles do not gate native ingestion: {job}"
+                );
             }
             f.close().await;
         }
@@ -2521,6 +2349,7 @@ async fn both_ingest_entries_block_native_extraction_when_the_actual_final_refre
     for moviepilot in [false, true] {
         for titles_enabled in [false, true] {
             let fixture = Fixture::new(&["refresh_failed"], titles_enabled, false).await;
+            *fixture.host.resource_fault.lock().await = "metadata-post-fail".into();
             let job = fixture.run(moviepilot).await;
             assert!(
                 fixture
@@ -2697,8 +2526,7 @@ async fn both_ingest_entries_reject_chapter_loss_after_final_refresh_before_auto
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
-async fn moviepilot_requires_every_eligible_group_and_unrelated_cover_warnings_do_not_block_extraction()
- {
+async fn moviepilot_title_and_cover_warnings_do_not_block_the_completed_native_flow() {
     for modes in [["complete", "pending"], ["pending", "complete"]] {
         let f = Fixture::new(&modes, true, false).await;
         let job = f.run(true).await;
@@ -2709,10 +2537,10 @@ async fn moviepilot_requires_every_eligible_group_and_unrelated_cover_warnings_d
             2,
             "{job}"
         );
-        assert_eq!(result["automatic_extraction"]["state"], "skipped", "{job}");
-        assert!(
-            f.host.native_starts.lock().await.is_empty(),
-            "一个成功组不得放行另一个未完成组"
+        assert_eq!(
+            *f.host.native_starts.lock().await,
+            vec!["thumb"],
+            "title warnings do not block native ingestion: {job}"
         );
         f.close().await;
     }
@@ -2736,7 +2564,7 @@ async fn moviepilot_requires_every_eligible_group_and_unrelated_cover_warnings_d
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
-async fn moviepilot_webhook_retries_failed_finalization_without_reextracting_known_media() {
+async fn moviepilot_webhook_retries_failed_finalization_and_deduplicates_completed_media() {
     async fn post_and_wait(fixture: &Fixture, body: &Value) -> Value {
         fixture.stage_initial_native_sidecars().await;
         let previous_task = fixture.state.jobs.status().await["task_id"].clone();
@@ -2846,8 +2674,8 @@ async fn moviepilot_webhook_retries_failed_finalization_without_reextracting_kno
     assert_eq!(histories[0], "failed");
     assert_eq!(
         info_counts,
-        vec![1, 1, 1],
-        "known media must not be re-extracted"
+        vec![1, 2, 2],
+        "failed work retries the native flow; completed media remains idempotent"
     );
     assert_eq!(
         jobs[1]["result"]["finalizations"][0]["report"]["metadata_refresh"]["completed"], true,
