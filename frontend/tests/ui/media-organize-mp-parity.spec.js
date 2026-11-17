@@ -58,6 +58,12 @@ for (const mode of ['reprocess', 'rescrape']) {
       await page.locator('.v-overlay--active').getByRole('option', { name: '重新刮削', exact: true }).click();
     }
     const dialog = page.locator('.v-overlay--active').filter({ has: page.getByTestId('organize-confirm') });
+    await expect(dialog.locator('.v-card-title')).toHaveText(mode === 'reprocess' ? '重新整理' : '重新刮削');
+    await expect(dialog.locator('[data-native-dialog-close]')).toHaveAttribute('aria-label', '关闭整理确认');
+    await expect(dialog.getByTestId('organize-confirm')).toHaveText('加入队列');
+    await expect(dialog.getByTestId('organize-confirm')).toHaveClass(/v-btn--variant-tonal/);
+    await expect(dialog.locator('.v-card-actions')).toHaveClass(/app-dialog-actions/);
+    await expect(dialog.locator('.v-card-text')).toHaveCSS('padding', '24px');
     await expect(dialog.locator('.v-card-subtitle')).toHaveText('1 条记录，1 项媒体');
     await expect(dialog.getByTestId('organize-mode')).toContainText(mode === 'reprocess' ? '重新整理入库' : '重新刮削');
     await expect(dialog).toContainText(mode === 'reprocess' ? '重新执行完整入库流程' : '保留已有媒体信息、音轨和章节');

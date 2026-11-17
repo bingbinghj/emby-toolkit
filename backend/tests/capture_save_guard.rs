@@ -265,6 +265,7 @@ async fn api(State(host): State<Host>, request: Request<Body>) -> Response {
             item["Size"] = info[0]["MediaSourceInfo"]["Size"].clone();
             item["RunTimeTicks"] = info[0]["MediaSourceInfo"]["RunTimeTicks"].clone();
             item["MediaSources"][0]["Size"] = info[0]["MediaSourceInfo"]["Size"].clone();
+            item["MediaSources"][0]["Container"] = info[0]["MediaSourceInfo"]["Container"].clone();
             item["MediaSources"][0]["RunTimeTicks"] =
                 info[0]["MediaSourceInfo"]["RunTimeTicks"].clone();
             return Json(info).into_response();
@@ -497,7 +498,7 @@ async fn capture_enables_images_then_restores_native_info_and_settings() {
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; all APIs are localhost"]
-async fn unconfirmed_capture_keeps_config_and_original_backup() {
+async fn unconfirmed_capture_restores_config_and_keeps_original_backup() {
     let f = Fixture::new("capture-log-error").await;
     let id = f.start().await;
     let result = f.wait(&id).await;
@@ -515,13 +516,8 @@ async fn unconfirmed_capture_keeps_config_and_original_backup() {
         serde_json::from_slice(&std::fs::read(root.join("0.json")).unwrap()).unwrap();
     f.close().await;
     assert_eq!(result["state"], "failed", "{result}");
-    assert_eq!(settings["EnableImageCapture"], true);
-    assert!(
-        settings["ExclusiveControlFeatures"]
-            .as_str()
-            .unwrap()
-            .contains("CatchAllAllow")
-    );
+    assert_eq!(settings["EnableImageCapture"], false);
+    assert_eq!(settings["ExclusiveControlFeatures"], "CatchAllBlock,ExtractOnFileChange,Custom");
     assert!(marked);
     assert_eq!(
         backup[0]["MediaSourceInfo"]["MediaStreams"][1]["Title"],
@@ -561,7 +557,7 @@ async fn cancellation_after_capture_acceptance_finishes_media_restore_before_cle
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; all APIs are localhost"]
-async fn restoration_readback_failure_keeps_restore_guard_and_backups() {
+async fn restoration_readback_failure_restores_settings_and_keeps_backups() {
     let f = Fixture::new("restore-read-error").await;
     let id = f.start().await;
     let result = f.wait(&id).await;
@@ -579,19 +575,14 @@ async fn restoration_readback_failure_keeps_restore_guard_and_backups() {
         .any(|path| path.join("manifest.json").is_file());
     f.close().await;
     assert_eq!(result["state"], "failed", "{result}");
-    assert_eq!(settings["PersistMediaInfoMode"], "Restore");
-    assert!(
-        settings["ExclusiveControlFeatures"]
-            .as_str()
-            .unwrap()
-            .contains("IgnoreFileChange")
-    );
+    assert_eq!(settings["PersistMediaInfoMode"], "Default");
+    assert_eq!(settings["ExclusiveControlFeatures"], "CatchAllBlock,ExtractOnFileChange,Custom");
     assert!(media_pending && capture_backup);
     let reason = result["result"]["error"].as_str().unwrap();
     assert!(
         reason.contains("HTTP 400")
             && reason.contains("/Users/user/Items/e1")
-            && reason.contains("恢复说明"),
+            && reason.contains("原快照"),
         "{reason}"
     );
 }

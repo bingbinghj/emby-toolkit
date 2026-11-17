@@ -96,7 +96,9 @@ test('running progress distinguishes an unknown percentage from measured progres
   await expect(page.getByTestId('organize-queue-dialog')).toContainText('当前没有整理任务');
   await expect(page.locator('.queue-overall')).toHaveCount(0);
   await page.getByRole('button', { name: '关闭整理队列', exact: true }).click();
-  await expect(page.getByTestId('organize-items')).toContainText('媒体回读未通过；核查材料已保留');
+  await expect(page.getByTestId('organize-items')).not.toContainText('媒体回读未通过；核查材料已保留');
+  await page.getByTestId('organize-items').getByRole('button', { name: /^失败，查看/ }).click();
+  await expect(page.getByTestId('organize-detail-dialog')).toContainText('媒体回读未通过；核查材料已保留');
 });
 
 test('pause and stop states preserve measured progress without presenting continued processing', async ({ page, api }) => {
@@ -283,6 +285,8 @@ test('actual completion refreshes admission history and preserves returned warni
   await expect(task(page, 'completion-task')).toHaveCount(0);
   await expect(page.getByTestId('organize-queue-dialog')).toContainText('当前没有整理任务');
   await page.getByRole('button', { name: '关闭整理队列', exact: true }).click();
-  await expect(page.getByTestId('organize-items')).toContainText('媒体已刮削，图片待确认');
+  await expect(page.getByTestId('organize-items')).not.toContainText('媒体已刮削，图片待确认');
+  await page.getByTestId('organize-items').getByRole('button', { name: /^成功，查看/ }).click();
+  await expect(page.getByTestId('organize-detail-dialog')).toContainText('媒体已刮削，图片待确认');
   expect(api.requests.filter(request => request.path === historyPath).length).toBeGreaterThan(before);
 });

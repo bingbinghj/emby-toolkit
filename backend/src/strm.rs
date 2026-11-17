@@ -10,6 +10,9 @@ use sha2::{Digest, Sha256};
 use std::{collections::HashSet, future::Future, sync::Arc};
 use tokio::sync::Mutex;
 
+mod settings_recovery;
+pub use settings_recovery::{recover_pending, run_recovery};
+
 #[derive(Default)]
 pub struct Service {
     gate: Mutex<()>,
@@ -157,6 +160,7 @@ where
     Fut: Future<Output = Result<T>>,
 {
     let _gate = state.strm.gate.lock().await;
+    settings_recovery::recover_locked(state).await?;
     let id = discover(state).await?;
     check_rename_scan_guard(state, &id, None).await?;
     let original = read(state, &id).await?;
@@ -174,6 +178,7 @@ where
     let changed = !restore.as_object().unwrap().is_empty();
     let mode = "自定义配置";
     let mode_name = settings_mode_label(mode);
+    let mut settings_lease = settings_recovery::Lease::begin(state, &id, &restore, &desired).await?;
     tracing::info!("[神医临时设置] {mode_name} 开始");
     let mut applied = false;
     let outcome = std::panic::AssertUnwindSafe(async {
@@ -231,30 +236,15 @@ where
         }
         if !stopped {
             let message = if restoring_media {
-                "未确认神医媒体信息任务结束，临时恢复模式仍保留，请检查任务状态及神医设置"
+                "未确认神医媒体信息任务结束，原设置还原已持久登记，任务结束后自动重试"
             } else {
-                "未确认神医缩略图任务结束，临时编码器仍保留，请检查任务状态及神医设置"
+                "未确认神医缩略图任务结束，原编码器还原已持久登记，任务结束后自动重试"
             };
             tracing::error!("[神医临时设置] {message}");
             return Err(ApiError::bad(message));
         }
     }
-    if changed
-        && !restore_settings(
-            state,
-            &id,
-            &restore,
-            Some(&desired),
-            mode,
-            outcome.as_ref().err(),
-        )
-        .await
-    {
-        return Err(ApiError(
-            axum::http::StatusCode::CONFLICT,
-            "神医临时配置恢复失败，请核对神医设置".into(),
-        ));
-    }
+    settings_lease.restore().await?;
     settings_finished(mode, outcome)
 }
 fn page_id(page: &Value) -> Option<String> {
@@ -619,6 +609,7 @@ where
     Fut: Future<Output = Result<()>>,
 {
     let _gate = state.strm.gate.lock().await;
+    settings_recovery::recover_locked(state).await?;
     if !valid_recovery_settings(original) {
         return Err(ApiError::bad("原配置恢复说明无效，未修改神医配置"));
     }
@@ -627,6 +618,15 @@ where
     if !media_tasks_idle(&tasks) {
         return Err(ApiError::bad("神医媒体任务尚未结束，请结束后重试恢复"));
     }
+    let desired = match applied {
+        Some(applied) => applied.clone(),
+        None => read(state, &id).await?,
+    };
+    let original_fields = original.as_object().unwrap().iter()
+        .filter(|(key, _)| applied.is_none_or(|applied| applied.get(*key).is_some()))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<serde_json::Map<_, _>>();
+    let mut rearmed = None;
     if rearm && let Some(applied) = applied {
         let fields = applied.as_object().ok_or_else(|| ApiError::bad("原临时配置恢复说明无效"))?;
         let current = read(state, &id).await?;
@@ -657,19 +657,24 @@ where
             }
         }
         if !matches(&current, &desired) {
+            rearmed = Some(desired);
+        }
+    }
+    let mut settings_lease = settings_recovery::Lease::begin(
+        state, &id, &Value::Object(original_fields), &desired,
+    ).await?;
+    let outcome = std::panic::AssertUnwindSafe(async {
+        if let Some(desired) = rearmed {
             write(state, &id, &desired).await?;
             if !matches(&read(state, &id).await?, &desired) {
                 return Err(ApiError::bad("重启后原临时配置启用未通过回读验收"));
             }
         }
-    }
-    function().await?;
-    if !restore_settings(state, &id, original, applied, "preserve", None).await {
-        return Err(ApiError::bad(
-            "媒体已通过验收，但神医原配置恢复尚未确认，恢复记录已保留",
-        ));
-    }
-    Ok(())
+        function().await
+    }).catch_unwind().await
+        .unwrap_or_else(|_| Err(ApiError::bad("媒体恢复执行异常")));
+    settings_lease.restore().await?;
+    outcome
 }
 
 fn settings_finished<T>(mode: &str, outcome: Result<T>) -> Result<T> {
@@ -921,6 +926,7 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
+    settings_recovery::recover_locked(state).await?;
     check_rename_scan_guard(state, &id, guard.map(|(_, directory)| directory)).await?;
     let original = read(state, &id).await?;
     if mode == "restore_media_info"
@@ -1005,6 +1011,7 @@ where
         tokio::fs::File::open(recovery).await?.sync_all().await?;
     }
     let mode_name = settings_mode_label(mode);
+    let mut settings_lease = settings_recovery::Lease::begin(state, &id, &restore, &desired).await?;
     tracing::info!("[神医临时设置] {mode_name} 开始");
     let outcome = std::panic::AssertUnwindSafe(async {
         if changed {
@@ -1021,17 +1028,20 @@ where
     .catch_unwind()
     .await
     .unwrap_or_else(|_| Err(ApiError::bad("任务执行异常")));
+    // Configuration rollback is independent of whether media validation passed.
+    // Failed rollback keeps the durable journal and is retried outside this job.
+    settings_lease.restore().await?;
     if let Some((confirmed, recovery)) = guard
         && !confirmed.load(std::sync::atomic::Ordering::Acquire)
     {
         tracing::error!(
-            "[神医临时设置] 未确认媒体刷新结束，保留当前临时配置，原配置说明位于 {}",
+            "[神医临时设置] 原配置已还原，媒体刷新尚未验收，恢复材料位于 {}",
             recovery.display()
         );
         return Err(ApiError(
             axum::http::StatusCode::CONFLICT,
             format!(
-                "{}尚未确认媒体刷新结束；当前临时配置仍保留，恢复说明：{}",
+                "{}媒体刷新尚未验收；神医原设置已还原，恢复说明：{}",
                 outcome
                     .as_ref()
                     .err()
@@ -1039,22 +1049,6 @@ where
                     .unwrap_or_default(),
                 recovery.display()
             ),
-        ));
-    }
-    if changed
-        && !restore_settings(
-            state,
-            &id,
-            &restore,
-            Some(&desired),
-            mode,
-            outcome.as_ref().err(),
-        )
-        .await
-    {
-        return Err(ApiError(
-            axum::http::StatusCode::CONFLICT,
-            "神医临时设置恢复失败，请核对独占模式".into(),
         ));
     }
     if let Some((_, recovery)) = guard {

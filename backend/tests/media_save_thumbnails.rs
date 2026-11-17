@@ -4507,6 +4507,7 @@ mod native {
     #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
     async fn native_noop_reimport_rechecks_scope_after_preparation() {
         let f = ThumbnailFixture::with_flag(Some(false)).await;
+        let original_settings = f.native.host.settings.lock().await.clone();
         f.add_episode().await;
         f.native.host.item.lock().await["RunTimeTicks"] =
             f.native.original[0]["MediaSourceInfo"]["RunTimeTicks"].clone();
@@ -4530,6 +4531,10 @@ mod native {
             sibling_json
         );
         assert!(reload_recovery(&f).is_dir());
+        assert_eq!(
+            *f.native.host.settings.lock().await, original_settings,
+            "a synchronous response followed by refused clear must restore plugin settings"
+        );
         f.close().await;
     }
 
@@ -4537,6 +4542,7 @@ mod native {
     #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
     async fn native_noop_reimport_keeps_user_json_changed_after_the_sync_response() {
         let f = ThumbnailFixture::with_flag(Some(false)).await;
+        let original_settings = f.native.host.settings.lock().await.clone();
         f.native.host.item.lock().await["RunTimeTicks"] =
             f.native.original[0]["MediaSourceInfo"]["RunTimeTicks"].clone();
         *f.proxy.protocol_fault.lock().await = "sync-native-hmi-noop-json-change".into();
@@ -4556,6 +4562,10 @@ mod native {
             "同步后用户写入的新标题"
         );
         assert!(reload_recovery(&f).is_dir());
+        assert_eq!(
+            *f.native.host.settings.lock().await, original_settings,
+            "a JSON conflict after completed Sync must retain backups without retaining Restore"
+        );
         f.close().await;
     }
 

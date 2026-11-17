@@ -2486,6 +2486,7 @@ async fn both_ingest_entries_reject_chapter_loss_after_final_refresh_before_auto
             .await
             .unwrap();
         let original = fixture.host.items.lock().await["101"]["Chapters"].clone();
+        let original_settings = fixture.host.configuration.lock().await.clone();
         assert!(original.as_array().unwrap().len() >= 3);
         fixture
             .host
@@ -2497,6 +2498,10 @@ async fn both_ingest_entries_reject_chapter_loss_after_final_refresh_before_auto
             .await
             .unwrap()
             .0;
+        assert_eq!(
+            *fixture.host.configuration.lock().await, original_settings,
+            "a finished refresh must restore settings even when chapter verification fails"
+        );
         fixture.close().await;
         let finalization = if moviepilot {
             &job["result"]["finalizations"][0]["report"]
@@ -2822,6 +2827,10 @@ async fn both_ingest_entries_preserve_jpeg_bif_bytes_and_reject_same_tag_or_same
                     "fault={fault}: moviepilot={moviepilot}: {job}"
                 );
                 assert_eq!(recovery["pending"], true, "{recovery}");
+                assert_eq!(
+                    *fixture.host.configuration.lock().await, original_settings,
+                    "a completed native refresh must not retain Restore for a resource mismatch"
+                );
                 assert_eq!(recovery["records"][0]["can_recover"], true, "{recovery}");
                 let directory =
                     std::path::Path::new(recovery["records"][0]["directory"].as_str().unwrap());

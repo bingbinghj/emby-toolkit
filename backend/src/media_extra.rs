@@ -903,7 +903,7 @@ pub async fn replace_images(
         return Err(ApiError(
             StatusCode::CONFLICT,
             format!(
-                "未确认 Emby 截图刷新结束，临时配置及原快照仍保留：{}；{}",
+                "未确认 Emby 截图刷新结束，原快照及恢复材料仍保留：{}；{}",
                 recovery.display(),
                 reason
             ),

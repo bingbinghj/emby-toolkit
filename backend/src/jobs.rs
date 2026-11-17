@@ -760,6 +760,7 @@ impl JobManager {
                 return Err(error);
             }
         }
+        crate::strm::recover_pending(&state).await?;
         for saved in &pending {
             let context = self.saved_context(saved, cancel.child_token()).await?;
             let cleanup = context.for_resume_cleanup().await;

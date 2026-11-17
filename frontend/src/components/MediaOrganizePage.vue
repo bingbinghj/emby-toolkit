@@ -1,4 +1,4 @@
-<!-- 布局参考 MoviePilot-Frontend v3 TransferHistoryView/ReorganizeDialog/TransferHistoryDeleteDialog（MIT），许可证见 frontend/third-party/MoviePilot-LICENSE。 -->
+<!-- 布局参考 MoviePilot-Frontend v3 TransferHistoryView/TransferRecoveryDialog/ReorganizeDialog/TransferHistoryDeleteDialog（MIT），许可证见 frontend/third-party/MoviePilot-LICENSE。 -->
 <template>
   <div ref="pageElement" class="mp-page media-organize-page" :class="{ 'media-organize-page--desktop': !smAndDown }" :style="smAndDown ? undefined : { blockSize: `${desktopPageHeight}px` }">
     <div class="organize-controls">
@@ -55,8 +55,7 @@
                     <div v-if="episodeLabel(item)" class="text-caption text-medium-emphasis">{{ episodeLabel(item) }}</div>
                     <div class="text-caption text-medium-emphasis mt-1">{{ formatDate(item.created_at) }}</div>
                     <div class="text-caption text-medium-emphasis">{{ item.library_name || '—' }} · {{ item.item_type === 'Movie' ? '电影' : '剧集' }}</div>
-                    <VChip size="small" variant="tonal" :color="statusPresentation(item).color" class="mt-2">{{ statusPresentation(item).title }}</VChip>
-                    <div v-if="item.message" class="text-body-2 mt-2 history-message">{{ item.message }}</div>
+                    <VChip tag="button" type="button" size="small" variant="tonal" :color="statusPresentation(item).color" class="mt-2" :aria-label="`${statusPresentation(item).title}，查看${itemTitle(item)}详情`" @click.stop="openDetails(item)">{{ statusPresentation(item).title }}</VChip>
                     <div v-if="!item.item_id" class="text-caption text-medium-emphasis mt-1">尚未关联媒体，暂不能重新整理。</div>
                   </div>
                   <VMenu location="bottom end"><template #activator="{ props }"><VBtn v-bind="props" icon="mdi-dots-vertical" variant="text" color="default" size="small" :aria-label="`${itemTitle(item)} 操作`" /></template><VList min-width="180"><VListItem title="重新整理" prepend-icon="mdi-redo-variant" :disabled="!canReorganizeRecord(item)" @click="openRecordConfirmation(item, 'reprocess')" /><VListItem title="重新刮削" prepend-icon="mdi-movie-search-outline" :disabled="!canReorganizeRecord(item)" @click="openRecordConfirmation(item, 'rescrape')" /><VListItem v-if="item.item_id" title="媒体信息编辑" prepend-icon="mdi-pencil-outline" :to="`/edit-media/${encodeURIComponent(item.item_id)}`" /><VListItem title="删除" prepend-icon="mdi-trash-can-outline" :disabled="!canSelectRecord(item)" @click="openDeleteConfirmation(item)" /></VList></VMenu>
@@ -75,7 +74,7 @@
               <VAvatar rounded width="42" height="63"><VImg v-if="poster(item)" :src="poster(item)" :alt="itemTitle(item)" cover /><VIcon v-else icon="mdi-movie-open-outline" /></VAvatar>
               <div class="organize-media-copy"><VBtn v-if="item.item_id" variant="text" color="default" class="media-title text-none px-0" :to="`/edit-media/${encodeURIComponent(item.item_id)}`">{{ itemTitle(item) }}</VBtn><div v-else class="font-weight-medium">{{ itemTitle(item) }}</div><div class="text-caption text-medium-emphasis">{{ episodeLabel(item) || (item.item_type === 'Movie' ? '电影' : '剧集') }}</div><div v-if="!item.item_id" class="text-caption text-medium-emphasis">尚未关联媒体</div></div>
               <div class="organize-record-meta text-caption text-medium-emphasis"><div>{{ item.library_name || '—' }}</div><div v-if="item.file_name" :title="item.file_name" class="organize-file-name">{{ item.file_name }}</div><div>{{ formatDate(item.created_at) }}</div></div>
-              <div class="organize-record-status"><VChip size="small" variant="tonal" :color="statusPresentation(item).color">{{ statusPresentation(item).title }}</VChip><div v-if="item.message" class="text-body-2 mt-1 history-message">{{ item.message }}</div></div>
+              <div class="organize-record-status"><VChip tag="button" type="button" size="small" variant="tonal" :color="statusPresentation(item).color" :aria-label="`${statusPresentation(item).title}，查看${itemTitle(item)}详情`" @click.stop="openDetails(item)">{{ statusPresentation(item).title }}</VChip></div>
               <VMenu location="bottom end"><template #activator="{ props }"><VBtn v-bind="props" icon="mdi-dots-vertical" variant="text" color="default" :aria-label="`${itemTitle(item)} 操作`" /></template><VList min-width="180"><VListItem title="重新整理" prepend-icon="mdi-redo-variant" :disabled="!canReorganizeRecord(item)" @click="openRecordConfirmation(item, 'reprocess')" /><VListItem title="重新刮削" prepend-icon="mdi-movie-search-outline" :disabled="!canReorganizeRecord(item)" @click="openRecordConfirmation(item, 'rescrape')" /><VListItem v-if="item.item_id" title="媒体信息编辑" prepend-icon="mdi-pencil-outline" :to="`/edit-media/${encodeURIComponent(item.item_id)}`" /><VListItem title="删除" prepend-icon="mdi-trash-can-outline" :disabled="!canSelectRecord(item)" @click="openDeleteConfirmation(item)" /></VList></VMenu>
             </VCard>
           </td></tr>
@@ -89,16 +88,43 @@
       </footer>
     </div>
 
-    <VDialog v-model="confirmationOpen" max-width="720" scrollable :fullscreen="smAndDown" :persistent="processing">
-      <VCard class="organize-confirmation-card">
-        <VCardItem class="py-2">
-          <template #prepend><VIcon icon="mdi-folder-move" class="me-2" /></template>
-          <VCardTitle>确认{{ operationLabel(confirmationMode) }}</VCardTitle>
-          <VCardSubtitle>{{ confirmationItems.length }} 条记录，{{ confirmationMediaCount }} 项媒体</VCardSubtitle>
-          <template #append><VBtn icon="mdi-close" variant="text" aria-label="关闭整理确认" :disabled="processing" @click="confirmationOpen = false" /></template>
+    <VDialog v-model="detailOpen" max-width="42rem" scrollable :fullscreen="smAndDown">
+      <VCard v-if="detailItem" data-testid="organize-detail-dialog">
+        <VCardItem class="pe-16">
+          <template #prepend><VIcon icon="mdi-history" /></template>
+          <VCardTitle>整理详情</VCardTitle>
         </VCardItem>
+        <DialogCloseBtn aria-label="关闭整理详情" @click="detailOpen = false" />
         <VDivider />
-        <VCardText>
+        <VCardText class="organize-detail-content">
+          <div class="text-subtitle-1 font-weight-medium">{{ itemTitle(detailItem) }}<span v-if="episodeLabel(detailItem)" class="text-body-2 text-medium-emphasis ms-2">{{ episodeLabel(detailItem) }}</span></div>
+          <div><strong>文件：</strong>{{ detailItem.source_path || detailItem.file_name || '—' }}</div>
+          <div v-if="detailItem.library_name"><strong>媒体库：</strong>{{ detailItem.library_name }}</div>
+          <div><strong>开始时间：</strong>{{ formatDate(detailItem.created_at) }}</div>
+          <div v-if="detailItem.completed_at"><strong>完成时间：</strong>{{ formatDate(detailItem.completed_at) }}</div>
+          <div><strong>状态：</strong><VChip size="small" variant="tonal" :color="statusPresentation(detailItem).color">{{ statusPresentation(detailItem).title }}</VChip></div>
+          <VAlert :type="detailItem.status === 'failed' ? 'error' : detailItem.status === 'warning' ? 'warning' : detailItem.status === 'success' ? 'success' : 'info'" variant="tonal" class="history-message">{{ detailItem.message || '暂无详细处理信息' }}</VAlert>
+          <div v-if="!detailItem.item_id" class="text-body-2 text-medium-emphasis">尚未关联媒体，暂不能重新整理或刮削。</div>
+        </VCardText>
+        <VDivider />
+        <VCardActions class="app-dialog-actions">
+          <VBtn variant="tonal" prepend-icon="mdi-format-list-checks" @click="openQueue">查看队列</VBtn>
+          <VSpacer />
+          <VBtn variant="tonal" prepend-icon="mdi-movie-search-outline" :disabled="!canReorganizeRecord(detailItem)" @click="openRecordConfirmation(detailItem, 'rescrape')">重新刮削</VBtn>
+          <VBtn color="primary" variant="flat" prepend-icon="mdi-redo-variant" :disabled="!canReorganizeRecord(detailItem)" @click="openRecordConfirmation(detailItem, 'reprocess')">重新整理</VBtn>
+        </VCardActions>
+      </VCard>
+    </VDialog>
+    <VDialog v-model="confirmationOpen" max-width="min(45rem, calc(100vw - 2rem))" scrollable :fullscreen="smAndDown" :persistent="processing">
+      <VCard class="organize-confirmation-card">
+        <VCardItem class="py-2 pe-16">
+          <template #prepend><VIcon icon="mdi-folder-move" class="me-2" /></template>
+          <VCardTitle>{{ confirmationMode === 'rescrape' ? '重新刮削' : '重新整理' }}</VCardTitle>
+          <VCardSubtitle>{{ confirmationItems.length }} 条记录，{{ confirmationMediaCount }} 项媒体</VCardSubtitle>
+        </VCardItem>
+        <DialogCloseBtn aria-label="关闭整理确认" :disabled="processing" @click="confirmationOpen = false" />
+        <VDivider />
+        <VCardText class="pa-6">
           <VSelect v-model="confirmationMode" :items="operationOptions" :disabled="processing" label="整理方式" prepend-inner-icon="mdi-swap-horizontal" :hint="confirmationMode === 'rescrape' ? '更新元数据、NFO 和图片，保留已有媒体信息、音轨和章节。' : '重新执行完整入库流程，按当前入库配置处理所选媒体。'" persistent-hint data-testid="organize-mode" />
           <VAlert type="info" variant="tonal" density="compact" class="my-4">仅处理所选媒体文件，剧集只处理所选单集。同一媒体的多条记录合并为一次{{ confirmationMode === 'rescrape' ? '刮削' : '整理' }}。</VAlert>
           <VList bg-color="transparent" density="compact">
@@ -108,12 +134,12 @@
             <template v-else><VListItem v-for="item in confirmationItems" :key="item.id" :title="itemTitle(item)" :subtitle="`${episodeLabel(item) || (item.item_type === 'Movie' ? '电影' : '剧集')} · ${item.item_id}`" /></template>
           </VList>
         </VCardText>
-        <VDivider /><VCardActions><VSpacer /><VBtn variant="tonal" color="secondary" :disabled="processing" @click="confirmationOpen = false">取消</VBtn><VBtn color="primary" variant="flat" :loading="processing" data-testid="organize-confirm" @click="reorganize">加入{{ operationLabel(confirmationMode) }}队列</VBtn></VCardActions>
+        <VDivider /><VCardActions class="app-dialog-actions"><VBtn color="success" variant="tonal" prepend-icon="mdi-plus" :loading="processing" data-testid="organize-confirm" @click="reorganize">加入队列</VBtn><VSpacer /><VBtn variant="text" :disabled="processing" @click="confirmationOpen = false">取消</VBtn></VCardActions>
       </VCard>
     </VDialog>
     <VBottomSheet v-model="deleteOpen" inset :persistent="processing">
       <VCard class="text-center">
-        <IconBtn class="absolute right-3 top-3 z-10" aria-label="关闭删除确认" :disabled="processing" @click.stop="deleteOpen = false"><VIcon icon="mdi-close" /></IconBtn>
+        <DialogCloseBtn aria-label="关闭删除确认" :disabled="processing" @click="deleteOpen = false" />
         <VCardTitle class="pe-10">确认删除 {{ deleteItems.length }} 条记录？</VCardTitle>
         <div class="d-flex flex-column flex-lg-row justify-center my-3">
           <VBtn color="primary" class="mb-2 mx-2" :loading="processing" data-testid="organize-delete-confirm" @click="deleteHistory">仅删除整理记录</VBtn>
@@ -141,6 +167,7 @@ import axios from 'axios';
 import { useMessage } from '@/composables/useFeedback';
 import { queueReceiptMatches, useMediaOrganizeQueue } from '@/composables/useMediaOrganizeQueue';
 import MediaOrganizeQueueDialog from '@/components/MediaOrganizeQueueDialog.vue';
+import DialogCloseBtn from '@/components/theme/DialogCloseBtn.vue';
 
 const message = useMessage();
 const { smAndDown, height: viewportHeight, width: viewportWidth } = useDisplay();
@@ -161,6 +188,9 @@ watch([pageElement, viewportWidth, viewportHeight], () => {
   if (layout) contentBottomInset.value = parseFloat(getComputedStyle(layout).paddingBottom) || 0;
 }, { flush: 'post' });
 const selectedItems = ref([]), confirmationItems = ref([]), confirmationOpen = ref(false), confirmationMode = ref('reprocess'), queueOpen = ref(false), deleteItems = ref([]), deleteOpen = ref(false);
+const detailOpen = ref(false), detailRecord = ref(null);
+const detailItem = computed(() => items.value.find(item => item.id === detailRecord.value?.id) || detailRecord.value);
+const openDetails = item => { detailRecord.value = { ...item }; detailOpen.value = true; };
 const loadingItems = ref(false), itemsError = ref(''), processing = ref(false), feedback = ref(null);
 let active = true, itemSequence = 0, searchTimer;
 const loadedQuery = ref('');
@@ -190,7 +220,7 @@ const episodeLabel = item => {
   const episode = Number.isInteger(item.episode_number) ? `E${String(item.episode_number).padStart(2, '0')}` : '';
   return [[season, episode].join(''), item.name !== item.series_name ? item.name : ''].filter(Boolean).join(' · ');
 };
-const statusPresentation = item => ({ success: { title: '成功', color: 'success' }, warning: { title: '有提醒', color: 'warning' }, failed: { title: '失败', color: 'error' }, processing: { title: '正在处理', color: 'primary' } }[item.status] || { title: '未知', color: 'secondary' });
+const statusPresentation = item => ({ success: { title: '成功', color: 'success' }, warning: { title: '成功', color: 'success' }, failed: { title: '失败', color: 'error' }, processing: { title: '正在处理', color: 'primary' } }[item.status] || { title: '未知', color: 'secondary' });
 const formatDate = value => {
   if (!value) return '—';
   const date = new Date(value);
@@ -243,7 +273,7 @@ const queue = useMediaOrganizeQueue({ onSettled: loadItems });
 const pendingQueueCount = computed(() => queue.queuedCount + queue.runningCount);
 const operationLabel = mode => mode === 'rescrape' ? '重新刮削' : '重新整理入库';
 const operationOptions = [{ title: '重新整理入库', value: 'reprocess' }, { title: '重新刮削', value: 'rescrape' }];
-const openQueue = () => { queueOpen.value = true; void queue.refresh(); };
+const openQueue = () => { detailOpen.value = false; queueOpen.value = true; void queue.refresh(); };
 
 const searchItems = () => { clearTimeout(searchTimer); if (searchComposing.value || processing.value) return; appliedSearch.value = search.value?.trim() || ''; page.value = 1; loadItems(); };
 const clearSearch = () => { search.value = ''; searchItems(); };
@@ -273,6 +303,7 @@ const openRecordConfirmation = (item, mode) => {
   if (!canReorganizeRecord(item)) return;
   confirmationItems.value = [{ ...item }];
   confirmationMode.value = mode;
+  detailOpen.value = false;
   confirmationOpen.value = true;
 };
 const openDeleteConfirmation = item => {
@@ -387,7 +418,7 @@ onBeforeUnmount(() => { active = false; ++itemSequence; clearTimeout(searchTimer
 .organize-record--selected { outline: 1px solid rgba(var(--v-theme-primary), 0.45); outline-offset: -1px; }
 .organize-record-meta { flex: 0 1 28%; min-width: 0; }
 .organize-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.organize-record-status { flex: 0 1 22%; min-width: 120px; }
+.organize-record-status { flex: 0 0 auto; min-width: 64px; text-align: center; }
 .organize-items-desktop { background: transparent; }
 .organize-items-desktop :deep(.v-table__wrapper) { scrollbar-gutter: stable; }
 .organize-media-copy { min-width: 0; flex: 1; }
@@ -395,6 +426,8 @@ onBeforeUnmount(() => { active = false; ++itemSequence; clearTimeout(searchTimer
 .media-title :deep(.v-btn__content) { white-space: normal; overflow-wrap: anywhere; }
 .media-organize-page :deep(.v-card-title), .media-organize-page :deep(.v-card-subtitle) { white-space: normal; overflow-wrap: anywhere; }
 .history-message { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.organize-detail-content { display: flex; flex-direction: column; gap: 1rem; min-inline-size: 0; overflow-wrap: anywhere; }
+.organize-detail-content > * { flex: 0 0 auto; }
 .media-organize-page :deep(.v-data-table__td) { padding-block: 12px; }
 .media-organize-page :deep(.v-alert-title), .media-organize-page :deep(.v-chip__content) { white-space: normal; overflow-wrap: anywhere; }
 .media-organize-page :deep(.v-chip) { height: auto; min-height: 26px; padding-block: 4px; }

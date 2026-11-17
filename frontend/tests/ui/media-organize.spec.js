@@ -275,7 +275,11 @@ test('mobile history cards preserve real status and disable unfinished records',
   const cards = page.getByTestId('organize-items-mobile');
   await expect(cards).toBeVisible();
   await expect(cards).toContainText('正在处理');
-  await expect(cards).toContainText('未能匹配到媒体');
+  await expect(cards).not.toContainText('未能匹配到媒体');
+  await cards.getByRole('button', { name: /^失败，查看/ }).click();
+  await expect(page.getByTestId('organize-detail-dialog')).toContainText('未能匹配到媒体');
+  await expect(page.getByTestId('organize-detail-dialog').getByRole('button', { name: '重新整理', exact: true })).toBeDisabled();
+  await page.getByRole('button', { name: '关闭整理详情', exact: true }).click();
   await expect(cards.getByRole('checkbox').first()).toBeDisabled();
   await expect(cards.getByRole('checkbox').last()).toBeEnabled();
   await cards.getByRole('checkbox').last().check();
@@ -290,7 +294,9 @@ test('history filters use real status and do not fall back to Emby recent items'
   await page.goto('/media-organize');
   await page.getByTestId('organize-status-filter').click();
   await page.locator('.v-overlay--active').getByText('失败', { exact: true }).click();
-  await expect(page.getByTestId('organize-items')).toContainText('原生回读失败');
+  await expect(page.getByTestId('organize-items')).not.toContainText('原生回读失败');
+  await page.getByTestId('organize-items').getByRole('button', { name: /^失败，查看/ }).click();
+  await expect(page.getByTestId('organize-detail-dialog')).toContainText('原生回读失败');
   expect(api.requests.find(request => request.path === listPath && request.query.status === 'failed').query.page).toBe('1');
   expect(api.requests.some(request => request.path === '/api/dashboard/media' || request.path.startsWith('/api/media_center/libraries'))).toBe(false);
 });
@@ -313,7 +319,10 @@ test('confirmed organize reloads history status and preserves the selected recor
   await selectRow(page);
   await page.getByTestId('organize-selected').click();
   await page.getByTestId('organize-confirm').click();
-  await expect(page.getByTestId('organize-items')).toContainText('媒体已整理，图片待确认');
+  await expect(page.getByTestId('organize-items')).not.toContainText('媒体已整理，图片待确认');
+  await page.getByTestId('organize-items').getByRole('button', { name: /^成功，查看/ }).click();
+  await expect(page.getByTestId('organize-detail-dialog')).toContainText('媒体已整理，图片待确认');
+  await page.getByRole('button', { name: '关闭整理详情', exact: true }).click();
   await expect(page.getByTestId('organize-items').locator('.organize-record').first().getByRole('checkbox')).toBeChecked();
   await expect(page.getByTestId('organize-selection-count')).toHaveText('1/1 项');
   expect(posts(api)[0].body).toEqual({ item_ids: ['101'], history_ids: ['00000000-0000-4000-8000-000000000101'], mode: 'reprocess' });
@@ -339,7 +348,9 @@ test('typing a history query applies the MP delay and keeps real failure records
   api.respond('GET', listPath, request => list(request.query.search === '失败记录' ? [{ ...first, status: 'failed', message: '原生回读失败，恢复备份仍保留' }] : [first]));
   await page.goto('/media-organize');
   await page.getByRole('textbox', { name: '搜索入库记录', exact: true }).fill('失败记录');
-  await expect(page.getByTestId('organize-items')).toContainText('原生回读失败，恢复备份仍保留');
+  await page.getByTestId('organize-items').getByRole('button', { name: /^失败，查看/ }).click();
+  await expect(page.getByTestId('organize-detail-dialog')).toContainText('原生回读失败，恢复备份仍保留');
+  await page.getByRole('button', { name: '关闭整理详情', exact: true }).click();
   expect(api.requests.filter(request => request.path === listPath && request.query.search === '失败记录')).toHaveLength(1);
   await selectRow(page);
   await expect(page.getByTestId('organize-selected')).toBeEnabled();

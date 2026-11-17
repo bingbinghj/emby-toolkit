@@ -2,12 +2,13 @@
 <template>
   <VDialog :model-value="modelValue" :fullscreen="smAndDown" max-width="60rem" scrollable @update:model-value="$emit('update:modelValue', $event)">
     <VCard data-testid="organize-queue-dialog">
-      <VCardItem class="queue-heading">
+      <VCardItem class="queue-heading pe-16">
         <template #prepend><VIcon icon="mdi-menu" color="primary" size="28" class="me-2" /></template>
         <VCardTitle>整理队列</VCardTitle>
         <VCardSubtitle v-if="queue.items.length">本页 {{ groups.length }} 项媒体，共 {{ queue.items.length }} 项任务</VCardSubtitle>
-        <template #append><VBtn icon="mdi-refresh" variant="text" aria-label="刷新整理队列" :loading="queue.loading" @click="queue.refresh" /><VBtn icon="mdi-close" variant="text" aria-label="关闭整理队列" @click="$emit('update:modelValue', false)" /></template>
+        <template #append><VBtn icon="mdi-refresh" variant="text" aria-label="刷新整理队列" :loading="queue.loading" @click="queue.refresh" /></template>
       </VCardItem>
+      <DialogCloseBtn aria-label="关闭整理队列" @click="$emit('update:modelValue', false)" />
       <VDivider />
       <VCardText class="queue-content" :class="{ 'queue-content--active': queue.items.length }">
         <VAlert v-if="queue.error" type="warning" variant="tonal" class="mb-3" data-testid="organize-queue-error">{{ queue.error }}<VBtn variant="text" :loading="queue.loading" @click="queue.refresh">重新读取</VBtn></VAlert>
@@ -53,6 +54,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue';
 import { useDisplay } from 'vuetify';
+import DialogCloseBtn from '@/components/theme/DialogCloseBtn.vue';
 
 const props = defineProps({ modelValue: Boolean, queue: { type: Object, required: true } });
 defineEmits(['update:modelValue']);

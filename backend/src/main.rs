@@ -73,6 +73,9 @@ async fn main() -> anyhow::Result<()> {
         state.clone(),
         background.clone(),
     ));
+    let settings_recovery = tokio::spawn(emby_toolkit::strm::run_recovery(
+        state.clone(), background.clone(),
+    ));
     let monitor = emby_toolkit::monitor::Service::new(state.clone());
     let watcher = tokio::spawn(monitor.run(background.clone()));
     let organize_queue = tokio::spawn(emby_toolkit::media_organize_queue::run(
@@ -106,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
     watcher.await?;
     organize_queue.await?;
     recovery.await?;
+    settings_recovery.await?;
     tracing::info!("应用程序已关闭，后台任务已结束");
     Ok(())
 }
