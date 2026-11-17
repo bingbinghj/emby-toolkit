@@ -134,7 +134,7 @@ test('single-record deletion freezes that history while preserving an unrelated 
     return { deleted_count: request.body.history_ids.length, deleted_ids: request.body.history_ids, message: '整理记录已删除' };
   });
   await page.goto('/media-organize');
-  await rows(page).last().getByRole('checkbox').check();
+  await page.getByRole('checkbox', { name: '选择 排序验证电影', exact: true }).check();
   await rows(page).first().getByRole('button', { name: '整理验证剧集 操作', exact: true }).click();
   await page.locator('.v-overlay--active').getByText('删除', { exact: true }).click();
   const dialog = deleteDialog(page);

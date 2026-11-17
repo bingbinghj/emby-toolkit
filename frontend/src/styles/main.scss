@@ -3,5 +3,6 @@
 @use '@core/scss/index' as template;
 @use '@layouts/styles/index' as layouts;
 @use 'vuetify/styles' as vuetify;
+@use '@styles/tokens' as tokens;
 @use '@styles/common' as common;
 @use '@styles/themes/glass';
