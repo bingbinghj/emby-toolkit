@@ -79,6 +79,11 @@ for (const width of [390, 1440]) {
       const button = page.getByRole('button', { name: `选择${label}`, exact: true });
       expect(await button.evaluate(el => Boolean(el.closest('.v-field__append-inner')))).toBe(true);
       await button.click();
+      await expect.poll(async () => {
+        const box = await picker(page).boundingBox();
+        return box && Math.abs(box.x + box.width / 2 - width / 2) < 2
+          && Math.abs(box.y + box.height / 2 - 450) < 2;
+      }).toBe(true);
       await picker(page).getByRole('button', { name: '打开目录 chapters', exact: true }).click();
       await picker(page).getByRole('button', { name: '选择此目录', exact: true }).click();
       await expect(input).toHaveValue('/metadata/chapters');
@@ -92,6 +97,11 @@ for (const width of [390, 1440]) {
     const button = group.getByRole('button', { name: '选择监控路径', exact: true });
     expect(await button.evaluate(el => Boolean(el.closest('.v-field__append-inner')))).toBe(true);
     await button.click();
+    await expect.poll(async () => {
+      const box = await picker(page).boundingBox();
+      return box && Math.abs(box.x + box.width / 2 - width / 2) < 2
+        && Math.abs(box.y + box.height / 2 - 450) < 2;
+    }).toBe(true);
     await picker(page).getByRole('button', { name: '打开目录 chapters', exact: true }).click();
     await picker(page).getByRole('button', { name: '选择此目录', exact: true }).click();
     await expect(group.locator('.v-chip').filter({ hasText: '/metadata/chapters' })).toHaveCount(1);

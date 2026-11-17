@@ -105,3 +105,66 @@ fn he_aac_markers_in_the_middle_or_end_do_not_become_languages() {
         assert_eq!(report["pending"].as_array().unwrap().len(), 1);
     }
 }
+
+#[test]
+fn generated_audio_descriptions_reduce_to_language_without_losing_remarks() {
+    for (raw, title, expected, code) in [
+        (
+            "chi",
+            "Chinese AAC LC 2 channels @192kb/s (国语)",
+            "国语",
+            "chi",
+        ),
+        (
+            "chi",
+            "国语 AAC LC 2 channels @192kb/s (国语)",
+            "国语",
+            "chi",
+        ),
+        (
+            "und",
+            "Chinese AAC LC 2 channels @192kb/s (国语)",
+            "国语",
+            "chi",
+        ),
+        ("eng", "English AAC LC 2 channels @192kb/s", "英语", "eng"),
+        ("jpn", "Japanese HE-AAC 2 channels @128 kb/s", "日语", "jpn"),
+        (
+            "chi",
+            "Chinese AAC LC 2 channels @192kb/s (台配国语)",
+            "台配国语",
+            "chi",
+        ),
+        (
+            "yue",
+            "TVB粤语 AAC LC 2 channels @192kb/s",
+            "TVB粤语",
+            "yue",
+        ),
+        (
+            "eng",
+            "English AAC LC 2 channels @192kb/s Commentary 2",
+            "导评2",
+            "eng",
+        ),
+        (
+            "chi",
+            "Chinese AAC LC 2 channels @192kb/s (修复版)",
+            "国语 (修复版)",
+            "chi",
+        ),
+    ] {
+        let original = audio(Some(raw), title);
+        let (filled, report) = language::fill(&original, &json!([]), true);
+        let mut expected_stream = original["MediaStreams"][0].clone();
+        expected_stream["Title"] = json!(expected);
+        expected_stream["Language"] = json!(code);
+        assert_eq!(
+            filled["MediaStreams"][0], expected_stream,
+            "{title}: {report}"
+        );
+        assert_eq!(report["pending"], json!([]), "{title}: {report}");
+        let (again, repeated) = language::fill(&filled, &json!([]), true);
+        assert_eq!(again, filled, "{title}: {repeated}");
+    }
+}

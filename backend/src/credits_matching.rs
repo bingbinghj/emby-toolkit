@@ -162,9 +162,22 @@ fn median(mut values: Vec<f64>) -> f64 {
 /// The caller expands tail samples when the start touches
 /// the eight-second window margin, then validates the full media runtime.
 pub(crate) fn detect_common(samples: &[Fingerprint]) -> Option<(usize, f64, f64)> {
+    detect(samples, false)
+}
+
+/// The first sample is the episode being processed. A different song shared
+/// only by its neighbours must never replace or hide its own matching range.
+pub(crate) fn detect_target(samples: &[Fingerprint]) -> Option<(f64, f64)> {
+    detect(samples, true).map(|(_, start, end)| (start, end))
+}
+
+fn detect(samples: &[Fingerprint], target_only: bool) -> Option<(usize, f64, f64)> {
     let deadline = Deadline::new(60);
     let mut pairs = vec![vec![]; samples.len()];
     for (i, base) in samples.iter().enumerate() {
+        if target_only && i != 0 {
+            break;
+        }
         for (j, other) in samples.iter().enumerate().skip(i + 1) {
             deadline.check()?;
             if let Some(found) = segment(base, other, &deadline) {
@@ -178,19 +191,44 @@ pub(crate) fn detect_common(samples: &[Fingerprint]) -> Option<(usize, f64, f64)
     }
     let mut best: Option<(usize, usize, f64, f64)> = None;
     for (base_index, segments) in pairs.iter().enumerate() {
+        if target_only && base_index != 0 {
+            break;
+        }
         // 不合并互不重叠的歌曲区间；在同一实际匹配范围内选择支持最多的模板。
         for candidate in segments {
             let agreed = segments
                 .iter()
-                .filter(|s| (s.0 - candidate.0).abs() <= 2.0 && (s.1 - candidate.1).abs() <= 5.0)
+                .filter(|s| {
+                    if target_only {
+                        let overlap = s.1.min(candidate.1) - s.0.max(candidate.0);
+                        overlap >= MIN_SECONDS
+                            && overlap >= (s.1 - s.0).min(candidate.1 - candidate.0) * 0.75
+                    } else {
+                        (s.0 - candidate.0).abs() <= 2.0 && (s.1 - candidate.1).abs() <= 5.0
+                    }
+                })
                 .collect::<Vec<_>>();
             // 三集以上时至少由两个独立参照确认，不能只因某两集正文里的
             // 背景音乐相同就忽略其他样本的否定结果。
             if agreed.len() < if samples.len() >= 3 { 2 } else { 1 } {
                 continue;
             }
-            let start = median(agreed.iter().map(|s| s.0).collect());
-            let end = median(agreed.iter().map(|s| s.1).collect());
+            // A cut or voiceover may shorten a match. Accept only the shared
+            // intersection, starting at the later confirmed point, never a midpoint.
+            let (start, end) = if target_only {
+                (
+                    agreed.iter().map(|s| s.0).max_by(f64::total_cmp)?,
+                    agreed.iter().map(|s| s.1).min_by(f64::total_cmp)?,
+                )
+            } else {
+                (
+                    median(agreed.iter().map(|s| s.0).collect()),
+                    median(agreed.iter().map(|s| s.1).collect()),
+                )
+            };
+            if end - start < MIN_SECONDS {
+                continue;
+            }
             if best.as_ref().is_none_or(|(_, count, old_start, old_end)| {
                 agreed.len() > *count || agreed.len() == *count && end - start > old_end - old_start
             }) {
@@ -425,6 +463,46 @@ mod tests {
         let right = sample(160, &second, 640, 19);
         let samples = [base, left, right];
         assert!(detect_common(&samples).is_none());
+        assert!(detect_target(&samples).is_none());
+    }
+
+    #[test]
+    fn target_uses_its_own_two_references_when_neighbours_have_a_longer_ending() {
+        let first = noise(240, 932);
+        let second = noise(400, 933);
+        let samples = [
+            sample(320, &first, 480, 1),
+            sample(320, &second, 320, 2),
+            sample(320, &second, 320, 3),
+            sample(320, &second, 320, 4),
+            sample(400, &first, 400, 5),
+            sample(480, &first, 320, 6),
+        ];
+        let (base, start, end) = detect_common(&samples).unwrap();
+        assert!(match_template(&samples[0], &samples[base], start, end).is_none());
+        let (start, end) = detect_target(&samples).unwrap();
+        assert!((start - 1040.0).abs() < 0.25 && (end - 1070.0).abs() < 0.25);
+        assert!(
+            detect_target(&samples[..5]).is_none(),
+            "one reference is insufficient"
+        );
+        assert!(
+            detect_target(&samples[..4]).is_none(),
+            "neighbour consensus cannot prove the target"
+        );
+    }
+
+    #[test]
+    fn shortened_references_use_only_the_intersection_starting_later() {
+        let common = noise(480, 734);
+        let samples = [
+            sample(320, &common, 240, 7),
+            sample(400, &common, 160, 8),
+            sample(320, &common[160..], 400, 9),
+        ];
+        let (start, end) = detect_target(&samples).unwrap();
+        assert!((start - 1060.0).abs() < 0.25, "{start}");
+        assert!((end - 1100.0).abs() < 0.25, "{end}");
     }
 
     #[test]

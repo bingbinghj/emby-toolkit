@@ -55,11 +55,11 @@ onBeforeUnmount(() => { requestVersion += 1; });
     :multiple="multiple" :chips="multiple" :closable-chips="multiple" :return-object="false" :menu-icon="multiple ? '' : undefined"
     @update:model-value="emit('update:modelValue', $event)">
     <template #append-inner>
-      <VMenu v-model="menuOpen" :close-on-content-click="false" :max-width="480">
+      <VDialog v-model="menuOpen" max-width="480" scrollable>
         <template #activator="{ props: menuProps }">
           <VBtn v-bind="menuProps" icon="mdi-folder-open-outline" variant="text" size="small" :disabled="attrs.disabled || attrs.readonly" :aria-label="attrs.label ? `选择${attrs.label}` : '选择目录'" @click.stop />
         </template>
-        <VCard class="local-path-menu" width="480" max-width="calc(100vw - 24px)">
+        <VCard class="local-path-menu">
           <VCardTitle class="text-subtitle-1">选择目录</VCardTitle>
           <VCardText class="pb-0">
             <div class="text-body-2 text-break mb-3">{{ currentPath || requestedPath }}</div>
@@ -81,7 +81,7 @@ onBeforeUnmount(() => { requestVersion += 1; });
             <VBtn color="primary" variant="flat" :disabled="loading || Boolean(error) || !currentPath" @click="chooseDirectory">选择此目录</VBtn>
           </VCardActions>
         </VCard>
-      </VMenu>
+      </VDialog>
     </template>
   </component>
 </template>

@@ -352,7 +352,6 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
         template_indices.sort_by_key(|index| (*index != 0, !cached.contains(index)));
         template_indices.truncate(6);
         let mut template = None;
-        let mut template_errors = vec![];
         if template_indices.len() >= 2 {
             for count in [3, 6] {
                 if count == 6 && template_indices.len() <= 3 {
@@ -361,15 +360,23 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
                 for seconds in SAMPLE_STEPS {
                     let mut samples = vec![];
                     for index in template_indices.iter().take(count) {
-                        match fingerprint(state, &refs[*index], seconds, context).await {
-                            Ok(value) => {
-                                fingerprints
-                                    .insert((refs[*index].sha.clone(), seconds), value.clone());
-                                samples.push(value);
-                            }
+                        match cached_fingerprint(
+                            state,
+                            &refs[*index],
+                            seconds,
+                            context,
+                            &mut fingerprints,
+                        )
+                        .await
+                        {
+                            Ok(value) => samples.push(value),
                             Err(error) if context.is_cancelled() => return Err(error),
                             Err(error) => {
-                                template_errors.push(format!("{}：{}", refs[*index].label, error.1))
+                                tracing::debug!(
+                                    "[片尾提取] {} 模板不可用：{}",
+                                    refs[*index].label,
+                                    error.1
+                                )
                             }
                         }
                     }
@@ -417,27 +424,27 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
                     cache_chapters(state,reference,&live["Chapters"]).await?;
                     return Ok::<Value,ApiError>(json!({"item_id":reference.target.id,"status":"skipped","reason":"已有有效片尾标记，已核对并同步缓存","credits_start_ticks":ticks,"chapter":marker(ticks),"chapters":live["Chapters"]}));
                 }
-                let Some((base,start,end))=&template else {
-                    let reason=if template_indices.len()<2 {"同季可比对分集不足 2 集，未猜测片尾".into()} else if !template_errors.is_empty() {format!("同季片尾指纹提取未完成：{}",template_errors.join("；"))} else {"未找到稳定公共片尾或起点仍贴近采样窗口边界，未写入标记".into()};
-                    return Ok::<Value,ApiError>(json!({"item_id":reference.target.id,"status":if template_indices.len()<2 {"skipped"} else {"failed"},"error":reason,"reason":reason}));
-                };
-                let mut own_start=None;
-                for seconds in SAMPLE_STEPS {
-                    let sample=if let Some(sample)=fingerprints.get(&(reference.sha.clone(),seconds)) {sample.clone()} else {
-                        let sample=fingerprint(state,reference,seconds,context).await?;
-                        fingerprints.insert((reference.sha.clone(),seconds),sample.clone());sample
-                    };
-                    let _secondary=crate::strm::slot(state,"secondary",Some(context)).await?;
-                    let (own,template)= (sample.clone(),base.clone());
-                    let (start,end)=(*start,*end);
-                    let matched=tokio::task::spawn_blocking(move||credits_matching::match_template(&own,&template,start,end)).await.map_err(|_|ApiError::bad("分集片尾声纹匹配任务异常"))?;
-                    drop(_secondary);
-                    if let Some((start,_))=matched && start-sample.start_seconds>8.0 {
-                        let ticks=(start*10_000_000.0).round() as u64;
-                        if safe_start(reference.runtime,ticks) {own_start=Some(ticks);break;}
+                if template_indices.len() < 2 {
+                    return Ok::<Value, ApiError>(json!({"item_id":reference.target.id,"status":"skipped","error":"同季可比对分集不足 2 集，未猜测片尾","reason":"同季可比对分集不足 2 集，未猜测片尾"}));
+                }
+                let mut own_start = None;
+                // The season template remains a fast path. Different cuts/songs
+                // fall back to this episode's neighbours using the same cache.
+                if let Some((base, start, end)) = &template {
+                    let sample = cached_fingerprint(state, reference, SAMPLE_STEPS[0], context, &mut fingerprints).await?;
+                    let _secondary = crate::strm::slot(state, "secondary", Some(context)).await?;
+                    let (own, base, start, end) = (sample.clone(), base.clone(), *start, *end);
+                    let matched = tokio::task::spawn_blocking(move || credits_matching::match_template(&own, &base, start, end))
+                        .await.map_err(|_| ApiError::bad("分集片尾声纹匹配任务异常"))?;
+                    if let Some((start, _)) = matched && start - sample.start_seconds > 8.0 {
+                        let ticks = (start * 10_000_000.0).round() as u64;
+                        if safe_start(reference.runtime, ticks) { own_start = Some(ticks); }
                     }
                 }
-                let ticks=own_start.ok_or_else(||ApiError::bad("当前分集没有通过独立片尾声纹匹配，未写入标记"))?;
+                let ticks = match own_start {
+                    Some(ticks) => ticks,
+                    None => neighbour_start(state, &refs, reference, context, &mut fingerprints).await?,
+                };
                 let chapters=apply_marker(state,reference,ticks,context).await?;
                 cache_chapters(state,reference,&chapters).await?;
                 let actual_ticks=credits_start(&chapters).ok_or_else(||ApiError::bad("片尾标记回读缺失"))?;
@@ -514,6 +521,97 @@ fn select_templates(refs: &[Episode]) -> Vec<usize> {
         })
         .map(|(index, _)| index)
         .collect()
+}
+
+async fn cached_fingerprint(
+    state: &AppState,
+    reference: &Episode,
+    seconds: u32,
+    context: &JobContext,
+    cache: &mut HashMap<(String, u32), Fingerprint>,
+) -> Result<Fingerprint> {
+    let key = (reference.sha.clone(), seconds);
+    if let Some(sample) = cache.get(&key) {
+        return Ok(sample.clone());
+    }
+    let sample = fingerprint(state, reference, seconds, context).await?;
+    cache.insert(key, sample.clone());
+    Ok(sample)
+}
+
+async fn neighbour_start(
+    state: &AppState,
+    refs: &[Episode],
+    target: &Episode,
+    context: &JobContext,
+    cache: &mut HashMap<(String, u32), Fingerprint>,
+) -> Result<u64> {
+    let mut neighbours: Vec<_> = refs.iter().collect();
+    let number = target.item["IndexNumber"].as_u64();
+    neighbours.sort_by_key(|other| {
+        (
+            other.target.id != target.target.id,
+            number
+                .zip(other.item["IndexNumber"].as_u64())
+                .map_or(u64::MAX, |(a, b)| a.abs_diff(b)),
+            other.item["IndexNumber"].as_u64(),
+        )
+    });
+    let (mut hashes, mut numbers) = (HashSet::new(), HashSet::new());
+    neighbours.retain(|other| {
+        hashes.insert(&other.sha) && numbers.insert(other.item["IndexNumber"].as_u64())
+    });
+    neighbours.truncate(6);
+    let mut errors = Vec::new();
+    for seconds in SAMPLE_STEPS {
+        for count in [3, 6] {
+            if count == 6 && neighbours.len() <= 3 {
+                break;
+            }
+            context.checkpoint().await?;
+            let mut samples =
+                vec![cached_fingerprint(state, target, seconds, context, cache).await?];
+            for other in neighbours.iter().take(count).skip(1) {
+                match cached_fingerprint(state, other, seconds, context, cache).await {
+                    Ok(sample) => samples.push(sample),
+                    Err(error) if context.is_cancelled() => return Err(error),
+                    Err(error) => errors.push(format!("{}：{}", other.label, error.1)),
+                }
+            }
+            // Unavailable references must not reduce three-way verification to a pair.
+            if samples.len() < neighbours.len().min(count).min(3) {
+                continue;
+            }
+            let window_start = samples[0].start_seconds;
+            let _secondary = crate::strm::slot(state, "secondary", Some(context)).await?;
+            let matched =
+                tokio::task::spawn_blocking(move || credits_matching::detect_target(&samples))
+                    .await
+                    .map_err(|_| ApiError::bad("分集片尾声纹匹配任务异常"))?;
+            if let Some((start, end)) = matched
+                && start - window_start > 8.0
+            {
+                // Fuzzy alignment allows eight seconds of boundary uncertainty.
+                // A new song's opening can overlap the last scene; keep that
+                // margin and at least 18 seconds of confirmed common audio.
+                let start = start + 8.0;
+                if end - start < 18.0 {
+                    continue;
+                }
+                let ticks = (start * 10_000_000.0).round() as u64;
+                if safe_start(target.runtime, ticks) {
+                    return Ok(ticks);
+                }
+            }
+        }
+    }
+    Err(ApiError::bad(if errors.is_empty() {
+        "当前分集没有通过独立片尾声纹匹配，未写入标记".to_string()
+    } else {
+        errors.sort();
+        errors.dedup();
+        format!("同季片尾指纹提取未完成：{}", errors.join("；"))
+    }))
 }
 
 async fn guard_recovery(state: &AppState, id: &str) -> Result<()> {

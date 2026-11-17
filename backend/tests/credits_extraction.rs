@@ -235,6 +235,10 @@ struct Fixture {
 
 impl Fixture {
     async fn new(deny_readback: bool) -> Self {
+        Self::with_episode_count(deny_readback, 2).await
+    }
+
+    async fn with_episode_count(deny_readback: bool, count: u64) -> Self {
         let database = std::env::var("DATABASE_URL").unwrap();
         let admin = sqlx::PgPool::connect(&database).await.unwrap();
         let schema = format!("credits_{}", uuid::Uuid::new_v4().simple());
@@ -267,7 +271,9 @@ impl Fixture {
         };
         let mut sha = HashMap::new();
         let mut before = HashMap::new();
-        for (episode, id) in [(1, "101"), (2, "102")] {
+        for episode in 1..=count {
+            let id = (100 + episode).to_string();
+            let id = id.as_str();
             let bytes = media_file(&assets, id, episode);
             let digest = format!("{:X}", Sha1::digest(&bytes));
             sha.insert(id.into(), digest.clone());
@@ -673,6 +679,57 @@ async fn full_library_credits_task_extracts_episodes_and_never_movies() {
     assert_eq!(movie["state"], "failed", "{movie}");
     assert_eq!(fixture.host.writes.lock().await.len(), 2);
     assert_eq!(fixture.host.downloads.lock().await.len(), 2);
+    fixture.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL and ffmpeg with chromaprint; all HTTP stays local"]
+async fn changed_ending_uses_neighbours_and_cached_fingerprints_for_each_episode() {
+    let fixture = Fixture::with_episode_count(false, 6).await;
+    let directory = fixture.state.data_dir.join("credits-fingerprints");
+    std::fs::create_dir_all(&directory).unwrap();
+    let noise = |count: usize, mut seed: u32| -> Vec<u32> {
+        (0..count)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed
+            })
+            .collect()
+    };
+    for episode in 1..=6 {
+        let id = (100 + episode).to_string();
+        let mut values = noise(600, episode);
+        values.extend(noise(320, if episode <= 3 { 7001 } else { 8001 }));
+        values.extend(noise(40, episode + 11));
+        let sha = &fixture.sha[&id];
+        // Short fixtures have the same full-media coverage at every requested window.
+        for seconds in [180, 300, 360] {
+            std::fs::write(directory.join(format!("{sha}-{seconds}.json")), serde_json::to_vec(&json!({
+                "version":1,"sha1":sha,"runtime":120.0,"seconds":120.0,"start":0.0,"values":values,
+            })).unwrap()).unwrap();
+        }
+    }
+    let job = fixture.run(None).await;
+    assert_eq!(job["result"]["updated"], 6, "{job}");
+    assert_eq!(job["result"]["failed"], 0, "{job}");
+    for report in job["result"]["items"].as_array().unwrap() {
+        if report["status"] == "completed" {
+            let start = report["credits_start_ticks"].as_f64().unwrap() / 10_000_000.0;
+            let expected = if report["item_id"].as_str().unwrap() <= "103" {
+                75.0
+            } else {
+                83.0
+            };
+            assert!((start - expected).abs() <= 0.5, "{report}");
+        }
+    }
+    assert_eq!(fixture.host.writes.lock().await.len(), 6);
+    assert!(
+        fixture.host.downloads.lock().await.is_empty(),
+        "cached audio must not be downloaded again"
+    );
     fixture.close().await;
 }
 

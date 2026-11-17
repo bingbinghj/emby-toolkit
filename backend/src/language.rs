@@ -14,6 +14,11 @@ static TECHNICAL_PREFIX: LazyLock<regex::Regex> = LazyLock::new(|| {
 static AAC_PROFILE: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"(?i)(?:he[\s_-]*aac|aac[\s_-]*he)(?:[\s_-]*v2)?").unwrap()
 });
+// Generated audio descriptions can put the technical block after the language.
+// Require the channel/bitrate shape so source names and free-form remarks survive.
+static AUDIO_DESCRIPTION: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?i)\b(?:aac(?:[\s_-]+(?:lc|he)(?:[\s_-]*v2)?)?|he[\s_-]*aac(?:[\s_-]*v2)?|e?ac[-_]?3|dts(?:[\s._-]*hd)?(?:[\s._-]*ma)?|truehd|flac|opus|mp3|pcm(?:[_-]s\d+(?:le|be)?)?)\s+\d+(?:\.\d+)?\s*(?:channels?|ch)\s*@?\s*\d+(?:\.\d+)?\s*(?:kb/s|kbps|mb/s|mbps)\b").unwrap()
+});
 static LANGUAGE_TAG: LazyLock<regex::Regex> = LazyLock::new(|| {
     regex::Regex::new(r"(?i)\b[a-z]{2,3}(?:[-_](?:[a-z]{4}|[a-z]{2}|[0-9]{3}))+\b").unwrap()
 });
@@ -575,6 +580,12 @@ pub fn fill(info: &Value, mappings: &Value, skip_chinese: bool) -> (Value, Value
         let original_title = stream["Title"].as_str().unwrap_or("");
         let original_entry = lookup(&raw, mappings);
         let mut cleaned = original_title.trim().to_string();
+        if kind == "Audio" {
+            cleaned = AUDIO_DESCRIPTION
+                .replace_all(&cleaned, "")
+                .trim()
+                .to_string();
+        }
         while TECHNICAL_PREFIX.is_match(&cleaned) {
             cleaned = TECHNICAL_PREFIX.replace(&cleaned, "").trim().to_string();
         }
@@ -649,6 +660,15 @@ pub fn fill(info: &Value, mappings: &Value, skip_chinese: bool) -> (Value, Value
             title = commentary;
         } else if kind == "Audio" {
             title = dubbing_title(&cleaned, &hits, entry, &label, title);
+            // Chinese (...) and its already-localized form may repeat the same
+            // language or dubbing source after the generated description.
+            if let Some((base, remark)) = title.split_once(['(', '（'])
+                && remark
+                    .strip_suffix([')', '）'])
+                    .is_some_and(|rest| rest.trim() == base.trim())
+            {
+                title = base.trim().to_string();
+            }
         }
         let title_changed = stream["Title"] != title;
         let language_changed = inferred.as_ref().is_some_and(|entry| {
