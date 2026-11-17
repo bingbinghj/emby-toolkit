@@ -63,22 +63,39 @@ pub(crate) async fn run_organize_item(
     context: &JobContext,
 ) -> Result<Value> {
     match mode {
-        "reprocess" => Box::pin(reorganize_ingest(state, id, context)).await,
+        "reprocess" => Box::pin(reorganize_ingest(state, &[id.to_string()], context)).await,
         "rescrape" => Box::pin(crate::media_rescrape::run(state, id, context)).await,
         _ => Err(ApiError::bad("整理模式无效")),
     }
 }
 
-async fn reorganize_ingest(state: &AppState, id: &str, context: &JobContext) -> Result<Value> {
-    let requested = details(state, id, "Id,Type,Path,ProviderIds,SeriesId,ParentId").await?;
-    let ids = crate::revalidation::scope(state, id, context).await?;
+pub(crate) async fn reorganize_ingest(
+    state: &AppState,
+    selected: &[String],
+    context: &JobContext,
+) -> Result<Value> {
+    let mut item = None;
     let mut files = vec![];
-    for id in ids {
+    for id in selected {
         context.checkpoint().await?;
-        let item = details(state, &id, "Id,Type,Path").await?;
-        files.push(json!(string(&item, "Path")));
+        let requested = details(state, id, "Id,Type,Path,ProviderIds,SeriesId,ParentId").await?;
+        let parent = series_parent(state, requested).await?;
+        if item
+            .as_ref()
+            .is_some_and(|item: &Value| item["Id"] != parent["Id"])
+        {
+            return Err(ApiError::bad("所选媒体不属于同一作品，未扩大整理范围"));
+        }
+        item = Some(parent);
+        for target in crate::revalidation::scope(state, id, context).await? {
+            let target = details(state, &target, "Id,Type,Path").await?;
+            let path = json!(string(&target, "Path"));
+            if !files.contains(&path) {
+                files.push(path);
+            }
+        }
     }
-    let item = series_parent(state, requested).await?;
+    let item = item.ok_or_else(|| ApiError::bad("没有选择整理媒体"))?;
     let event = json!({"source":"moviepilot","files":files,
         "tmdb_id":item["ProviderIds"]["Tmdb"],"episode_group":null,
         "media_type":if item["Type"]=="Series" {"series"} else {"movie"}});
@@ -86,8 +103,11 @@ async fn reorganize_ingest(state: &AppState, id: &str, context: &JobContext) -> 
     report["finalization"] = report["finalizations"][0]["report"].clone();
     if crate::media_edit::list(&report["failures"]).is_empty() {
         let warnings = report["warnings"].as_u64().unwrap_or(0);
-        report["message"] = json!(if warnings == 0 { "重新整理入库流程已完成".to_string() }
-            else { format!("重新整理入库流程已完成，有 {warnings} 条提醒") });
+        report["message"] = json!(if warnings == 0 {
+            "重新整理入库流程已完成".to_string()
+        } else {
+            format!("重新整理入库流程已完成，有 {warnings} 条提醒")
+        });
     }
     Ok(report)
 }

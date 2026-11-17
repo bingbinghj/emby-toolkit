@@ -66,6 +66,7 @@ pub(crate) async fn enqueue(
     let mut transaction = state.db.begin().await?;
     let mut items = vec![];
     let mut duplicate_count = 0;
+    let batch_id = uuid::Uuid::new_v4().to_string();
     let mut lock_ids = ids.iter().collect::<Vec<_>>();
     lock_ids.sort();
     for id in lock_ids {
@@ -104,9 +105,9 @@ pub(crate) async fn enqueue(
         let snapshot: Option<Value> = sqlx::query_scalar("SELECT item_json FROM media_organize_history WHERE item_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1")
             .bind(id).fetch_optional(&mut *transaction).await?;
         let item = snapshot.unwrap_or_else(|| json!({"item_id":id,"name":id}));
-        let queued: Value = sqlx::query_scalar("INSERT INTO media_organize_queue(id,item_id,mode,item_json,history_ids,operator_id,message) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING to_jsonb(media_organize_queue)")
+        let queued: Value = sqlx::query_scalar("INSERT INTO media_organize_queue(id,item_id,mode,item_json,history_ids,operator_id,message,batch_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING to_jsonb(media_organize_queue)")
             .bind(uuid::Uuid::new_v4().to_string()).bind(id).bind(mode).bind(item)
-            .bind(json!(selected)).bind(operator).bind("已加入队列，等待处理")
+            .bind(json!(selected)).bind(operator).bind("已加入队列，等待处理").bind(&batch_id)
             .fetch_one(&mut *transaction).await?;
         items.push(queued);
     }
@@ -181,6 +182,11 @@ async fn cancel(
         .from_headers(&headers)
         .ok_or_else(ApiError::forbidden)?;
     let mut transaction = state.db.begin().await?;
+    let started_batch: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM media_organize_queue q WHERE q.id=$1 AND q.status='queued' AND q.task_id IS NOT NULL AND EXISTS(SELECT 1 FROM media_organize_queue member WHERE member.task_id=q.task_id AND member.id<>q.id))")
+        .bind(&id).fetch_one(&mut *transaction).await?;
+    if started_batch {
+        return Err(ApiError(StatusCode::CONFLICT, "该分集所属批次已开始执行，请通过任务中心停止整个批次".into()));
+    }
     let cancelled: Option<Value> = sqlx::query_scalar("UPDATE media_organize_queue SET status='cancelled',message='已移出队列，未执行媒体操作',completed_at=NOW() WHERE id=$1 AND status='queued' RETURNING to_jsonb(media_organize_queue)")
         .bind(&id).fetch_optional(&mut *transaction).await?;
     if let Some(mut item) = cancelled {
@@ -264,53 +270,96 @@ fn failed(report: &Value) -> bool {
             .is_some_and(|value| !value.is_empty())
 }
 
+// 只合并同次提交、同剧的重新入库；队列仍保留每集记录和取消入口。
+async fn claim_batch(state: &AppState, queued: &Value, context: &JobContext) -> Result<Vec<Value>> {
+    let mut transaction = state.db.begin().await?;
+    let entries: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(q) FROM media_organize_queue q WHERE id=$1 OR (batch_id=$2 AND mode='reprocess' AND $3='reprocess' AND item_json->>'item_type'='Episode' AND item_json->>'series_id'=$4 AND $4<>'' AND status='queued' AND (task_id IS NULL OR task_id=$5)) ORDER BY id FOR UPDATE")
+        .bind(string(queued,"id")).bind(queued["batch_id"].as_str()).bind(string(queued,"mode"))
+        .bind(string(&queued["item_json"],"series_id")).bind(&context.id).fetch_all(&mut *transaction).await?;
+    if !entries.iter().any(|entry| {
+        entry["id"] == queued["id"]
+            && entry["status"] == "queued"
+            && entry["task_id"] == queued["task_id"]
+    }) {
+        return Ok(vec![]);
+    }
+    let ids = entries
+        .iter()
+        .map(|entry| string(entry, "id"))
+        .collect::<Vec<_>>();
+    sqlx::query("UPDATE media_organize_queue SET status='running',task_id=$2,started_at=COALESCE(started_at,NOW()),message='正在执行' WHERE id=ANY($1)")
+        .bind(&ids).bind(&context.id).execute(&mut *transaction).await?;
+    transaction.commit().await?;
+    Ok(entries)
+}
+
 async fn execute(state: &AppState, queued: &Value, context: &JobContext) -> Result<Value> {
-    let started: Option<Value> = sqlx::query_scalar("UPDATE media_organize_queue SET status='running',task_id=$2,started_at=COALESCE(started_at,NOW()),message='正在执行' WHERE id=$1 AND status='queued' AND task_id IS NOT DISTINCT FROM $3 RETURNING to_jsonb(media_organize_queue)")
-        .bind(string(queued,"id")).bind(&context.id).bind(queued["task_id"].as_str()).fetch_optional(&state.db).await?;
-    let Some(entry) = started else {
+    let entries = claim_batch(state, queued, context).await?;
+    let Some(entry) = entries.iter().find(|entry| entry["id"] == queued["id"]) else {
         context.request_stop();
         return Ok(json!({"cancelled":true,"message":"等待任务已取消，未执行媒体操作"}));
     };
-    let id = string(&entry, "item_id");
-    let history = list(&entry["history_ids"])
+    let ids = entries
         .iter()
+        .map(|entry| string(entry, "item_id"))
+        .collect::<Vec<_>>();
+    let history = entries
+        .iter()
+        .flat_map(|entry| list(&entry["history_ids"]))
         .filter_map(|id| id.as_str().map(str::to_string))
         .collect::<Vec<_>>();
+    let count = ids.len() as u64;
     let operation = label(&string(&entry, "mode"));
     context
-        .update_counted(0, 1, operation, &format!("{operation}：媒体 {id}"))
+        .update_counted(
+            0,
+            count,
+            operation,
+            &format!("{operation}：本批 {count} 项媒体"),
+        )
         .await;
     let result = std::panic::AssertUnwindSafe(crate::notifications::with_operator(
         string(&entry, "operator_id"),
         async {
-            context.checkpoint().await?;
-            let current = details(state, &id, "Id,Type,Name,Path,ProviderIds,SeriesId").await?;
-            if current["Id"] != id || !matches!(current["Type"].as_str(), Some("Movie" | "Episode"))
-            {
-                return Err(ApiError::bad(
-                    "整理目标的原生媒体身份已变化，请重新选择媒体",
-                ));
+            for id in &ids {
+                crate::media_organize_history::begin_reorganize(state, &history, id).await?;
             }
-            let expected = &entry["item_json"];
-            if expected["item_type"]
-                .as_str()
-                .is_some_and(|kind| current["Type"] != kind)
-                || (current["Type"] == "Movie"
-                    && expected["media_source"] == "tmdb"
-                    && expected["media_id"]
-                        .as_str()
-                        .is_some_and(|tmdb| current["ProviderIds"]["Tmdb"] != tmdb))
-                || (current["Type"] == "Episode"
-                    && expected["series_id"]
-                        .as_str()
-                        .is_some_and(|series| current["SeriesId"] != series))
-            {
-                return Err(ApiError::bad(
-                    "排队期间媒体的作品绑定已变化，未处理其他作品",
-                ));
+            for entry in &entries {
+                let id = string(entry, "item_id");
+                context.checkpoint().await?;
+                let current = details(state, &id, "Id,Type,Name,Path,ProviderIds,SeriesId").await?;
+                if current["Id"] != id
+                    || !matches!(current["Type"].as_str(), Some("Movie" | "Episode"))
+                {
+                    return Err(ApiError::bad(
+                        "整理目标的原生媒体身份已变化，请重新选择媒体",
+                    ));
+                }
+                let expected = &entry["item_json"];
+                if expected["item_type"]
+                    .as_str()
+                    .is_some_and(|kind| current["Type"] != kind)
+                    || (current["Type"] == "Movie"
+                        && expected["media_source"] == "tmdb"
+                        && expected["media_id"]
+                            .as_str()
+                            .is_some_and(|tmdb| current["ProviderIds"]["Tmdb"] != tmdb))
+                    || (current["Type"] == "Episode"
+                        && expected["series_id"]
+                            .as_str()
+                            .is_some_and(|series| current["SeriesId"] != series))
+                {
+                    return Err(ApiError::bad(
+                        "排队期间媒体的作品绑定已变化，未处理其他作品",
+                    ));
+                }
             }
-            crate::media_organize_history::begin_reorganize(state, &history, &id).await?;
-            crate::actions::run_organize_item(state, &id, &string(&entry, "mode"), context).await
+            if ids.len() > 1 {
+                crate::actions::reorganize_ingest(state, &ids, context).await
+            } else {
+                crate::actions::run_organize_item(state, &ids[0], &string(entry, "mode"), context)
+                    .await
+            }
         },
     ))
     .catch_unwind()
@@ -325,10 +374,13 @@ async fn execute(state: &AppState, queued: &Value, context: &JobContext) -> Resu
     let history_result = if interrupted {
         Ok(())
     } else {
-        crate::notifications::with_operator(
-            string(&entry, "operator_id"),
-            crate::media_organize_history::finish_reorganize(state, &history, &id, &result),
-        )
+        crate::notifications::with_operator(string(&entry, "operator_id"), async {
+            for id in &ids {
+                crate::media_organize_history::finish_reorganize(state, &history, id, &result)
+                    .await?;
+            }
+            Ok::<_, ApiError>(())
+        })
         .await
     };
     let mut report = match &result {
@@ -373,10 +425,12 @@ async fn execute(state: &AppState, queued: &Value, context: &JobContext) -> Resu
                 }
             })
     };
-    sqlx::query("UPDATE media_organize_queue SET status=$2,result=$3,message=$4,completed_at=CASE WHEN $2='queued' THEN NULL ELSE NOW() END WHERE id=$1 AND status='running' AND task_id=$5")
-        .bind(string(&entry,"id")).bind(status).bind(&report).bind(message).bind(&context.id).execute(&state.db).await?;
+    sqlx::query("UPDATE media_organize_queue SET status=$2,result=$3,message=$4,completed_at=CASE WHEN $2='queued' THEN NULL ELSE NOW() END WHERE id=ANY($1) AND status='running' AND task_id=$5")
+        .bind(entries.iter().map(|entry| string(entry,"id")).collect::<Vec<_>>()).bind(status).bind(&report).bind(message).bind(&context.id).execute(&state.db).await?;
     if status != "queued" {
-        context.update_counted(1, 1, operation, message).await;
+        context
+            .update_counted(count, count, operation, message)
+            .await;
     }
     if result.is_err() {
         return result;

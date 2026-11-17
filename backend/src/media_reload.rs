@@ -2157,6 +2157,11 @@ async fn verify_reloaded(
             };
             let mut reasons = differences(target, &live);
             for field in METADATA_FIELDS {
+                // ImageTags 是 Emby 图片缓存标识，重导入可以重建它；它不是
+                // 图片内容。章节图和 BIF 继续通过下方的原资源校验。
+                if *field == "ImageTags" {
+                    continue;
+                }
                 if live[*field] != before[&target.id][*field] {
                     return Err(conflict(format!(
                         "当前元数据字段 {field} 在同步期间被修改，已保留现场和恢复备份"

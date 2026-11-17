@@ -53,6 +53,13 @@ impl Fixture {
                     if id == "remapped" {
                         return (StatusCode::OK, Json(json!({"Id":id,"Type":"Movie","Name":"another work","ProviderIds":{"Tmdb":"999"}})));
                     }
+                    if id.starts_with("batch-wait") {
+                        if count > 1 {
+                            host.waiting.notify_one();
+                            host.release.notified().await;
+                        }
+                        return (StatusCode::OK, Json(json!({"Id":id,"Type":"Episode","Name":"批量分集","Path":format!("/media/{id}.strm"),"SeriesId":"batch-series","ProviderIds":{"Tmdb":"700"}})));
+                    }
                     if id == "wait" {
                         if count == 1 {
                             return (StatusCode::OK, Json(json!({"Id":id,"Type":"Movie","Name":"queued movie","Path":"/media/wait.mkv","ProviderIds":{"Tmdb":"700"}})));
@@ -780,5 +787,91 @@ async fn service_shutdown_keeps_running_queue_work_and_history_available_for_aut
             .unwrap();
     assert_eq!(history_status, "failed");
     assert_eq!(f.row(id).await["status"], "cancelled");
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; grouped tasks fail against local missing media"]
+async fn one_selection_groups_only_its_own_series_and_releases_all_members_on_failure() {
+    let mut f = Fixture::new(true).await;
+    let mut history = vec![];
+    for (id, series) in [("episode1", "series"), ("episode2", "series"), ("other", "other-series")] {
+        history.push(f.history(id).await);
+        sqlx::query("UPDATE media_organize_history SET item_json=$2 WHERE item_id=$1")
+            .bind(id).bind(json!({"item_id":id,"item_type":"Episode","series_id":series}))
+            .execute(&f.state.db).await.unwrap();
+    }
+    let (_, accepted) = f.submit(json!({"item_ids":["episode1","episode2","other"],"history_ids":history})).await;
+    f.start();
+    let first = f.wait_status(accepted["queue_ids"][0].as_str().unwrap(), "failed").await;
+    let second = f.wait_status(accepted["queue_ids"][1].as_str().unwrap(), "failed").await;
+    let other = f.wait_status(accepted["queue_ids"][2].as_str().unwrap(), "failed").await;
+    assert_eq!(first["task_id"], second["task_id"]);
+    assert_ne!(first["task_id"], other["task_id"]);
+    assert!(first["task_id"].is_string());
+    let (_, queue) = f.request("GET", "/api/media_organize/queue", Value::Null).await;
+    assert_eq!(queue["total"], 0);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; cancelled selection remains absent from its local batch"]
+async fn cancelling_a_waiting_episode_keeps_it_out_of_the_started_batch() {
+    let mut f = Fixture::new(true).await;
+    for id in ["episode1", "episode2", "episode3"] {
+        f.history(id).await;
+        sqlx::query("UPDATE media_organize_history SET item_json=$2 WHERE item_id=$1")
+            .bind(id).bind(json!({"item_id":id,"item_type":"Episode","series_id":"series"}))
+            .execute(&f.state.db).await.unwrap();
+    }
+    let (_, accepted) = f.submit(json!({"item_ids":["episode1","episode2","episode3"]})).await;
+    let cancelled_id = accepted["queue_ids"][1].as_str().unwrap();
+    let (status, _) = f.request("DELETE", &format!("/api/media_organize/queue/{cancelled_id}"), Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    f.start();
+    let first = f.wait_status(accepted["queue_ids"][0].as_str().unwrap(), "failed").await;
+    let third = f.wait_status(accepted["queue_ids"][2].as_str().unwrap(), "failed").await;
+    assert_eq!(first["task_id"], third["task_id"]);
+    assert_eq!(f.row(cancelled_id).await["status"], "cancelled");
+    assert!(f.row(cancelled_id).await["task_id"].is_null());
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; grouped shutdown and restore remain local"]
+async fn shutdown_preserves_the_same_task_for_every_unfinished_batch_member() {
+    let mut f = Fixture::new(true).await;
+    for id in ["batch-wait1", "batch-wait2"] {
+        f.history(id).await;
+        sqlx::query("UPDATE media_organize_history SET item_json=$2 WHERE item_id=$1")
+            .bind(id).bind(json!({"item_id":id,"item_type":"Episode","series_id":"batch-series"}))
+            .execute(&f.state.db).await.unwrap();
+    }
+    let (_, accepted) = f.submit(json!({"item_ids":["batch-wait1","batch-wait2"]})).await;
+    f.start();
+    tokio::time::timeout(Duration::from_secs(8), f.waiting.notified()).await.unwrap();
+    let first_id = accepted["queue_ids"][0].as_str().unwrap();
+    let second_id = accepted["queue_ids"][1].as_str().unwrap();
+    let first = f.row(first_id).await;
+    assert_eq!(first["status"],"running");
+    assert_eq!(f.row(second_id).await["task_id"], first["task_id"]);
+    f.stop_worker().await;
+    let jobs = f.state.jobs.clone();
+    let closing = tokio::spawn(async move { jobs.shutdown().await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while f.state.jobs.status().await["state"] != "interrupted" {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    f.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), closing).await.unwrap().unwrap();
+    emby_toolkit::media_organize_queue::recover_unfinished(&f.state.db).await.unwrap();
+    for id in [first_id,second_id] {
+        let row = f.row(id).await;
+        assert_eq!(row["status"],"queued","{row}");
+        assert_eq!(row["task_id"],first["task_id"]);
+    }
+    let (status, _) = f.request("DELETE", &format!("/api/media_organize/queue/{second_id}"), Value::Null).await;
+    assert_eq!(status,StatusCode::CONFLICT,"a started batch cannot resume a previously saved scope with one member removed");
     f.close().await;
 }

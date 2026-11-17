@@ -23,7 +23,8 @@ use std::{
 };
 
 const FIELDS: &str = "Id,Type,Path,Size,RunTimeTicks,MediaSources,MediaStreams,Chapters,SeriesId,SeasonId,ParentId,ParentIndexNumber,IndexNumber,SeriesName,Name";
-const SAMPLE_STEPS: [u32; 2] = [180, 300];
+// 最后一档只补足窗口前沿的上下文，safe_start 仍限制片尾在末尾 308 秒内。
+const SAMPLE_STEPS: [u32; 3] = [180, 300, 360];
 const CACHE_VERSION: u32 = 1;
 
 pub fn router() -> Router<AppState> {
@@ -267,6 +268,22 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
             }
         };
         crate::media_order::sort(&mut siblings);
+        // 同季可能中途更换片尾曲，优先与所选分集邻近的集数比对。
+        let selected_numbers: Vec<_> = selected
+            .iter()
+            .filter_map(|item| item["IndexNumber"].as_u64())
+            .collect();
+        siblings.sort_by_key(|item| {
+            item["IndexNumber"]
+                .as_u64()
+                .and_then(|number| {
+                    selected_numbers
+                        .iter()
+                        .map(|selected| selected.abs_diff(number))
+                        .min()
+                })
+                .unwrap_or(u64::MAX)
+        });
         let mut refs = vec![];
         let mut seen = HashSet::new();
         let mut selected_ids: HashSet<_> = selected.iter().map(|item| string(item, "Id")).collect();
@@ -304,8 +321,15 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
             }
         }
         for report in &reports {
-            if report["status"] != "failed" && context.completed(&format!("credits:{}", string(report, "item_id"))).await?.is_none() {
-                context.complete(&format!("credits:{}", string(report, "item_id")), report).await?;
+            if report["status"] != "failed"
+                && context
+                    .completed(&format!("credits:{}", string(report, "item_id")))
+                    .await?
+                    .is_none()
+            {
+                context
+                    .complete(&format!("credits:{}", string(report, "item_id")), report)
+                    .await?;
             }
             selected_ids.remove(&string(report, "item_id"));
         }
@@ -313,41 +337,63 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
             continue;
         }
         let mut fingerprints: HashMap<(String, u32), Fingerprint> = HashMap::new();
-        let template_indices = select_templates(&refs);
+        let mut template_indices = select_templates(&refs);
+        let mut cached = HashSet::new();
+        for index in &template_indices {
+            let path = state
+                .data_dir
+                .join("credits-fingerprints")
+                .join(format!("{}-180.json", refs[*index].sha));
+            if tokio::fs::try_exists(path).await.unwrap_or(false) {
+                cached.insert(*index);
+            }
+        }
+        // 当前分集始终参与；优先复用已采样的同季音频，减少重复拉取。
+        template_indices.sort_by_key(|index| (*index != 0, !cached.contains(index)));
+        template_indices.truncate(6);
         let mut template = None;
         let mut template_errors = vec![];
         if template_indices.len() >= 2 {
-            for seconds in SAMPLE_STEPS {
-                let mut samples = vec![];
-                for index in &template_indices {
-                    match fingerprint(state, &refs[*index], seconds, context).await {
-                        Ok(value) => {
-                            fingerprints.insert((refs[*index].sha.clone(), seconds), value.clone());
-                            samples.push(value);
-                        }
-                        Err(error) if context.is_cancelled() => return Err(error),
-                        Err(error) => {
-                            template_errors.push(format!("{}：{}", refs[*index].label, error.1))
+            for count in [3, 6] {
+                if count == 6 && template_indices.len() <= 3 {
+                    break;
+                }
+                for seconds in SAMPLE_STEPS {
+                    let mut samples = vec![];
+                    for index in template_indices.iter().take(count) {
+                        match fingerprint(state, &refs[*index], seconds, context).await {
+                            Ok(value) => {
+                                fingerprints
+                                    .insert((refs[*index].sha.clone(), seconds), value.clone());
+                                samples.push(value);
+                            }
+                            Err(error) if context.is_cancelled() => return Err(error),
+                            Err(error) => {
+                                template_errors.push(format!("{}：{}", refs[*index].label, error.1))
+                            }
                         }
                     }
-                }
-                if samples.len() < 2 {
-                    continue;
-                }
-                let _secondary = crate::strm::slot(state, "secondary", Some(context)).await?;
-                let comparison = samples.clone();
-                let candidate = tokio::task::spawn_blocking(move || {
-                    credits_matching::detect_common(&comparison)
-                })
-                .await
-                .map_err(|_| ApiError::bad("片尾声纹匹配任务异常"))?;
-                drop(_secondary);
-                if let Some((index, start, end)) = candidate {
-                    if start - samples[index].start_seconds > 8.0 {
-                        template = Some((samples[index].clone(), start, end));
-                        break;
+                    if samples.len() < template_indices.len().min(count).min(3) {
+                        continue;
                     }
-                    tracing::info!("[片尾提取] 起点接近 {seconds} 秒采样边界，扩大窗口后核对");
+                    let _secondary = crate::strm::slot(state, "secondary", Some(context)).await?;
+                    let comparison = samples.clone();
+                    let candidate = tokio::task::spawn_blocking(move || {
+                        credits_matching::detect_common(&comparison)
+                    })
+                    .await
+                    .map_err(|_| ApiError::bad("片尾声纹匹配任务异常"))?;
+                    drop(_secondary);
+                    if let Some((index, start, end)) = candidate {
+                        if start - samples[index].start_seconds > 8.0 {
+                            template = Some((samples[index].clone(), start, end));
+                            break;
+                        }
+                        tracing::info!("[片尾提取] 起点接近 {seconds} 秒采样边界，扩大窗口后核对");
+                    }
+                }
+                if template.is_some() {
+                    break;
                 }
             }
         }
@@ -372,7 +418,7 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
                     return Ok::<Value,ApiError>(json!({"item_id":reference.target.id,"status":"skipped","reason":"已有有效片尾标记，已核对并同步缓存","credits_start_ticks":ticks,"chapter":marker(ticks),"chapters":live["Chapters"]}));
                 }
                 let Some((base,start,end))=&template else {
-                    let reason=if template_indices.len()<2 {"同季可比对分集不足 2 集，未猜测片尾".into()} else if !template_errors.is_empty() {format!("同季片尾指纹提取未完成：{}",template_errors.join("；"))} else {"未找到稳定公共片尾或起点仍贴近 300 秒窗口边界，未写入标记".into()};
+                    let reason=if template_indices.len()<2 {"同季可比对分集不足 2 集，未猜测片尾".into()} else if !template_errors.is_empty() {format!("同季片尾指纹提取未完成：{}",template_errors.join("；"))} else {"未找到稳定公共片尾或起点仍贴近采样窗口边界，未写入标记".into()};
                     return Ok::<Value,ApiError>(json!({"item_id":reference.target.id,"status":if template_indices.len()<2 {"skipped"} else {"failed"},"error":reason,"reason":reason}));
                 };
                 let mut own_start=None;
@@ -400,7 +446,9 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
             match outcome {
                 Ok(report) => {
                     if report["status"] != "failed" {
-                        context.complete(&format!("credits:{}", reference.target.id), &report).await?;
+                        context
+                            .complete(&format!("credits:{}", reference.target.id), &report)
+                            .await?;
                     }
                     tracing::info!(
                         "[片尾提取] {}：{}",
@@ -465,7 +513,6 @@ fn select_templates(refs: &[Episode]) -> Vec<usize> {
                 && numbers.insert(reference.item["IndexNumber"].as_u64())
         })
         .map(|(index, _)| index)
-        .take(3)
         .collect()
 }
 

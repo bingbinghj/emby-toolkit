@@ -251,6 +251,7 @@ CREATE TABLE IF NOT EXISTS media_organize_queue (
     completed_at TIMESTAMPTZ
 );
 ALTER TABLE media_organize_queue ADD COLUMN IF NOT EXISTS queue_order BIGSERIAL;
+ALTER TABLE media_organize_queue ADD COLUMN IF NOT EXISTS batch_id TEXT;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_media_organize_queue_active ON media_organize_queue(item_id, mode)
     WHERE status IN ('queued', 'running');
 CREATE INDEX IF NOT EXISTS idx_media_organize_queue_order ON media_organize_queue(status, queue_order);

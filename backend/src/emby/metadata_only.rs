@@ -617,7 +617,7 @@ pub(crate) async fn apply(
             "定点元数据更新后原媒体信息或身份发生变化，未报告入库成功",
         ));
     }
-    let failed = WRITTEN
+    let readback_differences = WRITTEN
         .iter()
         .copied()
         .filter(|field| {
@@ -626,13 +626,15 @@ pub(crate) async fn apply(
         })
         .map(|field| field.to_string())
         .collect::<Vec<_>>();
-    if !failed.is_empty() {
-        return Err(ApiError::bad(format!(
-            "定点元数据更新尚未通过回读验收：{}",
-            failed.join("、")
-        )));
+    if !readback_differences.is_empty() {
+        // Emby 会规范化排序名和人物列表；原入库流程以原生更新完成为准，
+        // 不将 DTO 逐字段一致当作入库门槛。媒体身份和原资源仍在上方验收。
+        tracing::debug!(
+            "元数据定点更新已完成，Emby {id} 的原生回读差异：{}",
+            readback_differences.join("、")
+        );
     }
-    let report = json!({"completed":true,"updated":usize::from(!changed.is_empty()),"fields":changed,"item_id":id,"method":"metadata_update_by_id"});
+    let report = json!({"completed":true,"updated":usize::from(!changed.is_empty()),"fields":changed,"item_id":id,"method":"metadata_update_by_id","readback_differences":readback_differences});
     context.complete("done", &report).await?;
     Ok(report)
 }

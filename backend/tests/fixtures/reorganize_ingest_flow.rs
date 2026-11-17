@@ -13,9 +13,9 @@ async fn reorganize_fixture_metadata(Path(path): Path<String>) -> Json<Value> {
             data["id"] = json!(1001);
             data["name"] = json!("第一季");
             data["season_number"] = json!(1);
-            data["episodes"] = json!([{"id":1011,"season_number":1,"episode_number":1,
+            data["episodes"] = json!((1..=2).map(|number| json!({"id":1010+number,"season_number":1,"episode_number":number,
                 "name":"重新入库分集","overview":"重新入库分集简介","air_date":"2005-01-01",
-                "runtime":2,"credits":{"cast":[],"crew":[]}}]);
+                "runtime":2,"credits":{"cast":[],"crew":[]}})).collect::<Vec<_>>());
         }
         _ => data = json!({"results":[],"credits":{"cast":[],"crew":[]}}),
     }
@@ -110,6 +110,10 @@ async fn metadata_only_mock_post(
                 .retain(|key, _| ["Name", "Role", "Type"].contains(&key.as_str()));
         }
     }
+    if *host.resource_fault.lock().await == "metadata-normalized" {
+        item["ForcedSortName"] = json!("原生排序名");
+        item["People"] = json!([{"Name":"原生规范化演员","Type":"Actor"}]);
+    }
     drop(items);
     host.stage_order
         .lock()
@@ -149,6 +153,23 @@ async fn metadata_only_mock_post(
         }
     }
     StatusCode::NO_CONTENT
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; native DTO normalization stays localhost"]
+async fn metadata_normalization_does_not_fail_completed_ingestion_or_modify_media_resources() {
+    let (fixture, event, old, _, _, _) = gaia_empty_version_fixture().await;
+    let original = fixture.host.items.lock().await["101"].clone();
+    *fixture.host.resource_fault.lock().await = "metadata-normalized".into();
+    let result = fixture.run_moviepilot_event(event).await;
+    assert_eq!(result["state"], "completed", "{result}");
+    let current = fixture.host.items.lock().await["101"].clone();
+    assert_eq!(current["ForcedSortName"], "原生排序名");
+    assert_eq!(current["Path"], original["Path"]);
+    assert_eq!(current["Size"], 1000);
+    assert_eq!(current["MediaStreams"][0]["Codec"], "hevc");
+    assert_eq!(fixture.host.items.lock().await["102"], old);
+    fixture.close().await;
 }
 
 #[tokio::test]
@@ -1169,4 +1190,64 @@ async fn reorganize_restart_reuses_verified_stages_and_cleans_uuid_recovery_with
     assert_eq!(finished, vec!["completed:moviepilot_finished:101"]);
     metadata.abort();
     fixture.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; same-series batch and native extraction stay localhost"]
+async fn selected_episodes_share_one_ingestion_and_one_automatic_extraction_batch() {
+    let fixture = current_reorganize_fixture().await;
+    let metadata = prepare_reorganize_chain(&fixture, false).await;
+    fixture.state.save_config(&json!({"monitor_sha1_pc_search":false})).await.unwrap();
+    let first = fixture.host.items.lock().await["101"].clone();
+    let directory = std::path::Path::new(first["Path"].as_str().unwrap()).parent().unwrap();
+    let path = directory.join("102.strm");
+    let playback = directory.join("102.mkv");
+    std::fs::write(&playback, vec![1_u8; 1000]).unwrap();
+    std::fs::write(&path, playback.to_string_lossy().as_bytes()).unwrap();
+    let mut second = first.clone();
+    second["Id"] = json!("102"); second["Path"] = json!(path); second["IndexNumber"] = json!(2);
+    second["ProviderIds"] = json!({"Tmdb":"1012"}); second["PresentationUniqueKey"] = json!("key-102");
+    second["Guid"] = json!(uuid::Uuid::new_v4().simple().to_string());
+    second["MediaSources"][0]["Id"] = json!("mediasource_102");
+    second["MediaSources"][0]["ItemId"] = json!("102");
+    second["MediaSources"][0]["Path"] = json!(playback);
+    let mut second_info: Value = serde_json::from_slice(&std::fs::read(fixture.sidecar_path()).unwrap()).unwrap();
+    second_info[0]["MediaSourceInfo"]["Path"] = json!(playback);
+    assert!(emby_toolkit::media_info::recoverable(&second_info));
+    second_info[0]["Chapters"] = second["Chapters"].clone();
+    std::fs::write(directory.join("102-mediainfo.json"), serde_json::to_vec(&second_info).unwrap()).unwrap();
+    fixture.host.items.lock().await.insert("102".into(), second.clone());
+    configure_ingest_metadata(&fixture, "102").await;
+    sqlx::query("INSERT INTO media_metadata(tmdb_id,item_type,title,parent_series_tmdb_id,season_number,episode_number,in_library,emby_item_ids_json,asset_details_json,file_sha1_json,file_pickcode_json) VALUES('1012','Episode','第二集','101',1,2,true,$1,$2,$3,$4)")
+        .bind(json!(["102"])).bind(json!([{"emby_item_id":"102","path":path,"size_bytes":1000}])).bind(json!(["B".repeat(40)])).bind(json!(["pc102"])).execute(&fixture.state.db).await.unwrap();
+    sqlx::query("INSERT INTO p115_mediainfo_cache(sha1,mediainfo_json) VALUES($1,$2)")
+        .bind("B".repeat(40)).bind(&second_info).execute(&fixture.state.db).await.unwrap();
+    for id in ["101", "102"] {
+        sqlx::query("INSERT INTO media_organize_history(id,source,source_identity,item_id,item_json,status) VALUES($1,'emby',$1,$1,$2,'success')")
+            .bind(id).bind(json!({"item_id":id,"item_type":"Episode","series_id":"301"})).execute(&fixture.state.db).await.unwrap();
+    }
+    let session = fixture.state.sessions.sign(&emby_toolkit::auth::Session {
+        user_id:"operator".into(),name:"Test".into(),setup_mode:false,expires:chrono::Utc::now().timestamp()+600,
+    });
+    let response = emby_toolkit::actions::router().with_state(fixture.state.clone()).oneshot(
+        Request::post("/api/actions/reorganize").header("content-type","application/json").header("cookie",format!("etk_session={session}"))
+        .body(Body::from(json!({"item_ids":["101","102"],"mode":"reprocess"}).to_string())).unwrap()
+    ).await.unwrap();
+    assert_eq!(response.status(),StatusCode::ACCEPTED);
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let worker = tokio::spawn(emby_toolkit::media_organize_queue::run(fixture.state.clone(),cancel.clone()));
+    let rows: Vec<Value> = tokio::time::timeout(Duration::from_secs(90),async {
+        loop {
+            let rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(q) FROM media_organize_queue q ORDER BY queue_order").fetch_all(&fixture.state.db).await.unwrap();
+            if rows.iter().all(|row| !matches!(row["status"].as_str(),Some("queued"|"running"))) {break rows;}
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }).await.unwrap();
+    cancel.cancel();worker.await.unwrap();
+    assert_eq!(rows.len(),2);
+    assert_eq!(rows[0]["task_id"],rows[1]["task_id"],"{rows:?}");
+    assert!(rows.iter().all(|row|row["status"]=="completed"),"{rows:?}");
+    assert_eq!(*fixture.host.native_starts.lock().await,vec!["intro","thumb"],"{rows:?}");
+    assert_eq!(fixture.host.items.lock().await["102"]["MediaSources"],second["MediaSources"]);
+    metadata.abort();fixture.close().await;
 }

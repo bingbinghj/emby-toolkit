@@ -263,6 +263,19 @@ mod native {
         f.close().await;
     }
 
+    #[tokio::test]
+    #[ignore = "requires disposable PostgreSQL; native image cache identity stays localhost"]
+    async fn regenerated_image_cache_tag_does_not_leave_a_reload_recovery_block() {
+        let f = failed_json_recovery_fixture().await;
+        let status = recovery_status(&f.native.state).await;
+        *f.proxy.protocol_fault.lock().await = "image-tag-change-during-sync".into();
+        let result = recover_from_editor(&f.native.state, status["records"][0]["id"].as_str().unwrap()).await;
+        assert_eq!(result["state"], "completed", "{result}");
+        assert_eq!(f.native.host.item.lock().await["ImageTags"]["Primary"], "regenerated-cache-tag");
+        assert_eq!(recovery_status(&f.native.state).await["pending"], false);
+        f.close().await;
+    }
+
     async fn failed_json_recovery_fixture() -> ThumbnailFixture {
         let f = ThumbnailFixture::with_flag(Some(false)).await;
         *f.proxy.protocol_fault.lock().await = "sync-failed".into();
@@ -1834,6 +1847,9 @@ mod native {
             }
             let metadata_changed =
                 self.protocol_fault.lock().await.as_str() == "metadata-change-during-sync";
+            if self.protocol_fault.lock().await.as_str() == "image-tag-change-during-sync" {
+                self.host.item.lock().await["ImageTags"] = json!({"Primary":"regenerated-cache-tag"});
+            }
             if id == "61616" && metadata_changed {
                 let mut item = self.host.item.lock().await;
                 item["Name"] = json!("同步期间用户再次改名");

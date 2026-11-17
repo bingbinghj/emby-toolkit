@@ -73,7 +73,7 @@ async fn cancel_owned_queue(
     message: &str,
 ) -> Result<()> {
     // Terminal jobs load a trimmed payload; use the original persisted owner.
-    sqlx::query("WITH cancelled AS (UPDATE media_organize_queue q SET status='cancelled',message=$2,completed_at=NOW() FROM durable_jobs j WHERE j.id=$1 AND j.spec_json->>'kind'='media_organize_queue' AND j.spec_json->>'owned'='true' AND q.id=j.spec_json#>>'{payload,queue_id}' AND q.task_id=j.id AND q.status IN ('queued','running','interrupted') RETURNING q.item_id,q.history_ids)
+    sqlx::query("WITH cancelled AS (UPDATE media_organize_queue q SET status='cancelled',message=$2,completed_at=NOW() FROM durable_jobs j WHERE j.id=$1 AND j.spec_json->>'kind'='media_organize_queue' AND j.spec_json->>'owned'='true' AND q.task_id=j.id AND q.status IN ('queued','running','interrupted') RETURNING q.item_id,q.history_ids)
         UPDATE media_organize_history h SET status='failed',message=$2,completed_at=NOW() FROM cancelled q WHERE h.status='processing' AND h.item_id=q.item_id AND q.history_ids ? h.id")
         .bind(job_id).bind(message).execute(&mut **transaction).await?;
     Ok(())
@@ -615,7 +615,7 @@ impl JobManager {
                     "completed_with_warnings" => "completed",
                     other => other,
                 };
-                sqlx::query("UPDATE media_organize_queue SET status=$3,result=$4,message=$5,completed_at=NOW() WHERE id=$1 AND task_id=$2 AND status IN ('queued','running','interrupted')")
+                sqlx::query("UPDATE media_organize_queue SET status=$3,result=$4,message=$5,completed_at=NOW() WHERE task_id=$2 AND EXISTS(SELECT 1 FROM media_organize_queue owner WHERE owner.id=$1 AND owner.task_id=$2) AND status IN ('queued','running','interrupted')")
                     .bind(spec.payload["queue_id"].as_str().unwrap_or("")).bind(&id).bind(status).bind(&state["result"]).bind(state["message"].as_str().unwrap_or("")).execute(&pool).await?;
             }
             if state["cleanup_pending"] == true {
@@ -934,7 +934,7 @@ impl JobManager {
                 && saved.spec.owned
                 && saved.spec.kind == "media_organize_queue"
             {
-                sqlx::query("WITH failed AS (UPDATE media_organize_queue q SET status='failed',message=$2,result=$3,completed_at=NOW() FROM durable_jobs j WHERE j.id=$1 AND q.task_id=j.id AND q.id=j.spec_json->'payload'->>'queue_id' AND q.status IN ('queued','running','interrupted') RETURNING q.item_id,q.history_ids)
+                sqlx::query("WITH failed AS (UPDATE media_organize_queue q SET status='failed',message=$2,result=$3,completed_at=NOW() FROM durable_jobs j WHERE j.id=$1 AND q.task_id=j.id AND q.status IN ('queued','running','interrupted') RETURNING q.item_id,q.history_ids)
                     UPDATE media_organize_history h SET status='failed',message=$2,completed_at=NOW() FROM failed q WHERE h.status='processing' AND h.item_id=q.item_id AND q.history_ids ? h.id")
                     .bind(&saved.id).bind(state["message"].as_str().unwrap_or("")).bind(&state["result"]).execute(&mut *transaction).await?;
             }
@@ -1305,7 +1305,7 @@ impl JobManager {
                     _ => None,
                 };
                 if let Some(status) = status {
-                    if let Err(error)=sqlx::query("UPDATE media_organize_queue SET status=$3,result=$4,message=$5,completed_at=NOW() WHERE id=$1 AND task_id=$2 AND status IN ('queued','running','interrupted')")
+                    if let Err(error)=sqlx::query("UPDATE media_organize_queue SET status=$3,result=$4,message=$5,completed_at=NOW() WHERE task_id=$2 AND EXISTS(SELECT 1 FROM media_organize_queue owner WHERE owner.id=$1 AND owner.task_id=$2) AND status IN ('queued','running','interrupted')")
                         .bind(owner["queue_id"].as_str().unwrap_or("")).bind(&context.id).bind(status).bind(&state["result"]).bind(state["message"].as_str().unwrap_or("")).execute(pool).await {
                         state["state"]=json!("interrupted");state["cleanup_pending"]=json!(true);
                         state["stop_requested"]=json!(stopped);

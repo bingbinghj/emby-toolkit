@@ -159,42 +159,52 @@ fn median(mut values: Vec<f64>) -> f64 {
 }
 
 /// Returns the base sample index and its absolute matching range in seconds.
-/// The caller expands 180-second samples to 300 seconds when the start touches
+/// The caller expands tail samples when the start touches
 /// the eight-second window margin, then validates the full media runtime.
 pub(crate) fn detect_common(samples: &[Fingerprint]) -> Option<(usize, f64, f64)> {
-    let base_index = samples
-        .iter()
-        .enumerate()
-        .max_by_key(|(index, fp)| (fp.values.len(), std::cmp::Reverse(*index)))?
-        .0;
-    let base = &samples[base_index];
     let deadline = Deadline::new(60);
-    let mut segments = vec![];
-    for (index, fp) in samples.iter().enumerate() {
-        deadline.yield_cpu(index, 32)?;
-        if index == base_index {
-            continue;
-        }
-        if let Some(found) = segment(base, fp, &deadline) {
-            let duration = (found.1 - found.0).min(found.3 - found.2);
-            if (MIN_SECONDS..=MAX_SECONDS).contains(&duration) {
-                segments.push(found);
+    let mut pairs = vec![vec![]; samples.len()];
+    for (i, base) in samples.iter().enumerate() {
+        for (j, other) in samples.iter().enumerate().skip(i + 1) {
+            deadline.check()?;
+            if let Some(found) = segment(base, other, &deadline) {
+                let duration = (found.1 - found.0).min(found.3 - found.2);
+                if (MIN_SECONDS..=MAX_SECONDS).contains(&duration) {
+                    pairs[i].push(found);
+                    pairs[j].push((found.2, found.3, found.0, found.1));
+                }
             }
         }
     }
-    if segments.is_empty() {
-        return None;
+    let mut best: Option<(usize, usize, f64, f64)> = None;
+    for (base_index, segments) in pairs.iter().enumerate() {
+        // 不合并互不重叠的歌曲区间；在同一实际匹配范围内选择支持最多的模板。
+        for candidate in segments {
+            let agreed = segments
+                .iter()
+                .filter(|s| (s.0 - candidate.0).abs() <= 2.0 && (s.1 - candidate.1).abs() <= 5.0)
+                .collect::<Vec<_>>();
+            // 三集以上时至少由两个独立参照确认，不能只因某两集正文里的
+            // 背景音乐相同就忽略其他样本的否定结果。
+            if agreed.len() < if samples.len() >= 3 { 2 } else { 1 } {
+                continue;
+            }
+            let start = median(agreed.iter().map(|s| s.0).collect());
+            let end = median(agreed.iter().map(|s| s.1).collect());
+            if best.as_ref().is_none_or(|(_, count, old_start, old_end)| {
+                agreed.len() > *count || agreed.len() == *count && end - start > old_end - old_start
+            }) {
+                best = Some((base_index, agreed.len(), start, end));
+            }
+        }
     }
-    let start = median(segments.iter().map(|s| s.0).collect());
-    let end = median(segments.iter().map(|s| s.1).collect());
-    segments
-        .iter()
-        .any(|s| (s.0 - start).abs() <= 30.0 && (s.1 - end).abs() <= 45.0)
-        .then_some((
-            base_index,
-            base.start_seconds + start,
-            base.start_seconds + end,
-        ))
+    best.map(|(index, _, start, end)| {
+        (
+            index,
+            samples[index].start_seconds + start,
+            samples[index].start_seconds + end,
+        )
+    })
 }
 
 fn template_range(
@@ -385,6 +395,36 @@ mod tests {
         let a = sample(0, &common, 160, 2);
         let b = sample(16, &common, 144, 3);
         assert_eq!(detect_common(&[a, b]), Some((0, 1000.0, 1050.0)));
+    }
+
+    #[test]
+    fn a_different_ending_does_not_hide_three_independently_matching_episodes() {
+        let common = noise(400, 9001);
+        let unrelated = sample(1200, &noise(500, 77), 160, 42);
+        let a = sample(320, &common, 320, 2);
+        let b = sample(480, &common, 160, 3);
+        let c = sample(400, &common, 240, 4);
+        assert!(detect_common(&[unrelated.clone(), a.clone(), b.clone()]).is_none());
+        let samples = [unrelated, a.clone(), b, c];
+        let (index, start, end) = detect_common(&samples).unwrap();
+        assert_ne!(index, 0);
+        let (own_start, own_end) = match_template(&a, &samples[index], start, end).unwrap();
+        assert!((own_start - 1040.0).abs() <= 0.5);
+        assert!((own_end - 1090.0).abs() <= 0.5);
+        assert!(match_template(&samples[0], &samples[index], start, end).is_none());
+    }
+
+    #[test]
+    fn unrelated_common_sections_never_produce_a_synthetic_midpoint_marker() {
+        let first = noise(240, 912);
+        let second = noise(240, 913);
+        let mut base = sample(160, &first, 400, 17);
+        base.values.extend_from_slice(&second);
+        base.sample_seconds = base.values.len() as f64 / 8.0;
+        let left = sample(160, &first, 640, 18);
+        let right = sample(160, &second, 640, 19);
+        let samples = [base, left, right];
+        assert!(detect_common(&samples).is_none());
     }
 
     #[test]
