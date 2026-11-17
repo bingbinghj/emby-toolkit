@@ -707,7 +707,8 @@ async fn changed_ending_uses_neighbours_and_cached_fingerprints_for_each_episode
         // Short fixtures have the same full-media coverage at every requested window.
         for seconds in [180, 300, 360] {
             std::fs::write(directory.join(format!("{sha}-{seconds}.json")), serde_json::to_vec(&json!({
-                "version":1,"sha1":sha,"runtime":120.0,"seconds":120.0,"start":0.0,"values":values,
+                "version":2,"sha1":sha,"runtime":120.0,"seconds":120.0,"start":0.0,"values":values,
+                "audio":{"index":1,"codec":"pcm_s16le","language":"jpn","channels":null},
             })).unwrap()).unwrap();
         }
     }
@@ -729,6 +730,58 @@ async fn changed_ending_uses_neighbours_and_cached_fingerprints_for_each_episode
     assert!(
         fixture.host.downloads.lock().await.is_empty(),
         "cached audio must not be downloaded again"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL and ffmpeg with chromaprint; all HTTP stays local"]
+async fn stale_audio_selection_cache_is_resampled_then_reused_without_changing_media() {
+    let fixture = Fixture::new(false).await;
+    let directory = fixture.state.data_dir.join("credits-fingerprints");
+    std::fs::create_dir_all(&directory).unwrap();
+    for (id, version) in [("101", 1), ("102", 2)] {
+        let sha = &fixture.sha[id];
+        for seconds in [180, 300, 360] {
+            // Same media identity and runtime, but an unknown/previous audio track.
+            std::fs::write(
+                directory.join(format!("{sha}-{seconds}.json")),
+                serde_json::to_vec(&json!({
+                    "version":version,"sha1":sha,"runtime":120.0,"seconds":120.0,"start":0.0,
+                    "audio":{"index":2,"codec":"aac","language":"chi","channels":2},
+                    "values":(0..960_u32).map(|v|v.wrapping_mul(1234567)).collect::<Vec<_>>()
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
+    }
+    let job = fixture.run(Some(vec!["101".into()])).await;
+    assert_eq!(job["result"]["updated"], 1, "{job}");
+    assert_eq!(
+        fixture.host.downloads.lock().await.len(),
+        2,
+        "both untagged and different-track caches must be resampled"
+    );
+    let cache: Value = serde_json::from_slice(
+        &std::fs::read(directory.join(format!("{}-180.json", fixture.sha["101"]))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(cache["version"], 2);
+    assert_eq!(
+        cache["audio"],
+        json!({"index":1,"codec":"pcm_s16le","language":"jpn","channels":null})
+    );
+    let other = fixture.run(Some(vec!["102".into()])).await;
+    assert_eq!(other["result"]["updated"], 1, "{other}");
+    assert_eq!(
+        fixture.host.downloads.lock().await.len(),
+        2,
+        "validated audio is reused for subsequent episodes"
+    );
+    assert_eq!(
+        fixture.host.items.lock().await["101"]["MediaStreams"],
+        fixture.before["101"]["MediaStreams"]
     );
     fixture.close().await;
 }

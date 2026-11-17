@@ -21,7 +21,7 @@ function fixture(get) {
     logFiles: ref(['app.log']), selectedFile: ref('app.log'),
     logContent: ref([{ line: 'cached A content', file: 'app.log' }]),
     searchResults: ref([]), searchQuery: ref('query'), appliedQuery: ref(''), searchMode: ref('context'), levelFilter: ref('all'),
-    pageInput: ref(2), loadedFile: ref('app.log'), logPage: ref(2), logPages: ref(3), logTotalLines: ref(1200), errorMessage: ref(''), scrollRef: ref(null),
+    loadedFile: ref('app.log'), logPage: ref(2), logPages: ref(3), logTotalLines: ref(1200), errorMessage: ref(''), scrollRef: ref(null),
     nextTick: async () => {}, computed, matchesLogRecord, Blob,
     axios: { get: async (path, options) => { requests.push({ path, params: plain(options?.params || {}) }); return get(path, options); } },
   });
@@ -95,15 +95,12 @@ test('page navigation reads the requested page once and leaves the last successf
     if (fail) throw { response: { data: { error: 'page unavailable' } } };
     return { data: { lines: ['page three'], page: options.params.page, pages: 3, total_lines: 1200 } };
   });
-  f.context.pageInput.value = 3;
   await f.context.changePage(3);
   assert.equal(f.context.logPage.value, 2);
-  assert.equal(f.context.pageInput.value, 2);
   assert.equal(f.context.logContent.value[0].line, 'cached A content');
   fail = false;
   await f.context.changePage('3');
   assert.equal(f.context.logPage.value, 3);
-  assert.equal(f.context.pageInput.value, 3);
   assert.equal(f.context.logContent.value[0].line, 'page three');
   assert.equal(f.requests.length, 2);
 });
@@ -111,10 +108,8 @@ test('page navigation reads the requested page once and leaves the last successf
 for (const value of [0, -1, 4, 1.5, '', 'abc', 2]) {
   test(`invalid or current page ${JSON.stringify(value)} does not request logs`, async () => {
     const f = fixture(() => { throw new Error('unexpected request'); });
-    f.context.pageInput.value = value;
     await f.context.changePage(value);
     assert.equal(f.requests.length, 0);
-    assert.equal(f.context.pageInput.value, 2);
   });
 }
 

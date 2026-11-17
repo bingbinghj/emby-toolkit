@@ -23,10 +23,6 @@
     <div v-if="!isSearchMode && logPages > 1" class="history-pagination">
       <span class="text-caption text-medium-emphasis">第 {{ logPage }} / {{ logPages }} 页，共 {{ logTotalLines }} 行</span>
       <VPagination :model-value="logPage" :length="logPages" :total-visible="smAndDown ? 3 : 5" :disabled="isLoading || loadedFile !== selectedFile" size="small" show-first-last-page @update:model-value="changePage" />
-      <form class="history-page-jump" @submit.prevent="changePage(pageInput)">
-        <VTextField v-model="pageInput" label="跳转页码" aria-label="跳转页码" type="number" inputmode="numeric" :min="1" :max="logPages" step="1" density="compact" hide-details :mobile-layout="false" :disabled="isLoading || loadedFile !== selectedFile" />
-        <VBtn type="submit" variant="tonal" size="small" :disabled="isLoading || loadedFile !== selectedFile">跳转</VBtn>
-      </form>
     </div>
   </section>
 </template>
@@ -43,7 +39,7 @@ const { smAndDown } = useDisplay();
 const isLoadingFiles = ref(false), isLoadingContent = ref(false), isSearching = ref(false);
 const logFiles = ref([]), selectedFile = ref(null), logContent = ref([]), searchResults = ref([]);
 const logPage = ref(1), logPages = ref(1), logTotalLines = ref(0);
-const pageInput = ref(1), loadedFile = ref(null);
+const loadedFile = ref(null);
 const searchQuery = ref(''), appliedQuery = ref(''), searchMode = ref('context'), isSearchMode = ref(false);
 const levelFilter = ref('all'), errorMessage = ref(''), scrollRef = ref(null);
 const levelOptions = [{ title: '全部日志', value: 'all' }, { title: 'DEBUG', value: 'debug' }, { title: 'INFO', value: 'info' }, { title: '警告', value: 'warning' }, { title: '错误', value: 'error' }];
@@ -65,7 +61,7 @@ const fetchLogFiles = async () => {
     if (!selectedFile.value) {
       logContent.value = [];
       logPage.value = 1; logPages.value = 1; logTotalLines.value = 0;
-      pageInput.value = 1; loadedFile.value = null;
+      loadedFile.value = null;
     }
     return true;
   } catch (error) {
@@ -97,7 +93,6 @@ const fetchLogContent = async (filename, page = 1) => {
   } finally {
     if (pageActive && sequence === readSequence) {
       isLoadingContent.value = false;
-      pageInput.value = logPage.value;
     }
   }
 };
@@ -106,7 +101,6 @@ const changePage = async value => {
   const page = Number(value);
   if (!pageActive || isLoading.value || isSearchMode.value || loadedFile.value !== selectedFile.value) return;
   if (!Number.isInteger(page) || page < 1 || page > logPages.value || page === logPage.value) {
-    pageInput.value = logPage.value;
     return;
   }
   await fetchLogContent(selectedFile.value, page);
@@ -169,8 +163,6 @@ onUnmounted(() => { pageActive = false; readSequence++; fileSequence++; });
 .history-level-select { flex:0 1 140px; min-width:110px; }
 .history-log-view > .v-input, .history-log-view > .v-alert, .history-log-view > .v-progress-linear { flex:0 0 auto; }
 .history-pagination { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; flex-shrink:0; }
-.history-page-jump { display:flex; align-items:center; gap:8px; }
-.history-page-jump > .v-input { flex:0 0 100px; width:100px; }
 .history-log-list { display:flex; flex-direction:column; gap:6px; flex:1 1 0; min-height:0; min-width:0; overflow:auto; overscroll-behavior:contain; padding:14px; border:1px solid var(--logging-border,var(--ui-border)); background:var(--logging-shell-background,var(--ui-surface)); box-shadow:var(--logging-shadow); }
 .history-empty { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:32px 8px; color:var(--ui-text-muted); }
 @media (max-width:540px) { .history-search-toolbar > .v-input { flex-basis:100%; } .history-log-list { padding:4px; } }

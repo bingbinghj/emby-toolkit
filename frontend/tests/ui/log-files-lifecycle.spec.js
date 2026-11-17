@@ -64,7 +64,7 @@ test('closing history while the file list refreshes prevents its later content r
 });
 
 for (const width of [390, 1440]) {
-  test(`${width} history uses page buttons and direct jumps, retaining the old page after a failed read`, async ({ page, api }) => {
+  test(`${width} history uses page buttons without a jump input, retaining the old page after a failed read`, async ({ page, api }) => {
     await page.setViewportSize({ width, height: 900 });
     await openHistory(page, api);
     api.respond('GET', '/api/logs/view', request => ({ file: request.query.filename, lines: [logLine(`第 ${request.query.page} 页内容`)], page: Number(request.query.page), pages: 12, total_lines: 5501 }));
@@ -76,20 +76,17 @@ for (const width of [390, 1440]) {
     await expect(page.getByRole('button', { name: '下载实时日志', exact: true })).toBeVisible();
     await pagination.getByRole('button', { name: '下一页', exact: true }).click();
     await expect(page.locator('.history-log-list')).toContainText('第 2 页内容');
-    await pagination.getByRole('spinbutton', { name: '跳转页码', exact: true }).fill('11');
-    await pagination.getByRole('spinbutton', { name: '跳转页码', exact: true }).press('Enter');
+    await expect(pagination.getByRole('spinbutton')).toHaveCount(0);
+    await pagination.getByRole('button', { name: '转到页面 12', exact: true }).click();
+    await expect(page.locator('.history-log-list')).toContainText('第 12 页内容');
+    await pagination.getByRole('button', { name: '上一页', exact: true }).click();
     await expect(page.locator('.history-log-list')).toContainText('第 11 页内容');
     expect(viewReads(api).at(-1).query.page).toBe('11');
     api.respond('GET', '/api/logs/view', { error: '请求日志页失败' }, 503);
     await pagination.getByRole('button', { name: '下一页', exact: true }).click();
     await expect(page.getByText('请求日志页失败', { exact: true })).toBeVisible();
     await expect(pagination).toContainText('第 11 / 12 页');
-    await expect(pagination.getByRole('spinbutton', { name: '跳转页码', exact: true })).toHaveValue('11');
     await expect(page.locator('.history-log-list')).toContainText('第 11 页内容');
-    const count = viewReads(api).length;
-    await pagination.getByRole('spinbutton', { name: '跳转页码', exact: true }).fill('13');
-    await pagination.getByRole('button', { name: '跳转', exact: true }).click();
-    expect(viewReads(api)).toHaveLength(count);
     expect(await pagination.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
   });
 }

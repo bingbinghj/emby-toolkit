@@ -25,7 +25,7 @@ use std::{
 const FIELDS: &str = "Id,Type,Path,Size,RunTimeTicks,MediaSources,MediaStreams,Chapters,SeriesId,SeasonId,ParentId,ParentIndexNumber,IndexNumber,SeriesName,Name";
 // 最后一档只补足窗口前沿的上下文，safe_start 仍限制片尾在末尾 308 秒内。
 const SAMPLE_STEPS: [u32; 3] = [180, 300, 360];
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/api/media/{id}/extract_credits", post(submit))
@@ -638,6 +638,7 @@ async fn fingerprint(
     context.checkpoint().await?;
     let seconds = (requested as f64).min(reference.runtime.floor());
     let start = (reference.runtime - seconds).max(0.0);
+    let audio = fingerprint_audio_identity(&reference.info);
     let directory = state.data_dir.join("credits-fingerprints");
     let path = directory.join(format!("{}-{requested}.json", reference.sha));
     if let Ok(bytes) = tokio::fs::read(&path).await
@@ -647,6 +648,7 @@ async fn fingerprint(
         && cache["runtime"] == reference.runtime
         && cache["seconds"] == seconds
         && cache["start"] == start
+        && cache["audio"] == audio
         && let Ok(values) = serde_json::from_value::<Vec<u32>>(cache["values"].clone())
         && values.len() >= 40
         && values.len() <= 100_000
@@ -684,7 +686,7 @@ async fn fingerprint(
     let write=async {
         use tokio::io::AsyncWriteExt;
         let mut file=tokio::fs::OpenOptions::new().write(true).create_new(true).open(&stage).await?;
-        file.write_all(&serde_json::to_vec(&json!({"version":CACHE_VERSION,"sha1":reference.sha,"runtime":reference.runtime,"seconds":seconds,"start":start,"values":values})).unwrap()).await?;
+        file.write_all(&serde_json::to_vec(&json!({"version":CACHE_VERSION,"sha1":reference.sha,"runtime":reference.runtime,"seconds":seconds,"start":start,"audio":audio,"values":values})).unwrap()).await?;
         file.sync_all().await?;
         drop(file);
         tokio::fs::rename(&stage,&path).await?;
@@ -733,6 +735,14 @@ fn audio_stream(info: &Value) -> Option<u64> {
         .find(|stream| stream["IsDefault"] == true)
         .or_else(|| streams.iter().find(valid))
         .and_then(|stream| stream["Index"].as_u64())
+}
+
+fn fingerprint_audio_identity(info: &Value) -> Value {
+    let index = audio_stream(info);
+    let stream = media_info::container(info)
+        .and_then(|source| source["MediaStreams"].as_array())
+        .and_then(|streams| streams.iter().find(|s| s["Type"] == "Audio" && s["Index"].as_u64() == index));
+    json!({"index":index,"codec":stream.map(|s|&s["Codec"]),"language":stream.map(|s|&s["Language"]),"channels":stream.map(|s|&s["Channels"])})
 }
 
 fn chromaprint_arguments(url: &str, start: f64, seconds: f64, stream: Option<u64>) -> Vec<String> {
@@ -1108,6 +1118,23 @@ mod tests {
         assert!(args.windows(2).any(|pair| pair == ["-map", "0:3"]));
         assert!(args.windows(2).any(|pair| pair == ["-f", "chromaprint"]));
         assert!(args.windows(2).any(|pair| pair == ["-fp_format", "raw"]));
+    }
+    #[test]
+    fn fingerprint_cache_follows_selected_audio_but_ignores_title_edits() {
+        let mut info = json!({"MediaStreams":[
+            {"Type":"Audio","Index":1,"Codec":"aac","Language":"chi","Channels":2,"Title":"国语","IsDefault":true},
+            {"Type":"Audio","Index":2,"Codec":"aac","Language":"jpn","Channels":2,"Title":"日语"}
+        ]});
+        let original = fingerprint_audio_identity(&info);
+        info["MediaStreams"][0]["Title"] = json!("台配国语");
+        assert_eq!(fingerprint_audio_identity(&info), original);
+        info["MediaStreams"][0]["IsDefault"] = json!(false);
+        info["MediaStreams"][1]["IsDefault"] = json!(true);
+        assert_ne!(fingerprint_audio_identity(&info), original);
+        assert_eq!(fingerprint_audio_identity(&info)["index"], 2);
+        info["MediaStreams"][0]["Index"] = json!(2);
+        info["MediaStreams"][1]["Index"] = json!(1);
+        assert_ne!(fingerprint_audio_identity(&info), original, "reordered audio at the same index must not reuse the old track");
     }
     #[test]
     fn chapter_append_readback_requires_original_images_and_streams() {
