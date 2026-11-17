@@ -93,9 +93,9 @@ test('1000 returned history rows render as a virtual table and all are accepted 
   await expect(page.getByTestId('organize-selection-count')).toHaveText('1000/1000 项');
   await expect(page.getByTestId('organize-selection').locator('.v-chip')).toHaveCount(0);
   await page.getByTestId('organize-selected').click();
-  const review = page.getByTestId('organize-confirmation-scroll');
-  await expect(review).toBeVisible();
-  expect(await review.locator('.v-list-item').count()).toBeLessThan(30);
+  const review = page.locator('.organize-confirmation-card');
+  await expect(review.locator('.v-card-subtitle')).toHaveText('共 1000 项');
+  await expect(review.locator('.v-list-item')).toHaveCount(0);
   await page.getByTestId('organize-confirm').click();
   await expect(page.getByTestId('organize-queue-dialog')).toBeVisible();
   await expect(page.getByTestId('organize-result')).toHaveCount(0);
@@ -133,7 +133,7 @@ test('a virtual selection draft can revise its 1000th row before a batch is scop
   await selectRow(page);
   await expect(page.getByTestId('organize-selection-count')).toHaveText('1/1000 项');
   await page.getByTestId('organize-selected').click();
-  await expect(page.locator('.v-overlay--active').filter({ has: page.getByTestId('organize-confirm') }).locator('.v-card-subtitle')).toHaveText('1 条记录，1 项媒体');
+  await expect(page.locator('.v-overlay--active').filter({ has: page.getByTestId('organize-confirm') }).locator('.v-card-subtitle')).toHaveText('共 1 项');
   await page.getByTestId('organize-confirm').click();
   await expect(page.getByTestId('organize-queue-dialog')).toBeVisible();
   await expect(page.getByTestId('organize-result')).toHaveCount(0);
@@ -173,7 +173,7 @@ test('a selected movie runs the full background operation after scope confirmati
   await selectRow(page);
   await page.getByTestId('organize-selected').click();
   const dialog = page.locator('.v-overlay--active').filter({ has: page.getByTestId('organize-confirm') });
-  await expect(dialog).toContainText('第一页电影');
+  await expect(dialog.locator('.v-card-subtitle')).toHaveText('共 1 项');
   await expect(dialog).toContainText('仅处理所选媒体文件，剧集只处理所选单集');
   await dialog.getByTestId('organize-confirm').click();
   await expect(page.getByTestId('organize-result')).toContainText('媒体重新整理完成');
@@ -194,8 +194,7 @@ test('current-page batch reorganization prunes earlier-page drafts and submits o
   await page.getByTestId('organize-selected').click();
   const dialog = page.locator('.v-overlay--active').filter({ has: page.getByTestId('organize-confirm') });
   await expect(dialog).not.toContainText('第一页电影');
-  await expect(dialog).toContainText('第二页电影');
-  await expect(dialog.locator('.v-card-subtitle')).toHaveText('1 条记录，1 项媒体');
+  await expect(dialog.locator('.v-card-subtitle')).toHaveText('共 1 项');
   await page.getByTestId('organize-confirm').click();
   await expect(page.getByTestId('organize-result')).toBeVisible();
   expect(posts(api)[0].body).toEqual({ item_ids: ['202'], history_ids: ['00000000-0000-4000-8000-000000000202'], mode: 'reprocess' });
@@ -338,7 +337,7 @@ test('repeated historical events for one movie submit all record IDs and one med
   await rows.nth(1).getByRole('checkbox').check();
   await expect(page.getByTestId('organize-selection-count')).toHaveText('2/2 项');
   await page.getByTestId('organize-selected').click();
-  await expect(page.locator('.v-overlay--active').filter({ has: page.getByTestId('organize-confirm') }).locator('.v-card-subtitle')).toHaveText('2 条记录，1 项媒体');
+  await expect(page.locator('.v-overlay--active').filter({ has: page.getByTestId('organize-confirm') }).locator('.v-card-subtitle')).toHaveText('共 2 项');
   await page.getByTestId('organize-confirm').click();
   await expect(page.getByTestId('organize-result')).toBeVisible();
   expect(posts(api)[0].body).toEqual({ item_ids: ['101'], history_ids: ['00000000-0000-4000-8000-000000000101', '00000000-0000-4000-8000-000000000111'], mode: 'reprocess' });

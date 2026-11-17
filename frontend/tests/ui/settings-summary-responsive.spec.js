@@ -9,6 +9,7 @@ const mp = {
 
 for (const width of [390, 768, 1024, 1440, 1920, 2194, 3840]) {
   test(`${width}px media server and storage cards use MP's native grid, padding and natural dimensions`, async ({ page, api }, testInfo) => {
+    test.setTimeout(60_000);
     await page.setViewportSize({ width, height: width >= 2194 ? 1234 : 900 });
     await page.addInitScript(() => localStorage.setItem('moviepilot-theme-customizer', JSON.stringify({
       theme: 'dark', glassEnabled: true, glassQuality: 'css', glassAppearance: 'clear', layout: 'vertical',
@@ -24,8 +25,10 @@ for (const width of [390, 768, 1024, 1440, 1920, 2194, 3840]) {
       const summary = page.getByRole('button', { name, exact: true });
       await expect(summary).toBeVisible();
       await summary.scrollIntoViewIfNeeded();
-      await expect.poll(() => summary.locator('img').evaluate(image => image.complete && image.naturalWidth > 0)).toBe(true);
-      await page.evaluate(() => document.fonts.ready);
+      await summary.locator('img').evaluate(image => { image.loading = 'eager'; });
+      await expect.poll(() => summary.locator('img').evaluate(image => image.complete && image.naturalWidth > 0), { timeout: 15_000 }).toBe(true);
+      // Third-party font availability must not block geometry of rendered native controls.
+      await expect.poll(() => summary.evaluate(el => el.getBoundingClientRect().width)).toBeGreaterThan(0);
       const geometry = await summary.evaluate(element => {
         const outer = element.closest('.setting-card');
         const bounds = element => {

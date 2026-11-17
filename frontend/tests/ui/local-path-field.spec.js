@@ -67,3 +67,36 @@ test('a directory response arriving after cancellation cannot replace the reopen
   await expect(field(page)).toHaveValue('/new');
   expect(configWrites(api)).toEqual([]);
 });
+
+for (const width of [390, 1440]) {
+  test(`${width} directory and monitoring paths share the inline picker and keep unsaved multi-path drafts`, async ({ page, api }) => {
+    await page.setViewportSize({ width, height: 900 });
+    api.respond('GET', endpoint, request => directories(request.query.path));
+    await page.goto('/setting?tab=directory');
+    for (const label of ['本地 STRM 根目录', 'CD2 媒体库本地根目录']) {
+      const input = page.getByLabel(label, { exact: true });
+      await input.fill('/metadata');
+      const button = page.getByRole('button', { name: `选择${label}`, exact: true });
+      expect(await button.evaluate(el => Boolean(el.closest('.v-field__append-inner')))).toBe(true);
+      await button.click();
+      await picker(page).getByRole('button', { name: '打开目录 chapters', exact: true }).click();
+      await picker(page).getByRole('button', { name: '选择此目录', exact: true }).click();
+      await expect(input).toHaveValue('/metadata/chapters');
+    }
+    expect(await page.getByRole('button', { name: '选择 115 云端目录', exact: true }).evaluate(el => Boolean(el.closest('.v-field__append-inner')))).toBe(true);
+    await page.goto('/setting?tab=rule');
+    const group = page.locator('[data-field="monitor_paths"]');
+    const paths = group.getByRole('textbox', { name: '监控路径', exact: true });
+    await paths.fill('/metadata/chapters');
+    await paths.press('Enter');
+    const button = group.getByRole('button', { name: '选择监控路径', exact: true });
+    expect(await button.evaluate(el => Boolean(el.closest('.v-field__append-inner')))).toBe(true);
+    await button.click();
+    await picker(page).getByRole('button', { name: '打开目录 chapters', exact: true }).click();
+    await picker(page).getByRole('button', { name: '选择此目录', exact: true }).click();
+    await expect(group.locator('.v-chip').filter({ hasText: '/metadata/chapters' })).toHaveCount(1);
+    const exclude = page.getByRole('button', { name: '选择排除路径', exact: true });
+    expect(await exclude.evaluate(el => Boolean(el.closest('.v-field__append-inner')))).toBe(true);
+    expect(configWrites(api)).toEqual([]);
+  });
+}

@@ -58,9 +58,8 @@ test('rescraping one episode enters the queue immediately without claiming compl
   }, 202);
   await page.goto('/media-organize');
   await page.getByTestId('organize-items').locator('tbody tr').filter({ has: page.locator('input[type="checkbox"]') }).first().getByRole('checkbox').check();
-  await page.getByTestId('organize-selected').click();
-  await page.getByTestId('organize-mode').click();
-  await page.locator('.v-overlay--active').getByRole('option', { name: '重新刮削', exact: true }).click();
+  await page.getByTestId('organize-items').getByRole('button', { name: / 操作$/ }).first().click();
+  await page.locator('.v-overlay--active').getByText('重新刮削', { exact: true }).click();
   await expect(page.locator('.v-overlay--active').filter({ has: page.getByTestId('organize-confirm') })).toContainText('保留已有媒体信息、音轨和章节');
   await page.getByTestId('organize-confirm').click();
   await expect(page.getByTestId('organize-queue-dialog')).toBeVisible();

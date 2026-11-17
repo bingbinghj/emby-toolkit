@@ -45,7 +45,7 @@ for (const [mode, title] of [['reprocess', '重新整理'], ['rescrape', '重新
     await page.getByRole('button', { name: '失败，查看整理详情验证详情', exact: true }).click();
     await page.getByTestId('organize-detail-dialog').getByRole('button', { name: title, exact: true }).click();
     await expect(page.getByTestId('organize-detail-dialog')).not.toBeVisible();
-    await expect(page.getByTestId('organize-mode')).toContainText(title);
+    await expect(page.locator('.organize-confirmation-card .v-card-title')).toHaveText(mode === 'reprocess' ? '手动整理' : title);
     await page.getByTestId('organize-confirm').click();
     await expect(page.getByTestId('organize-queue-dialog')).toBeVisible();
     expect(api.requests.filter(request => request.path === actionPath).map(request => request.body)).toEqual([{ item_ids: ['episode-200'], history_ids: ['history-200'], mode }]);

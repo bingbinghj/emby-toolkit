@@ -119,22 +119,16 @@
       <VCard class="organize-confirmation-card">
         <VCardItem class="py-2 pe-16">
           <template #prepend><VIcon icon="mdi-folder-move" class="me-2" /></template>
-          <VCardTitle>{{ confirmationMode === 'rescrape' ? '重新刮削' : '重新整理' }}</VCardTitle>
-          <VCardSubtitle>{{ confirmationItems.length }} 条记录，{{ confirmationMediaCount }} 项媒体</VCardSubtitle>
+          <VCardTitle>{{ confirmationMode === 'rescrape' ? '重新刮削' : '手动整理' }}</VCardTitle>
+          <VCardSubtitle>共 {{ confirmationItems.length }} 项</VCardSubtitle>
         </VCardItem>
         <DialogCloseBtn aria-label="关闭整理确认" :disabled="processing" @click="confirmationOpen = false" />
         <VDivider />
         <VCardText class="pa-6">
-          <VSelect v-model="confirmationMode" :items="operationOptions" :disabled="processing" label="整理方式" prepend-inner-icon="mdi-swap-horizontal" :hint="confirmationMode === 'rescrape' ? '更新元数据、NFO 和图片，保留已有媒体信息、音轨和章节。' : '重新执行完整入库流程，按当前入库配置处理所选媒体。'" persistent-hint data-testid="organize-mode" />
-          <VAlert type="info" variant="tonal" density="compact" class="my-4">仅处理所选媒体文件，剧集只处理所选单集。同一媒体的多条记录合并为一次{{ confirmationMode === 'rescrape' ? '刮削' : '整理' }}。</VAlert>
-          <VList bg-color="transparent" density="compact">
-            <VVirtualScroll v-if="confirmationItems.length > 100" :items="confirmationItems" :height="Math.min(listHeight, 384)" :item-height="64" tabindex="0" aria-label="本次整理的媒体" data-testid="organize-confirmation-scroll">
-              <template #default="{ item }"><VListItem :title="itemTitle(item)" :subtitle="`${episodeLabel(item) || (item.item_type === 'Movie' ? '电影' : '剧集')} · ${item.item_id}`" /></template>
-            </VVirtualScroll>
-            <template v-else><VListItem v-for="item in confirmationItems" :key="item.id" :title="itemTitle(item)" :subtitle="`${episodeLabel(item) || (item.item_type === 'Movie' ? '电影' : '剧集')} · ${item.item_id}`" /></template>
-          </VList>
+          <p class="text-body-1 mb-2">{{ confirmationMode === 'rescrape' ? '更新元数据、NFO 和图片，保留已有媒体信息、音轨和章节。' : '重新执行完整入库流程，按当前入库配置处理所选媒体。' }}</p>
+          <p class="text-body-2 text-medium-emphasis mb-0">仅处理所选媒体文件，剧集只处理所选单集。同一媒体的多条记录合并为一次{{ confirmationMode === 'rescrape' ? '刮削' : '整理' }}。</p>
         </VCardText>
-        <VDivider /><VCardActions class="app-dialog-actions"><VBtn color="success" variant="tonal" prepend-icon="mdi-plus" :loading="processing" data-testid="organize-confirm" @click="reorganize">加入队列</VBtn><VSpacer /><VBtn variant="text" :disabled="processing" @click="confirmationOpen = false">取消</VBtn></VCardActions>
+        <VDivider /><VCardActions class="app-dialog-actions"><VBtn color="success" variant="tonal" prepend-icon="mdi-plus" :loading="processing" data-testid="organize-confirm" @click="reorganize">加入队列</VBtn><VSpacer /><VBtn color="secondary" variant="tonal" :disabled="processing" @click="confirmationOpen = false">取消</VBtn></VCardActions>
       </VCard>
     </VDialog>
     <VBottomSheet v-model="deleteOpen" inset :persistent="processing">
@@ -199,7 +193,6 @@ const selectedIds = computed(() => selectedItems.value.map(item => item.id));
 const selectedPageItems = computed(() => items.value.filter(item => selectedIds.value.includes(item.id)));
 const canReorganize = computed(() => canSelectItems() && selectedPageItems.value.length > 0 && selectedPageItems.value.every(isReadyRecord));
 const canDelete = computed(() => canSelectItems() && selectedPageItems.value.length > 0 && selectedPageItems.value.every(isDeletableRecord));
-const confirmationMediaCount = computed(() => new Set(confirmationItems.value.map(item => item.item_id)).size);
 const pages = computed(() => Math.max(1, Math.ceil((total.value || 0) / pageSize.value)));
 const pageTip = computed(() => ({ begin: total.value ? pageSize.value * (page.value - 1) + 1 : 0, end: Math.min(pageSize.value * page.value, total.value || 0) }));
 const emptyText = computed(() => itemsError.value ? '入库处理记录尚未读取成功' : '当前条件下没有入库处理记录');
@@ -272,7 +265,6 @@ const changePageSize = async value => {
 const queue = useMediaOrganizeQueue({ onSettled: loadItems });
 const pendingQueueCount = computed(() => queue.queuedCount + queue.runningCount);
 const operationLabel = mode => mode === 'rescrape' ? '重新刮削' : '重新整理入库';
-const operationOptions = [{ title: '重新整理入库', value: 'reprocess' }, { title: '重新刮削', value: 'rescrape' }];
 const openQueue = () => { detailOpen.value = false; queueOpen.value = true; void queue.refresh(); };
 
 const searchItems = () => { clearTimeout(searchTimer); if (searchComposing.value || processing.value) return; appliedSearch.value = search.value?.trim() || ''; page.value = 1; loadItems(); };

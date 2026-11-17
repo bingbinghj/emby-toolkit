@@ -74,7 +74,7 @@ for (const [name, preference] of [
   }
 }
 
-test('history cards paginate, filter errors and search complete contexts without losing raw exports', async ({ page, api }) => {
+test('history cards paginate, filter errors and search complete contexts without duplicate export controls', async ({ page, api }) => {
   api.respond('GET', '/api/logs/list', ['app.log', 'app.log.1']);
   api.respond('GET', '/api/logs/view', request => ({ file: request.query.filename, lines: request.query.page === '2' ? ['2026-11-09 12:00:00,000 - module - INFO - 较早日志完整结尾'] : [historyLine, warningLine], page: Number(request.query.page) || 1, pages: 2, total_lines: 501 }));
   api.respond('GET', '/api/logs/search', [{ file: 'app.log.1', content: historyLine }]);
@@ -82,9 +82,9 @@ test('history cards paginate, filter errors and search complete contexts without
   await openLogs(page, api);
   await page.getByRole('tab', { name: '历史日志', exact: true }).click();
   await expect(page.locator('.history-log-list .log-record')).toHaveCount(2);
-  await page.getByRole('button', { name: '较早日志', exact: true }).click();
+  await page.getByRole('button', { name: '下一页', exact: true }).click();
   await expect(page.getByText('较早日志完整结尾', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: '较新日志', exact: true }).click();
+  await page.getByRole('button', { name: '上一页', exact: true }).click();
   await page.locator('.history-log-view .v-select').filter({ has: page.getByLabel('日志级别', { exact: true }) }).locator('.v-field').click();
   await page.getByRole('option', { name: '错误', exact: true }).click();
   await expect(page.locator('.history-log-list .log-record')).toHaveCount(1);
@@ -96,12 +96,8 @@ test('history cards paginate, filter errors and search complete contexts without
   await expect(page.getByText('[任务结束] 失败完整结尾', { exact: true })).toBeVisible();
   await page.getByLabel('匹配日志行', { exact: true }).check();
   await expect(page.locator('.history-log-list .log-record')).toHaveCount(1);
-  const download = page.waitForEvent('download');
-  await page.locator('.history-log-view').getByRole('button', { name: '导出日志', exact: true }).click();
-  const saved = await download;
-  const stream = await saved.createReadStream();
-  let text = ''; for await (const chunk of stream) text += chunk.toString();
-  expect(text).toBe(historyLine);
+  await expect(page.getByRole('button', { name: '导出日志', exact: true })).toHaveCount(0);
+
 });
 
 test('paused live following freezes the visible records until returning to newest', async ({ page, api }) => {

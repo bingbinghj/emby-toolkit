@@ -15,7 +15,7 @@ function fixture(get = async (_, { params }) => ({ data: { code: 200, data: [], 
   const requests = [], updates = [];
   const context = vm.createContext({
     menuOpen: { value: true }, loading: { value: false }, error: { value: '' },
-    directories: { value: [] }, currentPath: { value: '' }, requestedPath: { value: '/' }, requestVersion: 0,
+    directories: { value: [] }, currentPath: { value: '' }, requestedPath: { value: '/' }, requestVersion: 0, props: { modelValue: '', multiple: false },
     emit: (event, value) => updates.push({ event, value }),
     axios: { get: async (url, options) => { requests.push({ url, options }); return get(url, options); } },
   });
@@ -98,4 +98,17 @@ test('closing the picker prevents a pending read from applying or selecting a pa
   f.context.choose();
   assert.equal(f.context.currentPath.value, '');
   assert.deepEqual(f.updates, []);
+});
+
+
+test('multiple directory selection preserves existing paths and avoids duplicate additions', async () => {
+  const f = fixture();
+  f.context.props = { modelValue: ['/media/a'], multiple: true };
+  await f.context.load('/media/b');
+  f.context.choose();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.updates)), [{ event: 'update:modelValue', value: ['/media/a', '/media/b'] }]);
+  f.context.menuOpen.value = true;
+  f.context.props.modelValue = ['/media/a', '/media/b'];
+  f.context.choose();
+  assert.deepEqual(JSON.parse(JSON.stringify(f.updates.at(-1).value)), ['/media/a', '/media/b']);
 });

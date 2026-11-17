@@ -52,20 +52,20 @@ for (const mode of ['reprocess', 'rescrape']) {
     api.respond('POST', actionPath, receipt, 202);
     await page.goto('/media-organize');
     await rows(page).first().getByRole('checkbox').check();
-    await page.getByTestId('organize-selected').click();
     if (mode === 'rescrape') {
-      await page.getByTestId('organize-mode').click();
-      await page.locator('.v-overlay--active').getByRole('option', { name: '重新刮削', exact: true }).click();
-    }
+      await rows(page).first().getByRole('button', { name: '整理验证剧集 操作', exact: true }).click();
+      await page.locator('.v-overlay--active').getByText('重新刮削', { exact: true }).click();
+    } else await page.getByTestId('organize-selected').click();
     const dialog = page.locator('.v-overlay--active').filter({ has: page.getByTestId('organize-confirm') });
-    await expect(dialog.locator('.v-card-title')).toHaveText(mode === 'reprocess' ? '重新整理' : '重新刮削');
+    await expect(dialog.locator('.v-card-title')).toHaveText(mode === 'reprocess' ? '手动整理' : '重新刮削');
     await expect(dialog.locator('[data-native-dialog-close]')).toHaveAttribute('aria-label', '关闭整理确认');
     await expect(dialog.getByTestId('organize-confirm')).toHaveText('加入队列');
     await expect(dialog.getByTestId('organize-confirm')).toHaveClass(/v-btn--variant-tonal/);
     await expect(dialog.locator('.v-card-actions')).toHaveClass(/app-dialog-actions/);
     await expect(dialog.locator('.v-card-text')).toHaveCSS('padding', '24px');
-    await expect(dialog.locator('.v-card-subtitle')).toHaveText('1 条记录，1 项媒体');
-    await expect(dialog.getByTestId('organize-mode')).toContainText(mode === 'reprocess' ? '重新整理入库' : '重新刮削');
+    await expect(dialog.locator('.v-card-subtitle')).toHaveText('共 1 项');
+    await expect(dialog.locator('.v-select, .v-list-item')).toHaveCount(0);
+    await expect(dialog.getByRole('button', { name: '取消', exact: true })).toHaveClass(/v-btn--variant-tonal/);
     await expect(dialog).toContainText(mode === 'reprocess' ? '重新执行完整入库流程' : '保留已有媒体信息、音轨和章节');
     await expect(dialog).toContainText('剧集只处理所选单集');
     await dialog.getByTestId('organize-confirm').click();
@@ -265,4 +265,17 @@ test('an incomplete deletion receipt preserves selection and reports that its re
   await expect(page.getByTestId('organize-result')).toContainText('整理记录删除结果尚未确认');
   await expect(rows(page).first().getByRole('checkbox')).toBeChecked();
   expect(api.requests.filter(request => request.method === 'GET' && request.path === historyPath)).toHaveLength(1);
+});
+
+test('canceling manual organization preserves selection without submitting work', async ({ page, api }) => {
+  api.respond('GET', historyPath, { items: records, total: 2 });
+  await page.goto('/media-organize');
+  await rows(page).first().getByRole('checkbox').check();
+  await page.getByTestId('organize-selected').click();
+  const dialog = page.locator('.organize-confirmation-card');
+  await expect(dialog.locator('.v-card-title')).toHaveText('手动整理');
+  await dialog.getByRole('button', { name: '取消', exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(rows(page).first().getByRole('checkbox')).toBeChecked();
+  expect(api.requests.filter(request => request.method !== 'GET')).toEqual([]);
 });

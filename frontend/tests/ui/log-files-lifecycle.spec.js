@@ -63,36 +63,33 @@ test('closing history while the file list refreshes prevents its later content r
   await expect(page.locator('.dashboard-page')).toBeVisible();
 });
 
-test('export keeps the last successful file and raw line endings while another file is pending or failed', async ({ page, api }) => {
-  const lines = [`${logLine('已读取的原文件记录')}\n`, `${logLine('原文件较早记录')}\n`];
-  await openHistory(page, api, lines);
-  api.respond('GET', '/api/logs/list', ['app.log', 'app.log.1']);
-  const refreshed = page.waitForResponse(response => new URL(response.url()).pathname === '/api/logs/view');
-  await page.getByRole('button', { name: '刷新历史日志', exact: true }).click();
-  await (await refreshed).finished();
-  await expect(page.getByRole('button', { name: '刷新历史日志', exact: true })).not.toHaveClass(/v-btn--loading/);
-  await expect(page.locator('.history-log-list .log-record')).toHaveCount(2);
-  let received, release;
-  const started = new Promise(resolve => { received = resolve; });
-  const completion = new Promise(resolve => { release = resolve; });
-  api.respond('GET', '/api/logs/view', async request => { received(request); return completion; }, 503);
-  await page.locator('.history-file-select .v-field').click();
-  await page.getByRole('option', { name: 'app.log.1', exact: true }).click();
-  expect((await started).query.filename).toBe('app.log.1');
-  const exportVisible = async () => {
-    const pending = page.waitForEvent('download');
-    await page.locator('.history-log-view').getByRole('button', { name: '导出日志', exact: true }).click();
-    const downloaded = await pending;
-    expect(downloaded.suggestedFilename()).toBe('app.log');
-    const stream = await downloaded.createReadStream();
-    let text = ''; for await (const chunk of stream) text += chunk.toString();
-    expect(text).toBe(lines.join(''));
-  };
-  await exportVisible();
-  const finished = page.waitForResponse(response => new URL(response.url()).pathname === '/api/logs/view');
-  release({ error: 'B 日志读取失败' });
-  await (await finished).finished();
-  await expect(page.getByText('B 日志读取失败', { exact: true })).toBeVisible();
-  await expect(page.locator('.history-log-list .log-record')).toHaveCount(2);
-  await exportVisible();
-});
+for (const width of [390, 1440]) {
+  test(`${width} history uses page buttons and direct jumps, retaining the old page after a failed read`, async ({ page, api }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await openHistory(page, api);
+    api.respond('GET', '/api/logs/view', request => ({ file: request.query.filename, lines: [logLine(`第 ${request.query.page} 页内容`)], page: Number(request.query.page), pages: 12, total_lines: 5501 }));
+    await page.getByRole('button', { name: '刷新历史日志', exact: true }).click();
+    const pagination = page.locator('.history-pagination');
+    await expect(pagination).toContainText('第 1 / 12 页，共 5501 行');
+    await expect(page.getByRole('button', { name: '导出日志', exact: true })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: /较新日志|较早日志/ })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '下载实时日志', exact: true })).toBeVisible();
+    await pagination.getByRole('button', { name: '下一页', exact: true }).click();
+    await expect(page.locator('.history-log-list')).toContainText('第 2 页内容');
+    await pagination.getByRole('spinbutton', { name: '跳转页码', exact: true }).fill('11');
+    await pagination.getByRole('spinbutton', { name: '跳转页码', exact: true }).press('Enter');
+    await expect(page.locator('.history-log-list')).toContainText('第 11 页内容');
+    expect(viewReads(api).at(-1).query.page).toBe('11');
+    api.respond('GET', '/api/logs/view', { error: '请求日志页失败' }, 503);
+    await pagination.getByRole('button', { name: '下一页', exact: true }).click();
+    await expect(page.getByText('请求日志页失败', { exact: true })).toBeVisible();
+    await expect(pagination).toContainText('第 11 / 12 页');
+    await expect(pagination.getByRole('spinbutton', { name: '跳转页码', exact: true })).toHaveValue('11');
+    await expect(page.locator('.history-log-list')).toContainText('第 11 页内容');
+    const count = viewReads(api).length;
+    await pagination.getByRole('spinbutton', { name: '跳转页码', exact: true }).fill('13');
+    await pagination.getByRole('button', { name: '跳转', exact: true }).click();
+    expect(viewReads(api)).toHaveLength(count);
+    expect(await pagination.evaluate(el => el.scrollWidth <= el.clientWidth + 1)).toBe(true);
+  });
+}

@@ -14,27 +14,21 @@ function definition(name, declaration = 'const') {
 }
 const plain = value => JSON.parse(JSON.stringify(value));
 function fixture(get) {
-  const requests = [], downloads = [], blobs = [];
+  const requests = [];
   const context = vm.createContext({
     readSequence: 0, fileSequence: 0, pageActive: true,
     isLoadingFiles: ref(false), isLoadingContent: ref(false), isSearching: ref(false), isSearchMode: ref(false),
     logFiles: ref(['app.log']), selectedFile: ref('app.log'),
     logContent: ref([{ line: 'cached A content', file: 'app.log' }]),
     searchResults: ref([]), searchQuery: ref('query'), appliedQuery: ref(''), searchMode: ref('context'), levelFilter: ref('all'),
-    logPage: ref(2), logPages: ref(3), logTotalLines: ref(1200), errorMessage: ref(''), scrollRef: ref(null),
+    pageInput: ref(2), loadedFile: ref('app.log'), logPage: ref(2), logPages: ref(3), logTotalLines: ref(1200), errorMessage: ref(''), scrollRef: ref(null),
     nextTick: async () => {}, computed, matchesLogRecord, Blob,
-    URL: { createObjectURL: blob => { blobs.push(blob); return `blob:log-${blobs.length}`; }, revokeObjectURL() {} },
-    document: { createElement: () => {
-      const link = { href: '', download: '', click: () => downloads.push({ href: link.href, name: link.download }) };
-      return link;
-    } },
-    setTimeout() {},
     axios: { get: async (path, options) => { requests.push({ path, params: plain(options?.params || {}) }); return get(path, options); } },
   });
   context.isLoading = computed(() => context.isLoadingFiles.value || context.isLoadingContent.value || context.isSearching.value);
   const displayed = source.match(/^const displayedRecords = computed\([\s\S]*?\);\n/m)[0];
-  vm.runInContext(`${displayed}\n${definition('fetchLogFiles')}\n${definition('fetchLogContent')}\n${definition('executeSearch')}\n${definition('clearSearch')}\n${definition('refreshLogs', 'async function')}\n${definition('downloadLogs', 'function')}\nthis.refresh = refreshLogs; this.load = fetchLogContent; this.search = executeSearch; this.clear = clearSearch; this.download = downloadLogs;`, context);
-  return { context, requests, downloads, blobs };
+  vm.runInContext(`${displayed}\n${definition('fetchLogFiles')}\n${definition('fetchLogContent')}\n${definition('executeSearch')}\n${definition('clearSearch')}\n${definition('refreshLogs', 'async function')}\n${definition('changePage')}\nthis.refresh = refreshLogs; this.load = fetchLogContent; this.search = executeSearch; this.clear = clearSearch; this.changePage = changePage;`, context);
+  return { context, requests };
 }
 
 test('failed log list refresh preserves its error and existing content until a real retry', async () => {
@@ -95,54 +89,41 @@ test('an empty refreshed file list clears the cached page and pagination metadat
   assert.equal(f.context.logTotalLines.value, 0);
 });
 
-test('export names cached file A while a selected file B is pending or failed', async () => {
-  let reject;
-  const pending = new Promise((_resolve, no) => { reject = no; });
-  const f = fixture(() => pending);
-  f.context.selectedFile.value = 'app.log.1';
-  const loading = f.context.load('app.log.1');
-  assert.equal(f.context.isLoading.value, true);
-  f.context.download();
-  assert.equal(f.downloads[0].name, 'app.log');
-  assert.equal(await f.blobs[0].text(), 'cached A content');
-  reject({ response: { data: { error: 'B unavailable' } } }); await loading;
-  f.context.download();
-  assert.equal(f.downloads[1].name, 'app.log');
-  assert.equal(await f.blobs[1].text(), 'cached A content');
-  assert.equal(f.context.errorMessage.value, 'B unavailable');
-});
-
-test('export follows committed file/search data through search failure and returning to browsing', async () => {
+test('page navigation reads the requested page once and leaves the last successful page on failure', async () => {
   let fail = true;
-  const f = fixture(async () => {
-    if (fail) throw { response: { data: { error: 'search unavailable' } } };
-    return { data: [{ file: 'app.log.1', lines: ['matching query\n'] }] };
+  const f = fixture(async (_path, options) => {
+    if (fail) throw { response: { data: { error: 'page unavailable' } } };
+    return { data: { lines: ['page three'], page: options.params.page, pages: 3, total_lines: 1200 } };
   });
-  await f.context.search();
-  assert.equal(f.context.isSearchMode.value, false);
-  f.context.download();
-  assert.equal(f.downloads[0].name, 'app.log');
+  f.context.pageInput.value = 3;
+  await f.context.changePage(3);
+  assert.equal(f.context.logPage.value, 2);
+  assert.equal(f.context.pageInput.value, 2);
+  assert.equal(f.context.logContent.value[0].line, 'cached A content');
   fail = false;
-  await f.context.search();
-  assert.equal(f.context.isSearchMode.value, true);
-  f.context.download();
-  assert.equal(f.downloads[1].name, 'etk-search.log');
-  assert.equal(await f.blobs[1].text(), 'matching query\n');
-  f.context.clear(); f.context.download();
-  assert.equal(f.downloads[2].name, 'app.log');
-  assert.equal(await f.blobs[2].text(), 'cached A content');
+  await f.context.changePage('3');
+  assert.equal(f.context.logPage.value, 3);
+  assert.equal(f.context.pageInput.value, 3);
+  assert.equal(f.context.logContent.value[0].line, 'page three');
+  assert.equal(f.requests.length, 2);
 });
 
-for (const [lines, expected] of [
-  [['newest\n', 'older\n'], 'newest\nolder\n'],
-  [['newest\r\n', 'older\r\n'], 'newest\r\nolder\r\n'],
-  [['newest\n', 'older'], 'newest\nolder'],
-  [['newest', 'older'], 'newest\nolder'],
-]) {
-  test(`export preserves existing line endings ${JSON.stringify(lines)}`, async () => {
-    const f = fixture(async () => ({ data: [] }));
-    f.context.logContent.value = lines.map(line => ({ line, file: 'app.log' }));
-    f.context.download();
-    assert.equal(await f.blobs[0].text(), expected);
+for (const value of [0, -1, 4, 1.5, '', 'abc', 2]) {
+  test(`invalid or current page ${JSON.stringify(value)} does not request logs`, async () => {
+    const f = fixture(() => { throw new Error('unexpected request'); });
+    f.context.pageInput.value = value;
+    await f.context.changePage(value);
+    assert.equal(f.requests.length, 0);
+    assert.equal(f.context.pageInput.value, 2);
   });
 }
+
+test('a failed file switch cannot paginate using the previous file total', async () => {
+  const f = fixture(() => { throw new Error('unavailable'); });
+  f.context.selectedFile.value = 'app.log.1';
+  await f.context.load('app.log.1');
+  await f.context.changePage(3);
+  assert.equal(f.requests.length, 1);
+  assert.equal(f.context.loadedFile.value, 'app.log');
+  assert.equal(f.context.logPage.value, 2);
+});

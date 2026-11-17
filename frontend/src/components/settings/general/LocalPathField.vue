@@ -3,7 +3,7 @@ import { ref, watch, onBeforeUnmount, useAttrs } from 'vue';
 import axios from 'axios';
 
 defineOptions({ inheritAttrs: false });
-const props = defineProps({ modelValue: { type: String, default: '' } });
+const props = defineProps({ modelValue: { type: [String, Array], default: '' }, multiple: Boolean });
 const emit = defineEmits(['update:modelValue']);
 const attrs = useAttrs();
 const menuOpen = ref(false), loading = ref(false), error = ref('');
@@ -35,19 +35,25 @@ const loadDirectory = async (path) => {
 
 const chooseDirectory = () => {
   if (!menuOpen.value || loading.value || error.value || !currentPath.value) return;
-  emit('update:modelValue', currentPath.value);
+  emit('update:modelValue', props.multiple ? [...new Set([...(props.modelValue || []), currentPath.value])] : currentPath.value);
   menuOpen.value = false;
 };
 
 watch(menuOpen, open => {
-  if (open) loadDirectory(String(props.modelValue || '').trim() || '/');
+  if (open) {
+    const value = props.multiple ? props.modelValue?.at(-1) || '' : props.modelValue;
+    const path = props.multiple ? value.slice(0, value.lastIndexOf('/')) : value;
+    loadDirectory(String(path || '').trim() || '/');
+  }
   else { requestVersion += 1; loading.value = false; }
 });
 onBeforeUnmount(() => { requestVersion += 1; });
 </script>
 
 <template>
-  <VTextField v-bind="attrs" :model-value="modelValue" @update:model-value="emit('update:modelValue', $event)">
+  <component :is="multiple ? 'VCombobox' : 'VTextField'" v-bind="attrs" :model-value="modelValue"
+    :multiple="multiple" :chips="multiple" :closable-chips="multiple" :return-object="false" :menu-icon="multiple ? '' : undefined"
+    @update:model-value="emit('update:modelValue', $event)">
     <template #append-inner>
       <VMenu v-model="menuOpen" :close-on-content-click="false" :max-width="480">
         <template #activator="{ props: menuProps }">
@@ -71,13 +77,13 @@ onBeforeUnmount(() => { requestVersion += 1; });
             <p v-else-if="!loading && !error" class="text-body-2 text-medium-emphasis py-3 mb-0">此目录没有子文件夹。</p>
           </VCardText>
           <VCardActions>
-            <VSpacer /><VBtn variant="text" @click="menuOpen = false">取消</VBtn>
-            <VBtn variant="flat" :disabled="loading || Boolean(error) || !currentPath" @click="chooseDirectory">选择此目录</VBtn>
+            <VSpacer /><VBtn color="secondary" variant="tonal" @click="menuOpen = false">取消</VBtn>
+            <VBtn color="primary" variant="flat" :disabled="loading || Boolean(error) || !currentPath" @click="chooseDirectory">选择此目录</VBtn>
           </VCardActions>
         </VCard>
       </VMenu>
     </template>
-  </VTextField>
+  </component>
 </template>
 
 <style scoped>

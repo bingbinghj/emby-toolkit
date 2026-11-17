@@ -79,11 +79,11 @@ function fixture(overrides = {}) {
   vm.runInContext(source + '\n' + `globalThis.page = {
     saveCard, formRef, cardFields, configModel, openMediaServerDialog, saveMediaServer, mediaServerFormRef,
     mediaServerDraft, mediaServerDialogOpen, handleImportFileSelection, fileToImport,
-    tablesToImport, handleImportSelectionChange, startImportProcess, openLocalFolderSelector,
-    confirmLocalFolder, currentLocalPath, currentP115Cid, currentP115Path, confirmP115Folder,
+    tablesToImport, handleImportSelectionChange, startImportProcess,
+    currentP115Cid, currentP115Path, confirmP115Folder,
     openQrcodeModal, closeQrcodeModal, qrcodeStatus, showQrcodeModal, componentIsMounted,
     startCookiePolling, closeCookieModal, cookieQrcodeSessionId, cookieQrcodeStatus, cookieAppType, showCookieModal,
-    fetchLocalFolders, fetchP115Folders, showLocalFolderModal, showP115FolderModal, loadingLocalFolders, loadingP115Folders, currentLocalTargetField,
+    fetchP115Folders, showP115FolderModal, loadingP115Folders,
     openP115FolderSelector, startWebAuth, isWebAuthing, p115Info, previewRenameFormats, renameFormatPreview,
     monitorExtensionOptions, check115Status, p115StatusError, loading115Info,
     openPromptModal, savePrompts, resetPrompts, promptModalVisible, loadingPrompts, savingPrompts, promptsModel,
@@ -428,17 +428,8 @@ test('VFileInput File array reaches multipart preview and selected table import 
   assert.deepEqual(imported.body.get('tables').split(',').sort(), ['emby_users', 'emby_users_extended']);
 });
 
-test('directory selection keeps local path arrays and cloud CID/path values', async () => {
+test('cloud directory selection keeps its CID/path values', async () => {
   const f = fixture({ get: async (url, options) => ({ data: { code: 200, data: [], current_path: url === '/api/p115/directories' ? '媒体库/电影' : options.params.path, current_cid: options.params.cid } }) });
-  f.page.openLocalFolderSelector('monitor_paths', true);
-  await f.page.fetchLocalFolders('/media/b');
-  f.page.confirmLocalFolder();
-  f.page.confirmLocalFolder();
-  assert.deepEqual(plain(f.page.configModel.value.monitor_paths), ['/media/a', '/media/b']);
-  f.page.openLocalFolderSelector('local_strm_root');
-  await f.page.fetchLocalFolders('/new-media');
-  f.page.confirmLocalFolder();
-  assert.equal(f.page.configModel.value.local_strm_root, '/new-media');
   f.page.showP115FolderModal.value = true;
   await f.page.fetchP115Folders('123');
   f.page.confirmP115Folder();
@@ -505,20 +496,6 @@ test('Cookie delayed success close cannot close a newly opened session', async (
   assert.equal(f.intervals.size, 1);
 });
 
-test('local directory confirmation uses the last successfully loaded path after out-of-order replies', async () => {
-  const pending = [];
-  const f = fixture({ get: (url, options) => new Promise(resolve => pending.push({ url, options, resolve })) });
-  f.page.currentLocalTargetField.value = 'local_strm_root';
-  f.page.showLocalFolderModal.value = true;
-  const first = f.page.fetchLocalFolders('/first');
-  const latest = f.page.fetchLocalFolders('/second');
-  pending[1].resolve({ data: { code: 200, current_path: '/second', data: [] } });
-  await latest;
-  pending[0].resolve({ data: { code: 200, current_path: '/first', data: [] } });
-  await first;
-  f.page.confirmLocalFolder();
-  assert.equal(f.page.configModel.value.local_strm_root, '/second');
-});
 
 test('cloud directory confirmation preserves the last CID/path pair after out-of-order replies', async () => {
   const pending = [];
@@ -535,23 +512,14 @@ test('cloud directory confirmation preserves the last CID/path pair after out-of
   assert.equal(f.page.configModel.value.p115_fingerprint_media_root_path, '媒体库/second');
 });
 
-test('directory loading or failed reads cannot confirm unverified local paths or cloud IDs', async () => {
+test('directory loading or failed reads cannot confirm unverified cloud IDs', async () => {
   const pending = [];
   const f = fixture({ get: () => new Promise(resolve => pending.push(resolve)) });
-  f.page.openLocalFolderSelector('local_strm_root');
-  f.page.currentLocalPath.value = '/unverified';
-  f.page.confirmLocalFolder();
-  assert.equal(f.page.configModel.value.local_strm_root, '/media');
-  pending[0]({ data: { code: 403, message: 'denied' } });
-  await Promise.resolve();
-  await Promise.resolve();
-  f.page.confirmLocalFolder();
-  assert.equal(f.page.configModel.value.local_strm_root, '/media');
   f.page.showP115FolderModal.value = true;
   const cloud = f.page.fetchP115Folders('unverified');
   f.page.confirmP115Folder();
   assert.equal(f.page.configModel.value.p115_fingerprint_media_root_cid, undefined);
-  pending[1]({ data: { code: 403, message: 'denied' } });
+  pending[0]({ data: { code: 403, message: 'denied' } });
   await cloud;
   f.page.confirmP115Folder();
   assert.equal(f.page.configModel.value.p115_fingerprint_media_root_cid, undefined);
@@ -599,32 +567,7 @@ test('old Cookie request rejection cannot stop a reopened session', async () => 
   assert.equal(f.messages.length, 0);
 });
 
-test('editing a local path invalidates confirmation until that path has loaded', async () => {
-  const f = fixture({ get: async (url, options) => ({ data: { code: 200, current_path: options.params.path, data: [] } }) });
-  f.page.currentLocalTargetField.value = 'local_strm_root';
-  f.page.showLocalFolderModal.value = true;
-  await f.page.fetchLocalFolders('/loaded');
-  f.page.currentLocalPath.value = '/typed';
-  f.page.confirmLocalFolder();
-  assert.equal(f.page.configModel.value.local_strm_root, '/media');
-  await f.page.fetchLocalFolders('/typed');
-  f.page.confirmLocalFolder();
-  assert.equal(f.page.configModel.value.local_strm_root, '/typed');
-});
 
-test('closing directory dialogs discards pending replies without changing the new displayed location', async () => {
-  const gate = deferred();
-  const f = fixture({ get: () => gate.promise });
-  f.page.currentLocalTargetField.value = 'local_strm_root';
-  f.page.showLocalFolderModal.value = true;
-  const loading = f.page.fetchLocalFolders('/old');
-  f.page.showLocalFolderModal.value = false;
-  f.page.currentLocalPath.value = '/new';
-  gate.resolve({ data: { code: 200, current_path: '/old', data: [] } });
-  await loading;
-  assert.equal(f.page.currentLocalPath.value, '/new');
-  assert.equal(f.page.configModel.value.local_strm_root, '/media');
-});
 
 test('closing an unconfirmed web popup preserves old credentials and cannot report success', async () => {
   const popup = { closed: true, location: { origin: 'https://115.example', pathname: '/login' }, document: { title: '' } };

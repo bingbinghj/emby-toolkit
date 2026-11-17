@@ -13,12 +13,6 @@
       <VSelect v-else v-model="selectedFile" :items="logFiles" label="日志文件" :loading="isLoadingFiles" :disabled="isLoading" hide-details density="compact" class="history-file-select" @update:model-value="filename => fetchLogContent(filename)" />
       <VSelect v-model="levelFilter" :items="levelOptions" label="日志级别" hide-details density="compact" class="history-level-select" />
       <VBtn icon="mdi-refresh" variant="text" size="small" aria-label="刷新历史日志" :loading="isLoading" @click="refreshLogs" />
-      <VBtn variant="tonal" size="small" prepend-icon="mdi-download" :disabled="!displayedRecords.length" @click="downloadLogs">导出日志</VBtn>
-    </div>
-    <div v-if="!isSearchMode && logPages > 1" class="history-pagination">
-      <VBtn variant="tonal" size="small" prepend-icon="mdi-chevron-left" :disabled="isLoading || logPage <= 1" @click="fetchLogContent(selectedFile, logPage - 1)">较新日志</VBtn>
-      <span>第 {{ logPage }} / {{ logPages }} 页，共 {{ logTotalLines }} 行</span>
-      <VBtn variant="tonal" size="small" append-icon="mdi-chevron-right" :disabled="isLoading || logPage >= logPages" @click="fetchLogContent(selectedFile, logPage + 1)">较早日志</VBtn>
     </div>
     <VAlert v-if="errorMessage" type="error" variant="tonal">{{ errorMessage }}</VAlert>
     <VProgressLinear v-if="isLoading" indeterminate color="primary" :aria-label="loadingText" />
@@ -26,19 +20,30 @@
       <LogRecord v-for="(entry, index) in displayedRecords" :key="index" :line="entry.line" :file="entry.file" :keyword="isSearchMode ? appliedQuery : ''" :stripe="index % 2 ? 'odd' : 'even'" />
       <div v-if="!isLoading && !displayedRecords.length" class="history-empty"><VIcon icon="mdi-text-search" size="40" /><p>{{ isSearchMode ? '未找到匹配的日志记录' : levelFilter === 'all' ? '暂无日志内容' : '没有匹配的日志' }}</p></div>
     </div>
+    <div v-if="!isSearchMode && logPages > 1" class="history-pagination">
+      <span class="text-caption text-medium-emphasis">第 {{ logPage }} / {{ logPages }} 页，共 {{ logTotalLines }} 行</span>
+      <VPagination :model-value="logPage" :length="logPages" :total-visible="smAndDown ? 3 : 5" :disabled="isLoading || loadedFile !== selectedFile" size="small" show-first-last-page @update:model-value="changePage" />
+      <form class="history-page-jump" @submit.prevent="changePage(pageInput)">
+        <VTextField v-model="pageInput" label="跳转页码" aria-label="跳转页码" type="number" inputmode="numeric" :min="1" :max="logPages" step="1" density="compact" hide-details :mobile-layout="false" :disabled="isLoading || loadedFile !== selectedFile" />
+        <VBtn type="submit" variant="tonal" size="small" :disabled="isLoading || loadedFile !== selectedFile">跳转</VBtn>
+      </form>
+    </div>
   </section>
 </template>
 
 <script setup>
 import { ref, watch, computed, onUnmounted, nextTick } from 'vue';
 import axios from 'axios';
+import { useDisplay } from 'vuetify';
 import LogRecord from './LogRecord.vue';
 import { matchesLogRecord } from '@/utils/logRecords';
 
 const props = defineProps({ show: { type: Boolean, default: false } });
+const { smAndDown } = useDisplay();
 const isLoadingFiles = ref(false), isLoadingContent = ref(false), isSearching = ref(false);
 const logFiles = ref([]), selectedFile = ref(null), logContent = ref([]), searchResults = ref([]);
 const logPage = ref(1), logPages = ref(1), logTotalLines = ref(0);
+const pageInput = ref(1), loadedFile = ref(null);
 const searchQuery = ref(''), appliedQuery = ref(''), searchMode = ref('context'), isSearchMode = ref(false);
 const levelFilter = ref('all'), errorMessage = ref(''), scrollRef = ref(null);
 const levelOptions = [{ title: '全部日志', value: 'all' }, { title: 'DEBUG', value: 'debug' }, { title: 'INFO', value: 'info' }, { title: '警告', value: 'warning' }, { title: '错误', value: 'error' }];
@@ -60,6 +65,7 @@ const fetchLogFiles = async () => {
     if (!selectedFile.value) {
       logContent.value = [];
       logPage.value = 1; logPages.value = 1; logTotalLines.value = 0;
+      pageInput.value = 1; loadedFile.value = null;
     }
     return true;
   } catch (error) {
@@ -80,6 +86,7 @@ const fetchLogContent = async (filename, page = 1) => {
     if (!pageActive || sequence !== readSequence) return;
     if (!Array.isArray(data?.lines) || data.lines.some(line => typeof line !== 'string')) throw new Error('日志内容格式无效');
     logContent.value = data.lines.map(line => ({ line, file: filename }));
+    loadedFile.value = filename;
     logPage.value = Number(data.page) || 1;
     logPages.value = Number(data.pages) || 1;
     logTotalLines.value = Number(data.total_lines) || 0;
@@ -88,8 +95,21 @@ const fetchLogContent = async (filename, page = 1) => {
   } catch (error) {
     if (pageActive && sequence === readSequence) errorMessage.value = error.response?.data?.error || error.message || `加载日志 ${filename} 失败`;
   } finally {
-    if (pageActive && sequence === readSequence) isLoadingContent.value = false;
+    if (pageActive && sequence === readSequence) {
+      isLoadingContent.value = false;
+      pageInput.value = logPage.value;
+    }
   }
+};
+
+const changePage = async value => {
+  const page = Number(value);
+  if (!pageActive || isLoading.value || isSearchMode.value || loadedFile.value !== selectedFile.value) return;
+  if (!Number.isInteger(page) || page < 1 || page > logPages.value || page === logPage.value) {
+    pageInput.value = logPage.value;
+    return;
+  }
+  await fetchLogContent(selectedFile.value, page);
 };
 
 const executeSearch = async () => {
@@ -136,18 +156,6 @@ async function refreshLogs() {
   if (!await fetchLogFiles() || !pageActive) return;
   if (selectedFile.value) await fetchLogContent(selectedFile.value);
 }
-function downloadLogs() {
-  const records = displayedRecords.value;
-  if (!records.length) return;
-  const text = records.map((entry, index) => entry.line
-    + (index < records.length - 1 && !/[\r\n]$/.test(entry.line) ? '\n' : '')).join('');
-  const url = URL.createObjectURL(new Blob([text], { type: 'text/plain;charset=utf-8' }));
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = isSearchMode.value ? 'etk-search.log' : records[0].file || 'etk.log';
-  link.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
 watch(() => props.show, async visible => { if (visible && !logFiles.value.length && !isLoading.value) await refreshLogs(); }, { immediate: true });
 watch(searchMode, () => { if (isSearchMode.value || isSearching.value) executeSearch(); }, { flush: 'sync' });
 onUnmounted(() => { pageActive = false; readSequence++; fileSequence++; });
@@ -161,7 +169,8 @@ onUnmounted(() => { pageActive = false; readSequence++; fileSequence++; });
 .history-level-select { flex:0 1 140px; min-width:110px; }
 .history-log-view > .v-input, .history-log-view > .v-alert, .history-log-view > .v-progress-linear { flex:0 0 auto; }
 .history-pagination { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; flex-shrink:0; }
-.history-pagination span { color:var(--ui-text-muted); font-size:12px; }
+.history-page-jump { display:flex; align-items:center; gap:8px; }
+.history-page-jump > .v-input { flex:0 0 100px; width:100px; }
 .history-log-list { display:flex; flex-direction:column; gap:6px; flex:1 1 0; min-height:0; min-width:0; overflow:auto; overscroll-behavior:contain; padding:14px; border:1px solid var(--logging-border,var(--ui-border)); background:var(--logging-shell-background,var(--ui-surface)); box-shadow:var(--logging-shadow); }
 .history-empty { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:32px 8px; color:var(--ui-text-muted); }
 @media (max-width:540px) { .history-search-toolbar > .v-input { flex-basis:100%; } .history-log-list { padding:4px; } }

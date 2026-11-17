@@ -28,6 +28,9 @@ for (const width of [390, 1440]) {
       expect(row.label.bottom, row.name).toBeGreaterThan(row.control.top);
       expect(row.label.top, row.name).toBeLessThan(row.control.bottom);
     }
+    const labelBounds = await priority.locator('.storage-auth-label').boundingBox();
+    const optionBounds = await priority.getByText('优先 Cookie（默认）', { exact: true }).boundingBox();
+    expect(Math.abs(labelBounds.y + labelBounds.height / 2 - optionBounds.y - optionBounds.height / 2)).toBeLessThanOrEqual(2);
     await interval.scrollIntoViewIfNeeded();
     await expect(hint).toBeVisible();
     const layout = await dialog.evaluate(element => {
@@ -37,7 +40,7 @@ for (const width of [390, 1440]) {
         const { x, top, bottom, width } = node.getBoundingClientRect();
         return { x, top, bottom, width };
       };
-      const priorityLabel = priority.querySelector('.app-responsive-input__label') || priority.querySelector('.v-input__control > .v-label');
+      const priorityLabel = priority.querySelector('.storage-auth-label') || priority.querySelector('.app-responsive-input__label') || priority.querySelector('.v-input__control > .v-label');
       const intervalLabel = interval.querySelector('.app-responsive-input__label') || interval.querySelector('.v-field-label--floating');
       const hint = priority.querySelector('.app-responsive-input__hint') || priority.querySelector('.v-messages__message');
       return { priority: bounds(priority), interval: bounds(interval), priorityLabel: bounds(priorityLabel), intervalLabel: bounds(intervalLabel), hint: bounds(hint) };
@@ -51,7 +54,7 @@ for (const width of [390, 1440]) {
     const appIdRow = dialog.locator('[data-field="p115_app_id"]');
     await expect(appIdRow.getByText('OpenAPI', { exact: true })).toBeVisible();
     await expect(appIdRow.getByRole('textbox', { name: '自定义 AppID', exact: true })).toBeVisible();
-    await dialog.screenshot({ path: testInfo.outputPath(`storage-dialog-${width}.png`) });
+    await page.screenshot({ animations: 'disabled', path: testInfo.outputPath(`storage-dialog-${width}.png`) });
     await dialog.getByRole('button', { name: '取消存储配置', exact: true }).click();
     expect(api.requests.filter(request => request.method === 'POST' && request.path !== '/api/config/rename_preview')).toEqual([]);
   });

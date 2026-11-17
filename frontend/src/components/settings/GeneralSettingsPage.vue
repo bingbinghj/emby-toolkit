@@ -843,13 +843,15 @@
                                 </div>
                               </div>
                             </div>
-                            <div class="settings-field storage-auth-radio mb-4" data-field="p115_api_priority">
+                            <div class="settings-field storage-auth-row storage-auth-priority" data-field="p115_api_priority" data-settings-label="115接口">
+                              <div id="p115-api-priority-label" class="storage-auth-label text-body-2 font-weight-medium">115接口</div>
                               <VRadioGroup
                                 :mobile-layout="false"
                                 :disabled="storageSaving"
                                 v-model="storageDraft.p115_api_priority"
                                 name="api_priority_group"
-                                label="115接口"
+                                aria-labelledby="p115-api-priority-label"
+                                density="compact"
                                 hint="默认优先 Cookie，失败后再尝试 OpenAPI。"
                                 persistent-hint
                                 inline
@@ -892,67 +894,17 @@
                       </div>
 
                       <div class="settings-field" data-field="local_strm_root">
-                        <div class="settings-input-group d-flex align-start ga-2">
-                          <VTextField
-                            v-model="configModel.local_strm_root"
-                            placeholder="例如: /mnt/media"
-                            style="flex: 1"
-                            label="本地 STRM 根目录"
-                          ></VTextField>
-                          <VBtn
-                            color="primary"
-                            aria-label="选择本地 STRM 根目录"
-                            @click="openLocalFolderSelector('local_strm_root')"
-                            variant="outlined"
-                            icon
-                          >
-                            <template #default><VIcon :icon="FolderIcon" /></template>
-                          </VBtn>
-                        </div>
-                        <div class="settings-hint">
-                          <span class="text-medium-emphasis">
-                            用于从 Emby 路径反查 115 缓存位置，辅助补齐 PC/SHA1。
-                          </span>
-                        </div>
+                        <LocalPathField v-model="configModel.local_strm_root" label="本地 STRM 根目录" placeholder="例如: /mnt/media" hint="用于从 Emby 路径反查 115 缓存位置，辅助补齐 PC/SHA1。" persistent-hint />
                       </div>
                       <div class="settings-field" data-field="cd2_media_root">
-                        <div class="settings-input-group d-flex align-start ga-2">
-                          <VTextField
-                            v-model="configModel.cd2_media_root"
-                            placeholder="例如: /cd2/115open/媒体库"
-                            style="flex: 1"
-                            label="CD2 媒体库本地根目录"
-                          ></VTextField>
-                          <VBtn
-                            color="primary"
-                            aria-label="选择 CD2 媒体库根目录"
-                            @click="openLocalFolderSelector('cd2_media_root')"
-                            variant="outlined"
-                            icon
-                          >
-                            <template #default><VIcon :icon="FolderIcon" /></template>
-                          </VBtn>
-                        </div>
+                        <LocalPathField v-model="configModel.cd2_media_root" label="CD2 媒体库本地根目录" placeholder="例如: /cd2/115open/媒体库" />
                       </div>
                       <div class="settings-field" data-field="p115_fingerprint_media_root_path">
-                        <div class="settings-input-group d-flex align-start ga-2">
-                          <VTextField
-                            v-model="configModel.p115_fingerprint_media_root_path"
-                            placeholder="例如: 媒体库"
-                            readonly
-                            style="flex: 1"
-                            label="115 云端媒体库根目录"
-                          ></VTextField>
-                          <VBtn
-                            color="primary"
-                            aria-label="选择 115 云端目录"
-                            @click="openP115FolderSelector"
-                            variant="outlined"
-                            icon
-                          >
-                            <template #default><VIcon :icon="FolderIcon" /></template>
-                          </VBtn>
-                        </div>
+                        <VTextField v-model="configModel.p115_fingerprint_media_root_path" placeholder="例如: 媒体库" readonly label="115 云端媒体库根目录">
+                          <template #append-inner>
+                            <VBtn icon="mdi-folder-open-outline" variant="text" size="small" aria-label="选择 115 云端目录" @click.stop="openP115FolderSelector" />
+                          </template>
+                        </VTextField>
                       </div>
                       <div class="settings-field" data-field="monitor_sha1_pc_search">
                         <VSwitch v-model="configModel.monitor_sha1_pc_search" label="SHA1检测"></VSwitch>
@@ -1008,69 +960,10 @@
                         <VSwitch v-model="configModel.monitor_enabled" label="启用文件系统监控"></VSwitch>
                       </div>
                       <div class="settings-field" data-field="monitor_paths">
-                        <div class="settings-input-group d-flex align-start ga-2">
-                          <VCombobox
-                            v-model="configModel.monitor_paths"
-                            multiple
-                            placeholder="输入路径并回车，或点击右侧选择"
-                            :items="[]"
-                            style="flex: 1"
-                            item-title="label"
-                            item-value="value"
-                            :return-object="false"
-                            chips
-                            closable-chips
-                            label="监控路径"
-                          ></VCombobox>
-                          <VBtn
-                            color="primary"
-                            aria-label="选择监控路径"
-                            @click="openLocalFolderSelector('monitor_paths', true)"
-                            variant="outlined"
-                            icon
-                          >
-                            <template #default><VIcon :icon="FolderIcon" /></template>
-                          </VBtn>
-                        </div>
-                        <div class="settings-hint">
-                          <span class="text-medium-emphasis">
-                            请保持和 Emby 媒体库路径映射一致。
-                          </span>
-                        </div>
+                        <LocalPathField v-model="configModel.monitor_paths" label="监控路径" placeholder="输入路径并回车，或点击右侧选择" multiple hint="请保持和 Emby 媒体库路径映射一致。" persistent-hint />
                       </div>
                       <div class="settings-field" data-field="monitor_exclude_dirs">
-                        <div class="settings-input-group d-flex align-start ga-2">
-                          <VCombobox
-                            v-model="configModel.monitor_exclude_dirs"
-                            multiple
-                            placeholder="输入路径并回车，或点击右侧选择"
-                            :items="[]"
-                            style="flex: 1"
-                            item-title="label"
-                            item-value="value"
-                            :return-object="false"
-                            chips
-                            closable-chips
-                            label="排除路径"
-                          ></VCombobox>
-                          <VBtn
-                            color="primary"
-                            aria-label="选择排除路径"
-                            @click="openLocalFolderSelector('monitor_exclude_dirs', true)"
-                            variant="outlined"
-                            icon
-                          >
-                            <template #default><VIcon :icon="FolderIcon" /></template>
-                          </VBtn>
-                        </div>
-                        <div class="settings-hint">
-                          <span class="text-medium-emphasis">
-                            命中这些路径的文件将
-                            <b>跳过刮削流程</b>
-                            ，仅刷新。
-                            <br />
-                          </span>
-                        </div>
+                        <LocalPathField v-model="configModel.monitor_exclude_dirs" label="排除路径" placeholder="输入路径并回车，或点击右侧选择" multiple hint="命中这些路径的文件将跳过刮削流程，仅刷新。" persistent-hint />
                       </div>
                       <!-- 排除刷新延迟 -->
                       <div class="settings-field" data-field="monitor_exclude_refresh_delay">
@@ -1614,100 +1507,29 @@
     </VDialog>
     <!-- ★★★ 本地物理目录选择器弹窗 ★★★ -->
     <VDialog
-      v-model="showLocalFolderModal"
-      :fullscreen="isMobile"
-      max-width="600"
-      width="calc(100vw - 24px)"
-      @update:model-value="$event || (showLocalFolderModal = false)"
-    >
-      <VCard class="settings-dialog">
-        <VCardTitle class="d-flex align-center justify-space-between ga-2">
-          <span class="text-h6">选择本地路径</span>
-          <VBtn
-            icon="mdi-close" color="default"
-            variant="text"
-            size="small"
-            aria-label="关闭选择本地路径"
-            @click="showLocalFolderModal = false"
-          />
-        </VCardTitle>
-        <VCardText>
-          <div class="settings-loading">
-            <VProgressLinear v-if="loadingLocalFolders" indeterminate color="primary" class="mb-3" />
-            <div class="d-flex ga-3 flex-column">
-              <!-- 顶部路径输入与刷新 -->
-              <div class="settings-input-group d-flex align-start ga-2">
-                <VTextField
-                  v-model="currentLocalPath"
-                  placeholder="当前路径"
-                  @keyup.enter="fetchLocalFolders(currentLocalPath)"
-                ></VTextField>
-                <VBtn color="primary" @click="fetchLocalFolders(currentLocalPath)" icon>
-                  <template #default><VIcon :icon="RefreshIcon" /></template>
-                </VBtn>
-              </div>
-              <!-- 目录列表 -->
-              <VList style="max-height: 400px; overflow-y: auto; border-radius: 6px">
-                <VListItem v-for="folder in localFolders" :key="folder.path" @click="selectLocalFolder(folder)">
-                  <template #prepend>
-                    <VIcon
-                      :icon="folder.is_parent ? ArrowUpIcon : FolderIcon"
-                      size="22"
-                      :color="folder.is_parent ? 'secondary' : 'warning'"
-                    />
-                  </template>
-                  <span :style="{ fontWeight: folder.is_parent ? 'bold' : 'normal' }">{{ folder.name }}</span>
-                </VListItem>
-                <div
-                  v-if="localFolders.length === 0"
-                  style="margin-top: 30px; margin-bottom: 30px"
-                  class="pa-6 text-center text-medium-emphasis"
-                >
-                  <VIcon icon="mdi-folder-open-outline" size="36" />
-                  <p class="mt-2">空目录或无权限访问</p>
-                </div>
-              </VList>
-              <!-- 底部按钮 -->
-              <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 16px">
-                <VBtn @click="showLocalFolderModal = false" color="secondary">取消</VBtn>
-                <VBtn color="primary" @click="confirmLocalFolder" :disabled="loadingLocalFolders || !localFolderSelectionReady">
-                  <template #prepend><UiIcon name="select" /></template>
-                  确定选择此目录
-                </VBtn>
-              </div>
-            </div>
-          </div>
-        </VCardText>
-      </VCard>
-    </VDialog>
-    <VDialog
       v-model="showP115FolderModal"
       :fullscreen="isMobile"
       max-width="600"
       width="calc(100vw - 24px)"
+      scrollable
       @update:model-value="$event || (showP115FolderModal = false)"
     >
       <VCard class="settings-dialog">
-        <VCardTitle class="d-flex align-center justify-space-between ga-2">
-          <span class="text-h6">选择 115 云端目录</span>
-          <VBtn
-            icon="mdi-close" color="default"
-            variant="text"
-            size="small"
-            aria-label="关闭选择 115 云端目录"
-            @click="showP115FolderModal = false"
-          />
-        </VCardTitle>
-        <VCardText>
+        <VCardItem class="pe-16">
+          <template #prepend><VIcon icon="mdi-folder-outline" /></template>
+          <VCardTitle>选择 115 云端目录</VCardTitle>
+        </VCardItem>
+        <DialogCloseBtn aria-label="关闭选择 115 云端目录" @click="showP115FolderModal = false" />
+        <VDivider />
+        <VCardText class="pa-6">
           <div class="settings-loading">
             <VProgressLinear v-if="loadingP115Folders" indeterminate color="primary" class="mb-3" />
             <div class="d-flex ga-3 flex-column">
-              <div class="settings-input-group d-flex align-start ga-2">
-                <VTextField :model-value="currentP115Path || '根目录'" readonly></VTextField>
-                <VBtn color="primary" @click="fetchP115Folders(currentP115Cid)" icon>
-                  <template #default><VIcon :icon="RefreshIcon" /></template>
-                </VBtn>
-              </div>
+              <VTextField :model-value="currentP115Path || '根目录'" label="当前目录" readonly>
+                <template #append-inner>
+                  <VBtn icon="mdi-refresh" variant="text" size="small" aria-label="刷新云端目录" :loading="loadingP115Folders" @click="fetchP115Folders(currentP115Cid)" />
+                </template>
+              </VTextField>
               <VList style="max-height: 400px; overflow-y: auto; border-radius: 6px">
                 <VListItem
                   v-for="folder in p115Folders"
@@ -1732,16 +1554,15 @@
                   <p class="mt-2">空目录</p>
                 </div>
               </VList>
-              <div style="display: flex; justify-content: flex-end; gap: 12px; margin-top: 16px">
-                <VBtn @click="showP115FolderModal = false" color="secondary">取消</VBtn>
-                <VBtn color="primary" @click="confirmP115Folder" :disabled="loadingP115Folders || !p115FolderSelectionReady">
-                  <template #prepend><UiIcon name="select" /></template>
-                  确定选择此目录
-                </VBtn>
-              </div>
             </div>
           </div>
         </VCardText>
+        <VDivider />
+        <VCardActions class="app-dialog-actions">
+          <VSpacer />
+          <VBtn color="secondary" variant="tonal" @click="showP115FolderModal = false">取消</VBtn>
+          <VBtn color="primary" variant="flat" prepend-icon="mdi-check" :disabled="loadingP115Folders || !p115FolderSelectionReady" @click="confirmP115Folder">确定选择此目录</VBtn>
+        </VCardActions>
       </VCard>
     </VDialog>
   </VContainer>
@@ -2134,6 +1955,7 @@ import SettingCard from './general/SettingCard.vue';
 import EmbyMediaServerCard from './general/EmbyMediaServerCard.vue';
 import P115StorageCard from './general/P115StorageCard.vue';
 import LocalPathField from './general/LocalPathField.vue';
+import DialogCloseBtn from '@/components/theme/DialogCloseBtn.vue';
 import SettingsSearchResults from './general/SettingsSearchResults.vue';
 import { useSettingsSearch } from '@/composables/useSettingsSearch';
 import { useRoute } from 'vue-router';
@@ -2921,115 +2743,6 @@ const cookieAppLabel = computed(() => {
   return p115Info.value?.cookie_app_label || '未配置';
 });
 
-// --- 本地目录浏览器状态 ---
-const showLocalFolderModal = ref(false)
-const currentLocalPath = ref('')
-const localFolders = ref([])
-const loadingLocalFolders = ref(false)
-const currentLocalTargetField = ref('')
-const isCurrentLocalTargetArray = ref(false)
-let localFolderRequestVersion = 0;
-const loadedLocalFolder = ref(null);
-const localFolderSelectionReady = computed(() => !!loadedLocalFolder.value
-  && loadedLocalFolder.value.field === currentLocalTargetField.value
-  && loadedLocalFolder.value.isArray === isCurrentLocalTargetArray.value
-  && loadedLocalFolder.value.path === currentLocalPath.value);
-
-// 打开本地目录浏览器 (增强版)
-const openLocalFolderSelector = (targetField, isArray = false) => {
-    currentLocalTargetField.value = targetField
-    isCurrentLocalTargetArray.value = isArray
-
-    // 决定初始路径
-    let startPath = '/'
-    if (!isArray && configModel.value[targetField]) {
-        startPath = configModel.value[targetField]
-    } else if (isArray && configModel.value[targetField] && configModel.value[targetField].length > 0) {
-        // 如果是数组且有值，取最后一个值的父目录作为起点，方便连续添加
-        const lastPath = configModel.value[targetField][configModel.value[targetField].length - 1]
-        startPath = lastPath.substring(0, lastPath.lastIndexOf('/')) || '/'
-    }
-
-    currentLocalPath.value = startPath
-    showLocalFolderModal.value = true
-    fetchLocalFolders(currentLocalPath.value)
-}
-
-// 获取本地目录列表 (保持不变)
-const fetchLocalFolders = async (path) => {
-    const requestVersion = ++localFolderRequestVersion;
-    const requestedPath = String(path || '/');
-    const targetField = currentLocalTargetField.value;
-    const targetIsArray = isCurrentLocalTargetArray.value;
-    const isCurrentRequest = () => requestVersion === localFolderRequestVersion
-        && componentIsMounted.value && showLocalFolderModal.value
-        && targetField === currentLocalTargetField.value
-        && targetIsArray === isCurrentLocalTargetArray.value
-        && currentLocalPath.value === requestedPath;
-    currentLocalPath.value = requestedPath;
-    loadedLocalFolder.value = null;
-    localFolders.value = [];
-    loadingLocalFolders.value = true;
-    try {
-        const res = await axios.get('/api/p115/system/directories', { params: { path: requestedPath } });
-        if (!isCurrentRequest()) return;
-        if (res.data.code === 200 && typeof res.data.current_path === 'string' && Array.isArray(res.data.data)) {
-            localFolders.value = res.data.data;
-            currentLocalPath.value = res.data.current_path;
-            loadedLocalFolder.value = { field: targetField, isArray: targetIsArray, path: res.data.current_path };
-        } else {
-            message.error(res.data.message || '获取目录失败，尚未确认当前路径');
-        }
-    } catch (error) {
-        if (!isCurrentRequest()) return;
-        if (error.response && error.response.status === 403) {
-            message.error('没有权限访问该目录！');
-        } else if (error.response && error.response.status === 404) {
-            message.error('目录不存在！');
-        } else {
-            message.error('请求目录失败: ' + (error.response?.data?.message || error.message));
-        }
-    } finally {
-        if (requestVersion === localFolderRequestVersion) loadingLocalFolders.value = false;
-    }
-};
-
-// 点击列表中的文件夹 (保持不变)
-const selectLocalFolder = (folder) => {
-    fetchLocalFolders(folder.path)
-}
-
-// 确认选择 (增强版)
-const confirmLocalFolder = () => {
-    if (!componentIsMounted.value || !showLocalFolderModal.value) return;
-    if (loadingLocalFolders.value || !localFolderSelectionReady.value) {
-        message.warning('请先加载并确认当前目录，再保存路径。');
-        return;
-    }
-    const field = currentLocalTargetField.value
-    const path = currentLocalPath.value
-
-    if (isCurrentLocalTargetArray.value) {
-        // 如果是多选数组 (如 monitor_paths)
-        if (!configModel.value[field]) {
-            configModel.value[field] = []
-        }
-        // 防止重复添加
-        if (!configModel.value[field].includes(path)) {
-            configModel.value[field].push(path)
-            message.success(`已追加路径: ${path}`)
-        } else {
-            message.warning('该路径已存在列表中')
-        }
-    } else {
-        // 如果是单选字符串 (如 local_strm_root)
-        configModel.value[field] = path
-        message.success(`已选择路径: ${path}`)
-    }
-
-    showLocalFolderModal.value = false
-}
-
 // --- 115 云端目录浏览器状态 ---
 const showP115FolderModal = ref(false)
 const currentP115Cid = ref('0')
@@ -3597,7 +3310,6 @@ onUnmounted(() => {
   cookieQrcodeRequestVersion += 1;
   openApiQrcodeRequestVersion += 1;
   webAuthRequestVersion += 1;
-  localFolderRequestVersion += 1;
   p115FolderRequestVersion += 1;
   stopCookiePolling();
   stopPolling();
@@ -3616,6 +3328,8 @@ onUnmounted(() => {
 .storage-auth-row { display:grid; grid-template-columns:4.5rem minmax(0,1fr); gap:12px; margin-block-end:20px; }
 .storage-auth-row > div { min-width:0; }
 .storage-auth-label { margin-block-start:6px; white-space:nowrap; }
+.storage-auth-priority .storage-auth-label { align-self:start; }
+.storage-auth-priority :deep(.v-selection-control-group) { flex-wrap:wrap; }
 .storage-auth-radio { margin-block-end:20px; }
 .storage-auth-radio :deep(.v-input__control) { flex-direction:row; align-items:flex-start; gap:12px; }
 .storage-auth-radio :deep(.v-input__control > .v-label) { flex:0 0 4.5rem; margin:8px 0 0; white-space:nowrap; }
