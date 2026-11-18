@@ -15,7 +15,7 @@ pub use settings_recovery::{recover_pending, run_recovery};
 
 #[derive(Default)]
 pub struct Service {
-    gate: Mutex<()>,
+    pub(crate) gate: Mutex<()>,
     token: Mutex<Option<String>>,
     pub(crate) threads: Arc<crate::concurrency::Service>,
 }
@@ -808,13 +808,7 @@ async fn check_rename_scan_guard(
         let position = record["position"]
             .as_u64()
             .ok_or_else(|| blocked("待确认标记缺少本次日志位置".into()))?;
-        let logs = state
-            .emby(
-                Method::GET,
-                "System/Logs/embyserver.txt/Lines",
-                &[("Limit", "500".into())],
-                None,
-            )
+        let logs = crate::media_extra::refresh_log_window(state, position)
             .await
             .map_err(|error| blocked(format!("无法回读本次扫描日志：{}", error.1)))?;
         for id in ids {

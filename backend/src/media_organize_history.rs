@@ -4,6 +4,7 @@ use crate::{
     AppState,
     error::{ApiError, Result},
     media_edit::list,
+    media_paths,
     state::string,
 };
 use axum::{
@@ -234,11 +235,47 @@ fn valid_id(id: &str) -> bool {
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
 }
+/// Upgrade original MoviePilot receipts using only their own retained job snapshot.
+pub(crate) async fn migrate_file_names(tx: &mut sqlx::PgConnection) -> Result<()> {
+    let first_run = sqlx::query("INSERT INTO app_settings(setting_key,value_json) VALUES('history_source_filenames_v1','true') ON CONFLICT DO NOTHING")
+        .execute(&mut *tx).await?.rows_affected();
+    if first_run == 0 { return Ok(()); }
+    let snapshots: Vec<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT h.id, s.value_json#>>'{identity,source}', s.value_json#>>'{identity,cloud,name}'
+         FROM durable_jobs j
+         JOIN durable_job_steps s ON s.job_id=j.id AND starts_with(s.step_key,'plans:moviepilot_file:')
+         JOIN media_organize_history h ON h.item_id=s.value_json#>>'{identity,id}'
+            AND h.item_json->>'source_path'=s.value_json#>>'{identity,path}'
+            AND (j.spec_json#>'{payload,event,history_ids}') ? h.id
+         WHERE h.source='moviepilot' AND lower(h.item_json->>'file_name') LIKE '%.strm'").fetch_all(&mut *tx).await?;
+    let mut ids = Vec::new();
+    let mut names = Vec::new();
+    for (id, source, cloud_name) in snapshots {
+        if let Some(name) = [cloud_name, source].iter().flatten()
+            .find_map(|path| media_paths::media_file_name(path))
+        {
+            ids.push(id);
+            names.push(safe_text(&name));
+        }
+    }
+    sqlx::query("UPDATE media_organize_history h SET item_json=jsonb_set(item_json,'{file_name}',to_jsonb(f.name))
+        FROM unnest($1::text[], $2::text[]) f(id,name) WHERE h.id=f.id")
+        .bind(ids).bind(names).execute(tx).await?;
+    Ok(())
+}
+
 fn item_projection(item: &Value) -> Value {
     let id = string(item, "Id");
     let kind = string(item, "Type");
     let mut result = json!({"item_id": if valid_id(&id) && matches!(kind.as_str(), "Movie" | "Episode") {Some(id)} else {None},
         "name":safe_text(&string(item,"Name")), "item_type":kind});
+    let path = string(item, "Path");
+    if media_paths::extension(&path) == ".strm"
+        && let Some(source) = crate::media_info::item_source(item, &[&path])
+        && let Some(name) = media_paths::media_file_name(&string(source, "Path"))
+    {
+        result["file_name"] = json!(safe_text(&name));
+    }
     if result["item_type"] == "Movie" {
         let tmdb = string(&item["ProviderIds"], "Tmdb");
         if !tmdb.is_empty() && tmdb.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -286,7 +323,9 @@ async fn insert(
             .map(|name| safe_text(&name.to_string_lossy()))
             .unwrap_or_default()
     };
-    item["file_name"] = json!(file_name);
+    if item["file_name"].is_null() {
+        item["file_name"] = json!(file_name);
+    }
     sqlx::query("INSERT INTO media_organize_history(id,source,source_identity,item_id,item_json,status,message) VALUES($1,$2,$3,$4,$5,'processing','等待 ETK 入库处理')")
         .bind(&id).bind(source).bind(identity(path)).bind(item["item_id"].as_str()).bind(&item).execute(connection).await?;
     Ok(id)
@@ -357,9 +396,15 @@ pub async fn bind_item(state: &AppState, event: &Value, path: &str, item: &Value
     if ids.is_empty() {
         return Ok(());
     }
-    let projection = item_projection(item);
+    let mut projection = item_projection(item);
     if projection["item_id"].is_null() {
         return Ok(());
+    }
+    if projection.get("file_name").is_none()
+        && let Some(target) = media_paths::strm_target(path).await
+        && let Some(name) = media_paths::media_file_name(&target)
+    {
+        projection["file_name"] = json!(safe_text(&name));
     }
     let item_id = string(&projection, "item_id");
     sqlx::query("UPDATE media_organize_history SET item_id=$1,item_json=item_json || $2 WHERE id=ANY($3) AND source_identity=$4")

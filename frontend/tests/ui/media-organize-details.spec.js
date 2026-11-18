@@ -2,7 +2,7 @@ import { test, expect } from './fixtures.js';
 
 const historyPath = '/api/media_organize/history';
 const actionPath = '/api/actions/reorganize';
-const failed = { id: 'history-200', item_id: 'episode-200', item_type: 'Episode', name: '第二百集', series_name: '整理详情验证', season_number: 1, episode_number: 200, status: 'failed', source_path: '/media/整理详情验证/Season 01/S01E200.strm', message: '媒体信息提取失败：上游返回空结果。\n请检查媒体来源。', created_at: '2026-11-17T01:00:00Z' };
+const failed = { id: 'history-200', item_id: 'episode-200', item_type: 'Episode', name: '第二百集', series_name: '整理详情验证', season_number: 1, episode_number: 200, status: 'failed', file_name: '葫芦兄弟.Calabash Brothers.S01E12.1986.1440p.SDR.H264.AAC.2.0.mp4', source_path: '/media/整理详情验证/Season 01/S01E200.strm', message: '媒体信息提取失败：上游返回空结果。\n请检查媒体来源。', created_at: '2026-11-17T01:00:00Z' };
 const other = { id: 'history-other', item_id: 'movie-other', item_type: 'Movie', name: '另一条已选媒体', status: 'success', message: '媒体入库完成' };
 const receipt = request => ({ mode: request.body.mode, queued_count: 1, duplicate_count: 0, queue_ids: ['queue-200'], items: [{ id: 'queue-200', item_id: 'episode-200', mode: request.body.mode, status: 'queued' }] });
 
@@ -14,6 +14,11 @@ for (const mobile of [false, true]) {
     const list = page.getByTestId(mobile ? 'organize-items-mobile' : 'organize-items');
     await expect(list).toContainText('失败');
     await expect(list).not.toContainText(failed.message);
+    const row = list.locator(mobile ? '.history-card' : '.organize-record').filter({ hasText: failed.series_name });
+    await expect(row).not.toContainText('—');
+    const file = list.getByText(failed.file_name, { exact: true });
+    await expect(file).toBeVisible();
+    expect(await file.evaluate(el => el.scrollWidth <= el.clientWidth + 1 && el.scrollHeight <= el.clientHeight + 1)).toBe(true);
     const status = list.getByRole('button', { name: '失败，查看整理详情验证详情', exact: true });
     await status.focus();
     await status.press('Enter');

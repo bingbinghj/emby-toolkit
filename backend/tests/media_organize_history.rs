@@ -327,6 +327,40 @@ fn episode(id: &str) -> Value {
     json!({"Id":id,"Type":"Episode","Name":format!("本集-{id}"),"SeriesId":"series","SeriesName":"入库测试剧","ParentIndexNumber":1,"IndexNumber":2,"ImageTags":{"Primary":"frame"},"SeriesPrimaryImageTag":"series-poster","Path":format!("/media/{id}.strm"),"AccessToken":"must-not-store","ProviderIds":{"Tmdb":"private-extra"}})
 }
 
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL"]
+async fn strm_names_come_from_the_admitted_source_and_legacy_job_snapshot() {
+    let f = Fixture::new().await;
+    let mut item = episode("ep200");
+    let path = "/media/ep200.strm";
+    item["MediaSources"] = json!([
+        {"ItemId":"another","Path":"/media/wrong.mkv"},
+        {"ItemId":"ep200","Path":"https://media.test/watch/ep200.mp4?token=private"}
+    ]);
+    let ids = history::begin_emby(&f.state, "item.add", &item, path, None).await.unwrap();
+    let mut event = json!({"files":[path],"media_type":"tv"});
+    let mp = history::begin_moviepilot(&f.state, &event).await.unwrap();
+    event["history_ids"] = json!(mp);
+    history::bind_item(&f.state, &event, path, &item).await.unwrap();
+    assert!(f.rows().await.iter().all(|row| row["file_name"] == "ep200.mp4"));
+
+    // Re-create the two older receipts. Only the original job names one of them.
+    sqlx::query("UPDATE media_organize_history SET item_json=jsonb_set(item_json,'{file_name}',to_jsonb('ep200.strm'::text))")
+        .execute(&f.state.db).await.unwrap();
+    sqlx::query("INSERT INTO durable_jobs(id,spec_json,state_json) VALUES('job',$1,'{}')")
+        .bind(json!({"kind":"webhook","payload":{"event":event}})).execute(&f.state.db).await.unwrap();
+    sqlx::query("INSERT INTO durable_job_steps(job_id,step_key,value_json) VALUES('job','plans:moviepilot_file:sample',$1)")
+        .bind(json!({"identity":{"id":"ep200","path":path,"source":"https://media.test/watch/old%20copy.mkv?token=private"}}))
+        .execute(&f.state.db).await.unwrap();
+    sqlx::query("DELETE FROM app_settings WHERE setting_key='history_source_filenames_v1'").execute(&f.state.db).await.unwrap();
+    emby_toolkit::db::initialize(&f.state.db).await.unwrap();
+    let rows = f.rows().await;
+    assert!(rows.iter().any(|r| r["id"] == ids[0] && r["file_name"] == "ep200.strm"));
+    assert!(rows.iter().any(|r| r["id"] == mp[0] && r["file_name"] == "old copy.mkv" && r["source_path"] == path));
+    assert!(!rows.iter().any(|r| r.to_string().contains("private")));
+    f.close().await;
+}
+
 async fn finish_moviepilot_with_plans(
     f: &Fixture,
     event: &Value,

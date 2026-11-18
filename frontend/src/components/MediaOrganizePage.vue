@@ -53,8 +53,9 @@
                     <VBtn v-if="item.item_id" variant="text" color="default" class="media-title text-none px-0" :to="`/edit-media/${encodeURIComponent(item.item_id)}`">{{ itemTitle(item) }}</VBtn>
                     <div v-else class="font-weight-medium">{{ itemTitle(item) }}</div>
                     <div v-if="episodeLabel(item)" class="text-caption text-medium-emphasis">{{ episodeLabel(item) }}</div>
-                    <div class="text-caption text-medium-emphasis mt-1">{{ formatDate(item.created_at) }}</div>
-                    <div class="text-caption text-medium-emphasis">{{ item.library_name || '—' }} · {{ item.item_type === 'Movie' ? '电影' : '剧集' }}</div>
+                    <div v-if="mediaFileName(item)" class="organize-file-name text-caption text-medium-emphasis mt-1">{{ mediaFileName(item) }}</div>
+                    <div class="text-caption text-medium-emphasis">{{ formatDate(item.created_at) }}</div>
+                    <div class="text-caption text-medium-emphasis"><template v-if="item.library_name">{{ item.library_name }} · </template>{{ item.item_type === 'Movie' ? '电影' : '剧集' }}</div>
                     <VChip tag="button" type="button" size="small" variant="tonal" :color="statusPresentation(item).color" class="mt-2" :aria-label="`${statusPresentation(item).title}，查看${itemTitle(item)}详情`" @click.stop="openDetails(item)">{{ statusPresentation(item).title }}</VChip>
                     <div v-if="!item.item_id" class="text-caption text-medium-emphasis mt-1">尚未关联媒体，暂不能重新整理。</div>
                   </div>
@@ -73,7 +74,7 @@
               <VCheckbox :model-value="selectedIds.includes(item.id)" :disabled="!canSelectRecord(item)" :aria-label="`选择 ${itemTitle(item)}`" density="compact" hide-details @update:model-value="toggleSelection(item, $event)" />
               <VAvatar rounded width="42" height="63"><VImg v-if="poster(item)" :src="poster(item)" :alt="itemTitle(item)" cover /><VIcon v-else icon="mdi-movie-open-outline" /></VAvatar>
               <div class="organize-media-copy"><VBtn v-if="item.item_id" variant="text" color="default" class="media-title text-none px-0" :to="`/edit-media/${encodeURIComponent(item.item_id)}`">{{ itemTitle(item) }}</VBtn><div v-else class="font-weight-medium">{{ itemTitle(item) }}</div><div class="text-caption text-medium-emphasis">{{ episodeLabel(item) || (item.item_type === 'Movie' ? '电影' : '剧集') }}</div><div v-if="!item.item_id" class="text-caption text-medium-emphasis">尚未关联媒体</div></div>
-              <div class="organize-record-meta text-caption text-medium-emphasis"><div>{{ item.library_name || '—' }}</div><div v-if="item.file_name" :title="item.file_name" class="organize-file-name">{{ item.file_name }}</div><div>{{ formatDate(item.created_at) }}</div></div>
+              <div class="organize-record-meta text-caption text-medium-emphasis"><div v-if="item.library_name">{{ item.library_name }}</div><div v-if="mediaFileName(item)" :title="mediaFileName(item)" class="organize-file-name">{{ mediaFileName(item) }}</div><div>{{ formatDate(item.created_at) }}</div></div>
               <div class="organize-record-status"><VChip tag="button" type="button" size="small" variant="tonal" :color="statusPresentation(item).color" :aria-label="`${statusPresentation(item).title}，查看${itemTitle(item)}详情`" @click.stop="openDetails(item)">{{ statusPresentation(item).title }}</VChip></div>
               <VMenu location="bottom end"><template #activator="{ props }"><VBtn v-bind="props" icon="mdi-dots-vertical" variant="text" color="default" :aria-label="`${itemTitle(item)} 操作`" /></template><VList min-width="180"><VListItem title="重新整理" prepend-icon="mdi-redo-variant" :disabled="!canReorganizeRecord(item)" @click="openRecordConfirmation(item, 'reprocess')" /><VListItem title="重新刮削" prepend-icon="mdi-movie-search-outline" :disabled="!canReorganizeRecord(item)" @click="openRecordConfirmation(item, 'rescrape')" /><VListItem v-if="item.item_id" title="媒体信息编辑" prepend-icon="mdi-pencil-outline" :to="`/edit-media/${encodeURIComponent(item.item_id)}`" /><VListItem title="删除" prepend-icon="mdi-trash-can-outline" :disabled="!canSelectRecord(item)" @click="openDeleteConfirmation(item)" /></VList></VMenu>
             </VCard>
@@ -98,7 +99,8 @@
         <VDivider />
         <VCardText class="organize-detail-content">
           <div class="text-subtitle-1 font-weight-medium">{{ itemTitle(detailItem) }}<span v-if="episodeLabel(detailItem)" class="text-body-2 text-medium-emphasis ms-2">{{ episodeLabel(detailItem) }}</span></div>
-          <div><strong>文件：</strong>{{ detailItem.source_path || detailItem.file_name || '—' }}</div>
+          <div v-if="mediaFileName(detailItem)"><strong>文件：</strong>{{ mediaFileName(detailItem) }}</div>
+          <div v-if="detailItem.source_path"><strong>入库路径：</strong>{{ detailItem.source_path }}</div>
           <div v-if="detailItem.library_name"><strong>媒体库：</strong>{{ detailItem.library_name }}</div>
           <div><strong>开始时间：</strong>{{ formatDate(detailItem.created_at) }}</div>
           <div v-if="detailItem.completed_at"><strong>完成时间：</strong>{{ formatDate(detailItem.completed_at) }}</div>
@@ -206,7 +208,8 @@ const selectablePageItems = computed(() => items.value.filter(isDeletableRecord)
 const pageSelectedCount = computed(() => selectablePageItems.value.filter(item => selectedIds.value.includes(item.id)).length);
 const allPageSelected = computed(() => selectablePageItems.value.length > 0 && pageSelectedCount.value === selectablePageItems.value.length);
 const selectPage = enabled => updateSelection(enabled ? [...selectedIds.value, ...selectablePageItems.value.map(item => item.id)] : selectedIds.value.filter(id => !selectablePageItems.value.some(item => item.id === id)));
-const itemTitle = item => (item.item_type === 'Episode' ? item.series_name || item.name : item.name) || '未知媒体';
+const mediaFileName = item => item.file_name?.replace(/\.strm$/i, '') || '';
+const itemTitle = item => (item.item_type === 'Episode' && item.series_name) || (item.name === item.file_name ? mediaFileName(item) : item.name) || '未知媒体';
 const episodeLabel = item => {
   if (item.item_type !== 'Episode') return '';
   const season = Number.isInteger(item.season_number) ? `S${String(item.season_number).padStart(2, '0')}` : '';
@@ -409,7 +412,7 @@ onBeforeUnmount(() => { active = false; ++itemSequence; clearTimeout(searchTimer
 .organize-record > .v-input { flex: 0 0 auto; }
 .organize-record--selected { outline: 1px solid rgba(var(--v-theme-primary), 0.45); outline-offset: -1px; }
 .organize-record-meta { flex: 0 1 28%; min-width: 0; }
-.organize-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.organize-file-name { white-space: normal; overflow-wrap: anywhere; }
 .organize-record-status { flex: 0 0 auto; min-width: 64px; text-align: center; }
 .organize-items-desktop { background: transparent; }
 .organize-items-desktop :deep(.v-table__wrapper) { scrollbar-gutter: stable; }

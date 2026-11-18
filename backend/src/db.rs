@@ -45,6 +45,7 @@ pub async fn initialize(pool: &PgPool) -> Result<()> {
     sqlx::raw_sql(include_str!("../assets/schema.sql"))
         .execute(&mut *transaction)
         .await?;
+    crate::media_organize_history::migrate_file_names(&mut transaction).await?;
     transaction.commit().await?;
     Ok(())
 }

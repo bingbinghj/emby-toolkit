@@ -700,12 +700,7 @@ async fn renamed_scan(
     loop {
         let logs = tokio::time::timeout_at(
             deadline,
-            state.emby(
-                reqwest::Method::GET,
-                "System/Logs/embyserver.txt/Lines",
-                &[("Limit", "500".into())],
-                None,
-            ),
+            crate::media_extra::refresh_log_window(state, traces.iter().find(|(_, _, done)| !done).unwrap().1.position()),
         )
         .await
         .map_err(|_| ApiError::bad("改名目录扫描完成日志读取超时"))??;
@@ -1301,25 +1296,6 @@ fn sample_id(id: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-fn sample_media_name(raw: &str) -> Option<String> {
-    let path = crate::media_paths::clean(raw);
-    let path = if path.to_lowercase().ends_with(".strm") {
-        std::path::Path::new(&path)
-            .with_extension("")
-            .to_string_lossy()
-            .into_owned()
-    } else {
-        path
-    };
-    let ext = crate::media_paths::extension(&path);
-    if ext.is_empty() || ext == ".strm" {
-        return None;
-    }
-    std::path::Path::new(&path)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-}
-
 async fn sample_source(state: &AppState, item: &Value) -> Result<String> {
     let path = string(item, "Path");
     let target = crate::media_paths::strm_target(&path)
@@ -1337,17 +1313,17 @@ async fn sample_source(state: &AppState, item: &Value) -> Result<String> {
         && !string(source, "Container")
             .trim()
             .eq_ignore_ascii_case("strm")
-        && let Some(name) = sample_media_name(&string(source, "Path"))
+        && let Some(name) = crate::media_paths::media_file_name(&string(source, "Path"))
     {
         return Ok(name);
     }
     if crate::media_paths::extension(&path) != ".strm"
-        && let Some(name) = sample_media_name(&path)
+        && let Some(name) = crate::media_paths::media_file_name(&path)
     {
         return Ok(name);
     }
     if crate::media_paths::extension(&target) != ".strm"
-        && let Some(name) = sample_media_name(&target)
+        && let Some(name) = crate::media_paths::media_file_name(&target)
     {
         return Ok(name);
     }
@@ -1363,11 +1339,11 @@ async fn sample_source(state: &AppState, item: &Value) -> Result<String> {
     let pc = crate::fingerprints::pickcode(&target);
     if let Some(cache) = crate::fingerprints::cached(state, pc.as_deref(), &candidates).await?
         && crate::media_paths::extension(&string(&cache, "name")) != ".strm"
-        && let Some(name) = sample_media_name(&string(&cache, "name"))
+        && let Some(name) = crate::media_paths::media_file_name(&string(&cache, "name"))
     {
         return Ok(name);
     }
-    if let Some(name) = sample_media_name(&path) {
+    if let Some(name) = crate::media_paths::media_file_name(&path) {
         return Ok(name);
     }
     Err(ApiError::bad("最近入库媒体无法确定真实源文件名及扩展名"))
@@ -2091,15 +2067,15 @@ mod sample_tests {
     #[test]
     fn preview_source_names_decode_urls_without_guessing_an_unknown_extension() {
         assert_eq!(
-            sample_media_name("https://media.test/Title%20Name.2026.mp4?token=redacted"),
+            crate::media_paths::media_file_name("https://media.test/Title%20Name.2026.mp4?token=redacted"),
             Some("Title Name.2026.mp4".into())
         );
         assert_eq!(
-            sample_media_name("/media/Title.mkv.strm"),
+            crate::media_paths::media_file_name("/media/Title.mkv.strm"),
             Some("Title.mkv".into())
         );
-        assert_eq!(sample_media_name("/media/Title.strm"), None);
-        assert_eq!(sample_media_name("https://media.test/d/abc123"), None);
+        assert_eq!(crate::media_paths::media_file_name("/media/Title.strm"), None);
+        assert_eq!(crate::media_paths::media_file_name("https://media.test/d/abc123"), None);
     }
 
     #[tokio::test]

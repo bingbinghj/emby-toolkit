@@ -218,13 +218,9 @@ async fn metadata_target_details(
     Ok((checked, live))
 }
 
-/// Finish a submitted metadata refresh without importing or replacing media.
-pub(crate) async fn finish_saved_guard(
-    state: &AppState,
-    recovery: &Path,
-    context: &JobContext,
-) -> Result<()> {
-    let mut record = recovery_record(recovery).await?;
+async fn load_saved_guard(
+    state: &AppState, recovery: &Path, record: &mut Value, context: &JobContext,
+) -> Result<Guard> {
     context.ensure_server(state).await?;
     let connection = connection(&*state.config.read().await);
     if record["connection_sha256"]
@@ -299,7 +295,7 @@ pub(crate) async fn finish_saved_guard(
     for (path, _) in requested.values() {
         json_paths.insert(tokio::fs::canonicalize(path).await?);
     }
-    let guard = Guard {
+    Ok(Guard {
         targets,
         observations: serde_json::from_value(record["observations"].clone())
             .map_err(|_| conflict("原媒体保护观察记录不完整"))?,
@@ -314,7 +310,18 @@ pub(crate) async fn finish_saved_guard(
         scope: BTreeMap::new(),
         selected_ids: vec![],
         require_clear_scope: record["require_clear_scope"] != false,
-    };
+    })
+}
+
+/// Finish a submitted metadata refresh without importing or replacing media.
+pub(crate) async fn finish_saved_guard(
+    state: &AppState,
+    recovery: &Path,
+    context: &JobContext,
+) -> Result<()> {
+    let mut record = recovery_record(recovery).await?;
+    let guard = load_saved_guard(state, recovery, &mut record, context).await?;
+    let owners = guard.targets.iter().map(|target| target.id.as_str()).collect::<BTreeSet<_>>();
     let finishing = JobContext::for_recovery(Some(context)).await;
     let pending = recovery.join("pending-scan.json");
     let has_pending_scan = tokio::fs::try_exists(&pending).await?;
@@ -399,6 +406,71 @@ pub(crate) async fn finish_saved_guard(
         &state.data_dir.join("backups/media-info-conflicts"),
     )
     .await
+}
+
+/// A later admission may close an earlier ingest guard only after its original
+/// resources and settings independently pass readback. Never replay old writes.
+pub(crate) async fn check_previous_admissions(
+    state: &AppState, ids: &[String], context: &JobContext,
+) -> Result<()> {
+    let root = state.data_dir.join("backups/media-info-reload");
+    let mut entries = match tokio::fs::read_dir(&root).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    while let Some(entry) = entries.next_entry().await? {
+        context.checkpoint().await?;
+        let path = entry.path();
+        if !entry.file_type().await?.is_dir() || !tokio::fs::try_exists(path.join("media-reload.json")).await? {
+            continue;
+        }
+        let result = async {
+            let mut record = recovery_record(&path).await?;
+            if record["preparation_kind"] != "ingest-resource-guard" || record["require_clear_scope"] != true
+                || !media_edit::list(&record["target_ids"]).iter().any(|id| ids.iter().any(|candidate| id == candidate))
+            {
+                return Ok(());
+            }
+            let owner = string(&record, "owner_task_id");
+            if owner == context.id || owner.is_empty() { return Ok(()); }
+            let finished: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM durable_jobs
+                WHERE id=$1 AND state_json->>'state' IN ('completed','completed_with_warnings','failed','cancelled'))")
+                .bind(owner).fetch_one(&state.db).await?;
+            if !finished { return Ok(()); }
+            let _settings = state.strm.gate.lock().await;
+            let original = crate::media_recovery::read_json(&path.join("original-settings.json")).await?;
+            if !crate::strm::valid_recovery_settings(&original)
+                || !crate::strm::matches(&crate::strm::config(state).await?, &original)
+            {
+                return Err(conflict("原配置尚未通过回读"));
+            }
+            if tokio::fs::try_exists(path.join("pending-scan.json")).await? {
+                let scan = crate::media_recovery::read_json(&path.join("pending-scan.json")).await?;
+                let position = scan["position"].as_u64().ok_or_else(|| conflict("原刷新缺少日志位置"))?;
+                let scan_ids = scan["ids"].as_array().filter(|ids| !ids.is_empty()).ok_or_else(|| conflict("原刷新缺少目标"))?;
+                let logs = crate::media_extra::refresh_log_window(state, position).await?;
+                for id in scan_ids {
+                    let id = id.as_str().ok_or_else(|| conflict("原刷新目标无效"))?;
+                    if !crate::media_extra::RefreshTrace::new(position).feed(id, &logs)? {
+                        return Err(conflict("原目标刷新尚未确认完成"));
+                    }
+                }
+            }
+            let guard = load_saved_guard(state, &path, &mut record, context).await?;
+            guard.verify(state, context).await?;
+            guard.verify_unchanged_json().await?;
+            context.checkpoint().await?;
+            let marker = crate::media_recovery::mark_verified(&path, &record["target_ids"]).await?;
+            crate::media_recovery::cleanup_verified(&path, &marker, &state.data_dir.join("backups/media-info-conflicts")).await?;
+            tracing::info!("前次入库媒体、原资源和神医设置已验收，已清理恢复备份 {}", path.display());
+            Ok::<(), ApiError>(())
+        }.await;
+        if let Err(error) = result {
+            tracing::debug!("前次入库备份继续保留 {}：{}", path.display(), error.1);
+        }
+    }
+    Ok(())
 }
 
 impl Guard {

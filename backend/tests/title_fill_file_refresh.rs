@@ -361,6 +361,9 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
                 .get("Limit")
                 .and_then(|v| v.parse::<usize>().ok())
                 .unwrap_or(500);
+            if limit > 0 && &*h.fault.lock().await == "lost-log-response" {
+                return StatusCode::BAD_REQUEST.into_response();
+            }
             return Json(json!({"TotalRecordCount":lines.len(),"Items":lines.iter().rev().take(limit).cloned().collect::<Vec<_>>()})).into_response();
         }
         if path == "/web/ConfigurationPages" {
@@ -653,9 +656,11 @@ async fn api(State(h): State<Host>, request: Request<Body>) -> Response {
                 h.refresh_ready_checks.lock().await.push((refresh_id.clone(), ready));
                 h.refresh_saw_ready_titles.store(ready, Ordering::SeqCst);
                 h.refresh_accepted.store(true, Ordering::SeqCst);
-                h.refresh_log.lock().await.push(format!(
-                    "Info ProviderManager: RefreshItem Start: {refresh_id} item"
-                ));
+                let mut log = h.refresh_log.lock().await;
+                log.push(format!("Info ProviderManager: RefreshItem Start: {refresh_id} item"));
+                if fault == "busy-log" {
+                    log.extend(std::iter::repeat_n("Unrelated log entry".to_owned(), 600));
+                }
             }
             if fault == "change-other-setting" {
                 h.configuration.lock().await["OtherOption"] = json!("changed elsewhere");
@@ -1100,13 +1105,6 @@ impl Fixture {
         let writes = self.host.configuration_writes.lock().await.clone();
         let guard_violations = self.host.guard_violations.load(Ordering::SeqCst);
         let fault = self.host.fault.lock().await.clone();
-        let recoveries = self.state.data_dir.join("backups/media-info-reload");
-        let pending_restore = std::fs::read_dir(&recoveries).ok().is_some_and(|entries| {
-            entries.flatten().any(|entry| {
-                entry.path().join("media-reload.json").is_file()
-                    || entry.path().join("pending-scan.json").is_file()
-            })
-        });
         self.state.jobs.shutdown().await;
         self.server.abort();
         self.state.db.close().await;
@@ -1129,33 +1127,18 @@ impl Fixture {
             "guard must cover JSON preparation, refresh and readback"
         );
         if let Some(original) = original_configuration {
-            if pending_restore {
-                assert!(
-                    configuration["ExclusiveControlFeatures"]
-                        .as_str()
-                        .unwrap()
-                        .split(',')
-                        .any(|flag| flag == "IgnoreFileChange")
-                );
-                assert_eq!(configuration["PersistMediaInfoMode"], "Restore");
-            }
             for key in [
                 "ExclusiveControlFeatures",
                 "PersistMediaInfoMode",
                 "LibraryScope",
                 "MediaInfoJsonRootFolder",
             ] {
-                if pending_restore
-                    && matches!(key, "ExclusiveControlFeatures" | "PersistMediaInfoMode")
-                {
-                    continue;
-                }
                 assert_eq!(
                     configuration[key], original[key],
                     "original {key} must be restored"
                 );
             }
-            if fault != "change-other-setting" && !pending_restore {
+            if fault != "change-other-setting" {
                 assert_eq!(configuration, original);
             }
             for write in &writes {
@@ -1193,11 +1176,7 @@ impl Fixture {
                 }
                 assert_eq!(
                     writes.last().unwrap()["ExclusiveControlFeatures"],
-                    if pending_restore {
-                        configuration["ExclusiveControlFeatures"].clone()
-                    } else {
-                        original["ExclusiveControlFeatures"].clone()
-                    }
+                    original["ExclusiveControlFeatures"]
                 );
             }
         } else {
@@ -1856,6 +1835,54 @@ async fn cancellation_after_real_refresh_acceptance_keeps_ignore_until_completio
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn refresh_completion_is_verified_across_a_burst_of_unrelated_log_entries() {
+    let f = Fixture::new(&["gaia"]).await;
+    f.make_movie().await;
+    *f.host.fault.lock().await = "busy-log".into();
+    let task = f.start_real_finalize().await;
+    let result = f.wait_job(&task).await;
+    assert_eq!(result["result"]["title_fill"]["completed"], true, "{result}");
+    assert!(f.host.refresh_log.lock().await.len() > 500);
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn next_admission_closes_the_failed_guard_only_after_original_resources_match() {
+    let f = Fixture::new(&["gaia"]).await;
+    f.make_movie().await;
+    // A BIF makes the movie's existing resources part of the ingest guard.
+    let root = f.state.data_dir.join("backups/media-info-reload");
+    *f.host.fault.lock().await = "lost-log-response".into();
+    let state = f.state.clone();
+    let first = f.state.jobs.submit_persistent_response(
+        "original admission", emby_toolkit::jobs::JobSpec::new("webhook", json!({})),
+        move |ctx| async move { Ok((200, webhook::finalize(&state, "10001", &[], false, &ctx).await?)) },
+    ).await.unwrap();
+    let _ = f.wait_job(&first).await;
+    let dir = std::fs::read_dir(&root).unwrap().flatten()
+        .map(|entry| entry.path()).find(|path| path.join("media-reload.json").is_file()).unwrap();
+    let marker = dir.join("media-reload.json");
+    let record: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    assert_eq!(record["preparation_kind"], "ingest-resource-guard", "{record}");
+    *f.host.fault.lock().await = String::new();
+    let formal = f.directory.path().join("10001-mediainfo.json");
+    let original = std::fs::read(&formal).unwrap();
+    let mut changed: Value = serde_json::from_slice(&original).unwrap();
+    changed[0]["ChangedAfterFailure"] = json!(true);
+    std::fs::write(&formal, serde_json::to_vec(&changed).unwrap()).unwrap();
+    let second = f.start_real_finalize().await;
+    f.wait_job(&second).await;
+    assert!(marker.exists(), "keep the backup while formal JSON differs");
+    std::fs::write(formal, original).unwrap();
+    let third = f.start_real_finalize().await;
+    let result = f.wait_job(&third).await;
+    assert!(!dir.exists(), "expected automatic cleanup after matching readback: {result}");
+    f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
 async fn asynchronous_file_refresh_waits_for_live_titles_without_repeating_notifications() {
     let f = Fixture::new(&["raw", "raw"]).await;
     *f.host.fault.lock().await = "delayed".into();
@@ -2144,13 +2171,13 @@ async fn failed_or_ineffective_refresh_never_claims_live_titles_are_updated() {
         assert!(
             report["error"]
                 .as_str()
-                .is_some_and(|error| error.contains("尚未确认媒体刷新结束")),
+                .is_some_and(|error| error.contains("媒体刷新尚未验收")),
             "{fault}: {report}"
         );
         assert_ne!(report["completed"], true, "{fault}: {report}");
         assert!(
-            protected && pending,
-            "incomplete import must retain protection and recovery data"
+            !protected && pending,
+            "incomplete import restores the settings and retains recovery data"
         );
         assert_ne!(live["10001"]["MediaStreams"][1]["Title"], "日语");
     }

@@ -80,7 +80,7 @@ pub(crate) async fn finalize_metadata_only_targets(
         context.checkpoint().await?;
         let scoped = context.scoped(&format!("metadata-only:{}", string(&target, "Id")));
         metadata_only::apply(state, &target, &scoped, &nfos).await?;
-        crate::media_images::sync_local_images(state, &target, &scoped).await?;
+        Box::pin(crate::media_images::sync_local_images(state, &target, &scoped)).await?;
     }
     guard.verify(state, context).await?;
     Ok(())
@@ -955,14 +955,7 @@ pub(crate) async fn wait_item_refresh(
             }
             if let Some(log_trace) = trace.as_mut() {
                 let completed = async {
-                    let logs = state
-                        .emby(
-                            Method::GET,
-                            "System/Logs/embyserver.txt/Lines",
-                            &[("Limit", "500".into())],
-                            None,
-                        )
-                        .await?;
+                    let logs = crate::media_extra::refresh_log_window(state, log_trace.position()).await?;
                     log_trace.feed(id, &logs)
                 }
                 .await;

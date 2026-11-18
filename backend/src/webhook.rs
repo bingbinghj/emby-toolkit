@@ -1290,7 +1290,7 @@ pub async fn process_emby(
         collect_ingest_notice(&mut notices, &current, &report["title_fill"], &episodes);
         report
     } else {
-        let report = finalize_inner(
+        let report = Box::pin(finalize_inner(
             state,
             &id,
             &episodes,
@@ -1298,7 +1298,7 @@ pub async fn process_emby(
             context,
             Some(&mut notices),
             None,
-        )
+        ))
         .await?;
         context.complete("emby_finalized", &report).await?;
         report
@@ -2432,7 +2432,7 @@ async fn process_moviepilot_inner(
                             );
                             Ok(report)
                         } else {
-                            let report = finalize_inner(
+                            let report = Box::pin(finalize_inner(
                                 state,
                                 &id,
                                 &episodes,
@@ -2440,7 +2440,7 @@ async fn process_moviepilot_inner(
                                 context,
                                 Some(&mut notices),
                                 Some(&changed),
-                            )
+                            ))
                             .await;
                             if let Ok(report) = &report {
                                 context.complete(&key, report).await?;
@@ -2579,7 +2579,7 @@ pub async fn finalize(
     updated: bool,
     context: &crate::jobs::JobContext,
 ) -> Result<Value> {
-    finalize_inner(state, id, episode_ids, updated, context, None, None).await
+    Box::pin(finalize_inner(state, id, episode_ids, updated, context, None, None)).await
 }
 async fn finalize_inner(
     state: &AppState,
@@ -2982,6 +2982,14 @@ async fn finalize_inner(
             context,
         )
         .await?;
+    }
+    if refresh_completed.load(std::sync::atomic::Ordering::Acquire) && !targets.is_empty() {
+        if let Err(error) = Box::pin(crate::media_reload::ingest_preservation::check_previous_admissions(
+            state, &targets, context,
+        )).await {
+            context.checkpoint().await?;
+            tracing::warn!("前次入库备份核对未完成：{}", error.1);
+        }
     }
     let notification = if let Some(notices) = notices {
         collect_ingest_notice(notices, &item, &title_report, episode_ids);

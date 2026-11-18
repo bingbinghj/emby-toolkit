@@ -41,6 +41,25 @@ pub fn extension(raw: &str) -> String {
         String::new()
     }
 }
+pub(crate) fn media_file_name(raw: &str) -> Option<String> {
+    let path = clean(raw);
+    let path = if path.to_lowercase().ends_with(".strm") {
+        std::path::Path::new(&path)
+            .with_extension("")
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        path
+    };
+    let ext = extension(&path);
+    if ext.is_empty() || ext == ".strm" {
+        return None;
+    }
+    std::path::Path::new(&path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
 fn add(paths: &mut Vec<String>, value: String) {
     if !value.is_empty() && !paths.contains(&value) {
         paths.push(value);

@@ -283,6 +283,17 @@ async fn upload_image(
         failures.join("；")
     )))
 }
+// RGB beneath a fully transparent PNG pixel is not part of the displayed image.
+fn visible_pixels(image: image::DynamicImage) -> image::RgbaImage {
+    let mut pixels = image.into_rgba8();
+    for pixel in pixels.pixels_mut() {
+        if pixel[3] == 0 {
+            *pixel = image::Rgba([0; 4]);
+        }
+    }
+    pixels
+}
+
 fn pixel_difference(a: &image::RgbaImage, b: &image::RgbaImage) -> Option<f64> {
     if a.dimensions() != b.dimensions() {
         return None;
@@ -306,16 +317,16 @@ async fn verify_image(
         .map(image::load_from_memory)
         .transpose()
         .map_err(|_| ApiError::bad("待验收图片无法解码"))?
-        .map(|image| image.to_rgba8());
+        .map(visible_pixels);
     let previous = previous
         .and_then(|bytes| image::load_from_memory(bytes).ok())
-        .map(|image| image.to_rgba8());
+        .map(visible_pixels);
     let mut error = "原生图片验收不一致".to_string();
     for attempt in 0..5 {
         match read_image(state, url, key).await {
             Ok(None) if expected.is_none() => return Ok(()),
             Ok(Some(bytes)) if expected.is_some() => {
-                let actual = image::load_from_memory(&bytes).unwrap().to_rgba8();
+                let actual = visible_pixels(image::load_from_memory(&bytes).unwrap());
                 let expected = expected.as_ref().unwrap();
                 if let Some(difference) = pixel_difference(&actual, expected) {
                     // Allow JPEG recompression, but never accept an unchanged prior image
@@ -389,9 +400,7 @@ pub(crate) async fn sync_local_images(
             Err(error) => return Err(error.into()),
         };
         // 缓存中无有效图像的占位文件不属于本次已经下载成功的图片。
-        if image::load_from_memory(&bytes).is_err() {
-            continue;
-        }
+        let Ok(local_image) = image::load_from_memory(&bytes) else { continue; };
         let scoped = context.scoped(&format!("native-image:{kind}"));
         let url = format!(
             "{}/Items/{id}/Images/{kind}",
@@ -426,7 +435,10 @@ pub(crate) async fn sync_local_images(
             .map(|value| base64::Engine::decode(&base64::engine::general_purpose::STANDARD, value))
             .transpose()
             .map_err(|_| ApiError::bad("原图片定点更新记录无效，未覆盖当前图片"))?;
-        let imported = if native.as_deref() == Some(bytes.as_slice()) {
+        let already_matches = native.as_deref() == Some(bytes.as_slice())
+            || native.as_deref().and_then(|data| image::load_from_memory(data).ok())
+                .is_some_and(|native_image| visible_pixels(native_image) == visible_pixels(local_image));
+        let imported = if already_matches {
             true
         } else if native != previous {
             verify_image(state, &url, &key, Some(&bytes), previous.as_deref())
@@ -444,7 +456,10 @@ pub(crate) async fn sync_local_images(
                 .to_mime_type();
             upload_image(state, &url, &key, mime, &bytes).await?;
         }
-        verify_image(state, &url, &key, Some(&bytes), previous.as_deref()).await?;
+        if !imported {
+            verify_image(state, &url, &key, Some(&bytes), previous.as_deref()).await
+                .map_err(|error| ApiError(error.0, format!("{id} {kind}：{}", error.1)))?;
+        }
         let live = details(
             state,
             &id,
@@ -753,4 +768,17 @@ pub(crate) async fn resume_cleanup(state: &AppState, context: &crate::jobs::JobC
     }
     verify_image(state,&url,&key,original_native.as_deref(),Some(&replacement)).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn invisible_png_rgb_is_ignored_but_visible_color_and_alpha_are_verified() {
+        let pixels = |rgb: u8, alpha: u8| visible_pixels(image::DynamicImage::ImageRgba8(
+            image::RgbaImage::from_pixel(2, 2, image::Rgba([rgb, 0, 0, alpha]))));
+        assert_eq!(pixels(0, 0), pixels(255, 0));
+        assert_ne!(pixels(0, 1), pixels(255, 1));
+        assert_ne!(pixels(255, 0), pixels(255, 1));
+    }
 }

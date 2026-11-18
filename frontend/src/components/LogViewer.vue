@@ -1,7 +1,7 @@
 <template>
   <section class="history-log-view" aria-label="历史日志">
     <div class="history-search-toolbar">
-      <VTextField v-model="searchQuery" label="在所有日志文件中搜索" placeholder="输入关键词" clearable hide-details density="compact" prepend-inner-icon="mdi-magnify" :disabled="isLoading" @keyup.enter="executeSearch" />
+      <VTextField v-model="searchQuery" :mobile-layout="false" label="在所有日志文件中搜索" placeholder="输入关键词" clearable hide-details density="compact" prepend-inner-icon="mdi-magnify" :disabled="isLoading" @keyup.enter="executeSearch" />
       <VBtn variant="tonal" prepend-icon="mdi-magnify" :loading="isSearching" :disabled="isLoading" @click="executeSearch">搜索</VBtn>
     </div>
     <VRadioGroup v-model="searchMode" inline hide-details :disabled="isLoadingFiles || isLoadingContent">
@@ -10,8 +10,8 @@
     </VRadioGroup>
     <div class="history-toolbar">
       <VBtn v-if="isSearchMode" variant="tonal" size="small" prepend-icon="mdi-arrow-left" @click="clearSearch">返回文件浏览</VBtn>
-      <VSelect v-else v-model="selectedFile" :items="logFiles" label="日志文件" :loading="isLoadingFiles" :disabled="isLoading" hide-details density="compact" class="history-file-select" @update:model-value="filename => fetchLogContent(filename)" />
-      <VSelect v-model="levelFilter" :items="levelOptions" label="日志级别" hide-details density="compact" class="history-level-select" />
+      <VSelect v-else v-model="selectedFile" :mobile-layout="false" :items="logFiles" label="日志文件" :loading="isLoadingFiles" :disabled="isLoading" hide-details density="compact" class="history-file-select" @update:model-value="filename => fetchLogContent(filename)" />
+      <VSelect v-model="levelFilter" :mobile-layout="false" :items="levelOptions" label="日志级别" hide-details density="compact" class="history-level-select" />
       <VBtn icon="mdi-refresh" variant="text" size="small" aria-label="刷新历史日志" :loading="isLoading" @click="refreshLogs" />
     </div>
     <VAlert v-if="errorMessage" type="error" variant="tonal">{{ errorMessage }}</VAlert>
@@ -22,7 +22,7 @@
     </div>
     <div v-if="!isSearchMode && logPages > 1" class="history-pagination">
       <span class="text-caption text-medium-emphasis">第 {{ logPage }} / {{ logPages }} 页，共 {{ logTotalLines }} 行</span>
-      <VPagination :model-value="logPage" :length="logPages" :total-visible="smAndDown ? 3 : 5" :disabled="isLoading || loadedFile !== selectedFile" size="small" show-first-last-page @update:model-value="changePage" />
+      <VPagination :model-value="logPage" :length="logPages" :total-visible="smAndDown ? 3 : 5" :disabled="isLoading || loadedFile !== selectedFile" size="small" :show-first-last-page="!xs" @update:model-value="changePage" />
     </div>
   </section>
 </template>
@@ -35,7 +35,7 @@ import LogRecord from './LogRecord.vue';
 import { matchesLogRecord } from '@/utils/logRecords';
 
 const props = defineProps({ show: { type: Boolean, default: false } });
-const { smAndDown } = useDisplay();
+const { xs, smAndDown } = useDisplay();
 const isLoadingFiles = ref(false), isLoadingContent = ref(false), isSearching = ref(false);
 const logFiles = ref([]), selectedFile = ref(null), logContent = ref([]), searchResults = ref([]);
 const logPage = ref(1), logPages = ref(1), logTotalLines = ref(0);
@@ -156,14 +156,14 @@ onUnmounted(() => { pageActive = false; readSequence++; fileSequence++; });
 </script>
 
 <style scoped>
-.history-log-view { display:flex; flex:1; flex-direction:column; gap:12px; min-height:0; min-width:0; overflow:hidden; }
+.history-log-view { display:flex; flex:1; flex-direction:column; gap:12px; min-height:0; min-width:0; padding:8px; overflow:auto; }
 .history-search-toolbar, .history-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:10px; flex-shrink:0; }
 .history-search-toolbar > .v-input { flex:1; min-width:160px; }
 .history-file-select { flex:1 1 200px; min-width:0; }
 .history-level-select { flex:0 1 140px; min-width:110px; }
 .history-log-view > .v-input, .history-log-view > .v-alert, .history-log-view > .v-progress-linear { flex:0 0 auto; }
 .history-pagination { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:8px; flex-shrink:0; }
-.history-log-list { display:flex; flex-direction:column; gap:6px; flex:1 1 0; min-height:0; min-width:0; overflow:auto; overscroll-behavior:contain; padding:14px; border:1px solid var(--logging-border,var(--ui-border)); background:var(--logging-shell-background,var(--ui-surface)); box-shadow:var(--logging-shadow); }
+.history-log-list { display:flex; flex-direction:column; gap:6px; flex:1 1 0; min-height:4rem; min-width:0; overflow:auto; overscroll-behavior:contain; padding:14px; border:1px solid var(--logging-border,var(--ui-border)); background:var(--logging-shell-background,var(--ui-surface)); box-shadow:var(--logging-shadow); }
 .history-empty { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:12px; padding:32px 8px; color:var(--ui-text-muted); }
-@media (max-width:540px) { .history-search-toolbar > .v-input { flex-basis:100%; } .history-log-list { padding:4px; } }
+@media (max-width:540px) { .history-search-toolbar > .v-input { flex-basis:100%; } .history-file-select { flex-basis:100%; } .history-level-select { flex:1; } .history-log-list { padding:6px; } }
 </style>

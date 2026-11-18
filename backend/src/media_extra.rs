@@ -307,6 +307,9 @@ impl RefreshTrace {
     pub(crate) fn pending_count(&self) -> usize {
         self.pending
     }
+    pub(crate) fn position(&self) -> u64 {
+        self.position
+    }
     pub fn new(position: u64) -> Self {
         Self {
             position,
@@ -355,6 +358,23 @@ impl RefreshTrace {
         Ok(self.completed && self.pending == 0)
     }
 }
+// Emby returns the newest lines first and can include a leading empty line.
+pub(crate) async fn refresh_log_window(state: &AppState, position: u64) -> Result<Value> {
+    for limit in [500, 10_000, 50_000] {
+        let response = state.emby(Method::GET, "System/Logs/embyserver.txt/Lines",
+            &[("Limit", limit.to_string())], None).await?;
+        let total = response["TotalRecordCount"].as_u64()
+            .ok_or_else(|| ApiError::bad("Emby刷新日志缺少行数"))?;
+        let lines = response["Items"].as_array()
+            .ok_or_else(|| ApiError::bad("Emby刷新日志格式无效"))?;
+        let available = lines.len() - usize::from(lines.first().is_some_and(|line| line == ""));
+        if total.checked_sub(position).unwrap_or(total) <= available as u64 {
+            return Ok(response);
+        }
+    }
+    Err(ApiError::bad("Emby日志增长超出读取窗口，无法完整验收刷新"))
+}
+
 pub(crate) async fn log_position(state: &AppState) -> Result<u64> {
     state
         .emby(
@@ -821,12 +841,7 @@ pub async fn replace_images(
             // An Emby refresh already in flight must finish before restoring the original files/settings.
             let lines = tokio::time::timeout_at(
                 deadline,
-                state.emby(
-                    Method::GET,
-                    "System/Logs/embyserver.txt/Lines",
-                    &[("Limit", "500".into())],
-                    None,
-                ),
+                refresh_log_window(state, trace.position()),
             )
             .await
             .map_err(|_| ApiError::bad("等待本次截图刷新日志超时，尚未确认 Emby 刷新结束"))??;
@@ -1033,7 +1048,7 @@ async fn resume_capture_after_request(state: &AppState, id: &str, context: &JobC
         let deadline = tokio::time::Instant::now()+Duration::from_secs((count*per_episode).max(600));
         let mut trace = RefreshTrace::new(position);
         loop {
-            let lines = tokio::time::timeout_at(deadline,state.emby(Method::GET,"System/Logs/embyserver.txt/Lines",&[("Limit","500".into())],None))
+            let lines = tokio::time::timeout_at(deadline,refresh_log_window(state, trace.position()))
                 .await.map_err(|_|ApiError::bad("截图原刷新完成日志等待超时"))??;
             if trace.feed(id,&lines)? { break; }
             if !string(&request,"before").is_empty() {
@@ -1732,13 +1747,10 @@ async fn wait_delete_scan(
         context.checkpoint().await?;
         deadline += before_checkpoint.elapsed();
         snapshot.restore(false).await?;
-        let query = [("Limit", "500".into())];
+        let position = traces.iter().find(|(_, _, done)| !done).unwrap().1.position();
         let logs = tokio::select! {
             _ = context.cancelled() => return context.checkpoint().await,
-            result = tokio::time::timeout_at(deadline, state.emby(
-                Method::GET, "System/Logs/embyserver.txt/Lines",
-                &query, None,
-            )) => result.map_err(|_| ApiError::bad("版本删除目录扫描完成日志读取超时"))??,
+            result = tokio::time::timeout_at(deadline, refresh_log_window(state, position)) => result.map_err(|_| ApiError::bad("版本删除目录扫描完成日志读取超时"))??,
         };
         for (id, trace, complete) in &mut traces {
             if !*complete {
