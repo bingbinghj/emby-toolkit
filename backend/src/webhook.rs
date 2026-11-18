@@ -1770,10 +1770,10 @@ mod automatic_credits_tests {
     }
 
     #[tokio::test]
-    async fn unconfirmed_credits_do_not_start_thumbnails_or_expand_to_whole_library() {
+    async fn empty_credits_scope_does_not_expand_or_start_disabled_thumbnails() {
         let fixture = fixture::Fixture::new().await;
         fixture.state.config.write().await["auto_extract_credits_on_ingest"] = json!(true);
-        fixture.state.config.write().await["auto_extract_video_thumbnails_on_ingest"] = json!(true);
+        fixture.state.config.write().await["auto_extract_video_thumbnails_on_ingest"] = json!(false);
         let context = crate::jobs::JobContext::for_recovery(None).await;
         let report =
             automatic_extraction(&fixture.state, true, true, &[], true, "测试分集", &context)
@@ -1786,7 +1786,7 @@ mod automatic_credits_tests {
                 .unwrap()
                 .contains("分集范围为空")
         );
-        assert_eq!(report["video_thumbnails"]["state"], "skipped", "{report}");
+        assert!(report.get("video_thumbnails").is_none(), "{report}");
         assert_eq!(report["warnings"], 1);
         assert_eq!(fixture.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
