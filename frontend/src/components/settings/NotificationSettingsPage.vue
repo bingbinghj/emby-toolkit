@@ -63,7 +63,7 @@
           <template #prepend><VIcon icon="mdi-cog" class="me-2" /></template>
           <VCardTitle>配置</VCardTitle><VCardSubtitle>{{ configModel.telegram_channel_name || 'Telegram' }}</VCardSubtitle>
         </VCardItem>
-        <VBtn class="absolute right-3 top-3 z-10" icon="mdi-close" color="default" variant="text" :disabled="busy" aria-label="关闭通知渠道" @click="channelDialogOpen = false" />
+        <DialogCloseBtn :disabled="busy" aria-label="关闭通知渠道" @click="channelDialogOpen = false" />
         <VDivider />
         <VCardText>
           <VRow>
@@ -83,7 +83,7 @@
           <VTextField data-field="telegram_chat_id" v-model="channelDraft.chat_id" label="个人 Chat ID" placeholder="例如 123456789" hint="先向 Telegram 机器人发送 /start，再填写私聊ID，用于接收个人通知。" persistent-hint prepend-inner-icon="mdi-account" :disabled="busy || loading || Boolean(accountError)" />
           <div v-if="globalChannelLink" class="global-notification-link mt-4"><VBtn variant="text" :href="globalChannelLink" target="_blank" rel="noopener noreferrer" prepend-icon="mdi-open-in-new">加入频道 / 群组</VBtn></div>
         </VCardText>
-        <VCardActions class="notification-actions px-6 pb-4">
+        <VCardActions class="app-dialog-actions notification-actions">
           <VBtn variant="tonal" prepend-icon="mdi-telegram" :loading="isFetchingBotLink" :disabled="busy || !channelDraft?.telegram_bot_token?.trim()" @click="openBotChat">打开机器人</VBtn>
           <VBtn variant="tonal" prepend-icon="mdi-send-outline" :loading="isTestingTelegram" :disabled="busy || !canTest" @click="testTelegram">发送测试</VBtn>
           <VSpacer />
@@ -95,6 +95,7 @@
   </div>
 </template>
 <script setup>
+import DialogCloseBtn from '@/components/theme/DialogCloseBtn.vue';
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import axios from 'axios';
 import { useDisplay } from 'vuetify';

@@ -182,7 +182,8 @@ export const test = base.extend({
       const request = { method: source.method(), path: url.pathname, query: Object.fromEntries(url.searchParams), body };
       requests.push(request);
       if (realLogStream && request.path === '/api/logs/stream') { await route.continue(); return; }
-      const handler = handlers.get(key(request.method, request.path));
+      const handler = handlers.get(key(request.method, request.path)) ||
+        (request.method === 'GET' && /^\/api\/media\/[^/]+\/extract_credits$/.test(request.path) ? { status: 200, body: { available: true } } : null);
       if (!handler) {
         unexpected.push(`${request.method} ${request.path}`);
         await route.fulfill({ status: 501, json: { error: `没有定义测试接口：${request.method} ${request.path}` } });

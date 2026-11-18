@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
-const MODULES: [&str; 4] = ["storage", "statistics", "recent", "libraries"];
+const MODULES: [&str; 5] = ["storage", "statistics", "recent", "libraries", "imports"];
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -59,7 +59,7 @@ fn key(state: &AppState, headers: &HeaderMap, profile: &str) -> Result<String> {
 }
 
 fn normalize(value: Value, profile: &str) -> Result<Value> {
-    let layout: Layout =
+    let mut layout: Layout =
         serde_json::from_value(value).map_err(|_| ApiError::bad("仪表盘布局格式无效"))?;
     let unique_known = |ids: &[String]| {
         ids.iter().all(|id| MODULES.contains(&id.as_str()))
@@ -71,6 +71,9 @@ fn normalize(value: Value, profile: &str) -> Result<Value> {
         "mobile" => 1,
         _ => return Err(ApiError::bad("无效的仪表盘设备布局")),
     };
+    if layout.order.len() == 4 && !layout.order.iter().any(|id| id == "imports") {
+        layout.order.push("imports".into());
+    }
     if layout.order.len() != MODULES.len()
         || !unique_known(&layout.order)
         || !unique_known(&layout.hidden)

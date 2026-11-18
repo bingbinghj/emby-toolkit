@@ -277,6 +277,9 @@ async fn details(
                 .get("Fields")
                 .is_some_and(|fields| fields.split(',').any(|field| field == "SeasonId"))
         {
+            if *host.resource_fault.lock().await == "credits-read-failure" {
+                return StatusCode::FORBIDDEN.into_response();
+            }
             let mut stages = host.stage_order.lock().await;
             if !stages.iter().any(|stage| stage == "credits-read") {
                 stages.push("credits-read".into());
@@ -2467,6 +2470,23 @@ async fn disabled_titles_still_allow_actual_series_refresh_then_intro_credits_an
             result["automatic_extraction"]["warnings"].as_u64().unwrap() > 0,
             "the refused thumbnail start must remain visible: {job}"
         );
+        fixture.close().await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby is localhost"]
+async fn finished_credits_without_a_match_still_runs_thumbnails() {
+    for enabled in [false, true] {
+        let fixture = Fixture::new(&["complete"], false, false).await;
+        fixture.configure_series_chain().await;
+        fixture.state.save_config(&json!({"auto_extract_video_thumbnails_on_ingest":enabled})).await.unwrap();
+        *fixture.host.resource_fault.lock().await = "credits-read-failure".into();
+        let job = fixture.run_series(true).await;
+        let extraction = &job["result"]["automatic_extraction"];
+        assert_eq!(extraction["credits"]["failed"], 1, "{job}");
+        assert_eq!(extraction["credits"]["native_ended"], true, "{job}");
+        assert_eq!(fixture.host.native_starts.lock().await.iter().any(|id| id == "thumb"), enabled, "{job}");
         fixture.close().await;
     }
 }

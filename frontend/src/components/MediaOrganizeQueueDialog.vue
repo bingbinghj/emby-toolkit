@@ -26,12 +26,12 @@
           <div class="queue-main">
             <nav class="queue-media-list" aria-label="队列媒体列表">
               <button v-for="group in groups" :key="group.key" type="button" class="queue-media-button" :class="{ selected: group.key === activeGroupKey }" :aria-current="group.key === activeGroupKey ? 'true' : undefined" @click="activeGroupKey = group.key">
-                <VAvatar rounded width="68" height="102"><VImg v-if="group.poster" :src="group.poster" :alt="group.title" cover /><VIcon v-else icon="mdi-movie-open-outline" /></VAvatar>
+                <OrganizePoster :item="group.item" :title="group.title" :width="68" :height="102" />
                 <div class="queue-media-copy"><div class="queue-media-title font-weight-medium" :title="group.title">{{ group.title }}</div><div class="queue-media-meta text-caption text-medium-emphasis"><span>剩余 {{ group.tasks.length }} 项</span><span class="queue-progress-number">{{ group.unknown ? '进度未确认' : Math.round(group.progress) + '%' }}</span></div><VProgressLinear :model-value="group.progress" :indeterminate="group.indeterminate" color="primary" bg-color="secondary" height="4" rounded /></div>
               </button>
             </nav>
             <section v-if="activeGroup" class="queue-detail">
-              <div class="d-flex align-center ga-3 pb-4 queue-active-media"><VAvatar rounded width="64" height="96"><VImg v-if="activeGroup.poster" :src="activeGroup.poster" :alt="activeGroup.title" cover /><VIcon v-else icon="mdi-movie-open-outline" /></VAvatar><div class="queue-media-copy"><div class="text-h6">{{ activeGroup.title }}</div><div class="text-body-2 text-medium-emphasis mt-2">{{ activeGroup.tasks.length }} 项文件任务</div></div></div>
+              <div class="d-flex align-center ga-3 pb-4 queue-active-media"><OrganizePoster :item="activeGroup.item" :title="activeGroup.title" :width="64" :height="96" /><div class="queue-media-copy"><div class="text-h6">{{ activeGroup.title }}</div><div class="text-body-2 text-medium-emphasis mt-2">{{ activeGroup.tasks.length }} 项文件任务</div></div></div>
               <div class="queue-task-header" aria-hidden="true"><span></span><span>文件名</span><span>状态</span><span>进度</span><span>操作</span></div>
               <div class="queue-task-list">
               <article v-for="task in activeGroup.tasks" :key="task.id" class="queue-task" :data-testid="'organize-queue-task-' + task.id">
@@ -54,6 +54,7 @@
 <script setup>
 import { computed, ref, watch } from 'vue';
 import { useDisplay } from 'vuetify';
+import OrganizePoster from '@/components/OrganizePoster.vue';
 import DialogCloseBtn from '@/components/theme/DialogCloseBtn.vue';
 
 const props = defineProps({ modelValue: Boolean, queue: { type: Object, required: true } });
@@ -84,9 +85,7 @@ const groups = computed(() => {
     const key = series ? 'series:' + item.series_id + ':season:' + (item.season_number ?? '') : 'item:' + task.item_id;
     if (!values.has(key)) {
       const title = series ? (item.series_name || item.name || task.item_id) + (Number.isInteger(item.season_number) ? ' S' + String(item.season_number).padStart(2, '0') : '') : item.name || task.item_id;
-      const posterId = series && item.series_image_tag ? item.series_id : task.item_id;
-      const tag = series && item.series_image_tag ? item.series_image_tag : item.image_tag;
-      values.set(key, { key, title, poster: tag ? '/image_proxy/Items/' + encodeURIComponent(posterId) + '/Images/Primary?tag=' + encodeURIComponent(tag) + '&quality=90' : '', tasks: [] });
+      values.set(key, { key, title, item: { ...item, item_id: task.item_id }, tasks: [] });
     }
     values.get(key).tasks.push(task);
   }

@@ -486,6 +486,14 @@ async fn finish_scoped(
     }
     let completed: Vec<Value> = sqlx::query_scalar("UPDATE media_organize_history SET status=$1,message=$2,completed_at=CASE WHEN $1='processing' THEN NULL ELSE NOW() END,item_json=item_json || $4 WHERE id=ANY($3) AND status='processing' AND ($5=false OR source='moviepilot') RETURNING item_json || jsonb_build_object('item_id',item_id)")
         .bind(status).bind(&message).bind(&ids).bind(preparation).bind(paths.is_some()).fetch_all(&mut *transaction).await?;
+    if status == "warning" && let Ok(report) = result {
+        for item in &completed {
+            if let Some(id) = item["item_id"].as_str() {
+                sqlx::query("UPDATE media_organize_history SET item_json=item_json || $3 WHERE id=ANY($1) AND item_id=$2")
+                    .bind(&ids).bind(id).bind(warning_receipt(report,id)).execute(&mut *transaction).await?;
+            }
+        }
+    }
     if completed.is_empty() {
         transaction.commit().await?;
         return Ok(());
@@ -620,8 +628,58 @@ pub async fn begin_reorganize(state: &AppState, ids: &[String], item_id: &str) -
     if ids.is_empty() {
         return Ok(());
     }
-    sqlx::query("UPDATE media_organize_history SET status='processing',message='正在重新执行 ETK 整理流程',completed_at=NULL WHERE id=ANY($1) AND item_id=$2")
+    sqlx::query("UPDATE media_organize_history SET item_json=(item_json - 'item_warnings' - 'batch_warnings'),status='processing',message='正在重新执行 ETK 整理流程',completed_at=NULL WHERE id=ANY($1) AND item_id=$2")
         .bind(ids).bind(item_id).execute(&state.db).await?;
+    Ok(())
+}
+
+// Retain the batch outcome separately so one episode's warning is not reported
+// as a failure of every other episode in the same queue run.
+fn episode_warnings(report: &Value, id: &str) -> Vec<String> {
+    let mut details = Vec::new();
+    for entry in list(&report["finalizations"]) {
+        for track in list(&entry["report"]["title_fill"]["pending"]) {
+            if track["item_id"] == id {
+                let kind = if track["type"] == "Audio" { "音轨" } else { "字幕" };
+                details.push(format!("{kind}标题：{}", safe_text(&string(&track, "reason"))));
+            }
+        }
+    }
+    for item in list(&report["automatic_extraction"]["credits"]["items"]) {
+        if item["item_id"] == id && item["status"] == "failed" {
+            details.push(format!("片尾提取：{}", safe_text(&string(&item, "error"))));
+        }
+    }
+    details
+}
+
+fn warning_receipt(report: &Value, id: &str) -> Value {
+    json!({"item_warnings":episode_warnings(report,id),
+        "batch_warnings":list(&report["warning_details"]).iter().filter_map(Value::as_str)
+            .map(safe_text).collect::<Vec<_>>()})
+}
+
+pub(crate) async fn migrate_warning_receipts(tx: &mut sqlx::PgConnection) -> Result<()> {
+    let added = sqlx::query("INSERT INTO app_settings(setting_key,value_json) VALUES('history_warning_receipts_v1','true') ON CONFLICT DO NOTHING")
+        .execute(&mut *tx).await?.rows_affected();
+    if added == 0 { return Ok(()); }
+    let rows: Vec<(String,String,Value)> = sqlx::query_as(
+        "SELECT DISTINCT ON (h.id) h.id,h.item_id,q.result FROM media_organize_history h
+         JOIN media_organize_queue q ON q.item_id=h.item_id AND q.history_ids ? h.id
+         AND h.completed_at BETWEEN q.started_at AND q.completed_at AND q.result->>'message'=h.message
+         WHERE h.status='warning' AND q.status='completed' ORDER BY h.id,q.queue_order DESC")
+        .fetch_all(&mut *tx).await?;
+    let webhook_rows: Vec<(String,String,Value)> = sqlx::query_as(
+        "SELECT DISTINCT ON (h.id) h.id,h.item_id,j.state_json->'result' FROM durable_jobs j
+         CROSS JOIN LATERAL jsonb_array_elements_text(j.spec_json#>'{payload,event,history_ids}') AS selected(id)
+         JOIN media_organize_history h ON h.id=selected.id
+         WHERE h.status='warning' AND h.item_id IS NOT NULL AND j.spec_json->>'kind'='webhook'
+         AND j.state_json#>>'{result,message}'=h.message ORDER BY h.id,j.updated_at DESC")
+        .fetch_all(&mut *tx).await?;
+    for (id,item,report) in rows.into_iter().chain(webhook_rows) {
+        sqlx::query("UPDATE media_organize_history SET item_json=item_json || $2 WHERE id=$1")
+            .bind(id).bind(warning_receipt(&report,&item)).execute(&mut *tx).await?;
+    }
     Ok(())
 }
 
@@ -635,8 +693,12 @@ pub async fn finish_reorganize(
         return Ok(());
     }
     let (status, message) = outcome(result);
-    let completed: Vec<Value> = sqlx::query_scalar("UPDATE media_organize_history SET status=$1,message=$2,completed_at=NOW() WHERE id=ANY($3) AND item_id=$4 AND status='processing' RETURNING item_json || jsonb_build_object('item_id',item_id)")
-        .bind(status).bind(&message).bind(ids).bind(item_id).fetch_all(&state.db).await?;
+    let details = match result {
+        Ok(report) if status == "warning" => warning_receipt(report,item_id),
+        _ => json!({}),
+    };
+    let completed: Vec<Value> = sqlx::query_scalar("UPDATE media_organize_history SET status=$1,message=$2,completed_at=NOW(),item_json=item_json || $5 WHERE id=ANY($3) AND item_id=$4 AND status='processing' RETURNING item_json || jsonb_build_object('item_id',item_id)")
+        .bind(status).bind(&message).bind(ids).bind(item_id).bind(details).fetch_all(&state.db).await?;
     if status == "failed" {
         notify_failures(state, completed, &message).await;
     }
@@ -661,7 +723,7 @@ async fn history(
     let status = params.get("status").map_or("all", String::as_str);
     if !matches!(
         status,
-        "all" | "success" | "warning" | "failed" | "processing"
+        "all" | "admitted" | "success" | "warning" | "failed" | "processing"
     ) {
         return Err(ApiError::bad("入库历史状态筛选无效"));
     }
@@ -669,9 +731,9 @@ async fn history(
     if search.chars().count() > 200 {
         return Err(ApiError::bad("历史搜索关键词过长"));
     }
-    let total:i64=sqlx::query_scalar("SELECT COUNT(*) FROM media_organize_history WHERE ($1='all' OR status=$1) AND ($2='' OR strpos(lower(COALESCE(item_json->>'name','') || ' ' || COALESCE(item_json->>'series_name','') || ' ' || COALESCE(item_json->>'file_name','')),lower($2))>0)")
+    let total:i64=sqlx::query_scalar("SELECT COUNT(*) FROM media_organize_history WHERE ($1='all' OR status=$1 OR ($1='admitted' AND status IN ('success','warning'))) AND ($2='' OR strpos(lower(COALESCE(item_json->>'name','') || ' ' || COALESCE(item_json->>'series_name','') || ' ' || COALESCE(item_json->>'file_name','')),lower($2))>0)")
         .bind(status).bind(search).fetch_one(&state.db).await?;
-    let items:Vec<Value>=sqlx::query_scalar("SELECT (item_json - '_preparation_warning') || jsonb_build_object('id',id,'item_id',item_id,'source',source,'status',status,'message',message,'created_at',created_at,'completed_at',completed_at) FROM media_organize_history WHERE ($1='all' OR status=$1) AND ($2='' OR strpos(lower(COALESCE(item_json->>'name','') || ' ' || COALESCE(item_json->>'series_name','') || ' ' || COALESCE(item_json->>'file_name','')),lower($2))>0) ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4")
+    let items:Vec<Value>=sqlx::query_scalar("SELECT (item_json - '_preparation_warning') || jsonb_build_object('id',id,'item_id',item_id,'source',source,'status',status,'message',message,'created_at',created_at,'completed_at',completed_at) FROM media_organize_history WHERE ($1='all' OR status=$1 OR ($1='admitted' AND status IN ('success','warning'))) AND ($2='' OR strpos(lower(COALESCE(item_json->>'name','') || ' ' || COALESCE(item_json->>'series_name','') || ' ' || COALESCE(item_json->>'file_name','')),lower($2))>0) ORDER BY created_at DESC,id DESC LIMIT $3 OFFSET $4")
         .bind(status).bind(search).bind(size).bind(offset).fetch_all(&state.db).await?;
     let tracking_since = crate::db::setting(&state.db, "media_organize_history_started_at")
         .await?

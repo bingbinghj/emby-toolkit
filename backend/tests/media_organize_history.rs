@@ -1473,3 +1473,26 @@ async fn linked_history_completion_is_atomic_and_retryable_after_sql_failure() {
         assert!(!row["completed_at"].is_null(), "{row}");
     }
 }
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL"]
+async fn warning_receipts_restore_episode_details_only_from_the_linked_run() {
+    let f = Fixture::new().await;
+    let first = f.seed_history(Some("101"), "warning").await;
+    let second = f.seed_history(Some("102"), "warning").await;
+    let report = json!({
+        "message":"本批入库有提醒", "warning_details":["片尾未全部提取"],
+        "automatic_extraction":{"credits":{"items":[{"item_id":"102","status":"failed","error":"声纹不匹配"}]}}
+    });
+    sqlx::query("UPDATE media_organize_history SET message=$1").bind("本批入库有提醒").execute(&f.state.db).await.unwrap();
+    sqlx::query("INSERT INTO durable_jobs(id,spec_json,state_json) VALUES('webhook',$1,$2)")
+        .bind(json!({"kind":"webhook","payload":{"event":{"history_ids":[first,second]}}}))
+        .bind(json!({"result":report})).execute(&f.state.db).await.unwrap();
+    sqlx::query("DELETE FROM app_settings WHERE setting_key='history_warning_receipts_v1'").execute(&f.state.db).await.unwrap();
+    emby_toolkit::db::initialize(&f.state.db).await.unwrap();
+    for row in f.rows().await {
+        assert_eq!(row["batch_warnings"],json!(["片尾未全部提取"]));
+        assert_eq!(row["item_warnings"],if row["id"] == first {json!([])} else {json!(["片尾提取：声纹不匹配"])});
+    }
+    f.close().await;
+}

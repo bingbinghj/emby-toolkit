@@ -21,7 +21,7 @@
           <template #selection="{ item }"><span class="font-weight-medium">{{ item.title }}</span></template>
         </VSelect>
         <VTextField v-model="keyword" clearable hide-details variant="plain" density="compact" prepend-inner-icon="mdi-magnify" placeholder="搜索日志" aria-label="搜索实时日志" class="notification-search logging-search" />
-        <VBtn variant="flat" color="primary" icon class="logging-stream-action" :aria-label="streamPaused ? '继续日志流' : '暂停日志流'" :title="streamPaused ? '继续日志流' : '暂停日志流'" @click="toggleStream"><VIcon :icon="streamPaused ? 'mdi-play' : 'mdi-pause'" /></VBtn>
+        <VBtn variant="text" icon class="logging-stream-action" :class="{ 'is-live': !streamPaused }" :aria-label="streamPaused ? '继续日志流' : '暂停日志流'" :title="streamPaused ? '继续日志流' : '暂停日志流'" @click="toggleStream"><VIcon :icon="streamPaused ? 'mdi-play' : 'mdi-pause'" /></VBtn>
       </div>
       <div ref="logRef" class="notification-log logging-shell" role="region" aria-label="实时日志内容" tabindex="0" @scroll="handleScroll">
         <VAlert v-if="connectionError && !streamPaused" type="error" variant="tonal" role="alert">{{ connectionError }}</VAlert>

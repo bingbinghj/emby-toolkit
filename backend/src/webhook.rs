@@ -1632,8 +1632,8 @@ async fn automatic_extraction(
         }
         let ended = credits["native_ended"] == true;
         report["credits"] = credits;
-        if thumbnails_enabled && (failed || !ended) {
-            report["video_thumbnails"] = json!({"state":"skipped","reason":"片尾提取或标记回读尚未完成验收，跳过视频预览缩略图提取"});
+        if thumbnails_enabled && !ended {
+            report["video_thumbnails"] = json!({"state":"skipped","reason":"片尾任务尚未确认结束，跳过视频预览缩略图提取"});
             report["warnings"] = json!(warning_details.len());
             report["warning_details"] = json!(warning_details);
             return Ok(report);

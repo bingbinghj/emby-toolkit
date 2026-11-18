@@ -15,7 +15,7 @@ function fixture(post = async () => ({ status: 200, data: { message: '片尾提�
   const calls = [], messages = [];
   const state = vm.createContext({
     itemDetails: { value: { item_type: 'Episode' } }, currentEditMediaId: { value: '101' },
-    creditsExtractionBlocked: { value: false }, isExtractingCredits: { value: false }, creditsExtractionFeedback: { value: null },
+    creditsRevision: { value: 0 }, creditsEligible: () => true, creditsExtractionBlocked: { value: false }, isExtractingCredits: { value: false }, creditsExtractionFeedback: { value: null },
     mediaDetailsLoadSequence: 1, mediaInfoLoadSequence: 1,
     mediaInfoData: { value: [{ Chapters: [intro, { ...credits, StartPositionTicks: 7000000000 }], MediaSourceInfo: { MediaStreams: [{ Type: 'Audio', Title: '保留草稿' }] } }] },
     axios: { post: async (url, payload) => { calls.push({ url, payload }); return post(); } },

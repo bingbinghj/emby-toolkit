@@ -19,7 +19,7 @@ function functionSource(name) {
 function fixture({ get = async () => ({ data: list }), post = async () => ({ status: 200, data: result }), delete: remove = async (_url, options) => ({ data: { deleted_count: options.data.history_ids.length, deleted_ids: options.data.history_ids } }) } = {}) {
   const calls = [], messages = [];
   const context = vm.createContext({
-    active: true, itemSequence: 0, pageSize: { value: 50 }, pageSizeOptions: [25, 50, 100, 500, 1000], queueReceiptMatches,
+    active: true, smAndDown: { value: false }, mobilePage: { value: 1 }, mobileEnd: { value: false }, mobileBatch: { value: false }, itemSequence: 0, pageSize: { value: 50 }, pageSizeOptions: [25, 50, 100, 500, 1000], queueReceiptMatches,
     computed: fn => ({ get value() { return fn(); } }),
     statusFilter: { value: 'all' }, loadedQuery: { value: '[1,50,"","all"]' },
     items: { value: [movie] }, search: { value: '' }, appliedSearch: { value: '' }, page: { value: 1 }, total: { value: 100 },
@@ -338,7 +338,7 @@ test('history search ignores composing input and coalesces typed queries using M
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(timers.size, 0);
   assert.equal(f.calls.length, 1);
-  assert.deepEqual(f.calls[0].options.params, { page: 1, page_size: 50, search: '下一部电影', status: 'all' });
+  assert.deepEqual(f.calls[0].options.params, { page: 1, page_size: 25, search: '下一部电影', status: 'all' });
 });
 
 const acceptedQueue = (itemId = '101', mode = 'reprocess') => ({ mode, queued_count: 1, duplicate_count: 0,

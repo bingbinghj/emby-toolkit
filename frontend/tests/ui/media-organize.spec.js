@@ -142,28 +142,20 @@ test('a virtual selection draft can revise its 1000th row before a batch is scop
   expect(posts(api)[0].body.history_ids).not.toContain(records[999].id);
 });
 
-test('mobile 1000-record cards keep the footer reachable and empty filters retain the selected page size', async ({ page, api }) => {
+test('mobile history appends 25 records on scroll and resets when filtering', async ({ page, api }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  const records = historyRecords();
-  api.respond('GET', listPath, request => list(request.query.status === 'failed' ? [] : records.slice(0, Number(request.query.page_size)), request.query.status === 'failed' ? 0 : records.length));
+  const records = historyRecords(31);
+  api.respond('GET', listPath, ({ query }) => query.status === 'failed' ? list([]) : list(records.slice((query.page - 1) * 25, query.page * 25), 31));
   await page.goto('/media-organize');
-  await changePageSize(page, 1000);
-  const cards = page.getByTestId('organize-items-mobile');
-  await expect(page.getByTestId('organize-page-info')).toHaveText('1 - 1000 / 1000');
-  expect(await cards.locator('.history-card').count()).toBeLessThan(50);
-  await cards.locator('.history-card-scroll').evaluate(element => { element.scrollTop = element.scrollHeight; });
-  const lastRecord = cards.getByRole('link', { name: '记录1000', exact: true });
-  await expect(lastRecord).toHaveAttribute('href', '/edit-media/media-1000');
-  await expect(lastRecord).toBeVisible();
-  await page.getByTestId('organize-page-size').scrollIntoViewIfNeeded();
-  await expect(page.getByTestId('organize-page-size')).toBeInViewport();
+  await expect(page.getByRole('link', {name:'记录1', exact:true})).toBeVisible();
+  await page.getByText('加载更多', {exact:true}).scrollIntoViewIfNeeded();
+  await expect.poll(() => api.requests.some(r => r.path === listPath && r.query.page === '2')).toBe(true);
+  await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
+  await expect(page.getByRole('link', {name:'记录31', exact:true})).toBeVisible();
   await page.getByTestId('organize-status-filter').click();
-  await page.locator('.v-overlay--active').getByText('失败', { exact: true }).click();
-  await expect(cards).toContainText('当前条件下没有入库处理记录');
-  await expect(page.getByTestId('organize-page-info')).toHaveText('0 - 0 / 0');
-  expect(api.requests.filter(request => request.path === listPath).at(-1).query).toMatchObject({ page: '1', page_size: '1000', status: 'failed' });
-  expect(posts(api)).toHaveLength(0);
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.locator('.v-overlay--active').getByText('失败', {exact:true}).click();
+  await expect(page.getByTestId('organize-items-mobile')).toContainText('当前条件下没有入库处理记录');
+  expect(api.requests.filter(r => r.path === listPath).at(-1).query).toMatchObject({ page:'1', page_size:'25', status:'failed' });
 });
 
 test('a selected movie runs the full background operation after scope confirmation', async ({ page, api }) => {
@@ -279,6 +271,7 @@ test('mobile history cards preserve real status and disable unfinished records',
   await expect(page.getByTestId('organize-detail-dialog')).toContainText('未能匹配到媒体');
   await expect(page.getByTestId('organize-detail-dialog').getByRole('button', { name: '重新整理', exact: true })).toBeDisabled();
   await page.getByRole('button', { name: '关闭整理详情', exact: true }).click();
+  await page.getByRole('button', { name: '批量选择', exact: true }).click();
   await expect(cards.getByRole('checkbox').first()).toBeDisabled();
   await expect(cards.getByRole('checkbox').last()).toBeEnabled();
   await cards.getByRole('checkbox').last().check();

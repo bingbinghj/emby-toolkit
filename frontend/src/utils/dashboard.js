@@ -3,6 +3,7 @@ export const dashboardModules = [
   { id: 'statistics', title: '媒体统计', icon: 'mdi-chart-box-outline', width: 'statistics' },
   { id: 'recent', title: '最新入库 - Emby', icon: 'mdi-clock-outline', width: 'full' },
   { id: 'libraries', title: '我的媒体库', icon: 'mdi-folder-multiple-outline', width: 'full' },
+  { id: 'imports', title: '最近整理入库', icon: 'mdi-history', width: 'full' },
 ];
 
 export function normalizeDashboardLayout(value) {
@@ -113,7 +114,7 @@ export function projectDashboardItems(items, library = false) {
   if (!Array.isArray(items) || items.some(item => typeof item?.id !== 'string' || !/^[\w-]{1,128}$/.test(item.id) || typeof item.name !== 'string')) {
     throw new Error(library ? '媒体库响应未确认' : '最新入库响应未确认');
   }
-  const fields = library ? ['id', 'name', 'collection_type', 'image_tag', 'item_count', 'count_error'] : [
+  const fields = library ? ['id', 'name', 'collection_type', 'image_tag', 'item_count', 'count_error', 'link'] : [
     'id', 'name', 'item_type', 'production_year', 'image_tag', 'series_id', 'series_image_tag',
     'series_name', 'season_number', 'episode_number', 'date_created',
   ];

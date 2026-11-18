@@ -55,7 +55,7 @@
             <VBtn block color="info" variant="tonal" prepend-icon="mdi-file-document-outline" data-testid="media-info-open" @click="handleMediaInfoButtonClick">编辑媒体信息 (音轨/字幕)</VBtn>
             <VBtn block variant="tonal" prepend-icon="mdi-shield-check-outline" :loading="isRevalidatingFingerprints" @click="revalidateFingerprints(itemDetails.item_id || itemId)">重新校验指纹（{{ fingerprintScopeLabel }}）</VBtn>
             <VBtn v-if="['Series', 'Season', 'Episode'].includes(itemDetails.item_type)" block color="warning" variant="tonal" prepend-icon="mdi-image-refresh-outline" :loading="isReplacingEpisodeImages" @click="confirmEpisodeImageReplacement">替换剧集图</VBtn>
-            <VBtn v-if="['Series', 'Season', 'Episode'].includes(itemDetails.item_type)" block color="default" variant="tonal" class="media-credits-action" prepend-icon="mdi-movie-open-outline" :loading="isExtractingCredits" :disabled="creditsExtractionBlocked" :data-testid="itemDetails.item_type === 'Episode' ? 'episode-extract-credits' : 'scope-extract-credits'" @click="extractEpisodeCredits(itemDetails.item_id || itemId)">提取{{ fingerprintScopeLabel }}片尾</VBtn>
+            <VBtn v-if="['Series', 'Season', 'Episode'].includes(itemDetails.item_type)" block color="default" variant="tonal" class="media-credits-action" prepend-icon="mdi-movie-open-outline" :loading="isExtractingCredits" :disabled="creditsExtractionBlocked || !creditsEligible(itemDetails.item_id || itemId)" :title="creditsReason(itemDetails.item_id || itemId)" :data-testid="itemDetails.item_type === 'Episode' ? 'episode-extract-credits' : 'scope-extract-credits'" @click="extractEpisodeCredits(itemDetails.item_id || itemId)">提取{{ fingerprintScopeLabel }}片尾</VBtn>
             <VBtn block color="warning" variant="tonal" prepend-icon="mdi-file-edit-outline" @click="openRenameEditor()">重命名媒体</VBtn>
             <VBtn block color="warning" variant="tonal" prepend-icon="mdi-cloud-search-outline" :loading="isRepairingP115Orphan" @click="confirmMediaAction('检查115孤儿文件', `确认只检查${p115OrphanScopeLabel}？`, repairCurrentP115Orphans)">检查115孤儿文件</VBtn>
           </VCardText>
@@ -236,7 +236,7 @@
             <VBtn class="mt-3" variant="text" :loading="isCheckingMediaRecovery" :disabled="isRecoveringMediaInfo" @click="loadMediaRecovery">重新检查恢复状态</VBtn>
           </VAlert>
           <VBtn variant="tonal" prepend-icon="mdi-shield-check-outline" :loading="isRevalidatingFingerprints" class="mb-4" :disabled="isSavingMediaInfo || isDeletingMediaVersion || isRepairingTruehdCore" @click="revalidateFingerprints(currentEditMediaId)">重新校验当前视频指纹</VBtn>
-          <VBtn v-if="['Series', 'Season', 'Episode'].includes(itemDetails?.item_type)" color="default" variant="tonal" prepend-icon="mdi-movie-open-outline" class="mb-4 ms-2 media-credits-action" :loading="isExtractingCredits" :disabled="creditsExtractionBlocked" data-testid="media-info-extract-credits" @click="extractEpisodeCredits(currentEditMediaId)">提取当前集片尾</VBtn>
+          <VBtn v-if="['Series', 'Season', 'Episode'].includes(itemDetails?.item_type)" color="default" variant="tonal" prepend-icon="mdi-movie-open-outline" class="mb-4 ms-2 media-credits-action" :loading="isExtractingCredits" :disabled="creditsExtractionBlocked || !creditsEligible(currentEditMediaId)" :title="creditsReason(currentEditMediaId)" data-testid="media-info-extract-credits" @click="extractEpisodeCredits(currentEditMediaId)">提取当前集片尾</VBtn>
           <VAlert v-if="creditsExtractionFeedback?.itemId === String(currentEditMediaId)" :type="creditsExtractionFeedback.type" :title="creditsExtractionFeedback.message" variant="tonal" class="mb-4" data-testid="media-info-credits-feedback">
             <div v-for="detail in creditsExtractionFeedback.details" :key="detail" class="text-wrap">{{ detail }}</div>
           </VAlert>
@@ -363,7 +363,7 @@ const confirmMediaAction = (title, content, action) => dialog.warning({
 const confirmEpisodeImageReplacement = () => {
   const scope = itemDetails.value?.item_type === 'Episode' ? '单集'
     : itemDetails.value?.item_type === 'Season' ? '季所有分集' : '电视剧所有分集';
-  confirmMediaAction('替换剧集图', `将删除当前${scope}的 Primary 海报，随后让神医助手使用 ffprobe 截图生成集图。是否继续？`, replaceEpisodeImages);
+  confirmMediaAction('替换剧集图', `将删除当前${scope}的 Primary 海报，随后让神医助手使用 ffprobe 截图生成集图。是否继续？`, () => { void replaceEpisodeImages(); });
 };
 const mediaInfoLanguageFilter = (value, query, item) => filterMediaInfoLanguageOption(query, item?.raw || item);
 
@@ -640,6 +640,28 @@ let mediaRecoverySession = 0;
 let mediaRecoveryDialog = null;
 let mediaInfoLoadedSnapshot = '';
 const currentEditMediaId = ref(null); // ★ 新增：记录当前正在编辑的具体媒体ID (电影ID或具体的集ID)
+const creditsAvailability = ref({});
+const creditsRevision = ref(0);
+const creditsEligible = id => creditsAvailability.value[id] === true;
+const creditsReason = id => {
+  const available = creditsAvailability.value[id];
+  if (available === false) return '没有可提取的分集：已存在片尾、命中失败记录或范围为空';
+  if (available === 'error') return '片尾状态读取失败，请刷新后重试';
+  return available === true ? undefined : '正在读取片尾状态';
+};
+watch(() => [itemDetails.value?.item_type, itemDetails.value?.item_id || itemId.value,
+  showMediaInfoEditor.value ? currentEditMediaId.value : null, creditsRevision.value, isBackgroundTaskRunning.value], async ([kind, root, edit], _, onCleanup) => {
+  let active = true;
+  onCleanup(() => { active = false; });
+  creditsAvailability.value = {};
+  if (!['Series','Season','Episode'].includes(kind) || !root) return;
+  await Promise.all([...new Set([root, edit].filter(Boolean))].map(async id => {
+    try {
+      const { data } = await axios.get(`/api/media/${encodeURIComponent(id)}/extract_credits`);
+      if (active) creditsAvailability.value[id] = data?.available === true;
+    } catch { if (active) creditsAvailability.value[id] = 'error'; }
+  }));
+}, { immediate: true });
 const mediaInfoVersions = ref([]);
 let mediaInfoStreamSnapshotMap = new WeakMap();
 let mediaInfoLoadSequence = 0;
@@ -669,7 +691,7 @@ const mergeCreditsChapter = (info, chapter) => {
 
 const extractEpisodeCredits = async (id) => {
   const targetId = String(id || '').trim();
-  if (!targetId || isExtractingCredits.value || creditsExtractionBlocked.value || !['Series', 'Season', 'Episode'].includes(itemDetails.value?.item_type)) return;
+  if (!targetId || isExtractingCredits.value || creditsExtractionBlocked.value || !creditsEligible(targetId) || !['Series', 'Season', 'Episode'].includes(itemDetails.value?.item_type)) return;
   const pageSequence = mediaDetailsLoadSequence;
   const editorSequence = mediaInfoLoadSequence;
   isExtractingCredits.value = true;
@@ -704,6 +726,7 @@ const extractEpisodeCredits = async (id) => {
   } finally {
     loadingMsg.destroy();
     isExtractingCredits.value = false;
+    creditsRevision.value++;
   }
 };
 

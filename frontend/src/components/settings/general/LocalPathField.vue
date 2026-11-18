@@ -6,48 +6,65 @@ defineOptions({ inheritAttrs: false });
 const props = defineProps({ modelValue: { type: [String, Array], default: '' }, multiple: Boolean });
 const emit = defineEmits(['update:modelValue']);
 const attrs = useAttrs();
-const menuOpen = ref(false), loading = ref(false), error = ref('');
-const directories = ref([]), currentPath = ref(''), requestedPath = ref('/');
-let requestVersion = 0;
+const menuOpen = ref(false), nodes = ref([]), opened = ref([]), failure = ref(null);
+const nodeFor = (path, name) => ({ path, name, children: [] });
+let generation = 0;
+const pending = new Map();
 
-const loadDirectory = async (path) => {
-  const version = ++requestVersion;
-  requestedPath.value = path || '/';
-  currentPath.value = '';
-  directories.value = [];
-  error.value = '';
-  loading.value = true;
-  try {
-    const { data } = await axios.get('/api/p115/system/directories', { params: { path: requestedPath.value } });
-    if (version !== requestVersion || !menuOpen.value) return;
-    if (data?.code !== 200 || !Array.isArray(data.data) || typeof data.current_path !== 'string' || !data.current_path.startsWith('/')
-      || data.data.some(item => typeof item?.path !== 'string' || !item.path.startsWith('/') || typeof item.name !== 'string')) {
-      throw new Error(data?.message || '目录响应无效，请重试');
+async function readChildren(node) {
+  if (node.loaded) return true;
+  if (pending.has(node.path)) return pending.get(node.path);
+  const version = generation;
+  const request = (async () => {
+    try {
+      const { data } = await axios.get('/api/p115/system/directories', { params: { path: node.path } });
+      if (version !== generation || !menuOpen.value) return false;
+      if (data?.code !== 200 || !Array.isArray(data.data) || typeof data.current_path !== 'string' || !data.current_path.startsWith('/') ||
+          data.data.some(child => typeof child?.path !== 'string' || !child.path.startsWith('/') || typeof child.name !== 'string')) {
+        throw new Error(data?.message || '目录响应无效');
+      }
+      node.children = data.data.filter(child => !child.is_parent).map(child => nodeFor(child.path, child.name));
+      node.loaded = true;
+      if (failure.value?.node.path === node.path) failure.value = null;
+      return true;
+    } catch (error) {
+      if (version === generation) failure.value = { node, message: error.response?.data?.error || error.response?.data?.message || error.message };
+      return false;
+    } finally {
+      if (version === generation) pending.delete(node.path);
     }
-    currentPath.value = data.current_path;
-    directories.value = data.data;
-  } catch (failed) {
-    if (version === requestVersion && menuOpen.value) error.value = failed.response?.data?.error || failed.response?.data?.message || failed.message || '目录读取失败';
-  } finally {
-    if (version === requestVersion) loading.value = false;
-  }
-};
+  })();
+  pending.set(node.path, request);
+  return request;
+}
 
-const chooseDirectory = () => {
-  if (!menuOpen.value || loading.value || error.value || !currentPath.value) return;
-  emit('update:modelValue', props.multiple ? [...new Set([...(props.modelValue || []), currentPath.value])] : currentPath.value);
+async function choose(node) {
+  const version = generation;
+  if (!menuOpen.value || !await readChildren(node) || version !== generation || !menuOpen.value) return;
+  const path = node.path;
+  emit('update:modelValue', props.multiple ? [...new Set([...(props.modelValue || []), path])] : path);
   menuOpen.value = false;
-};
+}
 
-watch(menuOpen, open => {
-  if (open) {
-    const value = props.multiple ? props.modelValue?.at(-1) || '' : props.modelValue;
-    const path = props.multiple ? value.slice(0, value.lastIndexOf('/')) : value;
-    loadDirectory(String(path || '').trim() || '/');
+watch(menuOpen, async open => {
+  generation++;
+  pending.clear();
+  failure.value = null;
+  if (!open) return;
+  const value = props.multiple ? props.modelValue?.at(-1) : props.modelValue;
+  const segments = String(value || '/').split('/').filter(Boolean);
+  nodes.value = [nodeFor('/', '/')];
+  opened.value = ['/'];
+  let node = nodes.value[0];
+  for (const segment of segments) {
+    if (!await readChildren(node)) return;
+    node = node.children.find(child => child.name === segment);
+    if (!node) return;
+    opened.value.push(node.path);
   }
-  else { requestVersion += 1; loading.value = false; }
+  await readChildren(node);
 });
-onBeforeUnmount(() => { requestVersion += 1; });
+onBeforeUnmount(() => { generation++; });
 </script>
 
 <template>
@@ -55,38 +72,23 @@ onBeforeUnmount(() => { requestVersion += 1; });
     :multiple="multiple" :chips="multiple" :closable-chips="multiple" :return-object="false" :menu-icon="multiple ? '' : undefined"
     @update:model-value="emit('update:modelValue', $event)">
     <template #append-inner>
-      <VDialog v-model="menuOpen" max-width="480" scrollable>
+      <VMenu v-model="menuOpen" :close-on-content-click="false" location="bottom end" max-width="min(30rem, 95vw)">
         <template #activator="{ props: menuProps }">
           <VBtn v-bind="menuProps" icon="mdi-folder-open-outline" variant="text" size="small" :disabled="attrs.disabled || attrs.readonly" :aria-label="attrs.label ? `选择${attrs.label}` : '选择目录'" @click.stop />
         </template>
         <VCard class="local-path-menu">
-          <VCardTitle class="text-subtitle-1">选择目录</VCardTitle>
-          <VCardText class="pb-0">
-            <div class="text-body-2 text-break mb-3">{{ currentPath || requestedPath }}</div>
-            <VProgressLinear v-if="loading" indeterminate class="mb-3" />
-            <VAlert v-if="error" type="error" variant="tonal" density="compact" class="mb-3">{{ error }}</VAlert>
-            <div class="d-flex flex-wrap ga-2 mb-2">
-              <VBtn size="small" variant="tonal" prepend-icon="mdi-home-outline" @click="loadDirectory('/')">根目录</VBtn>
-              <VBtn v-if="error" size="small" variant="text" :loading="loading" @click="loadDirectory(requestedPath)">重试读取目录</VBtn>
-            </div>
-            <VList v-if="directories.length" class="local-path-directories" density="compact">
-              <VListItem v-for="item in directories" :key="item.path" tag="button" type="button" class="w-100 text-start"
-                :title="item.is_parent ? '上一级' : item.name" :prepend-icon="item.is_parent ? 'mdi-arrow-up' : 'mdi-folder-outline'"
-                :disabled="loading" :aria-label="item.is_parent ? '返回上一级目录' : `打开目录 ${item.name}`" @click="loadDirectory(item.path)" />
-            </VList>
-            <p v-else-if="!loading && !error" class="text-body-2 text-medium-emphasis py-3 mb-0">此目录没有子文件夹。</p>
-          </VCardText>
-          <VCardActions>
-            <VSpacer /><VBtn color="secondary" variant="tonal" @click="menuOpen = false">取消</VBtn>
-            <VBtn color="primary" variant="flat" :disabled="loading || Boolean(error) || !currentPath" @click="chooseDirectory">选择此目录</VBtn>
-          </VCardActions>
+          <VAlert v-if="failure" type="error" variant="tonal" density="compact">{{ failure.message }}<VBtn variant="text" @click="readChildren(failure.node)">重试读取目录</VBtn></VAlert>
+          <VTreeview v-model:opened="opened" :items="nodes" :load-children="readChildren" item-value="path" item-title="name"
+            density="compact" max-height="20rem" expand-icon="mdi-folder-outline" collapse-icon="mdi-folder-open-outline">
+            <template #title="{ item }"><button type="button" class="directory-name" :aria-label="`选择目录 ${item.path}`" @click.stop="choose(item)">{{ item.name }}</button></template>
+          </VTreeview>
         </VCard>
-      </VDialog>
+      </VMenu>
     </template>
   </component>
 </template>
 
 <style scoped>
-.local-path-menu { min-width: 0; }
-.local-path-directories { max-height: 20rem; overflow-y: auto; }
+.local-path-menu { min-inline-size: min(18rem, 85vw); }
+.directory-name { width: 100%; min-height: 36px; text-align: start; white-space: normal; overflow-wrap: anywhere; }
 </style>

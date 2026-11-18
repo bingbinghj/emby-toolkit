@@ -21,13 +21,13 @@ for (const width of [1440, 1280, 1024, 390]) {
       const geometry = await card.locator('.temp-task-name').evaluate(element => {
         const range = document.createRange(); range.selectNodeContents(element);
         const text = range.getBoundingClientRect(), heading = element.getBoundingClientRect();
-        const card = element.closest('.scheduler-task-card').getBoundingClientRect();
-        const handle = element.closest('.scheduler-task-card').querySelector('.task-drag-handle').getBoundingClientRect();
-        const icon = element.closest('.scheduler-task-card').querySelector('.scheduler-task-summary .v-icon').getBoundingClientRect();
+        const card = element.closest('.task-record').getBoundingClientRect();
+        const handle = element.closest('.task-record').querySelector('.task-drag-handle').getBoundingClientRect();
+        const icon = element.closest('.task-record').querySelector('.scheduler-task-summary .v-icon')?.getBoundingClientRect();
         return { textHeight: text.height, lineHeight: parseFloat(getComputedStyle(element).lineHeight),
           left: text.left - card.left, right: card.right - text.right,
           headingHeight: heading.height, overlapsHandle: text.right > handle.left && text.top < handle.bottom && text.bottom > handle.top,
-          overlapsIcon: text.right > icon.left && text.bottom > icon.top && text.top < icon.bottom };
+          overlapsIcon: !!icon && text.right > icon.left && text.bottom > icon.top && text.top < icon.bottom };
       });
       expect(geometry.textHeight).toBeLessThanOrEqual(geometry.lineHeight + 1);
       expect(geometry.left).toBeGreaterThanOrEqual(8);
@@ -51,8 +51,8 @@ test('narrow cards wrap long task names without clipping or overlapping their co
   await expect(card.locator('.temp-task-name')).toHaveText(name);
   const geometry = await card.locator('.temp-task-name').evaluate(element => {
     const range = document.createRange(); range.selectNodeContents(element); const text = range.getBoundingClientRect();
-    const card = element.closest('.scheduler-task-card').getBoundingClientRect();
-    const icon = element.closest('.scheduler-task-card').querySelector('.scheduler-task-summary .v-icon').getBoundingClientRect();
+    const card = element.closest('.task-record').getBoundingClientRect();
+    const icon = element.closest('.task-record').querySelector('.scheduler-task-summary .v-icon')?.getBoundingClientRect();
     return { textHeight: element.scrollHeight, height: element.clientHeight, left: text.left - card.left,
       right: card.right - text.right, bottom: card.bottom - text.bottom, iconGap: icon.top - text.bottom };
   });

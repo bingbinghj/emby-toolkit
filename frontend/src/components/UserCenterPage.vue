@@ -49,14 +49,14 @@
       <div v-if="authStore.isAdmin" class="compact-fab-stack user-add-button"><VBtn icon="mdi-account-plus" color="primary" elevation="4" :disabled="userBusy" aria-label="添加用户" @click="addUser" /></div>
     </Teleport>
 
-    <VDialog v-model="userDialogOpen" max-width="960" scrollable :fullscreen="mobile" :persistent="userBusy" @update:model-value="open => { if (!open) clearUserDraft(); }">
+    <VDialog v-model="userDialogOpen" max-width="64rem" scrollable :fullscreen="mobile" :persistent="userBusy" @update:model-value="open => { if (!open) clearUserDraft(); }">
       <VCard>
-        <VCardItem class="py-3">
+        <VCardItem class="pe-16" :class="creatingUser ? 'py-3' : 'py-2'">
           <template #prepend><VIcon icon="mdi-account" class="mr-2" /></template>
           <VCardTitle>{{ creatingUser ? '添加用户' : '编辑用户' }}</VCardTitle>
           <VCardSubtitle v-if="editingUser">{{ editingUser.name }}</VCardSubtitle>
-          <template #append><VBtn icon="mdi-close" variant="text" color="default" :disabled="userBusy" aria-label="关闭编辑用户" @click="closeUserDialog" /></template>
         </VCardItem>
+        <DialogCloseBtn :disabled="userBusy" aria-label="关闭编辑用户" @click="closeUserDialog" />
         <VDivider />
         <VCardText class="user-dialog-content">
           <VProgressLinear v-if="loadingUserDetails" indeterminate aria-label="读取用户资料" class="mb-4" />
@@ -115,7 +115,7 @@
           </div>
         </VCardText>
         <VDivider />
-        <VCardActions class="px-6 py-4"><VSpacer /><VBtn color="default" variant="text" :disabled="userBusy" @click="closeUserDialog">取消</VBtn><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSavingUser" :disabled="userBusy || loadingUserDetails || !editingUser" @click="saveUserDetails">{{ creatingUser ? '添加' : '保存' }}</VBtn></VCardActions>
+        <VCardActions class="app-dialog-actions"><VSpacer /><VBtn color="secondary" variant="tonal" :disabled="userBusy" @click="closeUserDialog">取消</VBtn><VBtn color="primary" variant="flat" prepend-icon="mdi-content-save-outline" :loading="isSavingUser" :disabled="userBusy || loadingUserDetails || !editingUser" @click="saveUserDetails">{{ creatingUser ? '添加' : '保存' }}</VBtn></VCardActions>
       </VCard>
     </VDialog>
 
@@ -138,6 +138,7 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue';
 import { useDisplay } from 'vuetify';
 import axios from 'axios';
+import DialogCloseBtn from '@/components/theme/DialogCloseBtn.vue';
 import { useAuthStore } from '../stores/auth';
 import { useContextSearch } from '@/composables/useContextSearch';
 import { useMessage, useDialog } from '@/composables/useFeedback';

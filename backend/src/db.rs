@@ -46,6 +46,7 @@ pub async fn initialize(pool: &PgPool) -> Result<()> {
         .execute(&mut *transaction)
         .await?;
     crate::media_organize_history::migrate_file_names(&mut transaction).await?;
+    crate::media_organize_history::migrate_warning_receipts(&mut transaction).await?;
     transaction.commit().await?;
     Ok(())
 }

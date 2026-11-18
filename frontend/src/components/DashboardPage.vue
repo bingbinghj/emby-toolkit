@@ -12,6 +12,7 @@
               <VCardTitle class="dashboard-card-title">{{ element.title }}</VCardTitle>
               <template #append>
                 <span v-if="isLayoutEditing" class="dashboard-drag-handle" role="button" tabindex="0" :aria-label="`拖动${element.title}`"><VIcon icon="mdi-drag" size="small" /></span>
+                <VBtn v-else-if="element.id === 'imports'" size="small" variant="outlined" to="/media-organize">查看全部</VBtn>
                 <VBtn v-else-if="moduleError(element.id)" prepend-icon="mdi-refresh" variant="text" size="small" :aria-label="`重试${element.title}`" :loading="element.id === 'storage' ? loadingStorage : loadingMedia" @click="element.id === 'storage' ? loadStorage() : loadMedia()">重试</VBtn>
               </template>
             </VCardItem>
@@ -63,11 +64,12 @@
               <p v-else-if="recent !== null" class="text-body-2 text-medium-emphasis mb-0">暂无最近入库记录</p>
               <p v-else class="text-body-2 text-medium-emphasis mb-0">最新入库未知</p>
             </VCardText>
+            <RecentImports v-else-if="element.id === 'imports'" />
             <VCardText v-else class="pt-1">
               <VAlert v-if="mediaErrors.libraries" type="warning" variant="tonal" class="mb-3" density="compact">{{ mediaErrors.libraries }}；{{ staleMessage(snapshotTimes.libraries) }}</VAlert>
               <VSkeletonLoader v-if="loadingMedia && libraries === null" type="image" />
               <div v-else-if="libraries?.length" class="dashboard-library-row" tabindex="0" role="region" aria-label="我的媒体库列表">
-                <VCard v-for="library in libraries" :key="library.id" :to="`/library/${encodeURIComponent(library.id)}`" class="dashboard-library-card app-hover-lift-card" :aria-label="`打开${library.name}`" variant="flat">
+                <VCard v-for="library in libraries" :key="library.id" :href="library.link || undefined" :target="library.link ? '_blank' : undefined" rel="noopener noreferrer" :to="library.link ? undefined : `/library/${encodeURIComponent(library.id)}`" class="dashboard-library-card app-hover-lift-card" :aria-label="`打开${library.name}`" variant="flat">
                   <VImg :src="embyDashboardImage(library, true) || undefined" :aspect-ratio="16 / 9" cover>
                     <template #error><div class="dashboard-art-fallback"><VIcon :icon="mediaIcon(library.collection_type)" size="44" /></div></template>
                     <span class="dashboard-library-count" :aria-label="`媒体数量 ${formatDashboardCount(library.item_count)}`" :title="library.count_error || '媒体数量'">{{ formatDashboardCount(library.item_count) }}</span>
@@ -115,6 +117,7 @@ import { GridStack } from 'gridstack';
 import 'gridstack/dist/gridstack.min.css';
 import axios from 'axios';
 import storageImage from '@/assets/mp-storage.png';
+import RecentImports from './RecentImports.vue';
 import { useAuthStore } from '@/stores/auth';
 import { textColorForBackground } from '@/utils/colorContrast';
 import { dashboardModules, normalizeDashboardProfile, dashboardLayoutProfile, dashboardColumns, storageFrom115, embyDashboardImage, formatDashboardCount, dashboardSnapshot, projectDashboardItems, projectDashboardStatistics, dashboardMonthlyCount } from '@/utils/dashboard';
@@ -428,7 +431,7 @@ onBeforeUnmount(() => { active = false; ++mediaSequence; ++storageSequence; ++gr
 .dashboard-stat-addition { color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); font-size: .72rem; line-height: 1.5; overflow-wrap: anywhere; }
 .dashboard-number { color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); font-size: 1.15rem; font-weight: 700; line-height: 1.4; font-variant-numeric: tabular-nums; }
 .dashboard-poster-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(144px, 1fr)); gap: 16px; padding: 4px 0; }
-.dashboard-library-row { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 20px; padding: 4px 0 8px; }
+.dashboard-library-row { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr)); gap: 20px; padding: 4px 0 8px; }
 .dashboard-media-card, .dashboard-library-card { min-width: 0; background: transparent; border: 0; box-shadow: none; }
 .dashboard-library-card { border-radius: 0; overflow: visible; }
 .dashboard-media-card { aspect-ratio: 2 / 3; border: var(--app-surface-border); border-radius: var(--app-surface-radius); box-shadow: var(--app-surface-shadow); overflow: hidden; }
@@ -476,12 +479,6 @@ onBeforeUnmount(() => { active = false; ++mediaSequence; ++storageSequence; ++gr
   .storage-number { overflow-wrap: anywhere; }
 }
 @container (max-width: 180px) { .storage-number { font-size: 1.25rem; } }
-@container (max-width: 1440px) { .dashboard-library-row { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
-@container (max-width: 1190px) { .dashboard-library-row { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
-@container (max-width: 840px) { .dashboard-library-row { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
-@container (max-width: 600px) { .dashboard-library-row { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
-@container (max-width: 480px) { .dashboard-library-row { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@container (max-width: 280px) { .dashboard-library-row { grid-template-columns: minmax(0, 1fr); } }
 .dashboard-art-fallback { height: 100%; width: 100%; display: flex; align-items: center; justify-content: center; background: rgba(var(--v-theme-on-surface), 0.08); }
 @media (max-width: 740px) {
   .dashboard-poster-grid { grid-template-columns: repeat(auto-fill, minmax(144px, 1fr)); gap: 16px; }

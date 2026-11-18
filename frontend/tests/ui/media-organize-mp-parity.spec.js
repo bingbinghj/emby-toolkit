@@ -193,8 +193,9 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 720 }, { name: '
     });
     await page.goto('/media-organize');
     const items = viewport.name === 'mobile' ? page.getByTestId('organize-items-mobile') : page.getByTestId('organize-items');
+    if (viewport.name === 'mobile') await page.getByRole('button', {name:'批量选择', exact:true}).click();
     await items.getByRole('checkbox').first().check();
-    await page.getByRole('checkbox', { name: '全选本页', exact: true }).check();
+    await page.getByRole('checkbox', { name: viewport.name === 'mobile' ? '全选已加载' : '全选本页', exact: true }).check();
     await expect(page.getByTestId('organize-selection-count')).toHaveText('50/50 项');
     await page.getByTestId('organize-selected-delete').click();
     const dialog = deleteDialog(page);
@@ -212,7 +213,7 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 720 }, { name: '
     await expect(page.getByTestId('organize-selection-count')).toHaveText('50/50 项');
     await page.getByTestId('organize-selected-delete').click();
     await deleteDialog(page).getByTestId('organize-delete-confirm').click();
-    await expect(page.getByTestId('organize-page-info')).toHaveText('1 - 1 / 1');
+    if (viewport.name === 'desktop') await expect(page.getByTestId('organize-page-info')).toHaveText('1 - 1 / 1');
     await expect(page.getByTestId('organize-selection')).toHaveCount(0);
     await expect(items).toContainText('批量验证电影51');
     expect(deletes(api)).toHaveLength(1);
@@ -231,12 +232,13 @@ test('mobile unbound failure offers history deletion while reorganization remain
     return { deleted_count: 1, deleted_ids: request.body.history_ids };
   });
   await page.goto('/media-organize');
+  await page.getByRole('button',{name:'批量选择', exact:true}).click();
   await page.getByTestId('organize-items-mobile').getByRole('checkbox').check();
   await expect(page.getByTestId('organize-selected')).toBeDisabled();
   await expect(page.getByTestId('organize-selected-delete')).toBeEnabled();
   await page.getByTestId('organize-selected-delete').click();
   await deleteDialog(page).getByTestId('organize-delete-confirm').click();
-  await expect(page.getByTestId('organize-page-info')).toHaveText('0 - 0 / 0');
+  await expect(page.getByTestId('organize-items-mobile')).toContainText('当前条件下没有入库处理记录');
   expect(deletes(api)[0].body).toEqual({ history_ids: [failed.id] });
   expect(api.requests.some(request => request.method === 'POST')).toBe(false);
 });
@@ -278,4 +280,27 @@ test('canceling manual organization preserves selection without submitting work'
   await expect(dialog).toBeHidden();
   await expect(rows(page).first().getByRole('checkbox')).toBeChecked();
   expect(api.requests.filter(request => request.method !== 'GET')).toEqual([]);
+});
+
+test('missing tags use live Emby artwork, filename gets the wide column, and Shift follows displayed order', async ({ page, api }) => {
+  const file = '葫芦小金刚.Calabash Brothers： Little Golden Steel.S01E04.1989.1440p.H264.AAC.2.0.mp4';
+  const items = [4, 2, 1].map(n => ({ ...records[0], id: 'row'+n, item_id: 'ep'+n, series_name:'葫芦小金刚', series_id:'62037',
+    episode_number:n, file_name:file.replace('E04','E0'+n), created_at:'2026-11-18T11:33:39Z' }));
+  await page.setViewportSize({width:1440,height:900});
+  api.respond('GET', historyPath, {items,total:3});
+  await page.goto('/media-organize');
+  const row = rows(page).first();
+  await expect(row.locator('img')).toHaveAttribute('src', /Items\/62037\/Images\/Primary/);
+  const filename = await row.locator('.organize-file-name').boundingBox();
+  const time = await row.locator('time').boundingBox();
+  expect(filename.width).toBeGreaterThan(480);
+  expect(time.x).toBeGreaterThanOrEqual(filename.x + filename.width);
+  await row.getByRole('checkbox').check();
+  await rows(page).last().getByRole('checkbox').click({modifiers:['Shift']});
+  await expect(page.getByTestId('organize-selection-count')).toHaveText('3/3 项');
+  await page.getByRole('button',{name:'视图布局'}).click();
+  await page.getByText('分组模式',{exact:true}).click();
+  await expect(rows(page)).toHaveCount(0);
+  await page.getByRole('button',{name:/葫芦小金刚 · 3 项/}).click();
+  await expect(rows(page)).toHaveCount(3);
 });

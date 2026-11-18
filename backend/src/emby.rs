@@ -1414,10 +1414,18 @@ pub async fn query_items(
     parameters: &[(&str, String)],
     context: &JobContext,
 ) -> Result<Vec<Value>> {
+    query_items_checked(state, parameters, Some(context)).await
+}
+
+pub(crate) async fn query_items_checked(
+    state: &AppState,
+    parameters: &[(&str, String)],
+    context: Option<&JobContext>,
+) -> Result<Vec<Value>> {
     let mut result = vec![];
     let mut seen = std::collections::HashSet::new();
     loop {
-        context.checkpoint().await?;
+        if let Some(context) = context { context.checkpoint().await?; }
         let mut query = parameters.to_vec();
         query.extend([
             ("StartIndex", result.len().to_string()),

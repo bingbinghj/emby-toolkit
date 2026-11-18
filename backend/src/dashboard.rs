@@ -183,6 +183,26 @@ async fn libraries(state: &AppState, user: &str) -> Result<Value> {
             "image_tag":item["ImageTags"]["Primary"]}),
         );
     }
+    let config = state.config.read().await;
+    let public = string(&config, "emby_public_url");
+    let address = if public.is_empty() { string(&config, "emby_server_url") } else { public };
+    let server = string(&config, "emby_server_id");
+    drop(config);
+    if let Ok(mut url) = url::Url::parse(&address)
+        && matches!(url.scheme(), "https" | "http") && url.has_host()
+    {
+        let _ = url.set_username("");
+        let _ = url.set_password(None);
+        url.set_query(None);
+        url.set_path(&format!("{}/web/index.html", url.path().trim_end_matches('/').trim_end_matches("/emby")));
+        for library in &mut result {
+            let mut params = url::form_urlencoded::Serializer::new(String::new());
+            if valid_id(&server) { params.append_pair("serverId", &server); }
+            params.append_pair("parentId", &string(library, "id"));
+            url.set_fragment(Some(&format!("!/videos?{}", params.finish())));
+            library["link"] = json!(url.as_str());
+        }
+    }
     let counts = futures_util::future::join_all(result.iter().map(|library| async {
         let kind = match string(library, "collection_type").as_str() {
             "movies" | "movie" => "Movie",

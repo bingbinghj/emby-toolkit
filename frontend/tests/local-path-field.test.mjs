@@ -4,111 +4,52 @@ import test from 'node:test';
 import vm from 'node:vm';
 
 const source = readFileSync(new URL('../src/components/settings/general/LocalPathField.vue', import.meta.url), 'utf8');
-const handlers = source.slice(source.indexOf('const loadDirectory ='), source.indexOf('watch(menuOpen'));
+const handlers = source.slice(source.indexOf('const nodeFor'), source.indexOf('watch(menuOpen'));
 const deferred = () => {
-  let resolve, reject;
-  const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
-  return { promise, resolve, reject };
+  let resolve;
+  const promise = new Promise(yes => { resolve = yes; });
+  return { promise, resolve };
 };
-
 function fixture(get = async (_, { params }) => ({ data: { code: 200, data: [], current_path: params.path } })) {
-  const requests = [], updates = [];
-  const context = vm.createContext({
-    menuOpen: { value: true }, loading: { value: false }, error: { value: '' },
-    directories: { value: [] }, currentPath: { value: '' }, requestedPath: { value: '/' }, requestVersion: 0, props: { modelValue: '', multiple: false },
-    emit: (event, value) => updates.push({ event, value }),
-    axios: { get: async (url, options) => { requests.push({ url, options }); return get(url, options); } },
+  const requests = [], updates = [], context = vm.createContext({
+    menuOpen: { value: true }, failure: { value: null }, props: { modelValue: '', multiple: false },
+    emit: (event, value) => updates.push(value),
+    axios: { get: async (url, options) => { requests.push(options.params.path); return get(url, options); } },
   });
-  vm.runInContext(handlers + '\nthis.load = loadDirectory; this.choose = chooseDirectory;', context);
+  vm.runInContext(handlers + '\nthis.read = readChildren; this.choose = choose; this.node = nodeFor; this.close = () => {generation++;menuOpen.value = false};', context);
   return { context, requests, updates };
 }
-
-test('browsing parent and child directories performs GET reads without changing the input', async () => {
-  const f = fixture();
-  await f.context.load('/config');
-  await f.context.load('/config/metadata');
-  await f.context.load('/config');
-  assert.deepEqual(f.requests.map(request => request.url), Array(3).fill('/api/p115/system/directories'));
-  assert.deepEqual(f.requests.map(request => request.options.params.path), ['/config', '/config/metadata', '/config']);
+test('opening branches reads once per path and updates the draft only on selection', async () => {
+  const f = fixture(), root = f.context.node('/', '/'), child = f.context.node('/media', 'media');
+  await Promise.all([f.context.read(root), f.context.read(root)]);
+  await f.context.read(child);
   assert.deepEqual(f.updates, []);
-  f.context.choose();
-  assert.deepEqual(f.updates, [{ event: 'update:modelValue', value: '/config' }]);
-  assert.equal(f.context.menuOpen.value, false);
+  await f.context.choose(child);
+  assert.deepEqual(f.requests, ['/', '/media']);
+  assert.deepEqual(f.updates, ['/media']);
 });
-
-test('empty input opens the filesystem root and allows selecting an empty directory', async () => {
-  const f = fixture();
-  await f.context.load('');
-  assert.equal(f.requests[0].options.params.path, '/');
-  assert.equal(f.context.currentPath.value, '/');
-  assert.equal(f.context.directories.value.length, 0);
-  f.context.choose();
-  assert.equal(f.updates[0].value, '/');
-});
-
-test('a failed read preserves the input and retries only the requested directory', async () => {
-  let reads = 0;
-  const f = fixture(async (_, { params }) => {
-    if (!reads++) throw { response: { data: { message: '目录未挂载' } } };
-    return { data: { code: 200, data: [], current_path: params.path } };
-  });
-  await f.context.load('/metadata');
-  assert.equal(f.context.error.value, '目录未挂载');
-  assert.equal(f.context.currentPath.value, '');
-  f.context.choose();
-  assert.deepEqual(f.updates, []);
-  await f.context.load(f.context.requestedPath.value);
-  assert.equal(f.context.currentPath.value, '/metadata');
-  assert.equal(f.context.error.value, '');
-});
-
-for (const data of [
-  { code: 403, message: '没有目录访问权限' },
-  { code: 200, current_path: '/config', data: [{ name: 'invalid', path: null }] },
-  { code: 200, current_path: null, data: [] },
-]) {
-  test('invalid directory responses cannot select or overwrite a path', async () => {
-    const f = fixture(async () => ({ data }));
-    await f.context.load('/config');
-    assert.ok(f.context.error.value);
-    f.context.choose();
-    assert.deepEqual(f.updates, []);
+for (const data of [{ code: 403 }, { code: 200, current_path: null, data: [] }, { code: 200, current_path: '/', data: [{ name: 'bad', path: null }] }]) {
+  test('invalid directory replies preserve the field and allow retry', async () => {
+    let reads = 0;
+    const f = fixture(async () => ({ data: reads++ ? { code: 200, current_path: '/', data: [] } : data }));
+    const root = f.context.node('/', '/');
+    await f.context.choose(root);
+    assert.ok(f.context.failure.value); assert.deepEqual(f.updates, []);
+    await f.context.choose(root);
+    assert.deepEqual(f.updates, ['/']); assert.equal(f.context.failure.value, null);
   });
 }
-
-test('a late earlier directory response cannot replace the latest directory', async () => {
-  const old = deferred();
-  const f = fixture((_, { params }) => params.path === '/old' ? old.promise
-    : Promise.resolve({ data: { code: 200, data: [], current_path: params.path } }));
-  const first = f.context.load('/old');
-  await f.context.load('/new');
-  old.resolve({ data: { code: 200, data: [], current_path: '/old' } });
-  await first;
-  assert.equal(f.context.currentPath.value, '/new');
-  assert.equal(f.context.loading.value, false);
-});
-
-test('closing the picker prevents a pending read from applying or selecting a path', async () => {
-  const work = deferred();
-  const f = fixture(() => work.promise);
-  const request = f.context.load('/config');
-  f.context.menuOpen.value = false;
-  work.resolve({ data: { code: 200, data: [], current_path: '/config' } });
-  await request;
-  f.context.choose();
-  assert.equal(f.context.currentPath.value, '');
+test('closing a pending branch prevents both stale contents and selection', async () => {
+  const wait = deferred(), f = fixture(() => wait.promise), branch = f.context.node('/old', 'old');
+  const pending = f.context.choose(branch);
+  f.context.close();
+  wait.resolve({ data: { code: 200, current_path: '/old', data: [] } });
+  await pending;
   assert.deepEqual(f.updates, []);
+  assert.equal(branch.loaded, undefined);
 });
-
-
-test('multiple directory selection preserves existing paths and avoids duplicate additions', async () => {
-  const f = fixture();
-  f.context.props = { modelValue: ['/media/a'], multiple: true };
-  await f.context.load('/media/b');
-  f.context.choose();
-  assert.deepEqual(JSON.parse(JSON.stringify(f.updates)), [{ event: 'update:modelValue', value: ['/media/a', '/media/b'] }]);
-  f.context.menuOpen.value = true;
-  f.context.props.modelValue = ['/media/a', '/media/b'];
-  f.context.choose();
-  assert.deepEqual(JSON.parse(JSON.stringify(f.updates.at(-1).value)), ['/media/a', '/media/b']);
+test('multi-path selection preserves and deduplicates existing paths', async () => {
+  const f = fixture(); f.context.props = { multiple: true, modelValue: ['/a', '/b'] };
+  await f.context.choose(f.context.node('/b', 'b'));
+  assert.deepEqual([...f.updates[0]], ['/a', '/b']);
 });

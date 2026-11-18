@@ -44,7 +44,7 @@ test('OpenAPI user capacity fields are read without treating the server disk as 
 
 test('persisted dashboard layout repairs unknown and duplicate module entries', () => {
   assert.deepEqual(normalizeDashboardLayout({ order: ['recent', 'recent', 'unknown'], hidden: ['statistics', 'unknown', 'statistics'] }), {
-    order: ['recent', 'storage', 'statistics', 'libraries'], hidden: ['statistics'],
+    order: ['recent', 'storage', 'statistics', 'libraries', 'imports'], hidden: ['statistics'],
   });
   assert.deepEqual(normalizeDashboardLayout(null).order, dashboardModules.map(item => item.id));
 });

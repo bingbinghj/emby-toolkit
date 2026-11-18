@@ -37,7 +37,9 @@ struct Host {
     plugins_release: Arc<Notify>,
     failed_season: Arc<Mutex<Option<String>>>,
     item_queries: Arc<Mutex<Vec<HashMap<String, String>>>>,
-    items_seen: Arc<Notify>,
+    pause_second_scope: Arc<AtomicBool>,
+    scope_seen: Arc<Notify>,
+    scope_release: Arc<Notify>,
     page_limit: Arc<Mutex<Option<usize>>>,
 }
 
@@ -49,8 +51,14 @@ async fn details(State(host): State<Host>, Path(id): Path<String>) -> Response {
 }
 
 async fn items(State(host): State<Host>, Query(query): Query<HashMap<String, String>>) -> Response {
-    host.items_seen.notify_one();
-    host.item_queries.lock().await.push(query.clone());
+    let mut queries = host.item_queries.lock().await;
+    let pause = !queries.is_empty() && host.pause_second_scope.swap(false, Ordering::SeqCst);
+    queries.push(query.clone());
+    drop(queries);
+    if pause {
+        host.scope_seen.notify_one();
+        host.scope_release.notified().await;
+    }
     let failed_season = host.failed_season.lock().await.clone();
     if failed_season.is_some() && query.get("ParentId") == failed_season.as_ref() {
         return StatusCode::BAD_REQUEST.into_response();
@@ -507,6 +515,9 @@ async fn failure_table_is_listed_clearable_and_manual_episode_retry_bypasses_ski
             json!(130_000_000);
     }
     fixture.run_mode(false).await;
+    assert_eq!(endpoint(&fixture, "POST", "101").await.status(), StatusCode::CONFLICT);
+    let available: Value = serde_json::from_slice(&to_bytes(endpoint(&fixture,"GET","101").await.into_body(),1024).await.unwrap()).unwrap();
+    assert_eq!(available["available"],false);
     let retry = fixture.run(Some(vec!["101".into()])).await;
     assert_eq!(retry["result"]["failed"], 1, "{retry}");
     assert_eq!(retry["result"]["previous_failures"], 0);
@@ -531,6 +542,8 @@ async fn failure_table_is_listed_clearable_and_manual_episode_retry_bypasses_ski
         serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
             .unwrap();
     assert_eq!(body["cleared_tables"], json!(["credits_failures"]));
+    let available: Value = serde_json::from_slice(&to_bytes(endpoint(&fixture,"GET","101").await.into_body(),1024).await.unwrap()).unwrap();
+    assert_eq!(available["available"],true);
     let retry = fixture.run_mode(false).await;
     assert_eq!(retry["result"]["failed"], 2, "{retry}");
     assert_eq!(retry["result"]["previous_failures"], 0);
@@ -546,19 +559,16 @@ fn start(chapters: &Value) -> Option<u64> {
         .and_then(|chapter| chapter["StartPositionTicks"].as_u64())
 }
 
-async fn begin_endpoint(fixture: &Fixture, id: &str) -> String {
+async fn endpoint(fixture: &Fixture, method: &str, id: &str) -> Response {
     use tower::ServiceExt;
-    let response = credits::router()
-        .with_state(fixture.state.clone())
-        .oneshot(
-            axum::http::Request::builder()
-                .method("POST")
-                .uri(format!("/api/media/{id}/extract_credits"))
-                .body(axum::body::Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+    credits::router().with_state(fixture.state.clone())
+        .oneshot(axum::http::Request::builder().method(method)
+            .uri(format!("/api/media/{id}/extract_credits"))
+            .body(axum::body::Body::empty()).unwrap()).await.unwrap()
+}
+
+async fn begin_endpoint(fixture: &Fixture, id: &str) -> String {
+    let response = endpoint(fixture, "POST", id).await;
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     let body: Value = serde_json::from_slice(
         &axum::body::to_bytes(response.into_body(), 1024 * 1024)
@@ -594,24 +604,13 @@ async fn series_and_season_endpoints_page_only_the_selected_scope() {
             }
             items.insert("301".into(), json!({"Id":"301","Type":"Episode","SeriesId":"unrelated","SeasonId":"unrelated-season"}));
         }
-        let job = submit_endpoint(&fixture, id).await;
-        assert_eq!(job["last_action"], action, "{job}");
-        assert_eq!(job["result"]["failed"], 0, "{job}");
-        let selected = job["result"]["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|item| item["item_id"].as_str().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(selected, expected, "{job}");
-        assert_eq!(
-            start(&fixture.cache("101").await[0]["Chapters"]),
-            Some(750_000_000)
-        );
-        assert_eq!(
-            start(&fixture.cache("102").await[0]["Chapters"]),
-            (kind == "Series").then_some(750_000_000)
-        );
+        assert_eq!(endpoint(&fixture,"POST",id).await.status(), StatusCode::CONFLICT);
+        fixture.host.items.lock().await.get_mut("101").unwrap()["Chapters"].as_array_mut().unwrap().pop();
+        let job = submit_endpoint(&fixture,id).await;
+        assert_eq!(job["last_action"],action);
+        let selected: std::collections::BTreeSet<_> = job["result"]["items"].as_array().unwrap().iter().map(|i|i["item_id"].as_str().unwrap()).collect();
+        assert_eq!(selected,expected.into_iter().collect());
+        assert_eq!(start(&fixture.cache("102").await[0]["Chapters"]),None);
         let queries = fixture.host.item_queries.lock().await;
         assert!(
             queries
@@ -643,8 +642,7 @@ async fn selected_series_list_failure_is_terminal_before_extraction() {
         .await
         .insert("series".into(), json!({"Id":"series","Type":"Series"}));
     *fixture.host.failed_season.lock().await = Some("series".into());
-    let job = submit_endpoint(&fixture, "series").await;
-    assert_eq!(job["state"], "failed", "{job}");
+    assert!(!endpoint(&fixture,"POST","series").await.status().is_success());
     assert!(fixture.host.writes.lock().await.is_empty());
     assert!(fixture.host.downloads.lock().await.is_empty());
     fixture.close().await;
@@ -660,9 +658,9 @@ async fn stopping_series_scope_read_never_extracts_or_updates_episode_cache() {
         .lock()
         .await
         .insert("series".into(), json!({"Id":"series","Type":"Series"}));
-    let reads = fixture.host.item_queries.lock().await;
+    fixture.host.pause_second_scope.store(true,Ordering::SeqCst);
     let task = begin_endpoint(&fixture, "series").await;
-    tokio::time::timeout(Duration::from_secs(10), fixture.host.items_seen.notified())
+    tokio::time::timeout(Duration::from_secs(10), fixture.host.scope_seen.notified())
         .await
         .unwrap();
     fixture
@@ -671,7 +669,7 @@ async fn stopping_series_scope_read_never_extracts_or_updates_episode_cache() {
         .control(Some(&task), "stop")
         .await
         .unwrap();
-    drop(reads);
+    fixture.host.scope_release.notify_one();
     let job = fixture.wait(&task).await;
     assert_eq!(job["state"], "cancelled", "{job}");
     assert!(fixture.host.writes.lock().await.is_empty());
@@ -718,30 +716,8 @@ async fn single_episode_endpoint_rejects_movies_and_identifies_its_own_task_scop
         .oneshot(request())
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let body: Value = serde_json::from_slice(
-        &axum::body::to_bytes(response.into_body(), 1024 * 1024)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    let id = body["task_id"].as_str().unwrap();
-    let job = tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            let job = fixture.state.jobs.result(id).await.unwrap();
-            if job["is_running"] == false {
-                break job;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert_eq!(job["last_action"], "提取当前集片尾");
-    assert_eq!(job["result"]["skipped"], 1, "{job}");
-    assert_eq!(job["result"]["credits_start_ticks"], 750_000_000);
+    assert_eq!(response.status(), StatusCode::CONFLICT);
     assert!(fixture.host.writes.lock().await.is_empty());
-    assert!(fixture.host.downloads.lock().await.is_empty());
     fixture.close().await;
 }
 

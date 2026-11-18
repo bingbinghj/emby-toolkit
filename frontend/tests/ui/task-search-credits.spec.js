@@ -137,7 +137,7 @@ test('pending recovery and running tasks disable episode credits extraction', as
   api.setTask({ is_running: true, state: 'running', current_action: '提取缩略图', message: '处理中', progress: 20 });
   await page.reload();
   await expect(page.getByTestId('episode-extract-credits')).toBeDisabled();
-  expect(api.requests.filter(request => request.path.endsWith('/extract_credits'))).toEqual([]);
+  expect(api.requests.filter(request => request.method === 'POST' && request.path.endsWith('/extract_credits'))).toEqual([]);
 });
 
 test('series editor extracts only the selected episode rather than the series id', async ({ page, api }) => {
@@ -244,3 +244,22 @@ for (const [theme, glassEnabled] of [['light', false], ['dark', false], ['light'
     }
   });
 }
+
+test('blocked credits disable both editor entry points and replacement confirmation releases the log viewer', async ({ page, api }) => {
+  episode(api);
+  api.respond('GET', '/api/media/101/extract_credits', {available:false});
+  const replacement = api.defer('POST','/api/media_info/replace_episode_images/101');
+  await page.goto('/edit-media/101');
+  await expect(page.getByTestId('episode-extract-credits')).toBeDisabled();
+  await page.getByTestId('media-info-open').click();
+  await expect(page.getByTestId('media-info-extract-credits')).toBeDisabled();
+  await page.getByRole('button',{name:'关闭媒体信息编辑器'}).click();
+  await page.getByRole('button',{name:'替换剧集图',exact:true}).click();
+  await page.getByRole('button',{name:'确认',exact:true}).click();
+  await replacement.started;
+  await expect(page.getByRole('button',{name:'关闭确认'})).toHaveCount(0);
+  await page.getByRole('button',{name:'实时日志',exact:true}).click();
+  await expect(page.getByRole('tab',{name:'实时日志',exact:true})).toBeVisible();
+  replacement.release({refreshed_count:1,episode_count:1,message:'剧集图处理完成'});
+  expect(api.requests.filter(r=>r.method==='POST' && r.path.includes('replace_episode_images'))).toHaveLength(1);
+});

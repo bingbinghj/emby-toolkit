@@ -40,22 +40,22 @@ test('dashboard shows actual 115 space, Emby statistics and navigable Emby cover
 
 test('MP content settings save visibility after confirmation and default layout restores it', async ({ page }) => {
   await page.goto('/dashboard');
-  await expect(modules(page)).toHaveCount(4);
+  await expect(modules(page)).toHaveCount(5);
   await openSettings(page);
   const dialog = page.getByRole('dialog');
   await dialog.getByRole('button', { name: '媒体统计', exact: true }).click();
   await expect(dialog.getByRole('button', { name: '媒体统计', exact: true })).toHaveAttribute('aria-pressed', 'false');
-  await expect(modules(page)).toHaveCount(4);
+  await expect(modules(page)).toHaveCount(5);
   await dialog.getByRole('button', { name: '保存', exact: true }).click();
-  await expect(modules(page)).toHaveCount(3);
+  await expect(modules(page)).toHaveCount(4);
   await expect(page.locator('[data-dashboard-module="statistics"]')).toHaveCount(0);
   await page.reload();
-  await expect(modules(page)).toHaveCount(3);
+  await expect(modules(page)).toHaveCount(4);
   await page.getByRole('button', { name: '调整布局', exact: true }).click();
   await page.getByRole('button', { name: '完成调整', exact: true }).hover();
   await page.getByRole('button', { name: '恢复默认布局', exact: true }).click();
   await page.getByRole('button', { name: '完成调整', exact: true }).click();
-  await expect(modules(page)).toHaveCount(4);
+  await expect(modules(page)).toHaveCount(5);
 });
 
 test('MoviePilot-style reload failures preserve media snapshots and report unknown 115 space with retry notices', async ({ page, api }) => {
@@ -190,7 +190,7 @@ test('a late response from an unmounted dashboard cannot write a successful snap
 test('mobile dashboard and MP content settings remain within the viewport', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/dashboard');
-  await expect(modules(page)).toHaveCount(4);
+  await expect(modules(page)).toHaveCount(5);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await openSettings(page);
   await page.getByRole('dialog').getByRole('button', { name: '媒体统计', exact: true }).click();
@@ -199,13 +199,14 @@ test('mobile dashboard and MP content settings remain within the viewport', asyn
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
-test('my media wraps in rows with at most seven Emby covers and actual count badges', async ({ page, api }) => {
-  api.respond('GET', '/api/dashboard/media', { ...dashboard, libraries: Array.from({ length: 11 }, (_, index) => ({ id: `library-${index}`, name: `Emby 媒体库 ${index + 1}`, collection_type: 'movies', image_tag: `composite-${index}`, item_count: index === 0 ? 0 : 100 + index })) });
-  for (const [width, columns] of [[1920, 7], [1440, 5], [390, 2]]) {
+test('my media uses the MP 240px library grid, server links and actual count badges', async ({ page, api }) => {
+  api.respond('GET', '/api/dashboard/media', { ...dashboard, libraries: Array.from({ length: 11 }, (_, index) => ({ id: `library-${index}`, name: `Emby 媒体库 ${index + 1}`, link: `https://emby.invalid/web/index.html#!/videos?parentId=library-${index}`, collection_type: 'movies', image_tag: `composite-${index}`, item_count: index === 0 ? 0 : 100 + index })) });
+  for (const width of [1920, 1440, 390]) {
     await page.setViewportSize({ width, height: 1000 });
     await page.goto('/dashboard');
     const row = page.getByRole('region', { name: '我的媒体库列表', exact: true });
     await expect(row.getByRole('link')).toHaveCount(11);
+    await expect(row.getByRole('link').first()).toHaveAttribute('href', 'https://emby.invalid/web/index.html#!/videos?parentId=library-0');
     const metrics = await row.evaluate(element => {
       const cards = [...element.querySelectorAll('.dashboard-library-card')];
       const art = cards[0].querySelector('.v-responsive').getBoundingClientRect();
@@ -213,7 +214,8 @@ test('my media wraps in rows with at most seven Emby covers and actual count bad
       return { scrollWidth: element.scrollWidth, clientWidth: element.clientWidth, ratio: art.width / art.height, rowSize: cards.filter(card => Math.abs(card.getBoundingClientRect().top - cards[0].getBoundingClientRect().top) < 1).length, secondTop: cards.at(-1).getBoundingClientRect().top, firstTop: cards[0].getBoundingClientRect().top, weight: title.fontWeight };
     });
     expect(metrics.ratio).toBeCloseTo(16 / 9, 1);
-    expect(metrics.rowSize).toBe(columns);
+    const gap = await row.evaluate(element => parseFloat(getComputedStyle(element).columnGap));
+    expect(metrics.rowSize).toBe(Math.max(1, Math.floor((metrics.clientWidth + gap) / (240 + gap))));
     expect(metrics.secondTop).toBeGreaterThan(metrics.firstTop);
     expect(metrics.weight).toBe('700');
     expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.clientWidth + 1);
@@ -228,7 +230,7 @@ test('module drag handles become available only during layout editing', async ({
   await page.goto('/dashboard');
   await expect(page.locator('.dashboard-drag-handle')).toHaveCount(0);
   await page.getByRole('button', { name: '调整布局', exact: true }).click();
-  await expect(page.locator('.dashboard-drag-handle')).toHaveCount(4);
+  await expect(page.locator('.dashboard-drag-handle')).toHaveCount(5);
   const library = page.getByRole('button', { name: '拖动我的媒体库', exact: true });
   const storage = page.locator('[data-dashboard-module="storage"]');
   const title = page.locator('[data-dashboard-module="libraries"] .dashboard-card-title');
@@ -352,14 +354,14 @@ test('GridStack resizing persists width and height while device profiles keep in
 test('legacy visibility and ordering migrate into the per-user GridStack profile', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('etk-dashboard-layout-v1', JSON.stringify({ order: ['libraries', 'storage', 'statistics', 'recent'], hidden: ['recent'] })));
   await page.goto('/dashboard');
-  await expect(modules(page)).toHaveCount(3);
+  await expect(modules(page)).toHaveCount(4);
   await expect(modules(page).first()).toHaveAttribute('data-dashboard-module', 'libraries');
   await expect(modules(page).first()).toHaveAttribute('gs-y', '0');
   await openSettings(page);
   await page.getByRole('dialog').getByRole('button', { name: '媒体统计', exact: true }).click();
   await page.getByRole('button', { name: '保存', exact: true }).click();
   await page.reload();
-  await expect(modules(page)).toHaveCount(2);
+  await expect(modules(page)).toHaveCount(3);
   await expect(modules(page).first()).toHaveAttribute('data-dashboard-module', 'libraries');
   const saved = await page.evaluate(() => JSON.parse(localStorage.getItem('etk-dashboard-layout-v2:ui-test-user:desktop')));
   expect(saved.hidden.sort()).toEqual(['recent', 'statistics']);
@@ -371,7 +373,7 @@ const profile = (overrides = {}) => ({ order: ['storage', 'statistics', 'recent'
 test('server dashboard preferences load on a fresh browser without writing default preferences back', async ({ page, api }) => {
   api.respond('GET', '/api/dashboard/layout/desktop', { layout: profile({ order: ['libraries', 'storage', 'statistics', 'recent'], hidden: ['statistics'], items: { libraries: { x: 0, y: 0, w: 12, h: 20, manualHeight: false } } }) });
   await page.goto('/dashboard');
-  await expect(modules(page)).toHaveCount(3);
+  await expect(modules(page)).toHaveCount(4);
   await expect(modules(page).first()).toHaveAttribute('data-dashboard-module', 'libraries');
   await expect(modules(page).first()).toHaveAttribute('gs-y', '0');
   expect(api.requests.filter(request => request.method === 'POST' && request.path.startsWith('/api/dashboard/layout/'))).toEqual([]);
@@ -397,7 +399,7 @@ test('dashboard preference saves run serially and a failed read cannot replace a
   await openSettings(page);
   await page.getByRole('dialog').getByRole('button', { name: '存储空间', exact: true }).click();
   await page.getByRole('button', { name: '保存', exact: true }).click();
-  await expect(modules(page)).toHaveCount(2);
+  await expect(modules(page)).toHaveCount(3);
   expect(api.requests.filter(request => request.method === 'POST' && request.path === '/api/dashboard/layout/desktop')).toHaveLength(1);
   api.respond('POST', '/api/dashboard/layout/desktop', request => ({ layout: request.body.layout }));
   first.release({ layout: firstRequest.body.layout });
@@ -405,7 +407,7 @@ test('dashboard preference saves run serially and a failed read cannot replace a
   expect(api.requests.filter(request => request.method === 'POST' && request.path === '/api/dashboard/layout/desktop').at(-1).body.layout.hidden.sort()).toEqual(['statistics', 'storage']);
   api.respond('GET', '/api/dashboard/layout/desktop', { error: '布局服务器暂不可用' }, 503);
   await page.reload();
-  await expect(modules(page)).toHaveCount(2);
+  await expect(modules(page)).toHaveCount(3);
   await expect(page.getByText('布局读取失败：布局服务器暂不可用', { exact: false })).toBeVisible();
 });
 

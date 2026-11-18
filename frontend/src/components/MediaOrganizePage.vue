@@ -17,20 +17,36 @@
                 </VListItem>
               </VList>
             </VMenu>
+            <template v-if="!smAndDown">
+              <VMenu location="bottom end" :close-on-content-click="false">
+                <template #activator="{ props }"><VBtn v-bind="props" icon="mdi-sort-variant" variant="text" :color="sortKey ? 'primary' : 'default'" aria-label="排序" /></template>
+                <VList min-width="180">
+                  <VListItem v-for="option in sortOptions" :key="option.value" :title="option.title" :active="sortKey === option.value" @click="sortKey = option.value" />
+                  <VDivider /><VListItem :disabled="!sortKey" :title="descending ? '降序' : '升序'" :prepend-icon="descending ? 'mdi-sort-descending' : 'mdi-sort-ascending'" @click="descending = !descending" />
+                </VList>
+              </VMenu>
+              <VMenu location="bottom end">
+                <template #activator="{ props }"><VBtn v-bind="props" :icon="grouped ? 'mdi-format-list-group' : 'mdi-format-list-bulleted'" variant="text" aria-label="视图布局" /></template>
+                <VList><VListItem title="列表模式" :active="!grouped" @click="grouped = false" /><VListItem title="分组模式" :active="grouped" @click="grouped = true" /></VList>
+              </VMenu>
+            </template>
+            <VBtn v-if="smAndDown" icon="mdi-checkbox-multiple-marked-outline" variant="text" :color="mobileBatch ? 'primary' : 'default'"
+              :aria-label="mobileBatch ? '退出批量选择' : '批量选择'" :aria-pressed="mobileBatch" :disabled="processing" @click="toggleMobileBatch" />
             <VBtn icon="mdi-refresh" variant="text" color="default" aria-label="刷新入库记录" :loading="loadingItems" :disabled="processing" @click="loadItems" />
             </div>
           </header>
 
-      <div v-if="selectedItems.length" class="organize-selection" role="group" aria-label="批量选择" data-testid="organize-selection">
+      <div v-if="selectedItems.length || (smAndDown && mobileBatch)" class="organize-selection" role="group" aria-label="批量选择" data-testid="organize-selection">
         <div class="organize-selection-actions">
-          <VCheckbox :model-value="allPageSelected" :indeterminate="pageSelectedCount > 0 && !allPageSelected" label="全选本页" density="compact" hide-details :disabled="!canSelectItems() || !selectablePageItems.length" data-testid="organize-select-page" @update:model-value="selectPage" />
+          <VCheckbox :model-value="allPageSelected" :indeterminate="pageSelectedCount > 0 && !allPageSelected" :label="smAndDown ? '全选已加载' : '全选本页'" density="compact" hide-details :disabled="!canSelectItems() || !selectablePageItems.length" data-testid="organize-select-page" @update:model-value="selectPage" />
+          <span v-if="pageSelectedCount > 1000" class="text-caption">单次最多处理 1000 项</span>
           <span class="text-caption text-medium-emphasis" data-testid="organize-selection-count">{{ pageSelectedCount }}/{{ items.length }} 项</span>
           <VBtn size="small" color="primary" variant="tonal" prepend-icon="mdi-redo-variant" :disabled="!canReorganize" :loading="processing" data-testid="organize-selected" @click="openReprocessConfirmation">批量重新整理</VBtn>
           <VBtn size="small" color="error" variant="tonal" prepend-icon="mdi-trash-can-outline" :disabled="!canDelete" data-testid="organize-selected-delete" @click="openDeleteConfirmation()">批量删除</VBtn>
           <VBtn size="small" variant="text" :disabled="processing" @click="selectedItems = []">取消全选</VBtn>
         </div>
       </div>
-      <div v-else class="organize-summary text-medium-emphasis">{{ total === null ? '正在读取入库记录' : `共 ${total} 条记录，${pages} 页` }}</div>
+      <div v-else class="organize-summary text-medium-emphasis">{{ total === null ? '正在读取入库记录' : smAndDown ? `共 ${total} 条记录` : `共 ${total} 条记录，${pages} 页` }}</div>
 
       <VAlert v-if="itemsError" type="error" variant="tonal" class="mb-4" data-testid="organize-load-error">{{ itemsError }}<VBtn variant="text" :loading="loadingItems" @click="loadItems">重新读取</VBtn></VAlert>
       <VAlert v-if="feedback" :type="feedback.type" :title="feedback.message" variant="tonal" class="mb-4" data-testid="organize-result">
@@ -39,50 +55,66 @@
 
     </div>
 
+    <DefineRecord v-slot="{ item }">
+      <VCard :variant="smAndDown ? 'outlined' : undefined" class="organize-record" :class="{ 'history-card': smAndDown, 'organize-record--selected': selectedIds.includes(item.id) }">
+        <VCheckbox v-if="!smAndDown || mobileBatch" class="organize-check" :model-value="selectedIds.includes(item.id)" :disabled="!canSelectRecord(item)"
+          :aria-label="`选择 ${itemTitle(item)}`" density="compact" hide-details @click="range.onCheckboxClick" @input="range.onCheckboxInput(item, $event)" @update:model-value="checked => range.selectFromCheckbox(item, !!checked)" />
+        <OrganizePoster class="record-poster" :item="item" :title="itemTitle(item)" :width="smAndDown ? 56 : 42" :height="smAndDown ? 84 : 63" />
+        <div class="organize-media-copy">
+          <RouterLink v-if="item.item_id" class="media-title" :to="`/edit-media/${encodeURIComponent(item.item_id)}`">{{ itemTitle(item) }}</RouterLink>
+          <strong v-else>{{ itemTitle(item) }}</strong>
+          <small>{{ episodeLabel(item) || (item.item_type === 'Movie' ? '电影' : '剧集') }}</small>
+          <small v-if="!item.item_id">尚未关联媒体</small>
+        </div>
+        <div v-if="mediaFileName(item) || item.library_name || item.source_path" class="organize-record-file">
+          <small v-if="item.library_name">{{ item.library_name }}</small>
+          <button v-if="smAndDown && item.source_path" type="button" class="organize-file-name text-start" :aria-expanded="expandedPath === item.id" @click="expandedPath = expandedPath === item.id ? '' : item.id">{{ mediaFileName(item) || item.source_path }}</button>
+          <div v-else class="organize-file-name" :title="item.source_path">{{ mediaFileName(item) || item.source_path }}</div>
+          <small v-if="smAndDown && expandedPath === item.id">{{ item.source_path }}</small>
+        </div>
+        <VChip tag="button" type="button" size="small" variant="tonal" class="record-status" :color="statusPresentation(item).color"
+          :aria-label="`${statusPresentation(item).title}，查看${itemTitle(item)}详情`" @click.stop="openDetails(item)">{{ statusPresentation(item).title }}</VChip>
+        <VMenu v-if="!smAndDown || !mobileBatch" location="bottom end">
+          <template #activator="{ props }">
+            <VBtn v-bind="props" class="record-menu" icon="mdi-dots-vertical" variant="text" size="small" :aria-label="`${itemTitle(item)} 操作`" />
+          </template>
+          <VList min-width="180">
+            <VListItem title="重新整理" prepend-icon="mdi-redo-variant" :disabled="!canReorganizeRecord(item)" @click="openRecordConfirmation(item, 'reprocess')" />
+            <VListItem title="重新刮削" prepend-icon="mdi-movie-search-outline" :disabled="!canReorganizeRecord(item)" @click="openRecordConfirmation(item, 'rescrape')" />
+            <VListItem v-if="item.item_id" title="媒体信息编辑" prepend-icon="mdi-pencil-outline" :to="`/edit-media/${encodeURIComponent(item.item_id)}`" />
+            <VListItem title="删除" prepend-icon="mdi-trash-can-outline" :disabled="!canSelectRecord(item)" @click="openDeleteConfirmation(item)" />
+          </VList>
+        </VMenu>
+        <time v-if="item.created_at" :datetime="item.created_at" :title="formatDate(item.created_at)">{{ recordDate(item.created_at) }}</time>
+      </VCard>
+    </DefineRecord>
+
     <div class="organize-history-card">
       <div v-if="smAndDown" class="history-cards pa-3" data-testid="organize-items-mobile">
         <VProgressLinear v-if="loadingItems" indeterminate />
-        <VVirtualScroll :key="loadedQuery" :items="items" :item-height="160" :height="largePage ? listHeight : undefined" :renderless="!largePage" class="history-card-scroll">
+        <VVirtualScroll :key="loadedQuery" :items="items" :item-height="160" renderless class="history-card-scroll">
           <template #default="{ item, itemRef }">
             <div :key="item.id" :ref="itemRef" class="history-card-wrapper">
-              <VCard variant="outlined" class="history-card">
-                <VCardText class="history-card-body">
-                  <VCheckboxBtn :model-value="selectedIds.includes(item.id)" :disabled="!canSelectRecord(item)" :aria-label="`选择 ${itemTitle(item)}`" @update:model-value="toggleSelection(item, $event)" />
-                  <VAvatar rounded width="48" height="72"><VImg v-if="poster(item)" :src="poster(item)" :alt="itemTitle(item)" cover /><VIcon v-else icon="mdi-movie-open-outline" /></VAvatar>
-                  <div class="organize-media-copy">
-                    <VBtn v-if="item.item_id" variant="text" color="default" class="media-title text-none px-0" :to="`/edit-media/${encodeURIComponent(item.item_id)}`">{{ itemTitle(item) }}</VBtn>
-                    <div v-else class="font-weight-medium">{{ itemTitle(item) }}</div>
-                    <div v-if="episodeLabel(item)" class="text-caption text-medium-emphasis">{{ episodeLabel(item) }}</div>
-                    <div v-if="mediaFileName(item)" class="organize-file-name text-caption text-medium-emphasis mt-1">{{ mediaFileName(item) }}</div>
-                    <div class="text-caption text-medium-emphasis">{{ formatDate(item.created_at) }}</div>
-                    <div class="text-caption text-medium-emphasis"><template v-if="item.library_name">{{ item.library_name }} · </template>{{ item.item_type === 'Movie' ? '电影' : '剧集' }}</div>
-                    <VChip tag="button" type="button" size="small" variant="tonal" :color="statusPresentation(item).color" class="mt-2" :aria-label="`${statusPresentation(item).title}，查看${itemTitle(item)}详情`" @click.stop="openDetails(item)">{{ statusPresentation(item).title }}</VChip>
-                    <div v-if="!item.item_id" class="text-caption text-medium-emphasis mt-1">尚未关联媒体，暂不能重新整理。</div>
-                  </div>
-                  <VMenu location="bottom end"><template #activator="{ props }"><VBtn v-bind="props" icon="mdi-dots-vertical" variant="text" color="default" size="small" :aria-label="`${itemTitle(item)} 操作`" /></template><VList min-width="180"><VListItem title="重新整理" prepend-icon="mdi-redo-variant" :disabled="!canReorganizeRecord(item)" @click="openRecordConfirmation(item, 'reprocess')" /><VListItem title="重新刮削" prepend-icon="mdi-movie-search-outline" :disabled="!canReorganizeRecord(item)" @click="openRecordConfirmation(item, 'rescrape')" /><VListItem v-if="item.item_id" title="媒体信息编辑" prepend-icon="mdi-pencil-outline" :to="`/edit-media/${encodeURIComponent(item.item_id)}`" /><VListItem title="删除" prepend-icon="mdi-trash-can-outline" :disabled="!canSelectRecord(item)" @click="openDeleteConfirmation(item)" /></VList></VMenu>
-                </VCardText>
-              </VCard>
+              <RecordCard :item="item" />
             </div>
           </template>
         </VVirtualScroll>
+        <VBtn v-if="!mobileEnd && items.length && !itemsError && !loadingItems" ref="moreElement" block variant="text" @click="loadItems(true)">加载更多</VBtn>
         <div v-if="!items.length && !loadingItems" class="py-8 text-center text-medium-emphasis">{{ emptyText }}</div>
       </div>
-      <VDataTableVirtual v-else :key="loadedQuery" :headers="headers" :items="items" item-value="id" :loading="loadingItems" density="compact" height="100%" :item-height="100" class="organize-items-desktop" hide-default-header hide-default-footer data-testid="organize-items">
+      <VDataTableVirtual v-else :key="loadedQuery" :headers="headers" :items="desktopRows" item-value="id" :loading="loadingItems" density="compact" height="100%" :item-height="100" class="organize-items-desktop" hide-default-header hide-default-footer data-testid="organize-items">
         <template #item="{ item, columns, itemRef }">
           <tr :key="item.id" :ref="itemRef" class="organize-record-row"><td :colspan="columns.length">
-            <VCard class="organize-record" :class="{ 'organize-record--selected': selectedIds.includes(item.id) }">
-              <VCheckbox :model-value="selectedIds.includes(item.id)" :disabled="!canSelectRecord(item)" :aria-label="`选择 ${itemTitle(item)}`" density="compact" hide-details @update:model-value="toggleSelection(item, $event)" />
-              <VAvatar rounded width="42" height="63"><VImg v-if="poster(item)" :src="poster(item)" :alt="itemTitle(item)" cover /><VIcon v-else icon="mdi-movie-open-outline" /></VAvatar>
-              <div class="organize-media-copy"><VBtn v-if="item.item_id" variant="text" color="default" class="media-title text-none px-0" :to="`/edit-media/${encodeURIComponent(item.item_id)}`">{{ itemTitle(item) }}</VBtn><div v-else class="font-weight-medium">{{ itemTitle(item) }}</div><div class="text-caption text-medium-emphasis">{{ episodeLabel(item) || (item.item_type === 'Movie' ? '电影' : '剧集') }}</div><div v-if="!item.item_id" class="text-caption text-medium-emphasis">尚未关联媒体</div></div>
-              <div class="organize-record-meta text-caption text-medium-emphasis"><div v-if="item.library_name">{{ item.library_name }}</div><div v-if="mediaFileName(item)" :title="mediaFileName(item)" class="organize-file-name">{{ mediaFileName(item) }}</div><div>{{ formatDate(item.created_at) }}</div></div>
-              <div class="organize-record-status"><VChip tag="button" type="button" size="small" variant="tonal" :color="statusPresentation(item).color" :aria-label="`${statusPresentation(item).title}，查看${itemTitle(item)}详情`" @click.stop="openDetails(item)">{{ statusPresentation(item).title }}</VChip></div>
-              <VMenu location="bottom end"><template #activator="{ props }"><VBtn v-bind="props" icon="mdi-dots-vertical" variant="text" color="default" :aria-label="`${itemTitle(item)} 操作`" /></template><VList min-width="180"><VListItem title="重新整理" prepend-icon="mdi-redo-variant" :disabled="!canReorganizeRecord(item)" @click="openRecordConfirmation(item, 'reprocess')" /><VListItem title="重新刮削" prepend-icon="mdi-movie-search-outline" :disabled="!canReorganizeRecord(item)" @click="openRecordConfirmation(item, 'rescrape')" /><VListItem v-if="item.item_id" title="媒体信息编辑" prepend-icon="mdi-pencil-outline" :to="`/edit-media/${encodeURIComponent(item.item_id)}`" /><VListItem title="删除" prepend-icon="mdi-trash-can-outline" :disabled="!canSelectRecord(item)" @click="openDeleteConfirmation(item)" /></VList></VMenu>
-            </VCard>
+            <div v-if="item.members" class="organize-group">
+              <VCheckbox :model-value="item.members.filter(isDeletableRecord).every(row => selectedIds.includes(row.id))" :indeterminate="item.members.some(row => selectedIds.includes(row.id)) && !item.members.filter(isDeletableRecord).every(row => selectedIds.includes(row.id))" :disabled="!canSelectItems() || !item.members.some(isDeletableRecord)" :aria-label="`选择分组 ${item.title}`" density="compact" hide-details @update:model-value="setSelection(item.members, $event)" />
+              <VBtn variant="text" :aria-expanded="openGroups.has(item.title)" :prepend-icon="openGroups.has(item.title) ? 'mdi-chevron-down' : 'mdi-chevron-right'" @click="toggleGroup(item.title)">{{ item.title }} · {{ item.members.length }} 项</VBtn>
+            </div>
+            <RecordCard v-else :item="item" />
           </td></tr>
         </template>
         <template #no-data><div class="py-8 text-medium-emphasis">{{ emptyText }}</div></template>
       </VDataTableVirtual>
-      <footer ref="paginationElement" class="organize-pagination" data-testid="organize-footer">
+      <footer v-if="!smAndDown" ref="paginationElement" class="organize-pagination" data-testid="organize-footer">
         <VSelect :model-value="pageSize" :items="pageSizeOptions" density="compact" variant="solo" flat rounded="pill" hide-details aria-label="每页条数" title="每页条数" class="organize-page-size" :disabled="processing" data-testid="organize-page-size" @update:model-value="changePageSize" />
         <span class="organize-pagination-info text-medium-emphasis" :aria-label="total === null ? '总数未确认' : `第 ${pageTip.begin} 至 ${pageTip.end} 条，共 ${total} 条记录`" data-testid="organize-page-info">{{ total === null ? '总数未确认' : `${pageTip.begin} - ${pageTip.end} / ${total}` }}</span>
         <VPagination v-model="page" show-first-last-page :length="pages" :total-visible="smAndDown ? 3 : 7" :disabled="loadingItems || processing" data-testid="organize-pagination" @update:model-value="loadItems" />
@@ -105,7 +137,10 @@
           <div><strong>开始时间：</strong>{{ formatDate(detailItem.created_at) }}</div>
           <div v-if="detailItem.completed_at"><strong>完成时间：</strong>{{ formatDate(detailItem.completed_at) }}</div>
           <div><strong>状态：</strong><VChip size="small" variant="tonal" :color="statusPresentation(detailItem).color">{{ statusPresentation(detailItem).title }}</VChip></div>
-          <VAlert :type="detailItem.status === 'failed' ? 'error' : detailItem.status === 'warning' ? 'warning' : detailItem.status === 'success' ? 'success' : 'info'" variant="tonal" class="history-message">{{ detailItem.message || '暂无详细处理信息' }}</VAlert>
+          <VAlert :type="detailItem.status === 'failed' ? 'error' : detailItem.status === 'warning' ? 'warning' : detailItem.status === 'success' ? 'success' : 'info'" variant="tonal" class="history-message"><template v-if="detailItem.item_warnings?.length || detailItem.batch_warnings?.length">
+            <div v-for="(line, i) in detailItem.item_warnings" :key="i">{{ line }}</div>
+            <details v-if="detailItem.batch_warnings?.length"><summary>本批处理提醒</summary><div v-for="line in detailItem.batch_warnings" :key="line">{{ line }}</div></details>
+          </template><template v-else>{{ detailItem.message || '暂无详细处理信息' }}</template></VAlert>
           <div v-if="!detailItem.item_id" class="text-body-2 text-medium-emphasis">尚未关联媒体，暂不能重新整理或刮削。</div>
         </VCardText>
         <VDivider />
@@ -155,24 +190,58 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { useElementBounding } from '@vueuse/core';
+import { createReusableTemplate, formatTimeAgoIntl, useElementBounding, useIntersectionObserver, useNow } from '@vueuse/core';
+import { useRangeSelection } from '@/composables/useRangeSelection';
 import { useContextSearch } from '@/composables/useContextSearch';
 import { useDisplay } from 'vuetify';
 import { VDataTableVirtual } from 'vuetify/components';
 import axios from 'axios';
 import { useMessage } from '@/composables/useFeedback';
 import { queueReceiptMatches, useMediaOrganizeQueue } from '@/composables/useMediaOrganizeQueue';
+import OrganizePoster from '@/components/OrganizePoster.vue';
 import MediaOrganizeQueueDialog from '@/components/MediaOrganizeQueueDialog.vue';
 import DialogCloseBtn from '@/components/theme/DialogCloseBtn.vue';
 
+const [DefineRecord, RecordCard] = createReusableTemplate();
+const mobileBatch = ref(false);
+const toggleMobileBatch = () => {
+  mobileBatch.value = !mobileBatch.value;
+  if (!mobileBatch.value) selectedItems.value = [];
+};
 const message = useMessage();
 const { smAndDown, height: viewportHeight, width: viewportWidth } = useDisplay();
 const items = ref([]), search = ref(''), appliedSearch = ref(''), statusFilter = ref('all'), page = ref(1), total = ref(null), searchComposing = ref(false);
 const statusOptions = [{ title: '全部状态', value: 'all' }, { title: '成功', value: 'success' }, { title: '失败', value: 'failed' }, { title: '有提醒', value: 'warning' }, { title: '正在处理', value: 'processing' }];
 const pageSizeOptions = [25, 50, 100, 500, 1000];
 const pageSize = ref(50);
-const largePage = computed(() => pageSize.value >= 500);
-const listHeight = computed(() => Math.min(640, Math.max(240, viewportHeight.value * 0.65)));
+const mobilePage = ref(1), mobileEnd = ref(false), moreElement = ref(null);
+const expandedPath = ref('');
+const grouped = ref(false), sortKey = ref(''), descending = ref(false), openGroups = ref(new Set());
+const sortOptions = [
+  { title: '默认顺序', value: '' }, { title: '媒体标题', value: 'name' }, { title: '文件路径', value: 'source_path' },
+  { title: '整理时间', value: 'created_at' }, { title: '处理状态', value: 'status' },
+];
+const sortedItems = computed(() => {
+  if (!sortKey.value || smAndDown.value) return items.value;
+  const value = item => sortKey.value === 'name' ? itemTitle(item) : String(item[sortKey.value] || '');
+  return [...items.value].sort((a, b) => value(a).localeCompare(value(b), 'zh-CN', { numeric: true }) * (descending.value ? -1 : 1));
+});
+const desktopRows = computed(() => {
+  if (!grouped.value) return sortedItems.value;
+  const groups = new Map();
+  for (const item of sortedItems.value) {
+    const title = itemTitle(item);
+    if (!groups.has(title)) groups.set(title, []);
+    groups.get(title).push(item);
+  }
+  return [...groups].flatMap(([title, members]) => [
+    { id: 'group:' + title, title, members }, ...(openGroups.value.has(title) ? members : []),
+  ]);
+});
+const toggleGroup = title => {
+  if (openGroups.value.has(title)) openGroups.value.delete(title);
+  else openGroups.value.add(title);
+};
 const pageElement = ref(null), paginationElement = ref(null), contentBottomInset = ref(24);
 const { top: pageTop } = useElementBounding(pageElement);
 const { top: paginationTop } = useElementBounding(paginationElement);
@@ -193,8 +262,8 @@ const loadedQuery = ref('');
 const queryKey = () => JSON.stringify([page.value, pageSize.value, appliedSearch.value, statusFilter.value]);
 const selectedIds = computed(() => selectedItems.value.map(item => item.id));
 const selectedPageItems = computed(() => items.value.filter(item => selectedIds.value.includes(item.id)));
-const canReorganize = computed(() => canSelectItems() && selectedPageItems.value.length > 0 && selectedPageItems.value.every(isReadyRecord));
-const canDelete = computed(() => canSelectItems() && selectedPageItems.value.length > 0 && selectedPageItems.value.every(isDeletableRecord));
+const canReorganize = computed(() => canSelectItems() && selectedPageItems.value.length <= 1000 && selectedPageItems.value.length > 0 && selectedPageItems.value.every(isReadyRecord));
+const canDelete = computed(() => canSelectItems() && selectedPageItems.value.length <= 1000 && selectedPageItems.value.length > 0 && selectedPageItems.value.every(isDeletableRecord));
 const pages = computed(() => Math.max(1, Math.ceil((total.value || 0) / pageSize.value)));
 const pageTip = computed(() => ({ begin: total.value ? pageSize.value * (page.value - 1) + 1 : 0, end: Math.min(pageSize.value * page.value, total.value || 0) }));
 const emptyText = computed(() => itemsError.value ? '入库处理记录尚未读取成功' : '当前条件下没有入库处理记录');
@@ -222,18 +291,24 @@ const formatDate = value => {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? '—' : date.toLocaleString('zh-CN', { hour12: false });
 };
-const poster = item => {
-  const seriesPoster = item.item_type === 'Episode' && item.series_id && item.series_image_tag;
-  const id = seriesPoster ? item.series_id : item.item_id, tag = seriesPoster ? item.series_image_tag : item.image_tag;
-  return id && tag ? `/image_proxy/Items/${encodeURIComponent(id)}/Images/Primary?tag=${encodeURIComponent(tag)}&quality=90` : '';
+const now = useNow({ interval: 60_000 });
+const recordDate = value => {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return '';
+  if (smAndDown.value) return date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+  return formatTimeAgoIntl(date, { locale: 'zh-CN', insertSpace: false }, now.value);
 };
 
-const loadItems = async () => {
+const loadItems = async (append = false) => {
+  const more = append === true && smAndDown.value;
+  if (more && (loadingItems.value || mobileEnd.value || processing.value || loadedQuery.value !== queryKey())) return;
+  const requestPage = smAndDown.value ? (more ? mobilePage.value + 1 : 1) : page.value;
+  const size = smAndDown.value ? 25 : pageSize.value;
   const sequence = ++itemSequence, targetQuery = queryKey();
   loadingItems.value = true;
   try {
     const { data } = await axios.get('/api/media_organize/history', {
-      params: { page: page.value, page_size: pageSize.value, search: appliedSearch.value, status: statusFilter.value },
+      params: { page: requestPage, page_size: size, search: appliedSearch.value, status: statusFilter.value },
     });
     if (!active || sequence !== itemSequence || targetQuery !== queryKey()) return;
     if (!Array.isArray(data?.items) || !Number.isInteger(data?.total) || data.total < data.items.length) throw new Error('入库处理记录或分页总数无效');
@@ -245,7 +320,12 @@ const loadItems = async () => {
       await loadItems();
       return;
     }
-    items.value = data.items;
+    if (more) {
+      const known = new Set(items.value.map(row => row.id));
+      items.value = [...items.value, ...data.items.filter(row => !known.has(row.id))];
+    } else items.value = data.items;
+    mobilePage.value = requestPage;
+    mobileEnd.value = data.items.length < size || requestPage * size >= data.total;
     const refreshed = new Map(data.items.map(item => [item.id, item]));
     selectedItems.value = selectedItems.value.map(item => refreshed.get(item.id) || item);
     total.value = data.total;
@@ -285,7 +365,17 @@ const updateSelection = ids => {
     if (next.has(item.id) && canSelectRecord(item) && !selectedItems.value.some(selected => selected.id === item.id)) selectedItems.value.push({ ...item });
   }
 };
-const toggleSelection = (item, enabled) => updateSelection(enabled ? [...selectedIds.value, item.id] : selectedIds.value.filter(id => id !== item.id));
+const setSelection = (rows, enabled) => {
+  const ids = new Set(rows.filter(isDeletableRecord).map(row => row.id));
+  updateSelection(enabled ? [...selectedIds.value, ...ids] : selectedIds.value.filter(id => !ids.has(id)));
+};
+const range = useRangeSelection({
+  items: () => smAndDown.value ? items.value : desktopRows.value.filter(row => !row.members),
+  getKey: row => row.id, isSelected: row => selectedIds.value.includes(row.id), setSelected: setSelection,
+});
+watch([loadedQuery, grouped, sortKey, descending], () => { range.reset(); expandedPath.value = ''; });
+watch(smAndDown, () => { page.value = 1; mobileBatch.value = false; selectedItems.value = []; loadItems(); });
+useIntersectionObserver(moreElement, ([entry]) => { if (entry?.isIntersecting) void loadItems(true); });
 const openConfirmation = () => {
   const targets = selectedPageItems.value;
   if (!canSelectItems() || !targets.length || !targets.every(isReadyRecord)) return;
@@ -324,6 +414,7 @@ const deleteHistory = async () => {
     if (verified) {
       selectedItems.value = selectedItems.value.filter(item => !ids.includes(item.id));
       deleteItems.value = [];
+      if (!selectedItems.value.length) mobileBatch.value = false;
       await loadItems();
     }
   } catch (error) {
@@ -408,17 +499,32 @@ onBeforeUnmount(() => { active = false; ++itemSequence; clearTimeout(searchTimer
 .organize-selection-actions > .v-input { flex: 0 0 auto; }
 .organize-summary { padding-inline: 16px; font-size: 0.85rem; }
 .organize-record-row > td { padding: 0 0 10px !important; border: 0 !important; }
-.organize-record { display: flex; align-items: center; gap: 12px; min-block-size: 90px; padding: 8px 12px; }
-.organize-record > .v-input { flex: 0 0 auto; }
-.organize-record--selected { outline: 1px solid rgba(var(--v-theme-primary), 0.45); outline-offset: -1px; }
-.organize-record-meta { flex: 0 1 28%; min-width: 0; }
-.organize-file-name { white-space: normal; overflow-wrap: anywhere; }
-.organize-record-status { flex: 0 0 auto; min-width: 64px; text-align: center; }
+.organize-record {
+  display: grid;
+  grid-template-columns: 36px 42px minmax(5rem, 9.125rem) minmax(0, 1fr) minmax(5rem, 11rem) 36px;
+  grid-template-areas: "check poster identity file status menu" "check poster identity file time time";
+  align-items: center;
+  gap: 4px 12px;
+  min-block-size: 90px;
+  padding: 10px 14px;
+}
+.organize-group { display: flex; align-items: center; gap: 12px; padding: 10px 14px; }
+.organize-group > .v-input { flex: 0 0 36px; }
+.organize-group .v-btn { height: auto; min-height: 40px; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
+.organize-check { grid-area: check; }
+.record-poster { grid-area: poster; }
+.organize-media-copy { grid-area: identity; display: grid; gap: 6px; min-inline-size: 0; overflow-wrap: anywhere; }
+.media-title { color: inherit; font-size: 1.05rem; font-weight: 600; line-height: 1.35; }
+.media-title:hover { text-decoration: underline; }
+.organize-record small, .organize-record time { color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); line-height: 1.4; }
+.organize-record-file { grid-area: file; display: grid; gap: 4px; min-inline-size: 0; overflow-wrap: anywhere; }
+.organize-file-name { font-size: 0.9rem; line-height: 1.5; font-weight: 500; word-break: keep-all; overflow-wrap: anywhere; }
+.record-status { grid-area: status; justify-self: start; }
+.record-menu { grid-area: menu; justify-self: end; }
+.organize-record time { grid-area: time; justify-self: end; font-size: 0.8rem; }
+.organize-record--selected { outline: 1px solid rgba(var(--v-theme-primary), 0.55); outline-offset: -1px; }
 .organize-items-desktop { background: transparent; }
 .organize-items-desktop :deep(.v-table__wrapper) { scrollbar-gutter: stable; }
-.organize-media-copy { min-width: 0; flex: 1; }
-.media-title { max-width: 100%; height: auto; min-height: 36px; padding-block: 4px !important; border-radius: 0; white-space: normal; text-align: start; }
-.media-title :deep(.v-btn__content) { white-space: normal; overflow-wrap: anywhere; }
 .media-organize-page :deep(.v-card-title), .media-organize-page :deep(.v-card-subtitle) { white-space: normal; overflow-wrap: anywhere; }
 .history-message { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
 .organize-detail-content { display: flex; flex-direction: column; gap: 1rem; min-inline-size: 0; overflow-wrap: anywhere; }
@@ -427,9 +533,16 @@ onBeforeUnmount(() => { active = false; ++itemSequence; clearTimeout(searchTimer
 .media-organize-page :deep(.v-alert-title), .media-organize-page :deep(.v-chip__content) { white-space: normal; overflow-wrap: anywhere; }
 .media-organize-page :deep(.v-chip) { height: auto; min-height: 26px; padding-block: 4px; }
 .history-cards { min-width: 0; }
-.history-card { min-width: 0; }
-.history-card-body { display: flex; align-items: flex-start; gap: 12px; }
-.history-card-body > .v-selection-control { flex: 0 0 auto; }
+.history-card {
+  min-width: 0;
+  grid-template-columns: 56px minmax(0, 1fr) auto 36px;
+  grid-template-areas: "poster identity status menu" "poster time time time" "file file file file";
+  align-items: start;
+  gap: 8px;
+}
+.history-card .organize-check { grid-area: menu; }
+.history-card time { justify-self: start; }
+.history-card .organize-record-file { border-block-start: 1px solid rgba(var(--v-theme-on-surface), 0.12); padding-block-start: 10px; }
 .history-card-wrapper { padding-bottom: 12px; }
 .history-card-scroll { min-width: 0; }
 .organize-pagination { display: flex; flex-wrap: wrap; flex: 0 0 auto; align-items: center; gap: 12px; }

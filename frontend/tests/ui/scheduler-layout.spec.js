@@ -6,7 +6,7 @@ const tasks = [
 ];
 const active = { task_id: 'full-library-credits', is_running: true, state: 'running', last_action: '提取片尾', current_action: '比较第九集声纹', message: '已处理第九集，读取第十集', progress_known: true, progress: 55, logs: [] };
 
-test('desktop tasks use separate MP summary cards with a drag handle and primary execute button', async ({ page, api }) => {
+test('desktop tasks use MP service table rows with a drag handle and primary execute button', async ({ page, api }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   api.respond('GET', '/api/tasks/available', tasks);
   await page.goto('/settings/scheduler');
@@ -16,9 +16,9 @@ test('desktop tasks use separate MP summary cards with a drag handle and primary
   await expect(table.locator('.scheduler-category-card')).toHaveCount(1);
   await expect(table.locator('.v-card-title')).toHaveText('媒体信息');
   await expect(table.getByRole('columnheader', { name: '分类', exact: true })).toHaveCount(0);
-  await expect(table.getByRole('table')).toHaveCount(0);
-  await expect(table.getByRole('columnheader', { name: /下次|时间|提供者/ })).toHaveCount(0);
-  await expect(table.locator('.scheduler-task-grid > .scheduler-task-card')).toHaveCount(2);
+  await expect(table.getByRole('table')).toHaveCount(1);
+  await expect(table.getByRole('columnheader', { name: /下次|提供方/ })).toHaveCount(2);
+  await expect(table.locator('tbody > .task-record')).toHaveCount(2);
   await expect(table.locator('[data-task-key="extract-episode-credits"] .task-drag-handle')).toBeVisible();
   await expect(table.locator('[data-task-key="backup-mediainfo"] .task-drag-handle')).toBeVisible();
   const execute = table.locator('[data-task-key="extract-episode-credits"]').getByRole('button', { name: '执行', exact: true });
@@ -165,7 +165,7 @@ test('Telegram task menu uses the primary filled save control', async ({ page, a
   expect(position.parent - position.right).toBeLessThanOrEqual(24);
 });
 
-const taskKeys = group => group.locator('.scheduler-task-grid > .task-record').evaluateAll(cards => cards.map(card => card.dataset.taskKey));
+const taskKeys = group => group.locator('.task-record').evaluateAll(cards => cards.map(card => card.dataset.taskKey));
 async function moveCardBefore(page, group, moving, before, touch = false) {
   const handle = group.locator(`[data-task-key="${moving}"] .task-drag-handle`);
   await handle.scrollIntoViewIfNeeded();
