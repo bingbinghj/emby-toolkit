@@ -2023,6 +2023,7 @@ const tableInfo = {
   'emby_users_extended': { cn: 'Emby用户扩展信息' },
   'p115_filesystem_cache': { cn: '115目录缓存' },
   'p115_mediainfo_cache': {cn: '媒体信息备份' },
+  'credits_failures': { cn: '片尾提取失败记录' },
 };
 const tableDependencies = {
   'emby_users': ['emby_users_extended'],

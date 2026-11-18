@@ -27,7 +27,7 @@
             <nav class="queue-media-list" aria-label="队列媒体列表">
               <button v-for="group in groups" :key="group.key" type="button" class="queue-media-button" :class="{ selected: group.key === activeGroupKey }" :aria-current="group.key === activeGroupKey ? 'true' : undefined" @click="activeGroupKey = group.key">
                 <VAvatar rounded width="68" height="102"><VImg v-if="group.poster" :src="group.poster" :alt="group.title" cover /><VIcon v-else icon="mdi-movie-open-outline" /></VAvatar>
-                <div class="queue-media-copy"><div class="queue-media-title font-weight-medium" :title="group.title">{{ group.title }}</div><div class="queue-media-meta text-caption text-medium-emphasis"><span>剩余 {{ group.tasks.length }} 项</span><span class="text-primary">{{ group.unknown ? '进度未确认' : Math.round(group.progress) + '%' }}</span></div><VProgressLinear :model-value="group.progress" :indeterminate="group.indeterminate" color="primary" bg-color="secondary" height="4" rounded /></div>
+                <div class="queue-media-copy"><div class="queue-media-title font-weight-medium" :title="group.title">{{ group.title }}</div><div class="queue-media-meta text-caption text-medium-emphasis"><span>剩余 {{ group.tasks.length }} 项</span><span class="queue-progress-number">{{ group.unknown ? '进度未确认' : Math.round(group.progress) + '%' }}</span></div><VProgressLinear :model-value="group.progress" :indeterminate="group.indeterminate" color="primary" bg-color="secondary" height="4" rounded /></div>
               </button>
             </nav>
             <section v-if="activeGroup" class="queue-detail">
@@ -114,7 +114,8 @@ watch(groups, values => { if (!values.some(group => group.key === activeGroupKey
 .queue-overall { display: grid; align-items: center; border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); grid-template-columns: auto auto auto minmax(8rem, 1fr); gap: 1.25rem; padding: 1.15rem 1.25rem; }
 .queue-overall-label { font-size: 0.95rem; font-weight: 600; }
 .queue-overall-count { color: rgba(var(--v-theme-on-surface), 0.65); font-size: 0.875rem; }
-.queue-overall-value { color: rgb(var(--v-theme-primary)); font-size: 1.05rem; font-weight: 700; }
+.queue-overall-value, .queue-progress-number { color: rgb(var(--v-theme-on-surface)); font-weight: 700; }
+.queue-overall-value { font-size: 1.05rem; }
 .queue-overall-progress { min-inline-size: 0; }
 .queue-pending-summary { margin-block: 0.65rem 1rem; }
 .queue-main { display: grid; flex: 1 1 auto; overflow: hidden; min-block-size: 0; grid-template-columns: minmax(14rem, 19rem) minmax(0, 1fr); }
@@ -130,7 +131,7 @@ watch(groups, values => { if (!values.some(group => group.key === activeGroupKey
 .queue-active-media { flex: 0 0 auto; }
 .queue-active-media, .queue-task, .queue-task-header { border-block-end: 1px solid rgba(var(--v-border-color), var(--v-border-opacity)); }
 .queue-task-header, .queue-task { display: grid; grid-template-columns: 1.5rem minmax(0, 1fr) 5.5rem 7.5rem 2.5rem; gap: 0.5rem; align-items: center; }
-.queue-task-header { flex: 0 0 auto; min-block-size: 3rem; color: rgba(var(--v-theme-on-surface), 0.5); font-size: 0.75rem; }
+.queue-task-header { flex: 0 0 auto; min-block-size: 3rem; color: rgb(var(--v-theme-on-surface)); font-size: 0.75rem; }
 .queue-task-list { flex: 1 1 auto; min-block-size: 0; overflow-y: auto; scrollbar-width: none; }
 .queue-task-list::-webkit-scrollbar, .queue-media-list::-webkit-scrollbar { display: none; }
 .queue-task { min-block-size: 4.15rem; padding-block: 1rem; }

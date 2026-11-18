@@ -130,6 +130,48 @@ pub(crate) async fn fetch(
     }
 }
 
+/// MP compares image type aliases and extensions without case sensitivity.
+/// Episode aliases keep the exact media basename; season aliases stay in that season.
+pub(crate) async fn existing_image_path(path: &Path) -> Option<PathBuf> {
+    if tokio::fs::metadata(path).await.is_ok_and(|m| m.is_file() && m.len() > 0) {
+        return Some(path.into());
+    }
+    let stem = path.file_stem()?.to_str()?.to_ascii_lowercase();
+    let aliases: Vec<String> = match stem.as_str() {
+        "logo" | "clearlogo" => vec!["logo".into(), "clearlogo".into()],
+        "fanart" | "backdrop" | "background" => ["fanart", "backdrop", "background", "show4kbackground", "movie4kbackground"].map(str::to_string).into(),
+        "landscape" | "thumb" => vec!["landscape".into(), "thumb".into()],
+        "season00-poster" => vec![stem.clone(), "season-specials-poster".into()],
+        _ => std::iter::once(stem.clone()).chain(stem.strip_suffix("-thumb").map(str::to_string)).collect(),
+    };
+    let parent = path.parent()?;
+    let mut entries = tokio::fs::read_dir(parent).await.ok()?;
+    let mut found = vec![];
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let candidate = entry.path();
+        let name = candidate.file_stem().and_then(|v|v.to_str()).unwrap_or("").to_ascii_lowercase();
+        let extension = candidate.extension().and_then(|v|v.to_str()).unwrap_or("").to_ascii_lowercase();
+        if aliases.contains(&name) && ["jpg","jpeg","png","webp"].contains(&extension.as_str())
+            && tokio::fs::metadata(&candidate).await.is_ok_and(|m|m.is_file() && m.len()>0) {
+            found.push(candidate);
+        }
+    }
+    found.sort();
+    if let Some(found) = found.into_iter().next() { return Some(found); }
+    if let Some(number) = stem.strip_prefix("season").and_then(|s|s.strip_suffix("-poster")).and_then(|s|s.parse::<u32>().ok()) {
+        let folders = if number == 0 { vec!["Specials".into(), "Season 00".into()] }
+            else { vec![format!("Season {number:02}"), format!("Season {number}")] };
+        for folder in folders {
+            if let Some(found) = Box::pin(existing_image_path(&parent.join(folder).join("poster.jpg"))).await { return Some(found); }
+        }
+    }
+    None
+}
+
+pub(crate) async fn existing_image(path: &Path) -> bool {
+    existing_image_path(path).await.is_some()
+}
+
 pub async fn download(
     state: &AppState,
     kind: &str,
@@ -385,12 +427,10 @@ async fn download_scoped_report(
             let media_name = media_name.clone();
             async move {
         context.checkpoint().await?;
-        if !overwrite && tokio::fs::metadata(&path)
-            .await
-            .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+        if !overwrite && existing_image(&path).await
         {
             tracing::debug!(
-                "图片下载跳过：《{media_name}》，TMDb {id}，文件 {} 已存在",
+                "图片下载跳过：《{media_name}》，TMDb {id}，文件 {} 或兼容命名图片已存在",
                 path.display()
             );
             return Ok((0, 1, None));
@@ -477,4 +517,38 @@ async fn download_scoped_report(
     Ok(
         json!({"downloaded":count,"warnings":warning_details.len(),"warning_details":warning_details}),
     )
+}
+
+#[cfg(test)]
+mod mp_sidecars {
+    use super::*;
+
+    #[tokio::test]
+    async fn mp_names_extensions_and_case_are_reused_without_crossing_media_or_image_type() {
+        let root = tempfile::tempdir().unwrap();
+        for (wanted, existing) in [
+            ("clearlogo.png", "logo.PNG"), ("fanart.jpg", "backdrop.webp"),
+            ("landscape.jpg", "thumb.jpeg"), ("poster.jpg", "POSTER.PNG"),
+            ("S01E13-thumb.jpg", "S01E13.jpg"), ("season01-poster.jpg", "season01-poster.webp"),
+        ] {
+            let original = root.path().join(existing);
+            tokio::fs::write(&original, b"existing MP image").await.unwrap();
+            assert_eq!(existing_image_path(&root.path().join(wanted)).await, Some(original.clone()));
+            tokio::fs::remove_file(original).await.unwrap();
+        }
+        for existing in ["S01E12.jpg", "S01E13.other-version.jpg", "poster.png", "S01E13-thumb.nfo"] {
+            tokio::fs::write(root.path().join(existing), b"other media").await.unwrap();
+        }
+        assert!(!existing_image(&root.path().join("S01E13-thumb.jpg")).await);
+        assert!(!existing_image(&root.path().join("landscape.jpg")).await);
+        tokio::fs::write(root.path().join("logo.png"), b"").await.unwrap();
+        assert!(!existing_image(&root.path().join("clearlogo.png")).await);
+        let season = root.path().join("Season 01");
+        tokio::fs::create_dir(&season).await.unwrap();
+        tokio::fs::write(season.join("poster.webp"), b"MP season poster").await.unwrap();
+        assert_eq!(existing_image_path(&root.path().join("season01-poster.jpg")).await, Some(season.join("poster.webp")));
+        assert!(!existing_image(&root.path().join("season02-poster.jpg")).await);
+        tokio::fs::create_dir(root.path().join("clearlogo.png")).await.unwrap();
+        assert!(!existing_image(&root.path().join("clearlogo.png")).await);
+    }
 }

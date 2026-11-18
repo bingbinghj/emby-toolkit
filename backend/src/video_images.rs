@@ -129,7 +129,7 @@ pub async fn missing_with_overwrite_report(
             "{}-thumb.jpg",
             file.file_stem().unwrap_or_default().to_string_lossy()
         ));
-        if !overwrite && target.is_file() {
+        if !overwrite && crate::images::existing_image(&target).await {
             continue;
         }
         tasks.push((season, episode, file.clone(), target, data, overwrite));
@@ -352,7 +352,7 @@ async fn capture(
             if let Some(context) = context {
                 context.checkpoint().await?;
             }
-            if !overwrite && target.exists() {
+            if !overwrite && crate::images::existing_image(&target).await {
                 return Ok(false);
             }
             tokio::fs::rename(&stage, target).await?;

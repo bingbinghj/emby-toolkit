@@ -83,10 +83,10 @@
     {
       "key": "extract-episode-credits",
       "name": "提取片尾",
-      "help": "仅对电视剧分集提取尾部音频声纹并匹配同季片尾；逐集回读 CreditsStart，电影不参与。与神医助手共用线程和单主线程冷却设置。",
+      "help": "仅提取尚无片尾标记的电视剧分集。增量提取跳过已记录的失败分集；全量提取包含失败分集，重新尝试。电影不参与。",
       "category": "media-info",
       "category_name": "媒体信息",
-      "description": "提取全库电视剧分集片尾，已存在有效标记的分集跳过。需要 Emby Chapter API 或 ETKMediaInfoBridge 以安全写入章节。"
+      "description": "已有片尾标记的分集跳过。失败记录可在设置的“清空指定表”中清理。需要 Emby Chapter API 或 ETKMediaInfoBridge 写入章节。"
     }
   ],
   "manual": [
@@ -165,10 +165,10 @@
     {
       "key": "extract-episode-credits",
       "name": "提取片尾",
-      "help": "仅对电视剧分集提取尾部音频声纹并匹配同季片尾；逐集回读 CreditsStart，电影不参与。与神医助手共用线程和单主线程冷却设置。",
+      "help": "仅提取尚无片尾标记的电视剧分集。增量提取跳过已记录的失败分集；全量提取包含失败分集，重新尝试。电影不参与。",
       "category": "media-info",
       "category_name": "媒体信息",
-      "description": "提取全库电视剧分集片尾，已存在有效标记的分集跳过。需要 Emby Chapter API 或 ETKMediaInfoBridge 以安全写入章节。"
+      "description": "已有片尾标记的分集跳过。失败记录可在设置的“清空指定表”中清理。需要 Emby Chapter API 或 ETKMediaInfoBridge 写入章节。"
     },
     {
       "key": "repair-p115-fingerprints",
@@ -304,10 +304,10 @@
     {
       "key": "extract-episode-credits",
       "name": "提取片尾",
-      "help": "仅对电视剧分集提取尾部音频声纹并匹配同季片尾；逐集回读 CreditsStart，电影不参与。与神医助手共用线程和单主线程冷却设置。",
+      "help": "仅提取尚无片尾标记的电视剧分集。增量提取跳过已记录的失败分集；全量提取包含失败分集，重新尝试。电影不参与。",
       "category": "media-info",
       "category_name": "媒体信息",
-      "description": "提取全库电视剧分集片尾，已存在有效标记的分集跳过。需要 Emby Chapter API 或 ETKMediaInfoBridge 以安全写入章节。",
+      "description": "已有片尾标记的分集跳过。失败记录可在设置的“清空指定表”中清理。需要 Emby Chapter API 或 ETKMediaInfoBridge 写入章节。",
       "processor_type": "media"
     },
     {

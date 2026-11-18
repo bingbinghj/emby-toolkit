@@ -2336,8 +2336,12 @@ async fn process_moviepilot_inner(
             "MoviePilot 单组增强开始：《{media_name}》，Emby {id}，目标分集 {} 个",
             episodes.len()
         );
-        crate::moviepilot_ingest::unchanged_many(state, &changed, Some((&id, &episodes)), context)
-            .await?;
+        // The whole batch was just verified above. Later groups may follow a
+        // long-running predecessor, so only those need another fresh check.
+        if index > 0 {
+            crate::moviepilot_ingest::unchanged_many(state, &changed, Some((&id, &episodes)), context)
+                .await?;
+        }
         let preparation = async {
             let key = format!("moviepilot_prepared:{id}");
             if let Some(report) = context.completed(&key).await? {
@@ -2416,13 +2420,7 @@ async fn process_moviepilot_inner(
                     updated += result["updated"].as_u64().unwrap_or(0);
                     add_report_warnings(&mut postprocessing, &result);
                     if !awaiting_emby {
-                        crate::moviepilot_ingest::unchanged_many(
-                            state,
-                            &changed,
-                            Some((&id, &episodes)),
-                            context,
-                        )
-                        .await?;
+                        // finalize_inner verifies this scope immediately on entry.
                         let key = format!("moviepilot_finalized:{id}");
                         let finalized = if let Some(report) = context.completed(&key).await? {
                             let current=details(state,&id,"Id,Type,Name,Path,ProviderIds,ProductionYear,ImageTags,MediaSources,MediaStreams").await?;

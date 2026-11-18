@@ -364,12 +364,19 @@ impl Fixture {
             .submit("真实片尾提取验收", move |context| async move {
                 match ids {
                     Some(ids) => credits::extract_ids(&work, &ids, &context).await,
-                    None => credits::extract_all(&work, &context).await,
+                    None => credits::extract_all(&work, true, &context).await,
                 }
             })
             .await
             .unwrap();
         self.wait(&task).await
+    }
+
+    async fn run_mode(&self, full: bool) -> Value {
+        let task = emby_toolkit::tasks::submit_task(&self.state, "extract-episode-credits", full)
+            .await
+            .unwrap();
+        self.wait(task["task_id"].as_str().unwrap()).await
     }
 
     async fn wait(&self, task: &str) -> Value {
@@ -404,6 +411,130 @@ impl Fixture {
             .unwrap();
         self.admin.close().await;
     }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL and ffmpeg with chromaprint; all HTTP stays local"]
+async fn incremental_skips_persisted_failures_full_retries_and_existing_markers_clear_failures() {
+    let mut fixture = Fixture::new(false).await;
+    // Metadata missing on both episodes produces deterministic per-media failures.
+    for id in ["101", "102"] {
+        fixture.host.items.lock().await.get_mut(id).unwrap()["MediaSources"][0]["RunTimeTicks"] =
+            json!(130_000_000);
+    }
+    let failed = fixture.run_mode(false).await;
+    assert_eq!(failed["result"]["failed"], 2, "{failed}");
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM credits_failures")
+        .fetch_one(&fixture.state.db)
+        .await
+        .unwrap();
+    assert_eq!(rows, 2);
+    let finished_failures: i64 = sqlx::query_scalar("SELECT count(*) FROM durable_job_steps WHERE job_id=$1 AND step_key LIKE 'completed:credits:%' AND value_json->>'status'='failed'")
+        .bind(failed["task_id"].as_str().unwrap()).fetch_one(&fixture.state.db).await.unwrap();
+    assert_eq!(finished_failures, 2);
+    fixture.state.jobs.shutdown().await;
+    let cloud = fixture.state.p115.clone();
+    fixture.state = AppState::new(fixture.state.db.clone(), fixture.state.data_dir.clone()).await.unwrap();
+    fixture.state.p115 = cloud;
+    fixture.state.jobs.clone().resume_pending(
+        fixture.state.clone(),
+        tokio_util::sync::CancellationToken::new(),
+    ).await.unwrap();
+    assert!(fixture.host.downloads.lock().await.is_empty());
+    fixture.host.item_queries.lock().await.clear();
+    let skipped = fixture.run_mode(false).await;
+    assert_eq!(skipped["result"]["failed"], 0, "{skipped}");
+    assert_eq!(skipped["result"]["previous_failures"], 2, "{skipped}");
+    assert!(
+        fixture
+            .host
+            .item_queries
+            .lock()
+            .await
+            .iter()
+            .all(|query| !query.contains_key("ParentId")),
+        "failed episodes should not load season templates"
+    );
+    let full = fixture.run_mode(true).await;
+    assert_eq!(full["result"]["failed"], 2, "{full}");
+    assert_eq!(full["result"]["previous_failures"], 0, "{full}");
+    // A changed file/runtime is eligible again even in incremental mode.
+    for id in ["101", "102"] {
+        fixture
+            .host
+            .items
+            .lock()
+            .await
+            .insert(id.into(), fixture.before[id].clone());
+    }
+    let success = fixture.run_mode(false).await;
+    assert_eq!(success["result"]["updated"], 2, "{success}");
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM credits_failures")
+        .fetch_one(&fixture.state.db)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0);
+    let writes = fixture.host.writes.lock().await.len();
+    let downloads = fixture.host.downloads.lock().await.len();
+    // Both episodes now have markers; full mode must skip them even when their
+    // cached metadata is unavailable.
+    sqlx::query("DELETE FROM media_metadata").execute(&fixture.state.db).await.unwrap();
+    let full = fixture.run_mode(true).await;
+    assert_eq!(full["result"]["updated"], 0, "{full}");
+    assert_eq!(full["result"]["skipped"], 2, "{full}");
+    assert_eq!(fixture.host.writes.lock().await.len(), writes);
+    assert_eq!(fixture.host.downloads.lock().await.len(), downloads);
+    assert!(
+        !fixture
+            .host
+            .writes
+            .lock()
+            .await
+            .iter()
+            .any(|id| id == "201")
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; all HTTP stays local"]
+async fn failure_table_is_listed_clearable_and_manual_episode_retry_bypasses_skip() {
+    use axum::body::{Body, to_bytes};
+    use tower::ServiceExt;
+    let fixture = Fixture::new(false).await;
+    for id in ["101", "102"] {
+        fixture.host.items.lock().await.get_mut(id).unwrap()["MediaSources"][0]["RunTimeTicks"] =
+            json!(130_000_000);
+    }
+    fixture.run_mode(false).await;
+    let retry = fixture.run(Some(vec!["101".into()])).await;
+    assert_eq!(retry["result"]["failed"], 1, "{retry}");
+    assert_eq!(retry["result"]["previous_failures"], 0);
+    let tables = emby_toolkit::database_admin::tables(&fixture.state.db)
+        .await
+        .unwrap();
+    assert!(tables.iter().any(|name| name == "credits_failures"));
+    let app = emby_toolkit::database_admin::router().with_state(fixture.state.clone());
+    let response = app
+        .oneshot(
+            axum::http::Request::post("/api/actions/clear_tables")
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({"tables":["credits_failures"]}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+            .unwrap();
+    assert_eq!(body["cleared_tables"], json!(["credits_failures"]));
+    let retry = fixture.run_mode(false).await;
+    assert_eq!(retry["result"]["failed"], 2, "{retry}");
+    assert_eq!(retry["result"]["previous_failures"], 0);
+    fixture.close().await;
 }
 
 fn start(chapters: &Value) -> Option<u64> {

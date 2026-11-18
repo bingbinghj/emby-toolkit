@@ -69,10 +69,11 @@ test('filtered credits task runs the real task key and waits for its terminal wa
   await (await taskSearch(page, false)).fill('片尾');
   const run = page.locator('.task-record:visible').getByRole('button', { name: '执行', exact: true });
   await run.click();
+  await page.getByRole('button', { name: '增量提取', exact: true }).click();
   await expect(run).toBeDisabled();
   await expect(page.getByText('102：视频片尾没有可确认黑场', { exact: true }).first()).toBeVisible();
   await expect(run).toBeEnabled();
-  expect(taskRequests(api).map(request => request.body)).toEqual([{ task_name: 'extract-episode-credits' }]);
+  expect(taskRequests(api).map(request => request.body)).toEqual([{ task_name: 'extract-episode-credits', force_full_update: false }]);
   expect(mediaSearches(api)).toEqual([]);
 });
 

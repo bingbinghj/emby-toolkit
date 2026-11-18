@@ -35,7 +35,7 @@ async fn run(
         .ok_or_else(|| ApiError::bad("请求体中缺少 'task_name' 参数"))?;
     let allowed: &[&str] = match task {
         "populate-metadata" => &["force_full_update", "batch_size"],
-        "enrich-aliases" | "role-translation" | "restore_mediainfo" => &["force_full_update"],
+        "enrich-aliases" | "role-translation" | "restore_mediainfo" | "extract-episode-credits" => &["force_full_update"],
         _ => &[],
     };
     let unsupported = body
@@ -204,7 +204,7 @@ pub(crate) async fn execute_persisted(
         "generate-all-covers" => Box::pin(crate::covers::generate(work, None, context)).await,
         "clear-emby-activity-log" => Box::pin(crate::activity::clear(work, context)).await,
         "repair-video-thumbnails" => Box::pin(crate::thumbnails::repair(work, context)).await,
-        "extract-episode-credits" => Box::pin(crate::credits::extract_all(work, context)).await,
+        "extract-episode-credits" => Box::pin(crate::credits::extract_all(work, full, context)).await,
         "backup-mediainfo" => Box::pin(backup_info(work, context)).await,
         _ => Err(ApiError(
             StatusCode::NOT_FOUND,

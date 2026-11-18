@@ -382,6 +382,7 @@ pub(crate) async fn sync_local_images(
     let key = string(&config, "emby_api_key");
     for (path, kind) in paths {
         context.checkpoint().await?;
+        let Some(path) = crate::images::existing_image_path(&path).await else { continue; };
         let bytes = match tokio::fs::read(&path).await {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,

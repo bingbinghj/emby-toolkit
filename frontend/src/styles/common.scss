@@ -1877,3 +1877,16 @@ html[data-theme='plain'][data-glass-color-scheme='light'] .plugin-card__banner {
     color: color-mix(in srgb, rgb(var(--v-theme-on-surface)) 95%, currentColor 5%) !important;
   }
 }
+
+// Pagination needs a visible selected surface, including inside glass dialogs.
+// Keep the theme's contrasting on-primary text for custom light/dark accents.
+html body .v-pagination .v-pagination__item--is-active > .v-btn:not(.v-btn--disabled) {
+  background: rgb(var(--v-theme-primary)) !important;
+  color: rgb(var(--v-theme-on-primary)) !important;
+  font-weight: 600;
+
+  .v-btn__content { color: inherit !important; }
+  .v-btn__underlay { opacity: 0; }
+  .v-btn__overlay { opacity: 0 !important; }
+  &:focus-visible { outline: 2px solid rgb(var(--v-theme-on-surface)); outline-offset: 2px; }
+}

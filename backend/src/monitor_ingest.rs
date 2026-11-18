@@ -991,10 +991,7 @@ async fn download_images(
     };
     for (path, image) in image_plan(kind, root, &images, payload, &files) {
         check_active(state, paths, context, cancel, true).await?;
-        if tokio::fs::metadata(&path)
-            .await
-            .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
-        {
+        if crate::images::existing_image(&path).await {
             continue;
         }
         before_write(&path, roots).await?;

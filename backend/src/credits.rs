@@ -22,6 +22,9 @@ use std::{
     time::Duration,
 };
 
+#[path = "credits_failures.rs"]
+mod failures;
+
 const FIELDS: &str = "Id,Type,Path,Size,RunTimeTicks,MediaSources,MediaStreams,Chapters,SeriesId,SeasonId,ParentId,ParentIndexNumber,IndexNumber,SeriesName,Name";
 // 最后一档只补足窗口前沿的上下文，safe_start 仍限制片尾在末尾 308 秒内。
 const SAMPLE_STEPS: [u32; 3] = [180, 300, 360];
@@ -197,9 +200,10 @@ async fn season_items(state: &AppState, item: &Value, context: &JobContext) -> R
         .collect())
 }
 
-pub async fn extract_all(state: &AppState, context: &JobContext) -> Result<Value> {
+pub async fn extract_all(state: &AppState, full: bool, context: &JobContext) -> Result<Value> {
+    let mode = if full { Mode::Full } else { Mode::Incremental };
     if let Some(items) = context.plan("credits-all").await? {
-        return extract_items(state, list(&items), context).await;
+        return extract_items(state, list(&items), mode, context).await;
     }
     context
         .activity("提取片尾", "正在扫描电视剧分集，电影不参与片尾提取")
@@ -216,7 +220,7 @@ pub async fn extract_all(state: &AppState, context: &JobContext) -> Result<Value
     .await?;
     crate::media_order::sort(&mut items);
     context.save_plan("credits-all", &json!(items)).await?;
-    extract_items(state, items, context).await
+    extract_items(state, items, mode, context).await
 }
 
 pub async fn extract_ids(state: &AppState, ids: &[String], context: &JobContext) -> Result<Value> {
@@ -230,13 +234,19 @@ pub async fn extract_ids(state: &AppState, ids: &[String], context: &JobContext)
             items.push(item);
         }
     }
-    extract_items(state, items, context).await
+    extract_items(state, items, Mode::Selected, context).await
 }
 
-async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext) -> Result<Value> {
+#[derive(PartialEq)]
+enum Mode { Incremental, Full, Selected }
+
+async fn extract_items(state: &AppState, items: Vec<Value>, mode: Mode, context: &JobContext) -> Result<Value> {
+    let server = failures::server_key(state).await;
+    let previous = failures::load(state, &server).await?;
+    let mut inputs = HashMap::new();
     let mut groups: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     let mut reports = vec![];
-    for item in items {
+    for item in &items {
         context.checkpoint().await?;
         let id = string(&item, "Id");
         if let Some(report) = context.completed(&format!("credits:{id}")).await? {
@@ -249,9 +259,20 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
             reports.push(json!({"item_id":id,"status":"skipped","reason":"不是电视剧分集或媒体库不在处理范围内"}));
             continue;
         }
+        if mode != Mode::Selected && let Some(ticks) = credits_start(&item["Chapters"]) {
+            if previous.contains_key(&id) { failures::clear(state, &server, &id).await?; }
+            reports.push(json!({"item_id":id,"status":"skipped","reason":"已有片尾标记","credits_start_ticks":ticks,"chapter":marker(ticks)}));
+            continue;
+        }
+        inputs.insert(id.clone(), item);
+        if mode == Mode::Incremental && let Some(prior) = previous.get(&id)
+            && prior == &failures::identity(state, item).await? {
+            reports.push(json!({"item_id":id,"status":"skipped","previous_failure":true,"reason":"增量提取跳过已记录的失败分集，可使用全量提取重试"}));
+            continue;
+        }
         match season_key(&item) {
-            Ok(key) => groups.entry(key).or_default().push(item),
-            Err(error) => reports.push(json!({"item_id":id,"status":"failed","error":error.1})),
+            Ok(key) => groups.entry(key).or_default().push(item.clone()),
+            Err(error) => reports.push(persist_report(state, &server, &inputs, context, json!({"item_id":id,"status":"failed","error":error.1})).await?),
         }
     }
     let total = groups.values().map(Vec::len).sum::<usize>() + reports.len();
@@ -262,7 +283,7 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
             Err(error) if context.is_cancelled() => return Err(error),
             Err(error) => {
                 for item in selected {
-                    reports.push(json!({"item_id":item["Id"],"status":"failed","error":format!("同季分集读取未完成：{}",error.1)}));
+                    reports.push(persist_report(state, &server, &inputs, context, json!({"item_id":item["Id"],"status":"failed","error":format!("同季分集读取未完成：{}",error.1)})).await?);
                 }
                 continue;
             }
@@ -285,6 +306,7 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
                 .unwrap_or(u64::MAX)
         });
         let mut refs = vec![];
+        let mut skipped_failed_reference = false;
         let mut seen = HashSet::new();
         let mut selected_ids: HashSet<_> = selected.iter().map(|item| string(item, "Id")).collect();
         // Prioritize requested episodes, then other unique files from the same
@@ -294,10 +316,18 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
             if !seen.insert(id.clone()) {
                 continue;
             }
+            if mode == Mode::Incremental && let Some(previous_identity) = previous.get(&id)
+                && credits_start(&item["Chapters"]).is_none()
+            {
+                if !selected_ids.contains(&id) && &failures::identity(state, &item).await? == previous_identity {
+                    skipped_failed_reference = true;
+                    continue;
+                }
+            }
             match episode(state, item).await {
                 Ok(reference) => refs.push(reference),
                 Err(error) if selected_ids.contains(&id) => {
-                    reports.push(json!({"item_id":id,"status":"failed","error":error.1}))
+                    reports.push(persist_report(state, &server, &inputs, context, json!({"item_id":id,"status":"failed","error":error.1})).await?)
                 }
                 Err(error) => tracing::debug!(item_id=%id,"[片尾提取] 同季模板不可用：{}",error.1),
             }
@@ -314,10 +344,11 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
                     cache_chapters(state, reference, &reference.item["Chapters"]).await
                 }
                 .await;
-                reports.push(match outcome {
+                let report = match outcome {
                     Ok(())=>json!({"item_id":reference.target.id,"status":"skipped","reason":"已有有效片尾标记，已核对并同步缓存","credits_start_ticks":ticks,"chapter":marker(ticks),"chapters":reference.item["Chapters"]}),
                     Err(error)=>json!({"item_id":reference.target.id,"status":"failed","error":error.1}),
-                });
+                };
+                reports.push(persist_report(state, &server, &inputs, context, report).await?);
             }
         }
         for report in &reports {
@@ -352,7 +383,8 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
         template_indices.sort_by_key(|index| (*index != 0, !cached.contains(index)));
         template_indices.truncate(6);
         let mut template = None;
-        if template_indices.len() >= 2 {
+        let required_samples = if skipped_failed_reference { 3 } else { 2 };
+        if template_indices.len() >= required_samples {
             for count in [3, 6] {
                 if count == 6 && template_indices.len() <= 3 {
                     break;
@@ -424,8 +456,9 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
                     cache_chapters(state,reference,&live["Chapters"]).await?;
                     return Ok::<Value,ApiError>(json!({"item_id":reference.target.id,"status":"skipped","reason":"已有有效片尾标记，已核对并同步缓存","credits_start_ticks":ticks,"chapter":marker(ticks),"chapters":live["Chapters"]}));
                 }
-                if template_indices.len() < 2 {
-                    return Ok::<Value, ApiError>(json!({"item_id":reference.target.id,"status":"skipped","error":"同季可比对分集不足 2 集，未猜测片尾","reason":"同季可比对分集不足 2 集，未猜测片尾"}));
+                if template_indices.len() < required_samples {
+                    let reason = format!("同季可比对分集不足 {required_samples} 集，未猜测片尾");
+                    return Ok::<Value, ApiError>(json!({"item_id":reference.target.id,"status":"skipped","error":reason,"reason":reason}));
                 }
                 let mut own_start = None;
                 // The season template remains a fast path. Different cuts/songs
@@ -452,6 +485,7 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
             }.await;
             match outcome {
                 Ok(report) => {
+                    let report = persist_report(state, &server, &inputs, context, report).await?;
                     if report["status"] != "failed" {
                         context
                             .complete(&format!("credits:{}", reference.target.id), &report)
@@ -467,9 +501,9 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
                 Err(error) if context.is_cancelled() => return Err(error),
                 Err(error) => {
                     tracing::warn!("[片尾提取] {} 失败：{}", reference.label, error.1);
-                    reports.push(
-                        json!({"item_id":reference.target.id,"status":"failed","error":error.1}),
-                    );
+                    reports.push(persist_report(state, &server, &inputs, context,
+                        json!({"item_id":reference.target.id,"status":"failed","error":error.1})
+                    ).await?);
                 }
             }
         }
@@ -487,10 +521,11 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
         .filter(|item| item["status"] == "failed")
         .map(|item| format!("{}：{}", string(item, "item_id"), string(item, "error")))
         .collect::<Vec<_>>();
-    let message = format!(
-        "片尾提取完成：更新 {updated} 集，跳过 {skipped} 集，失败 {} 集",
-        failures.len()
+    let previous_failures = reports.iter().filter(|item| item["previous_failure"] == true).count();
+    let mut message = format!(
+        "片尾提取完成：更新 {updated} 集，跳过 {skipped} 集，失败 {} 集", failures.len()
     );
+    if previous_failures > 0 { message.push_str(&format!("（跳过项中有 {previous_failures} 集已有失败记录）")); }
     let warning_details = reports
         .iter()
         .filter(|item| {
@@ -501,13 +536,22 @@ async fn extract_items(state: &AppState, items: Vec<Value>, context: &JobContext
     context
         .update_counted(total as u64, total as u64, "提取片尾", &message)
         .await;
-    let mut result = json!({"state":if failures.is_empty(){"completed"}else{"failed"},"native_ended":true,"updated":updated,"skipped":skipped,"failed":failures.len(),"failures":failures,"warnings":warning_details.len(),"warning_details":warning_details,"items":reports,"message":message,"reason":message});
+    let mut result = json!({"state":if failures.is_empty(){"completed"}else{"failed"},"native_ended":true,"updated":updated,"skipped":skipped,"previous_failures":previous_failures,"failed":failures.len(),"failures":failures,"warnings":warning_details.len(),"warning_details":warning_details,"items":reports,"message":message,"reason":message});
     if reports.len() == 1 {
         for key in ["chapter", "chapters", "credits_start_ticks"] {
             result[key] = reports[0][key].clone();
         }
     }
     Ok(result)
+}
+
+async fn persist_report(
+    state: &AppState, server: &str, inputs: &HashMap<String, &Value>, context: &JobContext, report: Value,
+) -> Result<Value> {
+    if let Some(item) = inputs.get(&string(&report, "item_id")) {
+        failures::record(state, server, item, &report, context).await?;
+    }
+    Ok(report)
 }
 
 fn select_templates(refs: &[Episode]) -> Vec<usize> {
@@ -1162,7 +1206,7 @@ pub(crate) async fn execute_persisted(state: &AppState, payload: &Value, context
                 return Err(ApiError::bad("媒体类型在任务开始前变化，未提取片尾"));
             }
             if live["Type"] == "Episode" {
-                return Ok((200, extract_items(&state, vec![live], &context).await?));
+                return Ok((200, extract_items(&state, vec![live], Mode::Selected, &context).await?));
             }
             context
                 .activity("提取片尾", "正在读取所选范围的电视剧分集")
@@ -1196,5 +1240,5 @@ pub(crate) async fn execute_persisted(state: &AppState, payload: &Value, context
                 return Err(ApiError::bad("所选剧或季没有可提取片尾的分集"));
             }
             crate::media_order::sort(&mut items);
-            Ok((200, extract_items(&state, items, &context).await?))
+            Ok((200, extract_items(&state, items, Mode::Selected, &context).await?))
 }

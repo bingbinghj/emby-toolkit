@@ -105,12 +105,13 @@
       </VCard>
     </VDialog>
     <VDialog v-model="showSyncModeModal" max-width="560" persistent>
-      <VCard title="选择处理模式">
-        <VCardText>您希望如何执行此任务？</VCardText>
+      <VCard :title="taskToRunInModal === 'extract-episode-credits' ? '选择片尾提取模式' : '选择处理模式'">
+        <VCardText v-if="taskToRunInModal === 'extract-episode-credits'">仅处理尚无片尾标记的电视剧分集。增量提取跳过已记录的失败分集；全量提取包含失败分集，重新尝试。失败记录可在设置的“清空指定表”中清理。</VCardText>
+        <VCardText v-else>您希望如何执行此任务？</VCardText>
         <VCardActions class="sync-mode-actions">
           <VBtn variant="text" @click="showSyncModeModal = false">取消</VBtn>
-          <VBtn color="primary" variant="tonal" prepend-icon="mdi-play" @click="runTaskFromModal(false)">快速模式（增量）</VBtn>
-          <VBtn color="warning" variant="tonal" prepend-icon="mdi-play" @click="runTaskFromModal(true)">深度模式（全量）</VBtn>
+          <VBtn color="primary" variant="tonal" prepend-icon="mdi-play" @click="runTaskFromModal(false)">{{ taskToRunInModal === 'extract-episode-credits' ? '增量提取' : '快速模式（增量）' }}</VBtn>
+          <VBtn :color="taskToRunInModal === 'extract-episode-credits' ? 'primary' : 'warning'" variant="tonal" prepend-icon="mdi-play" @click="runTaskFromModal(true)">{{ taskToRunInModal === 'extract-episode-credits' ? '全量提取' : '深度模式（全量）' }}</VBtn>
         </VCardActions>
       </VCard>
     </VDialog>
@@ -138,7 +139,8 @@ const DUAL_MODE_TASKS = [
   'role-translation',
   'populate-metadata',
   'enrich-aliases',
-  'restore_mediainfo'
+  'restore_mediainfo',
+  'extract-episode-credits'
 ];
 
 const DEFAULT_TG_TASKS = [

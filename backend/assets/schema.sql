@@ -230,6 +230,16 @@ CREATE TABLE IF NOT EXISTS media_organize_history (
 );
 CREATE INDEX IF NOT EXISTS idx_media_organize_history_created ON media_organize_history(created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_media_organize_history_item ON media_organize_history(item_id) WHERE status='processing';
+
+CREATE TABLE IF NOT EXISTS credits_failures (
+    server_key TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+    item_name TEXT NOT NULL DEFAULT '',
+    file_identity JSONB NOT NULL,
+    reason TEXT NOT NULL,
+    failed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    PRIMARY KEY(server_key, item_id)
+);
 INSERT INTO app_settings(setting_key, value_json)
 VALUES('media_organize_history_started_at', to_jsonb(NOW()))
 ON CONFLICT(setting_key) DO NOTHING;

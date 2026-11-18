@@ -123,6 +123,14 @@ fn image_request_and_write_failures_warn_but_no_posters_existing_files_and_succe
         assert_eq!(std::fs::read_to_string(&poster_path).unwrap(),"keep-existing");
 
         std::fs::remove_file(&poster_path).unwrap();
+        let mp_poster = directory.path().join("poster.PNG");
+        std::fs::write(&mp_poster, "keep-MP-image").unwrap();
+        host.mode.store(3,Ordering::SeqCst);
+        let reused = run(&state, &item).await;
+        assert_eq!(reused["result"]["downloaded"], 0, "{reused}");
+        assert_eq!(reused["result"]["warnings"], 0, "a 502 image source must not be contacted when MP's image exists: {reused}");
+        assert!(!poster_path.exists());
+        std::fs::remove_file(mp_poster).unwrap();
         host.mode.store(3,Ordering::SeqCst);
         let failed_download = run(&state,&item).await;
         assert_eq!(failed_download["state"],"completed_with_warnings","{failed_download}");
