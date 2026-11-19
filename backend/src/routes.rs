@@ -18,6 +18,7 @@ use tower_http::services::{ServeDir, ServeFile};
 
 pub fn router(state: AppState) -> Router {
     let protected = Router::new()
+        .merge(crate::music::router())
         .merge(crate::p115::router())
         .merge(crate::ai::router())
         .merge(crate::tasks::router())
@@ -501,6 +502,8 @@ async fn config_save(
         "ai_api_key",
         "telegram_bot_token",
         "emby_webhook_secret",
+        "acoustid_api_key",
+        "theaudiodb_api_key",
     ] {
         if value[key] == "********" {
             value[key] = config.get(key).cloned().unwrap_or(json!(""));

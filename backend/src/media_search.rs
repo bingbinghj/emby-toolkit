@@ -83,6 +83,9 @@ async fn search_items(state: &AppState, params: &HashMap<String, String>) -> Res
     let mut items = vec![];
     let mut seen = HashSet::new();
     for item in list(&response["Items"]) {
+        if !matches!(item["Type"].as_str(), Some("Movie" | "Series" | "Season" | "Episode")) {
+            continue;
+        }
         let id = string(&item, "Id");
         if id.is_empty() || !seen.insert(id.clone()) {
             continue;
@@ -90,7 +93,7 @@ async fn search_items(state: &AppState, params: &HashMap<String, String>) -> Res
         items.push(json!({"item_id":id,"item_name":item["Name"].as_str().filter(|s|!s.is_empty()).map(str::to_string).unwrap_or(format!("ItemID {id}")),"item_type":item["Type"],"failed_at":null,"error_message":format!("Emby 媒体库搜索结果 (年份: {})",item["ProductionYear"].as_i64().map(|n|n.to_string()).unwrap_or("N/A".into())),"provider_ids":item["ProviderIds"].as_object().cloned().unwrap_or_default()}));
         details.insert(id, item);
     }
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE (title ILIKE $1 OR original_title ILIKE $1) AND ($2='' OR item_type=ANY(string_to_array($2,','))) LIMIT 50") .bind(format!("%{query}%")).bind(if kind.is_empty(){""}else{types}).fetch_all(&state.db).await?;
+    let rows:Vec<Value>=sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE (title ILIKE $1 OR original_title ILIKE $1) AND item_type=ANY(string_to_array($2,',')) LIMIT 50") .bind(format!("%{query}%")).bind(types).fetch_all(&state.db).await?;
     for row in rows {
         let mut ids = list(&row["emby_item_ids_json"]);
         if ids.is_empty() && row["item_type"] == "Series" {
@@ -138,9 +141,7 @@ async fn search_items(state: &AppState, params: &HashMap<String, String>) -> Res
                 .extend(display.as_object().unwrap().clone());
         }
     }
-    if !kind.is_empty() {
-        items.retain(|i| types.split(',').any(|t| i["item_type"] == t));
-    }
+    items.retain(|i| types.split(',').any(|t| i["item_type"] == t));
     sort(&mut items);
     Ok(Json(json!({"total_items":items.len(),"items":items})))
 }

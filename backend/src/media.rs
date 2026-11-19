@@ -54,7 +54,6 @@ fn filter(library: &Value) -> &'static str {
     match string(library, "CollectionType").to_lowercase().as_str() {
         "movie" | "movies" => "Movie",
         "tvshows" | "tv" => "Series",
-        "music" => "MusicAlbum",
         _ => "Movie,Series",
     }
 }
@@ -63,7 +62,7 @@ fn library_supported(library: &Value) -> bool {
         && !string(library, "Name").is_empty()
         && !matches!(
             string(library, "CollectionType").to_lowercase().as_str(),
-            "boxsets" | "playlists"
+            "boxsets" | "playlists" | "music" | "audiobooks"
         )
 }
 async fn items(state: &AppState, query: &[(&str, String)]) -> Result<Value> {

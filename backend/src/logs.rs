@@ -168,7 +168,7 @@ pub fn redact(text: &str) -> String {
         r"(?i)(/bot)\d{6,}:[A-Za-z0-9_-]{20,}",
         r"(?i)\b\d{6,}:[A-Za-z0-9_-]{20,}\b",
         r#"(?i)((?:api_key|apikey|access_token|refresh_token|token|password|passwd|secret|cookie)=)[^&\s]+"#,
-        r#"(?i)((?:X-Emby-Token|emby_api_key|tmdb_api_key|ai_api_key|telegram_bot_token|emby_admin_pass|db_password|douban_cookie|emby_webhook_secret|access_token|refresh_token|cookie|token|password)["']?\s*[:=]\s*["']?)[^"',\s}]+"#,
+        r#"(?i)((?:X-Emby-Token|emby_api_key|tmdb_api_key|ai_api_key|telegram_bot_token|emby_admin_pass|db_password|douban_cookie|emby_webhook_secret|acoustid_api_key|theaudiodb_api_key|access_token|refresh_token|cookie|token|password)["']?\s*[:=]\s*["']?)[^"',\s}]+"#,
         r#"(?i)(Authorization["']?\s*[:=]\s*["']?Bearer\s+)[^"',\s}]+"#,
     ].into_iter().map(|pattern| regex::Regex::new(pattern).expect("valid redaction pattern")).collect()
     });

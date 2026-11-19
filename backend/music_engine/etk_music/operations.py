@@ -1,0 +1,349 @@
+"""本地音乐的刮削和标签编辑；仅更新用户选择的文件。"""
+import base64
+import hashlib
+import fcntl
+import json
+import os
+import re
+import shutil
+import time
+from collections import defaultdict
+from pathlib import Path
+from dataclasses import asdict
+from . import catalog, library
+from .audio import AudioMetadataHelper, capture_audio_metadata
+from .models import MusicInfo, MusicLyrics
+from .meta import MetaMusic
+from .matching import music_tags_are_usable
+from .album import recognize_group, _preserve_music_image_tags, _merge_music_album_metadata
+from .evidence import _merge_music_audio_quality
+from .observation import music_recognition_is_blocked
+from .runtime import get_runtime_setting
+from .http import RequestUtils
+from .text import convert
+
+def write_json(path, data):
+    temporary = path.with_name(path.name+".new")
+    with temporary.open("w", encoding="utf-8") as stream:
+        json.dump(data, stream, ensure_ascii=False)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+    flush_directory(path.parent)
+
+
+@capture_audio_metadata()
+def preview(config, body):
+    root, _ = library.roots(config)
+    sources = config.get("music_sources") or ["musicbrainz"]
+    operation = body.get("operation", "rescrape")
+    if operation not in {"rescrape", "edit"}:
+        raise ValueError("未知音乐操作")
+    selected = body.get("selection")
+    rows = []
+    paths = list(dict.fromkeys(body.get("paths") or []))
+    overrides = body.get("selections") or {}
+    if selected and selected.get("music_type", "recording")=="recording" and len(paths)!=1:
+        raise ValueError("单曲资料只能用于一个所选音频，请选择专辑")
+    evidence, errors, groups, recognized, cue_digests = {}, {}, defaultdict(list), {}, {}
+    for relative in paths:
+        try:
+            path = library.target(config, relative)
+            identity = library.signature(path)
+            meta = AudioMetadataHelper.read(path)
+            if AudioMetadataHelper._open_audio(path) is None:
+                raise ValueError("音频内容无法读取，请检查文件实际格式")
+            if meta.organization_error:
+                raise ValueError(meta.organization_error)
+            if meta.cue_filename:
+                cue = path.parent / Path(meta.cue_filename).name
+                cue_digests[relative] = hashlib.sha256(cue.read_bytes()).hexdigest()
+            evidence[relative] = (path, identity, meta)
+            groups[library.album_directory(relative)].append(relative)
+        except Exception as error:
+            errors[relative] = str(error)
+    if operation!="edit":
+        for directory, group in groups.items():
+            choice = overrides.get(directory) or selected
+            if choice and choice.get("music_type", "album")!="album":
+                continue
+            try:
+                files = [evidence[name][0] for name in group]
+                matches, diagnostic = recognize_group(files, [evidence[name][2] for name in group], sources, choice, root/directory)
+                for name in group:
+                    info = matches.get(str(evidence[name][0].resolve()))
+                    if info:
+                        recognized[name] = info
+                    elif diagnostic.get("status") in {"ambiguous", "conflict"}:
+                        errors[name] = diagnostic.get("message", "专辑识别需要确认")
+            except Exception as error:
+                for name in group:
+                    errors[name] = str(error)
+    for relative in paths:
+        try:
+            if relative in errors:
+                raise ValueError(errors[relative])
+            path, identity, meta = evidence[relative]
+            if operation == "edit":
+                info = MusicInfo.from_meta(meta)
+                values = body.get("metadata") or {}
+                allowed = {"title", "artists", "album", "album_artist", "track_number", "total_tracks", "disc_number", "total_discs", "year", "release_year", "original_year", "composers", "conductors", "orchestras", "performers", "isrc"}
+                info = MusicInfo.from_dict({**info.to_dict(), **{key: value for key, value in values.items() if key in allowed}})
+            elif relative in recognized:
+                info = recognized[relative]
+            else:
+                meta, info = catalog.recognize(path, sources, selected)
+                if music_recognition_is_blocked(info):
+                    raise ValueError(info.raw_data["recognition"].get("message", "音乐识别需要确认"))
+                if not info.media_id and not music_tags_are_usable(meta):
+                    raise ValueError("没有匹配到可靠音乐身份，请手动选择歌曲或专辑")
+            if operation=="rescrape" and meta.music_layout=="image_cue":
+                _preserve_music_image_tags(path, meta)
+                album_info = info
+                info = MusicInfo.from_meta(_merge_music_album_metadata(meta, album_info))
+                info.cover_url = album_info.cover_url
+                info.raw_data = album_info.raw_data
+            if operation != "edit":
+                info = _merge_music_audio_quality(info, meta)
+                info = catalog.simplified(info, config.get("music_metadata_to_simplified", True))
+            if relative in cue_digests and hashlib.sha256((path.parent / Path(meta.cue_filename).name).read_bytes()).hexdigest()!=cue_digests[relative]:
+                raise ValueError("CUE 在识别期间已变化，请重新预览")
+            before = MusicInfo.from_meta(AudioMetadataHelper.read_tags(path) or MetaMusic()).to_dict()
+            rows.append({"path": relative, "target": relative, "signature": identity, "metadata": info.to_dict(), "before": before, "tag_updates": tag_updates(path, info, config, operation), "success": True, "music_layout": meta.music_layout, "cue_filename": meta.cue_filename, "cue_digest":cue_digests.get(relative)})
+        except Exception as error:
+            rows.append({"path": relative, "success": False, "message": str(error)})
+    for row in rows:
+        relative = row["path"]
+        group = library.album_directory(relative)
+        meta = evidence.get(relative, (None, None, None))[2]
+        info = row.get("metadata") or (MusicInfo.from_meta(meta).to_dict() if meta else {})
+        diagnostic = info.get("raw_data", {}).get("recognition", {})
+        status = "manual" if operation=="edit" else diagnostic.get("status", "metadata")
+        row.update(source=relative, source_storage="local", source_item={"storage":"local", "path":relative, "type":"file"})
+        row["music"] = {**info, "group_id":hashlib.sha256((str(root)+"/"+group).encode()).hexdigest(), "group_directory":group,
+            "file_role":"audio", "status":status, "online_confirmed":bool(status=="matched" and info.get("media_id")),
+            "read_status":("tags" if meta and any(value in {"tag", "cue"} for value in meta.field_sources.values()) else "stream_only") if meta else "unreadable",
+            "field_sources":info.get("field_sources") or {}, "candidates":diagnostic.get("candidates", [])}
+    return {"operation": operation, "items": rows, "library_path":config.get("music_library_path"), "seed_path":config.get("music_seed_path"), "cue_enable":config.get("music_cue_enable", True), "write_policy":config.get("music_scraping_policies"), "simplified":config.get("music_metadata_to_simplified")}
+
+
+def tag_updates(path, info, config, operation):
+    policy = (config.get("music_scraping_policies") or {}).get("tags", "missingOnly")
+    if operation != "edit" and policy == "skip":
+        return {}
+    return AudioMetadataHelper._tag_updates(AudioMetadataHelper._open_audio(path), info, operation=="edit" or policy=="overwrite")
+
+
+def cover(info, path, config):
+    """批次和跨请求复用封面 URL；网络不可用时使用专辑目录图片。"""
+    from .cache import Cache
+    if info.cover_url:
+        cache = Cache(128, 86400, "covers")
+        cached = cache.get(info.cover_url)
+        if cached:
+            return base64.b64decode(cached["data"]), cached["mime"]
+        response = RequestUtils().get_res(info.cover_url, stream=True)
+        if response is not None:
+            try:
+                mime = response.headers.get("Content-Type", "").split(";")[0]
+                if response.status_code==200 and mime in {"image/jpeg", "image/png"}:
+                    chunks, length = [], 0
+                    for chunk in response.iter_content(65536):
+                        length += len(chunk)
+                        if length>15*1024*1024:
+                            raise ValueError("封面超过 15 MB")
+                        chunks.append(chunk)
+                    data = b"".join(chunks)
+                    cache.set(info.cover_url, {"data": base64.b64encode(data).decode(), "mime": mime})
+                    return data, mime
+            finally:
+                response.close()
+    if config.get("music_local_cover_enable", True):
+        root, _ = library.roots(config)
+        image = library.image(config, str(path.relative_to(root)))
+        if image:
+            return base64.b64decode(image["data"]), image["mime"]
+    return None, "image/jpeg"
+
+
+def write_sidecar(target, text, identifier):
+    temporary = target.with_name("."+target.name[:40]+".etk-lyrics-"+identifier)
+    try:
+        with temporary.open("w", encoding="utf-8") as stream:
+            stream.write(text.rstrip()+"\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+        flush_directory(target.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def sidecar(path, lyrics, policy, simplified, identifier):
+    if not lyrics or not lyrics.content or lyrics.instrumental:
+        return "未匹配歌词"
+    existing = next((path.with_suffix(ext) for ext in (".lyricsfile.yaml", ".lrc", ".txt") if path.with_suffix(ext).exists()), None)
+    quality = 4 if existing and existing.name.endswith(".lyricsfile.yaml") else 3 if existing and existing.suffix==".lrc" else 1 if existing else 0
+    if existing and (quality>lyrics.quality_rank or policy=="missingOnly" or quality==lyrics.quality_rank and policy!="overwrite"):
+        return "保留现有歌词"
+    text = lyrics.content
+    if simplified:
+        # 沿用 MP：转换正文，保留 LRC 标签和逐字时间轴。
+        parts = re.split(r"(\[(?:\d+:|[A-Za-z][\w-]*:)[^\]\r\n]*\]|<\d+:\d{2}(?:[.:]\d+)?>)", text)
+        text = "".join(part if index % 2 else convert(part, "zh-hans") for index, part in enumerate(parts))
+    # 先写播放器兼容歌词，再保留标准逐字 Lyricsfile。失败后同一恢复记录可继续。
+    write_sidecar(path.with_suffix(lyrics.extension), text, identifier)
+    if lyrics.lyricsfile:
+        write_sidecar(path.with_suffix(".lyricsfile.yaml"), lyrics.lyricsfile, identifier)
+    if policy=="overwrite":
+        for extension in (".lrc", ".txt"):
+            if extension!=lyrics.extension:
+                path.with_suffix(extension).unlink(missing_ok=True)
+    return "歌词已保存"
+
+
+def existing_lyrics(path):
+    return any(path.with_suffix(ext).is_file() for ext in (".lyricsfile.yaml", ".lrc", ".txt"))
+
+
+def identity_matches(path, expected):
+    if not path.exists() and not path.is_symlink():
+        return False
+    current = library.signature(path)
+    return all(current[key] == expected[key] for key in ("dev", "ino", "size", "mtime", "link_ino"))
+
+
+def flush_directory(path):
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def execute(config, body):
+    """暂存副本和持久意图先落盘；原子替换后可凭 inode 回执恢复。"""
+    row, operation, identifier = body["item"], body["operation"], body["execution_id"]
+    if operation not in {"rescrape", "edit"} or row["target"]!=row["path"]:
+        raise ValueError("ETK 音乐仅支持原位置刮削和标签编辑")
+    if not identifier or any(char not in "0123456789abcdef-" for char in identifier):
+        raise ValueError("音乐任务标识无效")
+    directory = get_runtime_setting("CACHE_PATH")/"operations"
+    directory.mkdir(exist_ok=True)
+    receipt = directory/(identifier+".json")
+    # 全音乐操作串行锁只占一个固定文件，异常退出自动释放。
+    with (directory/"write.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        root, _ = library.roots(config)
+        path = root/row["path"]
+        saved = json.loads(receipt.read_text()) if receipt.exists() else None
+        if saved and saved.get("state")=="completed":
+            return saved["result"]
+        if saved and saved["state"]=="staging":
+            # 尚未提交的暂存不影响原文件，重启后在同一任务内重新准备。
+            Path(saved["temporary"]).unlink(missing_ok=True)
+            receipt.unlink(missing_ok=True)
+            saved = None
+        if not saved:
+            path = library.target(config, row["path"])
+            if row.get("cue_digest"):
+                cue = path.parent / Path(row["cue_filename"]).name
+                if hashlib.sha256(cue.read_bytes()).hexdigest()!=row["cue_digest"]:
+                    raise ValueError("CUE 在预览后已变化，请重新预览")
+            if library.signature(path)!=row["signature"]:
+                raise ValueError("音乐文件在预览后已变化，请重新预览")
+            info = MusicInfo.from_dict(row["metadata"])
+            policies = config.get("music_scraping_policies") or {"tags":"missingOnly","cover":"missingOnly","lyrics":"upgrade"}
+            write_tags = operation=="edit" or policies.get("tags")!="skip"
+            overwrite = operation=="edit" or policies.get("tags")=="overwrite"
+            audio = AudioMetadataHelper._open_audio(path)
+            cover_data, cover_mime = None, "image/jpeg"
+            if operation!="edit" and policies.get("cover")!="skip" and (policies.get("cover")=="overwrite" or not AudioMetadataHelper._has_cover(audio)):
+                cover_data, cover_mime = cover(info, path, config)
+            started = time.monotonic()
+            lyrics_enabled = operation!="edit" and row.get("music_layout")!="image_cue" and policies.get("lyrics")!="skip"
+            keep_lyrics = lyrics_enabled and policies.get("lyrics")=="missingOnly" and existing_lyrics(path)
+            lyric = catalog.lyrics(info, path, body.get("lyrics_budget", 120)) if lyrics_enabled and not keep_lyrics else None
+            lyrics_elapsed = time.monotonic()-started
+            if library.signature(path)!=row["signature"]:
+                raise ValueError("音乐文件在读取资料时已变化，请重新预览")
+            changed = (write_tags and AudioMetadataHelper._needs_tag_write(audio, info, overwrite)) or bool(cover_data)
+            temporary = path.with_name("."+path.name[:40]+".etk-music-"+identifier)
+            saved = {"state":"staging","path":row["path"],"target":row["target"],"original":row["signature"],"temporary":str(temporary),"changed":bool(changed),
+                "lyric":asdict(lyric) if lyric else None,"lyrics_elapsed":lyrics_elapsed,"lyrics_policy":policies.get("lyrics"),"lyrics_simplified":config.get("music_lyrics_to_simplified",False),
+                "lyrics_result":"保留现有歌词" if keep_lyrics else "未匹配歌词" if lyrics_enabled and not lyric else ""}
+            write_json(receipt, saved)
+            try:
+                if changed:
+                    with path.open("rb") as source, temporary.open("xb") as output:
+                        shutil.copyfileobj(source, output, 1024*1024)
+                        output.flush(); os.fsync(output.fileno())
+                    temporary.chmod(path.stat().st_mode | 0o600)
+                    if not AudioMetadataHelper.write(temporary, info, cover_data=cover_data, cover_mime=cover_mime, write_tags=write_tags, overwrite=overwrite, cover_overwrite=policies.get("cover")=="overwrite"):
+                        raise ValueError("音乐标签或封面写入失败")
+                    with temporary.open("rb") as stream: os.fsync(stream.fileno())
+                    saved["prepared"] = library.signature(temporary)
+                else:
+                    saved["prepared"] = library.signature(path)
+                saved["state"]="prepared"
+                write_json(receipt,saved)
+            except Exception:
+                temporary.unlink(missing_ok=True); receipt.unlink(missing_ok=True)
+                raise
+        temporary = Path(saved["temporary"])
+        destination = root/saved["target"]
+        if saved["state"]=="prepared":
+            library.target(config,row["path"])
+            if saved["changed"]:
+                if identity_matches(path,saved["prepared"]):
+                    pass
+                elif library.signature(path)==saved["original"] and identity_matches(temporary,saved["prepared"]):
+                    os.replace(temporary,path); flush_directory(path.parent)
+                else:
+                    raise ValueError("音乐文件已变化，保留暂存数据并停止替换")
+            elif not identity_matches(path,saved["prepared"]):
+                raise ValueError("音乐文件已变化，已停止处理")
+            saved["state"]="audio_done"; write_json(receipt,saved)
+        if saved["state"]=="audio_done":
+            if not identity_matches(path,saved["prepared"]):
+                raise ValueError("音乐文件在写入后被其他程序替换")
+            lyric = MusicLyrics.from_dict(saved["lyric"]) if saved["lyric"] else None
+            if lyric:
+                saved["lyrics_result"] = sidecar(path,lyric,saved["lyrics_policy"],saved["lyrics_simplified"],identifier)
+            saved["state"]="lyrics_done"; write_json(receipt,saved)
+        result={"path":row["path"],"target":row["target"],"success":True,"lyrics_elapsed":saved.get("lyrics_elapsed",0),"message":"音乐处理完成"+("，"+saved["lyrics_result"] if saved.get("lyrics_result") else "")}
+        library.scan_one(config,row["target"],"updated")
+        write_json(receipt,{"state":"completed","result":result,"signature":library.signature(destination)})
+        temporary.unlink(missing_ok=True)
+        return result
+
+
+def cleanup(config, body):
+    """终止任务仅清理其暂存副本；已提交的音乐文件保留。"""
+    identifier = body["task_id"]
+    if not identifier or any(char not in "0123456789abcdef-" for char in identifier):
+        raise ValueError("音乐任务标识无效")
+    directory = get_runtime_setting("CACHE_PATH")/"operations"
+    if not directory.exists():
+        return {"success":True}
+    with (directory/"write.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        for receipt in directory.glob(identifier+"-*.json"):
+            saved = json.loads(receipt.read_text())
+            if saved.get("state")!="completed":
+                root,_=library.roots(config)
+                path=root/saved["path"]
+                if not path.is_relative_to(root) or ".." in path.parts or path.parent.resolve()!=path.parent:
+                    raise ValueError("音乐暂存目录已变化，未清理")
+                expected = path.with_name("."+path.name[:40]+".etk-music-"+receipt.stem)
+                if str(expected)!=saved.get("temporary"):
+                    raise ValueError("音乐暂存路径不符，未清理")
+                expected.unlink(missing_ok=True)
+                for extension in (".lrc", ".txt", ".lyricsfile.yaml"):
+                    target=path.with_suffix(extension)
+                    target.with_name("."+target.name[:40]+".etk-lyrics-"+receipt.stem).unlink(missing_ok=True)
+            receipt.unlink()
+            receipt.with_name(receipt.name+".new").unlink(missing_ok=True)
+        for temporary_receipt in directory.glob(identifier+"-*.json.new"):
+            temporary_receipt.unlink()
+    return {"success":True}

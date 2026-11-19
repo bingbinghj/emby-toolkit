@@ -667,6 +667,33 @@
             </VWindowItem>
             <VWindowItem value="directory" eager>
               <VRow class="mp-aligned-grid settings-card-grid settings-grid">
+                <VCol id="music-settings" cols="12" v-show="settingsSearch.showCard('音乐')">
+                  <SettingCard title="音乐" subtitle="本地音乐库、识别与刮削" class="dashboard-card">
+                    <VCardText class="settings-card-body">
+                      <div class="settings-field" data-field="music_library_path"><LocalPathField v-model="configModel.music_library_path" label="本地音乐库目录" hint="只扫描和编辑此目录中的音乐。" persistent-hint /></div>
+                      <div class="settings-field" data-field="music_seed_path"><LocalPathField v-model="configModel.music_seed_path" label="音乐做种目录" hint="保护源文件，此目录不作为刮削目标。" persistent-hint /></div>
+                      <div class="settings-field" data-field="music_sources"><VSelect v-model="configModel.music_sources" label="音乐资料源" :items="[{title:'MusicBrainz',value:'musicbrainz'},{title:'TheAudioDB',value:'theaudiodb'},{title:'豆瓣音乐',value:'doubanmusic'}]" multiple chips hint="按选择顺序识别；资料搜索可同时查询多个来源。" persistent-hint /></div>
+                      <div class="settings-field" data-field="music_cue_enable"><VSwitch v-model="configModel.music_cue_enable" label="音乐 CUE 识别" /></div>
+                      <div class="settings-field" data-field="music_metadata_to_simplified"><VSwitch v-model="configModel.music_metadata_to_simplified" label="音乐媒体信息转简体中文" /></div>
+                      <div class="settings-field" data-field="music_lyrics_to_simplified"><VSwitch v-model="configModel.music_lyrics_to_simplified" label="歌词正文转简体中文" /></div>
+                      <div class="settings-field" data-field="music_local_cover_enable"><VSwitch v-model="configModel.music_local_cover_enable" label="音乐本地封面" /></div>
+                      <div class="settings-field" data-field="music_cover_file_patterns"><VTextField v-model="configModel.music_cover_file_patterns" label="本地封面匹配规则" /></div>
+                      <div class="settings-field" data-field="music_cover_proxy"><VTextField v-model="configModel.music_cover_proxy" label="音乐封面代理地址" placeholder="留空使用 Cover Art Archive" /></div>
+                      <div class="settings-field" data-field="music_release_region_priority"><VTextField v-model="configModel.music_release_region_priority" label="音乐发行地区优先级" hint="例如 CN,TW,HK" persistent-hint /></div>
+                      <div class="settings-field" data-field="music_release_script_priority"><VTextField v-model="configModel.music_release_script_priority" label="音乐文字字形优先级" hint="例如 Hans,Hant,Latn" persistent-hint /></div>
+                      <div class="settings-field" data-field="acoustid_api_key"><VTextField v-model="configModel.acoustid_api_key" label="AcoustID API Key" type="password" /></div>
+                      <div class="settings-field" data-field="theaudiodb_api_key"><VTextField v-model="configModel.theaudiodb_api_key" label="TheAudioDB API Key" type="password" /></div>
+                      <div class="settings-field" data-field="lrclib_base_url"><VTextField v-model="configModel.lrclib_base_url" label="LRCLIB 服务地址" /></div>
+                      <div class="settings-field" data-field="amll_base_url"><VTextField v-model="configModel.amll_base_url" label="AMLL TTML 服务地址" /></div>
+                      <div class="settings-field" data-field="lyrics_batch_timeout"><VTextField v-model.number="configModel.lyrics_batch_timeout" label="歌词批次查询预算（秒）" type="number" min="0" /></div>
+                      <div class="settings-field" data-field="lyrics_provider_retry_max_wait"><VTextField v-model.number="configModel.lyrics_provider_retry_max_wait" label="歌词来源最大重试等待（秒）" type="number" min="0" /></div>
+                      <div v-if="configModel.music_scraping_policies" class="settings-field" data-field="music_scraping_policies" data-settings-label="音乐刮削策略" style="grid-column:1/-1">
+                        <div v-for="item in [{key:'tags',label:'音乐标签'},{key:'cover',label:'音乐封面'},{key:'lyrics',label:'音乐歌词'}]" :key="item.key" class="d-flex flex-wrap align-center ga-3 mb-3"><span>{{ item.label }}</span><VBtnToggle v-model="configModel.music_scraping_policies[item.key]" mandatory density="compact" divided><VBtn value="skip" color="warning" variant="tonal">跳过</VBtn><VBtn value="missingOnly" color="primary" variant="tonal">仅缺失</VBtn><VBtn v-if="item.key === 'lyrics'" value="upgrade" color="info" variant="tonal">升级</VBtn><VBtn value="overwrite" color="success" variant="tonal">覆盖</VBtn></VBtnToggle></div>
+                      </div>
+                    </VCardText>
+                    <VCardActions class="app-dialog-actions"><VSpacer /><VBtn variant="flat" color="primary" prepend-icon="mdi-content-save-outline" :loading="savingCard === 'music'" :disabled="savingConfig || loadingConfig" @click="saveCard('music')">保存</VBtn></VCardActions>
+                  </SettingCard>
+                </VCol>
                 <VCol cols="12" v-show="settingsSearch.showCard('存储')">
                   <SettingCard class="dashboard-card storage-setting-card" title="存储" subtitle="115 授权方式与连接状态">
                     <VCardText class="service-setting-card-content">
@@ -2088,6 +2115,11 @@ const savingCard = ref(null);
 let mediaServerProbeVersion = 0, mediaServerProbeController = null;
 const formRef = ref(null);
 const { configModel, loadingConfig, savingConfig, configError, handleSaveConfig, captureConfigRefresh } = useConfig();
+watch([() => route.hash, activeSettingsTab, loadingConfig], async ([hash, tab, loading]) => {
+  if (hash !== '#music-settings' || tab !== 'directory' || loading) return;
+  await nextTick();
+  document.getElementById('music-settings')?.scrollIntoView({ block: 'start' });
+}, { immediate: true, flush: 'post' });
 const reloadChangedConfig = async (context, tables) => {
   if (!Array.isArray(tables) || !tables.includes('app_settings')) return '';
   const loaded = await context.refresh();
@@ -3027,6 +3059,7 @@ const check115Status = async () => {
 // 辅助函数：获取规则摘要
 
 const cardFields = {
+  music: ['music_library_path','music_seed_path','music_sources','music_cue_enable','music_metadata_to_simplified','music_lyrics_to_simplified','music_local_cover_enable','music_cover_file_patterns','music_cover_proxy','music_release_region_priority','music_release_script_priority','acoustid_api_key','theaudiodb_api_key','lrclib_base_url','amll_base_url','lyrics_batch_timeout','lyrics_provider_retry_max_wait','music_scraping_policies'],
   basic: ['delay_between_items_sec', 'media_info_retry_interval', 'media_info_retry_attempts', 'media_edit_skip_track_differences_on_select_all', 'max_actors_to_process', 'max_episode_actors_to_process', 'extract_thumb', 'actor_role_add_prefix', 'remove_actors_without_avatars', 'keyword_to_tags', 'studio_to_chinese'],
   monitor: ['monitor_enabled', 'monitor_paths', 'monitor_exclude_dirs', 'monitor_exclude_refresh_delay', 'monitor_extensions'],
   sources: ['tmdb_api_key', 'tmdb_api_base_url', 'douban_enable_online_api', 'api_douban_default_cooldown_seconds', 'douban_cookie'],

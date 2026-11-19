@@ -61,6 +61,7 @@ pub mod monitor;
 mod monitor_persistence;
 pub mod monitor_ingest;
 mod moviepilot_ingest;
+pub mod music;
 pub mod nfo;
 pub mod nfo_files;
 pub mod notifications;

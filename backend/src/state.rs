@@ -117,6 +117,7 @@ impl AppState {
         next.as_object_mut().unwrap().extend(updates.clone());
         next.as_object_mut().unwrap().remove("min_score_for_review");
         crate::notifications::validate_config(&next)?;
+        crate::music::validate_config(&next)?;
         if next.get("p115_media_read_mode").is_some_and(|mode| !matches!(mode.as_str(), Some("etk" | "cd2"))) {
             return Err(ApiError::bad("115 媒体读取方式必须为 ETK 或 CD2"));
         }
@@ -128,6 +129,8 @@ impl AppState {
             "ai_api_key",
             "telegram_bot_token",
             "emby_webhook_secret",
+            "acoustid_api_key",
+            "theaudiodb_api_key",
         ] {
             if next[key] == "********" {
                 next[key] = config[key].clone();

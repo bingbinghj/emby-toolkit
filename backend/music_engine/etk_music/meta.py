@@ -1,0 +1,2965 @@
+# Adapted from MoviePilot v3 e0f17f5aafd2a2cdc56d4466e60c11d125c603c9 (GPL-3.0).
+# Music-only host integration; upstream license: ../LICENSE.MoviePilot.
+"""
+音乐标题预处理、可扩展命名模式和音乐元信息解析。
+"""
+
+import json
+import logging
+import re
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+from threading import RLock
+from typing import Any, Callable, Optional
+
+import Pinyin2Hanzi
+from Pinyin2Hanzi import is_pinyin
+
+from etk_music.base import MetaBase
+from etk_music.runtime import get_metainfo_accelerator
+from etk_music.identity import resolve_media_identity
+from etk_music.types import MUSIC_ENTITY_ALBUM, MediaSource, MediaType
+
+_AUDIO_FORMAT_PATTERN = re.compile(
+    r"(?<![A-Z])(?P<format>DSD(?:64|128|256|512)?|DSF|DFF|SACD|FLAC|ALAC|APE|WAV|WAVE|AIFF?|PCM|"
+    r"MP3|AAC|M4A|OGG|VORBIS|OPUS|WMA)(?![A-Z])",
+    re.IGNORECASE,
+)
+_BIT_DEPTH_PATTERN = re.compile(r"(?<!\d)(?P<value>16|20|24|32)\s*(?:-?bit|bits?|位|B)(?!\w)", re.IGNORECASE)
+_SAMPLE_RATE_PATTERN = re.compile(
+    r"(?<!\d)(?P<value>44(?:[. ]1)?|48|88(?:[. ]2)?|96|176(?:[. ]4)?|192|352(?:[. ]8)?|384|705(?:[. ]6)?|768)"
+    r"\s*k(?:hz)?(?!\w)",
+    re.IGNORECASE,
+)
+_BITRATE_PATTERN = re.compile(
+    r"(?<!\d)(?P<value>\d{2,4})\s*k(?:bps?|b(?:it)?/?s?)?(?![a-z])",
+    re.IGNORECASE,
+)
+_LOSSLESS_PATTERN = re.compile(r"(?<![A-Za-z0-9])(?:lossless|无损音质|无损)(?![A-Za-z0-9])", re.IGNORECASE)
+_HIRES_PATTERN = re.compile(r"(?<!\w)(?:hi[ ._-]?res(?:olution)?|高解析|高分辨率音频)(?!\w)", re.IGNORECASE)
+
+_AUDIO_FORMAT_ALIASES = {
+    "WAVE": "WAV",
+    "AIF": "AIFF",
+    "VORBIS": "OGG",
+    "DSF": "DSD",
+    "DFF": "DSD",
+    "SACD": "DSD",
+}
+_LOSSLESS_AUDIO_FORMATS = frozenset({"DSD", "FLAC", "ALAC", "APE", "WAV", "AIFF", "PCM"})
+_LOSSY_AUDIO_FORMATS = frozenset({"MP3", "AAC", "OGG", "OPUS", "WMA"})
+logger = logging.getLogger(__name__)
+
+
+def parse_music_release_types(values: Any, compilation: Optional[str] = None) -> tuple[Optional[str], list[str]]:
+    """
+    将标签中的发行主副类型归一，保留 EP/Single，不从曲目数推断类型。
+    """
+    primary_names = {"album": "Album", "studio album": "Album", "专辑": "Album", "專輯": "Album",
+                     "single": "Single", "单曲": "Single", "單曲": "Single", "ep": "EP",
+                     "broadcast": "Broadcast", "other": "Other"}
+    secondary_names = {"compilation": "Compilation", "精选集": "Compilation", "合辑": "Compilation",
+                       "soundtrack": "Soundtrack", "ost": "Soundtrack", "原声": "Soundtrack",
+                       "live": "Live", "现场": "Live", "remix": "Remix", "dj-mix": "DJ-mix",
+                       "mixtape": "Mixtape/Street", "spokenword": "Spokenword"}
+    primary: Optional[str] = None
+    secondary: list[str] = []
+    for value in _string_list(values):
+        for token in re.split(r"[;,/+\\]", value):
+            key = token.strip().casefold()
+            primary = primary or primary_names.get(key)
+            if key in secondary_names and secondary_names[key] not in secondary:
+                secondary.append(secondary_names[key])
+    if str(compilation or "").strip().casefold() in {"1", "true", "yes"} and "Compilation" not in secondary:
+        secondary.append("Compilation")
+    return primary, secondary
+
+
+def normalize_audio_format(value: Any) -> Optional[str]:
+    """
+    将音频格式名称归一为订阅筛选和展示使用的规范值。
+    """
+    text = str(value or "").strip().upper()
+    if not text:
+        return None
+    match = _AUDIO_FORMAT_PATTERN.search(text)
+    if not match:
+        return text
+    normalized = match.group("format").upper()
+    if normalized.startswith("DSD"):
+        return "DSD"
+    return _AUDIO_FORMAT_ALIASES.get(normalized, normalized)
+
+
+def infer_audio_lossless(audio_format: Any, explicit: Optional[bool] = None) -> Optional[bool]:
+    """
+    根据格式推断是否无损；显式识别结果优先于格式推断。
+    """
+    if explicit is not None:
+        return bool(explicit)
+    normalized = normalize_audio_format(audio_format)
+    if normalized in _LOSSLESS_AUDIO_FORMATS:
+        return True
+    if normalized in _LOSSY_AUDIO_FORMATS:
+        return False
+    return None
+
+
+def parse_audio_quality(value: Any) -> dict[str, Any]:
+    """
+    从资源标题或描述中提取声明的格式、位深、采样率和码率。
+    """
+    text = str(value or "")
+    format_match = _AUDIO_FORMAT_PATTERN.search(text)
+    bit_depth_match = _BIT_DEPTH_PATTERN.search(text)
+    sample_rate_match = _SAMPLE_RATE_PATTERN.search(text)
+    bitrate_match = _BITRATE_PATTERN.search(text)
+    audio_format = normalize_audio_format(format_match.group("format")) if format_match else None
+    bit_depth = int(bit_depth_match.group("value")) if bit_depth_match else None
+    sample_rate = (
+        int(float(sample_rate_match.group("value").replace(" ", ".")) * 1000)
+        if sample_rate_match
+        else None
+    )
+    bitrate = int(bitrate_match.group("value")) * 1000 if bitrate_match else None
+    explicit_lossless = True if (_LOSSLESS_PATTERN.search(text) or _HIRES_PATTERN.search(text)) else None
+    return {
+        "audio_format": audio_format,
+        "audio_lossless": infer_audio_lossless(audio_format, explicit_lossless),
+        "bit_depth": bit_depth,
+        "sample_rate": sample_rate,
+        "bitrate": bitrate,
+    }
+
+
+def audio_quality_tier(
+        audio_format: Any,
+        audio_lossless: Optional[bool] = None,
+        bit_depth: Optional[int] = None,
+        sample_rate: Optional[int] = None,
+        bitrate: Optional[int] = None,
+) -> Optional[str]:
+    """
+    返回 hires、lossless 或 lossy 音质等级，未知参数返回 None。
+    """
+    normalized = normalize_audio_format(audio_format)
+    lossless = infer_audio_lossless(normalized, audio_lossless)
+    if normalized == "DSD" or (lossless and ((bit_depth or 0) >= 24 or (sample_rate or 0) >= 88200)):
+        return "hires"
+    if lossless:
+        return "lossless"
+    if lossless is False or normalized or bitrate:
+        return "lossy"
+    return None
+
+
+def audio_quality_score(
+        audio_format: Any,
+        audio_lossless: Optional[bool] = None,
+        bit_depth: Optional[int] = None,
+        sample_rate: Optional[int] = None,
+        bitrate: Optional[int] = None,
+) -> int:
+    """
+    将音乐音质换算为 0 至 100 的稳定洗版优先级。
+    """
+    normalized = normalize_audio_format(audio_format)
+    lossless = infer_audio_lossless(normalized, audio_lossless)
+    if normalized == "DSD" or (lossless and (bit_depth or 0) >= 24 and (sample_rate or 0) >= 192000):
+        return 100
+    if lossless:
+        score = 86
+        if (bit_depth or 0) >= 24:
+            score += 5
+        elif (bit_depth or 0) >= 16:
+            score += 2
+        if (sample_rate or 0) >= 176400:
+            score += 7
+        elif (sample_rate or 0) >= 88200:
+            score += 5
+        elif sample_rate:
+            score += 2
+        return min(score, 99)
+    if bitrate:
+        kbps = bitrate // 1000
+        if kbps >= 320:
+            return 80
+        if kbps >= 256:
+            return 70
+        if kbps >= 192:
+            return 60
+        if kbps >= 128:
+            return 50
+        return 40
+    return 35 if normalized in _LOSSY_AUDIO_FORMATS else 0
+
+
+def format_audio_quality(
+        audio_format: Any,
+        audio_lossless: Optional[bool] = None,
+        bit_depth: Optional[int] = None,
+        sample_rate: Optional[int] = None,
+        bitrate: Optional[int] = None,
+) -> Optional[str]:
+    """
+    将音频技术参数格式化为适合识别结果和通知展示的紧凑文本。
+    """
+    parts: list[str] = []
+    normalized = normalize_audio_format(audio_format)
+    if normalized:
+        parts.append(normalized)
+    if bit_depth:
+        parts.append(f"{bit_depth}-bit")
+    if sample_rate:
+        rate = sample_rate / 1000
+        parts.append(f"{rate:g} kHz")
+    if bitrate:
+        parts.append(f"{round(bitrate / 1000):,} kbps")
+    if not parts:
+        tier = audio_quality_tier(audio_format, audio_lossless, bit_depth, sample_rate, bitrate)
+        if tier:
+            parts.append({"hires": "Hi-Res", "lossless": "Lossless", "lossy": "Lossy"}[tier])
+    return " · ".join(parts) or None
+
+
+def _optional_int(value: Any) -> Optional[int]:
+    """
+    将音频技术参数安全转换为整数，空值与非数字返回 None。
+    """
+    if value in (None, ""):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+# 资源标题中的音质规格与发行标记（格式、位深采样、年份括号、发行实体标记），
+# 拆分艺术家/曲名前需先剔除，否则「曲名 - FLAC [16B-44.1kHz]」会被误拆成艺术家与曲名
+_MUSIC_FORMAT_TOKEN_ALT = (
+    r"DSD(?:64|128|256|512)?|DSF|DFF|SACD|FLAC|ALAC|APE|CUE|WAV|WAVE|AIFF?|PCM|"
+    r"MP3|AAC|M4A|OGG|VORBIS|OPUS|WMA|WEB-?DL|WEBRip|WEB"
+)
+# Gazelle 将音质、抓轨日志、介质与年份串成斜杠尾链。只匹配完整规格尾链，
+# 避免删除作品正文中的斜杠、CD 或 Log；末尾年份仍交由解析器提取。
+_MUSIC_SLASH_SPEC_TAIL_RE = re.compile(
+    rf"\s+(?:{_MUSIC_FORMAT_TOKEN_ALT})"
+    rf"(?:\s*/\s*(?:{_MUSIC_FORMAT_TOKEN_ALT}|lossless|Log(?:\s*\(\d{{1,3}}%\))?|"
+    r"CD|Vinyl|分[轨軌]|整[轨軌]|原抓|自抓|自扫|自掃))+"
+    r"(?:\s*/\s*(?P<year>(?:19|20)\d{2}))?\s*$",
+    re.IGNORECASE,
+)
+_MUSIC_VIDEO_TOKEN_ALT = (
+    r"1080[pi]|720p|2160[pi]|480[pi]|4k|8k|uhd|"
+    r"bluray|blu-ray|bdrip|uhd\s*bd|hddvd|hdvd|hdtv|webrip|remux|"
+    r"avc|hevc|x26[45]|h\.?26[45]|mpeg-?2|vc-?1|prores|av1|"
+    r"dts(?:-hd\s*(?:ma|hra)?)?(?:\s*[257]\.1)?|"
+    r"truehd|atmos|ddp?(?:\+[\w.]*)?|eac3|ac3|lpcm|flac\s*[257]\.1|"
+    r"[257]\.1(?:\s*ch(?:annels?)?)?|stereo|mono|"
+    r"hdr10\+?|dovi|dolby\s*vision|sub(?:title)?s?|chs&cht"
+)
+_MUSIC_QUALITY_TOKEN_RE = re.compile(
+    r"\[[^\]]*\]|\((?:19|20)\d{2}\)|"
+    rf"(?<![A-Za-z0-9])(?:{_MUSIC_FORMAT_TOKEN_ALT})(?![A-Za-z0-9])|"
+    r"\b\d{1,3}\s*-?\s*bits?\b|\b\d{2,4}(?:(?:[.．]|\s)\d)?\s*k(?:hz|bps?)\b|"
+    # Single / EP / Album 仅在独立尾段或括号标签中才是发行标记，
+    # 不能在这里全局删除，否则 Best Album、Single Ladies 等自然标题会受损。
+    r"(?<![A-Za-z0-9])(?:lossless|无损音质|无损|分[轨軌]|整[轨軌]|"
+    r"原抓|自抓|自扫|自掃)(?![A-Za-z0-9])|"
+    # 合集/精选只有作为独立标签时才删除，不能损伤「楠得精选」「音乐合集」等作品名。
+    r"(?<![A-Za-z0-9\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af])"
+    r"(?:合集|精选)(?![A-Za-z0-9\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af])",
+    re.IGNORECASE,
+)
+# 演唱会/音乐视频种子的视频编码标记：分辨率、编码、容器与声道描述，
+# 不是音乐文本信息，不剔除会污染曲名并阻断艺术家/曲名拆分
+_MUSIC_VIDEO_TOKEN_RE = re.compile(
+    rf"(?<![A-Za-z0-9])(?:{_MUSIC_VIDEO_TOKEN_ALT})(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+# 尾部规格段判定：整段仅由格式词、视频标记、位深采样与无损声明词组成，
+# 曲名含任何自然语言文本时判定失败，保证「曲名 (注释) - WEB-DL」不被误剥；
+# 发布组标签（HHWEB/FHDMv）不是固定词表，由 _strip_spec_segments 的短词规则另行放行
+_MUSIC_SPEC_SEGMENT_RE = re.compile(
+    rf"^(?:(?<![A-Za-z0-9])(?:{_MUSIC_FORMAT_TOKEN_ALT}|{_MUSIC_VIDEO_TOKEN_ALT}|single|ep|album)"
+    r"(?![A-Za-z0-9])"
+    r"|\d{1,3}\s*-?\s*bits?|\d{2,4}(?:(?:[.．]|\s)\d)?\s*k(?:hz|bps?)"
+    r"|lossless|无损音质|无损|分[轨軌]|整[轨軌]|原抓|自抓|自扫|自掃|合集|精选"
+    r"|[\s\-–—−－/+]"
+    r")+$",
+    re.IGNORECASE,
+)
+# 尾部规格段定位：最后一个「空白+连字符」或「格式词连字符」分隔的片段；
+# 片段内不允许连字符，保证匹配落在最尾部片段而不是从左吞掉整个尾巴
+_MUSIC_TRAILING_SEGMENT_RE = re.compile(
+    r"(?:\s+[\-–—−－]+\s*|(?P<prefix>[A-Za-z0-9]+)[\-–—−－]+)"
+    r"(?P<segment>[^\s\-–—−－]+(?:\s+[^\s\-–—−－]+)*)\s*$"
+)
+# 规格词后的发布组尾巴：FLAC 2.0-ADE、FLAC 分轨-nbarock、FLAC 2.0-LIVE@ADE。
+# 必须存在已知规格词才剥离，避免把普通的「标题-艺术家」误当发布组。
+_MUSIC_RELEASE_GROUP_RE = re.compile(
+    rf"(?<![A-Za-z0-9])(?:{_MUSIC_FORMAT_TOKEN_ALT}|{_MUSIC_VIDEO_TOKEN_ALT})(?![A-Za-z0-9])"
+    r"(?:\s*(?:[+/]|\d{1,3}(?:\.\d)?|bits?|k(?:hz|bps?)|lossless|无损|"
+    r"分[轨軌]|整[轨軌]|原抓|自抓|自扫|自掃))*"
+    r"\s*[-–—−－]+\s*[A-Za-z0-9][A-Za-z0-9@._-]{1,20}\s*$",
+    re.IGNORECASE,
+)
+# 括号内的抓轨说明整体删除，避免逐词清理后留下「(+CUE原抓)」等残片。
+_MUSIC_RIP_NOTE_RE = re.compile(
+    rf"[\(（][^()（）]{{0,80}}(?:{_MUSIC_FORMAT_TOKEN_ALT})[^()（）]{{0,80}}"
+    r"(?:原抓|自抓|自扫|自掃)[^()（）]{0,40}[\)）]",
+    re.IGNORECASE,
+)
+_MUSIC_RIP_SIGNATURE_RE = re.compile(
+    rf"(?:{_MUSIC_FORMAT_TOKEN_ALT})[^\r\n]{{0,30}}(?:原抓|自抓|自扫|自掃)",
+    re.IGNORECASE,
+)
+# 中文抓轨方式常与格式词粘连（WAV分轨原抓），不能复用要求 ASCII 边界的
+# 格式词元规则；这些词本身语义明确，单独清理可保留格式词的严格边界。
+_MUSIC_RIP_METHOD_RE = re.compile(r"(?:分轨|分軌|整轨|整軌|原抓|自抓|自扫|自掃)", re.IGNORECASE)
+# 场景音频尾链：作品名 - 2006-FLAC分轨-OpenCD-发布者。
+# 年份属于发行线索，其后的格式、抓轨方式和发布组都不进入音乐名称。
+_MUSIC_AUDIO_RELEASE_TAIL_RE = re.compile(
+    rf"(?<!\d)(?P<year>(?:19|20)\d{{2}})\s*[-–—−－]\s*"
+    rf"(?:{_MUSIC_FORMAT_TOKEN_ALT})(?:\s*(?:分[轨軌]|整[轨軌]|原抓|自抓|自扫|自掃))*"
+    r"(?:\s+multi[\s_-]*file)?"
+    r"(?:\s*[-–—−－]\s*[^\s\-–—−－]+){0,4}\s*$",
+    re.IGNORECASE,
+)
+# OpenCD 等站点用 ``格式 Multi File`` 表示分轨资源；保留格式词，去掉文件形态尾标。
+_MUSIC_MULTI_FILE_SUFFIX_RE = re.compile(
+    rf"\s+(?P<format>{_MUSIC_FORMAT_TOKEN_ALT})\s+multi[\s_-]*file"
+    r"(?:\s*[-–—−－]\s*[A-Za-z0-9][A-Za-z0-9@._-]{1,20})?\s*$", re.IGNORECASE,
+)
+# 圆括号中的联合位深声明（24/48bit）及规格剔除后留下的空括号。
+_MUSIC_PAREN_SPEC_RE = re.compile(
+    r"[\(（]\s*\d{1,3}\s*/\s*\d{1,3}\s*-?\s*bits?\s*[\)）]",
+    re.IGNORECASE,
+)
+# 介质与音频格式相邻才构成发行规格，不能全局删除作品名中的 CD/Album。
+_MUSIC_CARRIER_RE = re.compile(
+    rf"(?<![\w])(?:CD|Vinyl)[ .]+(?=(?:{_MUSIC_FORMAT_TOKEN_ALT})(?![A-Za-z0-9]))",
+    re.IGNORECASE,
+)
+_MUSIC_CATALOG_SPEC_RE = re.compile(
+    rf"\s*\((?:CD|WEB|Vinyl)\s*-\s*(?:{_MUSIC_FORMAT_TOKEN_ALT})\s*-\s*Lossless\)"
+    r"(?:-\d{4,10})?\s*$", re.IGNORECASE,
+)
+_MUSIC_SCENE_TYPE_RE = re.compile(
+    rf"\.(?:Album|Single|EP)(?=\.(?:{_MUSIC_FORMAT_TOKEN_ALT})(?![A-Za-z0-9]))", re.IGNORECASE,
+)
+_MUSIC_RELEASE_LABEL_RE = re.compile(
+    r"\s*-\s*(?:Single|EP|Album)\s*(?=\((?:19|20)\d{2}\)\s*-\s*(?:WEB-DL|FLAC|ALAC|AAC)\b)",
+    re.IGNORECASE,
+)
+_MUSIC_SCENE_YEAR_RE = re.compile(
+    rf"\.(?P<year>(?:19|20)\d{{2}})\.(?=(?:{_MUSIC_FORMAT_TOKEN_ALT}|{_MUSIC_VIDEO_TOKEN_ALT})"
+    r"(?![A-Za-z0-9]))", re.IGNORECASE,
+)
+_MUSIC_EDITION_BRACKET_RE = re.compile(
+    r"\[([^\[\]]*\b(?:deluxe|expanded|special|limited|anniversary|remaster(?:ed)?)\b[^\[\]]*)\]",
+    re.IGNORECASE,
+)
+_MUSIC_AUDIO_EXTENSION_RE = re.compile(r"\.(?:flac|mp3|m4a|aac|wav|ape|ogg|opus|wma|aiff?|dsf|dff|strm)$", re.I)
+# 合并书写的「碟号+曲号」4 位前缀，如 `0101`、`0203`。
+# 只接受补零写法（首位固定 0），从而排除 `1812`、`1999` 这类作品名与年份。
+_MUSIC_COMBINED_DISC_TRACK_RE = re.compile(r"^0(?P<disc>[1-9])(?P<num>[0-9][1-9]|[1-9][0-9])$")
+# 4 位补零「碟号+曲号」前缀后接曲名，如 `0101 - 曲名`。
+_MUSIC_COMBINED_TRACK_PREFIX_RE = re.compile(r"^\s*(?P<num>0[1-9][0-9]{2})\s*[-–—.。、) ]+\s*(?P<rest>.*\S)\s*$")
+_MUSIC_CLASSICAL_WORK_RE = re.compile(
+    r"\b(?:No\.|Op\.?|BWV|KV|Hob\.)\s*\d|"
+    r"\b(?:symphony|concerto|sonata|quartet|quintet|suite)\b.*(?:\d|\bin\b|\bfor\b)|"
+    r"^(?:polonaise|toccata|fugue)$", re.IGNORECASE,
+)
+_MUSIC_EMPTY_BRACKET_RE = re.compile(r"[\(（\[]\s*(?:[/+,\-]\s*)*[\)）\]]")
+# 尾部花括号通常是唱片目录号或发布标记，仅在末尾剔除，保护正文中的花括号文本。
+_MUSIC_TRAILING_CATALOG_RE = re.compile(r"\s*\{[A-Za-z0-9][^{}]{0,40}\}\s*$")
+# 标准抓轨发布尾链有介质、音频格式和厂牌目录三重证据；不删除正文中的 CD 或花括号。
+_MUSIC_RESOURCE_CATALOG_TAIL_RE = re.compile(
+    rf"(?<=[)）])\s+-\s+(?:CD|SACD|WEB)\s+-\s+\[[^\]\r\n]*"
+    rf"(?:{_MUSIC_FORMAT_TOKEN_ALT})[^\]\r\n]*\]"
+    r"(?:\s+-\s+\d+(?:\.\d+)?\s*(?:bits?|kHz|Hz))*"
+    r"\s+-\s+\{[^{}\r\n]+\}(?:\s+-\s+[A-Za-z0-9][A-Za-z0-9@._-]*)?\s*$",
+    re.IGNORECASE,
+)
+# 发行年份与独立规格尾段共同限定资源命名，不能仅凭无空格连字符猜测署名方向。
+_MUSIC_RESOURCE_RELEASE_RE = re.compile(
+    r"^(?P<name>.+?)\s+(?P<year>(?:19|20)\d{2})\s+[-–—−－]+\s+(?P<spec>.+)$"
+)
+_MUSIC_RESOURCE_BRACKET_RE = re.compile(
+    r"^\s*\[(?P<name>[^\[\]]+)\]\s*\[(?P<year>(?:19|20)\d{2})\](?P<tail>.*)$"
+)
+_MUSIC_RESOURCE_GROUP_RE = re.compile(
+    r"^(?P<spec>.+?)(?:\s*[-–—−－]+\s*|\s+)"
+    r"(?!(?:DELUXE|EXPANDED|SPECIAL|LIMITED|ANNIVERSARY|REMASTER(?:ED)?|RE-?RECORD(?:ED|ING))$)"
+    r"(?P<group>[A-Z0-9][A-Z0-9@._-]{1,20})$"
+)
+# 年份及完整发行日期括号提供候选消歧线索，规格或目录号不作为日期。
+_MUSIC_YEAR_RE = re.compile(
+    r"[\(\[（【]((?:19|20)\d{2})"
+    r"(?:[. /-](?:0?[1-9]|1[0-2])[. /-](?:0?[1-9]|[12]\d|3[01]))?[\)\]）】]"
+)
+# 标题尾部独立年份：「xxx音乐会 2018」「Funky Jazz Saxophone 2024」「系列-2007」，
+# 提取为发行年份线索并从曲名剥离，避免年份文本进入检索式造成零命中
+_MUSIC_TRAILING_YEAR_RE = re.compile(r"[\s\-–—]+((?:19|20)\d{2})\s*$")
+# 仅清理独立发行类型尾段或紧随年份的类型，保留 Best Album 等自然标题。
+_MUSIC_RELEASE_TYPE_RE = re.compile(
+    r"(?:\s+[-–—−－]+\s*(?:single|ep|album)|"
+    r"(?P<year>(?:19|20)\d{2})\s+(?:single|ep|album))\s*$", re.IGNORECASE,
+)
+# 无括号年份区间：全集/精选标题尾部的 1967-1995、2015-16，取结束年作为发行年份线索；
+# CJK 字符属于 \w，不能用 \b 定界，改用数字负向断言；
+# 短年右侧禁止再跟数字，避免把 2024-01-27 这类日期的 2024-01 误当区间；
+# 区间位于标题末尾（后随空白/括号/行尾）才整段剔除（全集1967-1995），
+# 后随「年」等内容文字时区间是标题的一部分（1995-2000年光华真纪录），仅提取年份保留原文
+_MUSIC_YEAR_RANGE_STRIP_RE = re.compile(
+    r"(?<!\d)(?:19|20)\d{2}\s*[-–—~～]\s*(?:(?:19|20)(\d{2})|(\d{2}))(?=\s|[\(（]|$)"
+)
+_MUSIC_YEAR_RANGE_DETECT_RE = re.compile(
+    r"(?<!\d)(?:19|20)\d{2}\s*[-–—~～]\s*(?:(?:19|20)(\d{2})|(\d{2})(?!\d))"
+)
+# 标题开头的广播/发行日期前缀：2018.01.10、2024-01-27_20-00 等电视录制命名，
+# 非音乐文本信息，需剔除后才能正确拆分艺术家与曲名
+_MUSIC_DATE_PREFIX_RE = re.compile(
+    r"^\s*(?:19|20)\d{2}\s*[.\-/年]\s*\d{1,2}\s*[.\-/月]\s*\d{1,2}\s*日?"
+    r"(?:\s*[_\-–—\s]\s*\d{1,2}\s*[-:.]\s*\d{2})?"
+)
+# 多艺术家分隔符：& , ， / 、
+_MUSIC_ARTIST_SEPARATOR_RE = re.compile(r"\s*(?:&|,|，|、|/)\s*")
+# 合辑资源的 Various Artists 署名别名：VA 是场景命名常用缩写，
+# 归一为 MusicBrainz 规范署名 Various Artists 才能命中合辑条目
+_MUSIC_ARTIST_ALIASES = {"va": "Various Artists", "various artists": "Various Artists"}
+# VA-Title / Various Artists-Title 无空格连字符前缀写法（场景命名），主拆分不适用需单独处理
+_MUSIC_ALIAS_PREFIX_RE = re.compile(
+    r"^\s*(?P<alias>VA|Various\.?\s*Artists)\s*[-–—−－]\s*(?P<title>.+\S)\s*$",
+    re.IGNORECASE,
+)
+# 艺术家与曲名的主分隔：半角/全角空格包裹的连字符（- – — − －）
+_MUSIC_ARTIST_TITLE_RE = re.compile(
+    r"^\s*(?P<artist>.+?)\s+[\-–—−－]+\s+(?P<title>.+?)\s*$"
+)
+_MUSIC_ARTIST_TITLE_SEPARATOR_RE = re.compile(r"\s+[-–—−－]+(?:\s+|$)")
+_MUSIC_RESOURCE_ARTIST_LABELS = r"艺术家|藝術家|藝人|歌手|演唱|专辑艺人|專輯藝人|artist|performer"
+_MUSIC_FEATURED_ARTIST_RE = re.compile(
+    r"\((?:featuring\s+|(?:feat|ft)(?:\.\s*|\s+))(?P<artist>[^()]+)\)", re.IGNORECASE,
+)
+# 曲名后含书名号的括号注释（影视原声说明等）：「等得到 (电影《如影随心》主题曲 独唱版)」，
+# 注释内的《》会抢先触发专辑书名号判定，需在结构解析前提取；
+# 单层括号注释（电影版/Live）是 MusicBrainz 条目的消歧后缀，不提取
+_MUSIC_TITLE_COMMENT_RE = re.compile(r"\s*[\(（](?P<comment>[^)）]*[《》][^)）]*)[\)）]\s*$")
+# CJK「歌手《专辑名》」书名号命名：提取艺术家与专辑，专辑内尾部 -CD2 为碟号
+_MUSIC_ALBUM_MARKER_RE = re.compile(
+    r"^\s*(?P<artist>[^《》]+?)\s*《(?P<album>[^《》]+)》\s*(?P<rest>.*)$"
+)
+_MUSIC_TRAILING_CJK_ALIAS_RE = re.compile(
+    r"\s+[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]"
+    r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af·・.'’\s]{0,60}$"
+)
+_MUSIC_ALBUM_DISC_RE = re.compile(r"[\s\-–—−－]*(?:cd|disc)\s*(\d{1,2})$", re.IGNORECASE)
+# 曲名尾部重复的艺术家署名（如「名人名曲-毛阿敏」「xxx - 许茹芸」）
+_MUSIC_ARTIST_SUFFIX_RE = re.compile(r"[\-–—−－]\s*(?P<suffix>[^\-–—−－]+?)\s*$")
+# 艺术家段尾部的合集修饰词：「邓丽君作品全集」需剥离为「邓丽君」才能命中条目署名
+_MUSIC_COLLECTION_SUFFIX_RE = re.compile(r"(?:的)?(?:作品)?(?:全集|精选集?|合集|精选辑)$")
+# 曲序/碟号前缀：碟号-曲序（1-02、CD1.03、Disc2-05）与单曲序（01.、01 -、01 晴天、Track 01）
+_MUSIC_DISC_TRACK_PREFIX_RE = re.compile(
+    r"^\s*(?:(?:cd|disc|disk)\s*)?(?P<disc>\d{1,2})\s*[-._]\s*(?P<num>\d{1,3})"
+    r"\s*[-–—.。、) ]*\s*(?P<rest>.*\S)?\s*$",
+    re.IGNORECASE,
+)
+_MUSIC_TRACK_PREFIX_RE = re.compile(
+    r"^\s*(?:track\s*)?(?P<num>\d{1,3})\s*[-–—.。、) ]+\s*(?P<rest>.*\S)\s*$",
+    re.IGNORECASE,
+)
+# 纯数字文件名：01.wav、Track 12.flac，只能得到曲序没有曲名
+_MUSIC_NUMBER_ONLY_RE = re.compile(
+    r"^\s*(?:(?:track|cd|disc|disk)\s*)?(?P<num>\d{1,3})\s*$",
+    re.IGNORECASE,
+)
+
+
+def _split_combined_disc_track(number: str) -> Optional[tuple[int, int]]:
+    """
+    把 4 位「碟号+曲号」前缀拆为 (碟号, 曲号)。
+
+    只识别补零写法 `0<碟><曲号>`：`0101` → 碟 1 曲 1，`0203` → 碟 2 曲 3。
+    四位数并不都是碟号曲号，`1812`（作品名）、`1999`（年份）、`2001` 等
+    真实曲名/编号必须排除，因此要求首位固定为 0 且末两位非 00。
+
+    :param number: 4 位数字前缀文本
+    :return: (碟号, 曲号)；不符合补零碟号曲号格式时返回 None
+    """
+    match = _MUSIC_COMBINED_DISC_TRACK_RE.match(number or "")
+    if not match:
+        return None
+    return int(match.group("disc")), int(match.group("num"))
+
+
+# 碟片目录名：CD1、Disc 2、Disk01
+_MUSIC_DISC_DIR_RE = re.compile(
+    r"^\s*(?:cd|disc|disk)\s*(?P<num>\d{1,2})\s*$",
+    re.IGNORECASE,
+)
+# 碟号后缀在目录名末尾的碟片目录：陈奕迅 - 十年经典 CD1、专辑名 Disc 2
+_MUSIC_DISC_DIR_SUFFIX_RE = re.compile(
+    r"^(?:.*[\s\-–—_.,、/\\])?(?:cd|disc|disk)\s*(?P<num>\d{1,2})\s*$",
+    re.IGNORECASE,
+)
+# 目录名中的年份：(2004)、[2004]
+_MUSIC_DIR_YEAR_RE = re.compile(r"[(\[]\s*(?P<year>(?:19|20)\d{2})\s*[)\]]")
+_MUSIC_DIR_PREFIX_YEAR_RE = re.compile(
+    r"^(?P<year>(?:19|20)\d{2})\s*[-._\s]+(?!(?:19|20)\d{2}\b)"
+)
+# 独立中间年份不能与数字专辑名混淆，必须同时存在艺人、年份及作品三个部分。
+_MUSIC_ALBUM_YEAR_RE = re.compile(
+    r"^(?P<artist>.+?)\s*[-–—−－]\s*(?P<year>(?:19|20)\d{2})"
+    r"\s*[-–—−－]\s*(?P<title>\S.*)$"
+)
+# 目录括号既可能是规格，也可能是作品或发行版本的一部分，需要按内容区分。
+_MUSIC_BRACKET_RE = re.compile(r"\[[^\]]*\]|【[^】]*】|\([^)]*\)")
+_MUSIC_RECORDING_VERSION_RE = re.compile(
+    r"[\[(（【]([^\])）】]*(?:\blive\b|\bremix\b|\binstrumental\b|\bacoustic\b|"
+    r"\bunplugged\b|\bdemo\b|\bkaraoke\b|现场|現場|混音|伴奏|不插电|不插電)[^\])）】]*)[\])）】]",
+    re.IGNORECASE,
+)
+_MUSIC_VERSION_LABEL_RE = re.compile(r"^(?:录音版本|錄音版本|版本|version)\s*[:：]\s*(.+)$", re.IGNORECASE)
+_MUSIC_SPACES_RE = re.compile(r"\s+")
+_MUSIC_COMPACT_RE = re.compile(r"[\W_]+", re.UNICODE)
+# 音乐视频/演唱会资源使用影视场景式命名，但标题语义仍属于音乐。
+# 这里按词元分类后再清理，避免用一个跨越整行的大正则吞掉年份后的演出名称。
+_MUSIC_SCENE_RESOLUTION_RE = re.compile(
+    r"^(?:(?:480|576|720|1080|2160)[pi]|[248]k)$",
+    re.IGNORECASE,
+)
+_MUSIC_SCENE_SOURCE_RE = re.compile(
+    r"^(?:uhd|blu[-.]?ray|bdrip|remux|web[-.]?dl|webrip|hdtv|uhdtv|"
+    r"hd[-.]?dvd|dvd|dvdrip|2cd\+blu[-.]?ray)$",
+    re.IGNORECASE,
+)
+_MUSIC_SCENE_VIDEO_RE = re.compile(
+    r"^(?:x26[45](?:[._-]?(?:8|10|12)bits?)?|h[.]?26[45]|avc|hevc|"
+    r"mpeg[-.]?2|vc[-.]?1|prores|av1)$",
+    re.IGNORECASE,
+)
+_MUSIC_SCENE_EFFECT_RE = re.compile(
+    r"^(?:sdr|hdr(?:10[+]?)?|hdrvivid|dovi|dv|dolbyvision|3d|repack|hlg|hq)$",
+    re.IGNORECASE,
+)
+_MUSIC_SCENE_AUDIO_RE = re.compile(
+    r"^(?:dts(?:-hd)?(?:ma|hra)?|truehd|atmos|ddp|dd[+]?|eac3|ac3|"
+    r"lpcm|aac|flac|pcm|opus|vorbis)(?:[257][.]1|2[.]0)?$",
+    re.IGNORECASE,
+)
+_MUSIC_SCENE_AUDIO_AUX_RE = re.compile(r"^(?:ma|hra)(?:[257][.]1|2[.]0)?$", re.IGNORECASE)
+_MUSIC_SCENE_CHANNEL_RE = re.compile(r"^(?:1[.]0|2[.]0|[257][.]1)(?:ch(?:annels?)?)?$", re.IGNORECASE)
+_MUSIC_SCENE_BIT_RE = re.compile(r"^(?:8|10|12|16|20|24|32)[-_.]?bits?$", re.IGNORECASE)
+_MUSIC_SCENE_FPS_RE = re.compile(r"^[0-9]{2,3}fps$", re.IGNORECASE)
+_MUSIC_SCENE_AUDIO_COUNT_RE = re.compile(r"^[0-9]{1,2}audios?$", re.IGNORECASE)
+_MUSIC_SCENE_YEAR_TOKEN_RE = re.compile(r"^(?:19|20)[0-9]{2}$")
+_MUSIC_SCENE_DATE_TOKEN_RE = re.compile(r"^(?P<year>[0-9]{2})(?:0[1-9]|1[0-2])(?:0[1-9]|[12][0-9]|3[01])$")
+_MUSIC_SCENE_YEAR_RANGE_TOKEN_RE = re.compile(
+    r"^(?P<begin>(?:19|20)[0-9]{2})[-–—~～](?P<end>(?:(?:19|20)[0-9]{2}|[0-9]{2}))$"
+)
+_MUSIC_SCENE_RELEASE_GROUP_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@._-]{1,20}$")
+_MUSIC_SCENE_PUNCTUATED_TECH_RE = re.compile(
+    r"([,;])(?=(?:blu[-.]?ray|web[-.]?dl|hdtv|remux|avc|hevc|x26[45]|h[.]?26[45]))",
+    re.IGNORECASE,
+)
+_MUSIC_SCENE_PLATFORM_TOKENS = frozenset({
+    "AMZN", "BAHA", "CR", "FRIDAY", "HMAX", "IQ", "IT", "LINETV",
+    "MYTVSUPER", "NF", "OTOTOY",
+})
+_MUSIC_SCENE_LOCALE_TOKENS = frozenset({"GERMAN", "ITA", "JPN"})
+_MUSIC_LATIN_HYPHEN_NON_ARTIST_SUFFIXES = frozenset({"cd", "disc", "part", "type", "vol", "volume"})
+# 日文资源标题大量使用全角字符（ＷＯＷＯＷ、５０ｔｈ、全角空格与括号），
+# 归一为半角后才能与 MusicBrainz 条目及内置模式匹配
+_FULLWIDTH_EXCLAMATION = 0xFF01
+_FULLWIDTH_TILDE = 0xFF5E
+_HALFWIDTH_OFFSET = 0xFEE0
+_FULLWIDTH_MAP = {
+    # 全角空格
+    0x3000: " ",
+    # 中文方头括号
+    0x3010: "[", 0x3011: "]",
+    # 日文引号「」/『』与《》承载作品名，不属于格式注释，保留原样交给命名模式。
+    # 中文圆括号
+    0xFF08: "(", 0xFF09: ")",
+    # 全角方括号
+    0xFF3B: "[", 0xFF3D: "]",
+    # 全角花括号
+    0xFF5B: "{", 0xFF5D: "}",
+}
+
+
+def _string_list(value: Any) -> list[str]:
+    """
+    将标签原始值归一为非空字符串列表，兼容单值、列表与逗号分隔。
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value] if value else []
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if str(item)]
+    return [str(value)]
+
+
+MUSIC_CREDIT_FIELDS = ("composers", "conductors", "orchestras", "performers")
+
+
+def music_credit_values(value: Any) -> dict[str, Any]:
+    """
+    复制明确角色证据，演奏者按乐器/声部保存；不从艺人显示署名猜测角色。
+    """
+    def read(name: str) -> Any:
+        """
+        兼容JSON快照与领域对象，不共享输入列表。
+        """
+        return value.get(name) if isinstance(value, dict) else getattr(value, name, None)
+
+    def names(raw: Any) -> list[str]:
+        """
+        保留人名原文及顺序，只消除空白和重复值。
+        """
+        return list(dict.fromkeys(text for item in _string_list(raw) if (text := item.strip())))
+
+    performers = read("performers")
+    normalized: dict[str, list[str]] = {}
+    if isinstance(performers, dict):
+        for role, people in performers.items():
+            key = str(role or "performer").strip().casefold() or "performer"
+            values = names([*normalized.get(key, []), *names(people)])
+            if values:
+                normalized[key] = values
+    return {
+        **{key: names(read(key)) for key in MUSIC_CREDIT_FIELDS if key != "performers"},
+        "performers": normalized,
+    }
+
+
+def _to_halfwidth(value: str) -> str:
+    """
+    全角字符归一为半角：FF01-FF5E 按偏移换算，全角空格与括号类字符查表替换。
+    """
+
+    def _translate(char: str) -> str:
+        """
+        仅映射全角标点和 ASCII 全角字符，其余字符保持原值。
+        """
+        code = ord(char)
+        if _FULLWIDTH_EXCLAMATION <= code <= _FULLWIDTH_TILDE:
+            return chr(code - _HALFWIDTH_OFFSET)
+        return _FULLWIDTH_MAP.get(code, char)
+
+    return "".join(_translate(char) for char in str(value or ""))
+
+
+# 场景点分命名的可替换点号：字母/数字两侧的点分单词（Shan.Ge.Liao.Zai.2023）、
+# 四位年份间的点分（1999.2022）与环绕符号的点（Purple.&.Orchestra、-.Live）；
+# 不含单位数字间的小数点，保护 5.1 声道与 44.1kHz 这类规格写法
+_SCENE_DOT_RE = re.compile(
+    r"(?<=[A-Za-z])\.(?=[A-Za-z])"
+    r"|(?<=[A-Za-z])\.(?=\d)"
+    r"|(?<=\d)\.(?=[A-Za-z])"
+    r"|(?<=\d{4})\.(?=\d)"
+    r"|(?<=[A-Za-z0-9])\.(?=[\-–—&+])"
+    r"|(?<=[\-–—&+])\.(?=[A-Za-z0-9])"
+)
+
+
+def _normalize_scene_dots(value: str) -> str:
+    """
+    场景命名的点分单词（Shan.Ge.Liao.Zai.2023）归一为空格。
+
+    点分隔少于 3 处时视为普通缩写（如 E.S.Posthumus）不处理，
+    避免破坏艺术家名中的合法点号。
+    """
+    if len(_SCENE_DOT_RE.findall(value or "")) < 3:
+        return value
+    return _SCENE_DOT_RE.sub(" ", value)
+
+
+# 连续单字母空格序列是缩写点号被全角归一/场景点分压平的结果（Ｓ.Ｈ.Ｅ -> S H E），
+# 还原为点号缩写（S.H.E）才能与 MusicBrainz 条目署名比对
+_LETTER_RUN_RE = re.compile(r"(?<![A-Za-z])((?:[A-Za-z] ){2,}[A-Za-z])(?![A-Za-z])")
+
+
+def _restore_letter_abbrev(value: str) -> str:
+    """
+    把连续单字母空格序列还原为点号缩写（S H E -> S.H.E）。
+    """
+    return _LETTER_RUN_RE.sub(
+        lambda m: ".".join(m.group(1).split(" ")), str(value or "")
+    )
+
+
+@dataclass(frozen=True)
+class MusicNameContext:
+    """
+    音乐命名公共清理后的解析上下文，供命名模式和解析器共享。
+
+    :param raw: 未经清理的原始音乐标题
+    :param normalized: 完成通用规范化后的标题
+    :param text: 进一步清除技术标记后用于模式匹配的文本
+    :param artists: 调用方提供并完成规范化的艺术家名称
+    :param year: 展示或匹配使用的年份；未知时为 None
+    :param comment: 从标题中分离出的版本或补充说明
+    """
+
+    raw: str
+    normalized: str
+    text: str
+    artists: tuple[str, ...]
+    year: Optional[int] = None
+    comment: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class _MusicSceneTokenResult:
+    """
+    音乐视频场景词元 清理结果，仅供 metamusic 内置模式使用。
+
+    :param text: 移除音乐场景技术词元后的文本
+    :param year: 技术词元处理中提取的年份；未提取时为 None
+    :param categories: 清理时命中的技术词元类别
+    """
+
+    text: str
+    year: Optional[int]
+    categories: frozenset[str]
+
+
+@dataclass(frozen=True)
+class MusicNamePattern:
+    """
+    可动态注册的音乐命名模式。
+
+    :param name: 供注册和选择使用的命名模式标识
+    :param matcher: 接收命名上下文并返回匹配载荷的回调；不匹配时返回 None
+    :param priority: 模式排序优先级，数值较大的模式先尝试
+    """
+
+    name: str
+    matcher: Callable[[MusicNameContext], Optional[Any]]
+    priority: int = 0
+
+
+@dataclass(frozen=True)
+class MusicNamePatternMatch:
+    """
+    第一层命名模式匹配结果。
+
+    :param pattern_name: 本次匹配成功的命名模式标识
+    :param payload: 匹配器返回并交给解析器的模式专有载荷
+    """
+
+    pattern_name: str
+    payload: Any
+
+
+@dataclass(frozen=True)
+class MusicNameParseResult:
+    """
+    第二层解析器提取出的音乐命名字段。
+
+    :param title: 解析出的曲目或专辑标题；未提取时为 None
+    :param artists: 解析出的艺术家姓名列表；未提取时为 None
+    :param album: 曲目所属专辑名称；未知时为 None
+    :param year: 展示或匹配使用的年份；未知时为 None
+    :param disc_number: 曲目所属碟号；未知时为 None
+    """
+
+    title: Optional[str]
+    artists: Optional[list[str]] = None
+    album: Optional[str] = None
+    year: Optional[int] = None
+    disc_number: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class MusicNameParser:
+    """
+    可动态注册、按命名模式选择的音乐解析器。
+
+    :param name: 供注册和替换使用的解析器标识
+    :param patterns: 该解析器支持的命名模式标识
+    :param handler: 接收上下文和模式匹配结果的解析回调；无法解析时返回 None
+    :param priority: 解析器排序优先级，数值较大的解析器先尝试
+    """
+
+    name: str
+    patterns: tuple[str, ...]
+    handler: Callable[
+        [MusicNameContext, MusicNamePatternMatch], Optional[MusicNameParseResult]
+    ]
+    priority: int = 0
+
+
+class MusicNameRegistry:
+    """
+    音乐命名模式与解析器的两层动态注册中心。
+    """
+
+    _patterns: dict[str, MusicNamePattern] = {}
+    _parsers: dict[str, MusicNameParser] = {}
+    _default_patterns: dict[str, MusicNamePattern] = {}
+    _default_parsers: dict[str, MusicNameParser] = {}
+    _lock = RLock()
+
+    @classmethod
+    def register_pattern(cls, pattern: MusicNamePattern, replace: bool = False) -> None:
+        """
+        注册命名模式，同名模式仅在 ``replace=True`` 时替换。
+        """
+        with cls._lock:
+            if pattern.name in cls._patterns and not replace:
+                raise ValueError(f"音乐命名模式已存在：{pattern.name}")
+            cls._patterns[pattern.name] = pattern
+
+    @classmethod
+    def unregister_pattern(cls, name: str) -> bool:
+        """
+        按名称注销命名模式，返回是否实际移除。
+        """
+        with cls._lock:
+            return cls._patterns.pop(name, None) is not None
+
+    @classmethod
+    def register_parser(cls, parser: MusicNameParser, replace: bool = False) -> None:
+        """
+        注册解析器，同名解析器仅在 ``replace=True`` 时替换。
+        """
+        with cls._lock:
+            if parser.name in cls._parsers and not replace:
+                raise ValueError(f"音乐命名解析器已存在：{parser.name}")
+            cls._parsers[parser.name] = parser
+
+    @classmethod
+    def unregister_parser(cls, name: str) -> bool:
+        """
+        按名称注销解析器，返回是否实际移除。
+        """
+        with cls._lock:
+            return cls._parsers.pop(name, None) is not None
+
+    @classmethod
+    def get_patterns(cls) -> tuple[MusicNamePattern, ...]:
+        """
+        按优先级返回当前已注册的命名模式快照。
+        """
+        with cls._lock:
+            return tuple(sorted(cls._patterns.values(), key=lambda item: item.priority, reverse=True))
+
+    @classmethod
+    def get_parsers(cls) -> tuple[MusicNameParser, ...]:
+        """
+        按优先级返回当前已注册的解析器快照。
+        """
+        with cls._lock:
+            return tuple(sorted(cls._parsers.values(), key=lambda item: item.priority, reverse=True))
+
+    @classmethod
+    def match_pattern(cls, context: MusicNameContext) -> Optional[MusicNamePatternMatch]:
+        """
+        执行第一层命名模式匹配，返回首个命中的模式及载荷。
+        """
+        for pattern in cls.get_patterns():
+            payload = pattern.matcher(context)
+            if payload is not None:
+                return MusicNamePatternMatch(pattern_name=pattern.name, payload=payload)
+        return None
+
+    @classmethod
+    def match_parser(cls, matched: MusicNamePatternMatch) -> Optional[MusicNameParser]:
+        """
+        执行第二层解析器匹配，选择支持该模式且优先级最高的解析器。
+        """
+        return next(
+            (
+                parser
+                for parser in cls.get_parsers()
+                if matched.pattern_name in parser.patterns or "*" in parser.patterns
+            ),
+            None,
+        )
+
+    @classmethod
+    def parse(cls, context: MusicNameContext) -> Optional[MusicNameParseResult]:
+        """
+        依次匹配命名模式和解析器，并返回结构化音乐字段。
+        """
+        matched = cls.match_pattern(context)
+        if not matched:
+            return None
+        parser = cls.match_parser(matched)
+        if not parser:
+            return None
+        return parser.handler(context, matched)
+
+    @classmethod
+    def _capture_default_components(cls) -> None:
+        """
+        保存内置命名组件的对象快照，供 Rust 快路判断兼容性。
+        """
+        with cls._lock:
+            cls._default_patterns = dict(cls._patterns)
+            cls._default_parsers = dict(cls._parsers)
+
+    @classmethod
+    def _uses_default_components(cls) -> bool:
+        """
+        判断当前注册表是否仍为未替换的内置命名组件。
+        """
+        with cls._lock:
+            if not cls._default_patterns or not cls._default_parsers:
+                return False
+            if (
+                    cls._patterns.keys() != cls._default_patterns.keys()
+                    or cls._parsers.keys() != cls._default_parsers.keys()
+            ):
+                return False
+            return all(
+                component is cls._default_patterns[name]
+                for name, component in cls._patterns.items()
+            ) and all(
+                component is cls._default_parsers[name]
+                for name, component in cls._parsers.items()
+            )
+
+
+@lru_cache(maxsize=1)
+def _music_pinyin_states() -> dict[str, str]:
+    """
+    按需读取拼音库的「音节 → 候选汉字」表，仅校验副标题原文，不生成猜测名称。
+
+    只读取 ``DefaultHmmParams.get_states()`` 依赖的 ``hmm_py2hz.json``（约 260KB）。
+    ``DefaultHmmParams()`` 会同时载入约 14MB JSON 的起始、发射与转移概率表，
+    常驻约 50MB 且这里用不到。数据文件路径随锁定的 pinyin2hanzi 版本固定。
+    """
+    path = Path(Pinyin2Hanzi.__file__).parent / "data" / "hmm_py2hz.json"
+    with path.open(encoding="utf-8") as file:
+        states: dict[str, str] = json.load(file)
+    return states
+
+
+class MetaMusic(MetaBase):
+    """
+    音乐文件名及音频标签解析结果，作为 MetaBase 的音乐分支实现。
+
+    :ivar year: 音乐发行年份，未知时为 None
+    """
+
+    year: Optional[int] = None
+
+    def __init__(
+        self,
+        org_string: Optional[str] = None,
+        title: Optional[str] = None,
+        artists: Optional[list[str]] = None,
+        album: Optional[str] = None,
+        album_artist: Optional[str] = None,
+        year: Optional[int] = None,
+        disc_number: Optional[int] = None,
+        track_number: Optional[int] = None,
+        total_discs: Optional[int] = None,
+        total_tracks: Optional[int] = None,
+        version: Optional[str] = None,
+        audio_format: Optional[str] = None,
+        audio_lossless: Optional[bool] = None,
+        bit_depth: Optional[int] = None,
+        sample_rate: Optional[int] = None,
+        bitrate: Optional[int] = None,
+        duration: Optional[int] = None,
+        isrc: Optional[str] = None,
+        media_source: Optional[MediaSource] = None,
+        media_id: Optional[str] = None,
+        parse_title: bool = False,
+        *,
+        musicbrainz_release_id: Optional[str] = None,
+        musicbrainz_release_group_id: Optional[str] = None,
+        musicbrainz_release_track_id: Optional[str] = None,
+        original_year: Optional[int] = None,
+        release_year: Optional[int] = None,
+        field_sources: Optional[dict[str, str]] = None,
+        music_type: Optional[str] = None,
+        album_type: Optional[str] = None,
+        secondary_types: Optional[list[str]] = None,
+        music_layout: Optional[str] = None,
+        cue_filename: Optional[str] = None,
+        cue_tracks: Optional[list[dict[str, Any]]] = None,
+        organization_error: Optional[str] = None,
+        composers: Optional[list[str]] = None,
+        conductors: Optional[list[str]] = None,
+        orchestras: Optional[list[str]] = None,
+        performers: Optional[dict[str, list[str]]] = None,
+    ):
+        """
+        初始化音乐标题、标签、音频规格和统一媒体身份。
+        """
+        # 音乐无季集概念，仅复用 MetaBase 的基础字段初始化，不触发副标题季集识别
+        super().__init__(title or org_string or "")
+        self.type = MediaType.MUSIC
+        self.org_string = org_string
+        self.title = title
+        self.artists = list(artists) if artists else []
+        self.album = album
+        self.album_artist = album_artist
+        credits = music_credit_values(dict(composers=composers, conductors=conductors,
+                                          orchestras=orchestras, performers=performers))
+        self.composers: list[str] = credits["composers"]
+        self.conductors: list[str] = credits["conductors"]
+        self.orchestras: list[str] = credits["orchestras"]
+        self.performers: dict[str, list[str]] = credits["performers"]
+        self.year = year if year is not None else release_year or original_year
+        self.original_year = original_year
+        self.release_year = release_year
+        self.musicbrainz_release_id = musicbrainz_release_id
+        self.musicbrainz_release_group_id = musicbrainz_release_group_id
+        self.musicbrainz_release_track_id = musicbrainz_release_track_id
+        self.field_sources = dict(field_sources or {})
+        self.music_type = music_type
+        self.album_type = album_type
+        self.secondary_types = list(secondary_types or [])
+        self.music_layout = music_layout
+        self.cue_filename = cue_filename
+        self.cue_tracks = [dict(track) for track in cue_tracks or []]
+        self.organization_error = organization_error
+        self.disc_number = disc_number
+        self.track_number = track_number
+        self.total_discs = total_discs
+        self.total_tracks = total_tracks
+        self.version = version
+        self.audio_format = normalize_audio_format(audio_format)
+        self.audio_lossless = infer_audio_lossless(self.audio_format, audio_lossless)
+        self.bit_depth = bit_depth
+        self.sample_rate = sample_rate
+        self.bitrate = bitrate
+        self.duration = duration
+        self.isrc = isrc
+        self.media_source, self.media_id = resolve_media_identity(
+            media_source=media_source,
+            media_id=media_id,
+        )
+        if parse_title:
+            # 种子/文件名字符串场景：解析艺术家、曲名、年份并补充音质参数
+            self.apply_title(self.title or org_string or "")
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        """
+        恢复旧版解析缓存时补齐发行事实和字段来源，避免丢失旧字段或共享字典。
+        """
+        self.__dict__.update(state)
+        self.__dict__.update(music_credit_values(state))
+        for key in ("musicbrainz_release_id", "musicbrainz_release_group_id", "musicbrainz_release_track_id",
+                    "original_year", "release_year"):
+            self.__dict__.setdefault(key, None)
+        self.field_sources = dict(state.get("field_sources") or {})
+        self.music_type = state.get("music_type")
+        self.album_type = state.get("album_type")
+        self.secondary_types = list(state.get("secondary_types") or [])
+        self.music_layout = state.get("music_layout")
+        self.cue_filename = state.get("cue_filename")
+        self.cue_tracks = [dict(track) for track in state.get("cue_tracks") or []]
+        self.organization_error = state.get("organization_error")
+
+    @classmethod
+    def parse_query(cls, query: str) -> "MetaMusic":
+        """
+        把用户输入或资源标题解析为音乐元数据。
+        """
+        return cls(org_string=query, title=query, parse_title=True)
+
+    @classmethod
+    def parse_resource(cls, title: str, subtitle: Optional[str] = None) -> "MetaMusic":
+        """
+        合并资源标题与副标题的独立证据，不使用搜索目标补写作品身份。
+
+        带年份及规格证据的发行命名先统一归一，再复用 Python/Rust 公共入口；
+        副标题只补缺失字段，保留标题中已有的署名。专辑、曲序、曲名的明确
+        多段格式在资源层统一补充。
+        """
+        meta = cls.parse_query(cls._normalize_resource_release(title))
+        meta.org_string = title
+        meta.apply_audio_quality(title)
+        subtitle = (subtitle or "").replace("丨", "|")
+        if not meta.title:
+            # 整个作品名位于中文展示括号内时，旧解析器可能把它误当发布标签删除。
+            bracket = re.match(r"^\s*[【《「]([^】》」]+)[】》」]", title)
+            if bracket:
+                meta.apply_title(bracket.group(1))
+                meta.apply_audio_quality(title)
+        if meta.artists and meta.title:
+            track = re.fullmatch(r"(.+?)\s+-\s+(\d{1,3})\s+-\s+(.+)", meta.title)
+            if track:
+                meta.album, number, meta.title = track.groups()
+                meta.track_number = int(number)
+        if subtitle:
+            # 管道分隔字段包含平台、规格与发行类型，不属于作品名。
+            secondary_text = re.split(r"[|｜]", subtitle, maxsplit=1)[0].strip()
+            secondary = cls.parse_query(secondary_text)
+            artist = cls._resource_label(
+                subtitle, _MUSIC_RESOURCE_ARTIST_LABELS,
+            )
+            if not meta.artists:
+                if artist:
+                    meta.artists = cls._split_artists(cls._strip_quality_tokens(cls._strip_spec_segments(artist)))
+                elif (
+                    _MUSIC_ARTIST_TITLE_RE.match(cls._normalize_text(secondary_text))
+                    or _MUSIC_ALBUM_MARKER_RE.match(cls._normalize_text(secondary_text))
+                ):
+                    # 不把厂牌目录号、营销文案中的无空格连字符当作艺术家署名。
+                    if any(re.search(r"[^\W\d_]", item) for item in secondary.artists):
+                        meta.artists = list(secondary.artists)
+                cls._remove_resource_artist_prefix(meta, secondary)
+            album = cls._resource_album_label(subtitle)
+            if album and not meta.album:
+                meta.album = album
+            elif not meta.album and secondary.album:
+                primary_artists = {cls.compact_text(item) for item in meta.artists}
+                if primary_artists & {cls.compact_text(item) for item in secondary.artists}:
+                    meta.album = secondary.album
+            if not meta.year:
+                meta.year = secondary.year
+                if not meta.year and secondary_text != subtitle:
+                    # 日期可能独立位于后续字段；仅补年份，不采用整段文本的作品名。
+                    meta.year = cls.parse_query(subtitle).year
+            meta.apply_audio_quality(subtitle)
+        cls._restore_resource_album_number(meta, title, subtitle)
+        if not meta.album and meta.title and not meta.track_number and cls._resource_is_album(title, subtitle):
+            meta.album = meta.title
+        if subtitle:
+            native_title = cls._native_resource_title(meta.title, subtitle, secondary)
+            if native_title:
+                if meta.album == meta.title:
+                    meta.album = native_title
+                meta.title = native_title
+        if not meta.version:
+            meta.version = cls._resource_version(title, subtitle)
+        meta.__dict__.update(cls._resource_credits(subtitle))
+        meta.field_sources.update({
+            key: "torrent" for key in ("title", "artists", "album", "year", "version",
+                                      "audio_format", "audio_lossless", "bit_depth", "sample_rate", "bitrate", *MUSIC_CREDIT_FIELDS)
+            if getattr(meta, key) not in (None, "", [], {})
+        })
+        return meta
+
+    @classmethod
+    def _resource_album_label(cls, subtitle: str) -> Optional[str]:
+        """
+        提取专辑标签，排除「专辑 FLAC 豪华版」这类以音频格式开头的说明。
+        """
+        labels = r"专辑(?:名|名称)?|專輯(?:名|名稱)?|album"
+        labelled = cls._resource_label(subtitle, labels)
+        if labelled:
+            return labelled
+        album = cls._resource_label(subtitle, labels, allow_unlabelled=True)
+        if album and re.match(rf"^(?:{_MUSIC_FORMAT_TOKEN_ALT})(?![A-Za-z0-9])", album, re.I):
+            return None
+        return album
+
+    @classmethod
+    def _remove_resource_artist_prefix(cls, meta: "MetaMusic", secondary: "MetaMusic") -> None:
+        """
+        副标题独立确认艺人与作品后，去掉主标题中逐字重复的艺人前缀。
+        """
+        if not meta.title or not secondary.title or len(meta.artists) != 1:
+            return
+        artist = meta.artists[0]
+        prefix = re.match(rf"^{re.escape(artist)}\s+(.+)$", meta.title, re.I)
+        if prefix and cls.compact_text(prefix.group(1)) == cls.compact_text(secondary.title):
+            meta.title = prefix.group(1)
+
+    @classmethod
+    def _restore_resource_album_number(cls, meta: "MetaMusic", title: str, subtitle: Optional[str]) -> None:
+        """
+        明确整专标签下保留作品名的数字前缀，避免把 12 Memories 当第 12 轨。
+        """
+        if not meta.track_number or not cls._resource_is_album(title, subtitle):
+            return
+        text = cls._strip_quality_tokens(cls._strip_spec_segments(cls._normalize_text(title)))
+        match = _MUSIC_ARTIST_TITLE_RE.match(text)
+        if not match:
+            return
+        name, _year = cls._parse_title_year(match.group("title"))
+        number, disc, remainder = cls.split_track_prefix(name)
+        if number == meta.track_number and disc is None and remainder == meta.title:
+            meta.title = name
+            meta.track_number = None
+
+    @classmethod
+    def _resource_credits(cls, subtitle: str) -> dict[str, Any]:
+        """
+        只读取明确角色标签，不从姓名顺序、括号或语言推断作曲家和演奏者。
+        """
+        credits: dict[str, Any] = {}
+        for key, labels in (("composers", r"作曲家?|composer"), ("conductors", r"指挥|指揮|conductor"),
+                            ("orchestras", r"乐团|樂團|合唱团|合唱團|orchestra|ensemble")):
+            value = cls._resource_label(subtitle, labels)
+            credits[key] = cls._split_artists(value) if value else []
+        performer = cls._resource_label(subtitle, r"演奏者?|独奏|獨奏|performer")
+        credits["performers"] = {"performer": cls._split_artists(performer)} if performer else {}
+        return music_credit_values(credits)
+
+    @classmethod
+    def _normalize_resource_release(cls, title: str) -> str:
+        """
+        在 Python/Rust 解析前归一带年份及规格证据的站点发行命名。
+
+        方括号只展开首个作品段；独立规格尾段允许携带发布组。此类发行命名的
+        中文紧凑署名采用「艺人-作品」，普通「作品-艺人」查询仍保留原有规则。
+        """
+        text = _MUSIC_RESOURCE_CATALOG_TAIL_RE.sub("", title)
+        bracket = _MUSIC_RESOURCE_BRACKET_RE.fullmatch(text)
+        if bracket:
+            name, year = bracket.group("name", "year")
+            tail = bracket.group("tail")
+        else:
+            release = _MUSIC_RESOURCE_RELEASE_RE.fullmatch(text)
+            if not release or not cls._is_resource_spec_tail(release.group("spec")):
+                return text
+            name, year = release.group("name", "year")
+            tail = ""
+        if not _MUSIC_ARTIST_TITLE_RE.match(name):
+            artist, separator, work = name.partition("-")
+            if separator and cls._contains_cjk(artist) and cls._contains_cjk(work):
+                name = f"{artist.strip()} - {work.strip()}"
+        # 保留尾部裸年份，让 Album/Single 等真实作品名不会提前被当作独立发行标签删除。
+        return f"{name} {year}{tail}"
+
+    @staticmethod
+    def _is_resource_spec_tail(value: str) -> bool:
+        """
+        只清理完整规格及大写发布组尾标，录音版本和发行版本词必须保留。
+        """
+        if _MUSIC_SPEC_SEGMENT_RE.fullmatch(value):
+            return True
+        group = _MUSIC_RESOURCE_GROUP_RE.fullmatch(value)
+        return bool(
+            group and _MUSIC_SPEC_SEGMENT_RE.fullmatch(group.group("spec"))
+            and not _MUSIC_RECORDING_VERSION_RE.search(f"({group.group('group')})")
+        )
+
+    @classmethod
+    def _native_resource_title(
+        cls, title: Optional[str], subtitle: str, secondary: "MetaMusic",
+    ) -> Optional[str]:
+        """
+        拼音主标题与副标题中文字音逐字一致时优先原文，保留普通外文名称。
+        """
+        if not title or not re.fullmatch(r"[A-Za-z ._-]+", title):
+            return None
+        syllables = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", title).lower()
+        parts = re.split(r"[ ._-]+", syllables.strip())
+        if not parts or not all(is_pinyin(part) for part in parts):
+            return None
+        candidates = [
+            cls._resource_label(subtitle, r"曲名|歌曲(?:名|名称)?|标题|標題|专辑(?:名)?|專輯(?:名)?|title|album"),
+            secondary.title,
+        ]
+        for field in re.split(r"[|｜;；\n]", subtitle):
+            # 「山歌廖哉 - 歌手：刀郎」的字段前缀本身就是明确的作品名。
+            candidate = re.split(
+                rf"\s+[-–—−－]+\s*(?:{_MUSIC_RESOURCE_ARTIST_LABELS})\s*[:：]",
+                field, maxsplit=1, flags=re.I,
+            )[0]
+            candidates.append(candidate)
+        for candidate in candidates:
+            if not candidate:
+                continue
+            candidate = cls._normalize_text(candidate).strip(" 《》「」『』[]")
+            characters = cls.compact_text(candidate)
+            if len(characters) != len(parts) or not re.fullmatch(r"[\u3400-\u9fff]+", characters):
+                continue
+            try:
+                if all(char in _music_pinyin_states()[part] for char, part in zip(characters, parts)):
+                    return candidate
+            except KeyError:
+                # 字音模型不覆盖的音节不提供名称替换证据。
+                continue
+        return None
+
+    @staticmethod
+    def _resource_label(
+        subtitle: str, labels: str, *, allow_unlabelled: bool = False,
+    ) -> Optional[str]:
+        """
+        读取明确的副标题字段，专辑标签兼容无冒号的末尾字段写法。
+        """
+        boundaries = r"^|[;；\n|｜，]|\s+[-–—−－]+\s+"
+        if allow_unlabelled:
+            boundaries += r"|\s+"
+        separator = r"\s*[:：]\s*"
+        if allow_unlabelled:
+            separator = r"(?:\s*[:：]\s*|\s+)"
+        match = re.search(
+            rf"(?:{boundaries})\s*(?:{labels})"
+            rf"{separator}([^;；\n|｜，]+?)"
+            r"(?=\s+[-–—−－]+\s+[^:：;；\n|｜，]+[:：]|[;；\n|｜，]|$)", subtitle, re.I,
+        )
+        return match.group(1).strip() if match else None
+
+    @classmethod
+    def _resource_is_album(cls, title: str, subtitle: Optional[str]) -> bool:
+        """
+        只采信明确专辑标签，不由音频格式或不同语言的副标题推断所属专辑。
+        """
+        normalized = cls._normalize_text(title)
+        if re.search(r"\[\s*(?:album|专辑|專輯)\s*\]", normalized, re.I):
+            return True
+        if re.search(r"\b(?:19|20)\d{2}\s+album\s*$", normalized, re.I):
+            return True
+        return any(
+            field.strip().strip("[]【】()（）").strip().casefold() in {
+                "album", "专辑", "專輯", "音乐专辑", "音樂專輯",
+                "录音室专辑", "錄音室專輯", "单曲专辑", "單曲專輯",
+            }
+            for field in re.split(r"[|｜;；\n]", subtitle or "")
+        )
+
+    @staticmethod
+    def _resource_version(title: str, subtitle: Optional[str]) -> Optional[str]:
+        """
+        优先保留标题版本，副标题仅接受明确版本字段或独立版本标签，避免误读艺名。
+        """
+        version = _MUSIC_RECORDING_VERSION_RE.search(title)
+        if version:
+            return version.group(1).strip()
+        for field in re.split(r"[;；\n]", subtitle or ""):
+            labelled = _MUSIC_VERSION_LABEL_RE.fullmatch(field.strip())
+            if labelled:
+                return labelled.group(1).strip().strip("[]()（）【】").strip() or None
+            version = _MUSIC_RECORDING_VERSION_RE.fullmatch(field.strip())
+            if version:
+                return version.group(1).strip()
+        return None
+
+    @classmethod
+    def from_music_info(cls, info: Any) -> "MetaMusic":
+        """
+        把标准音乐信息转换为下载、整理和站点搜索使用的元数据。
+        """
+        return cls(
+            **music_credit_values(info),
+            title=info.title,
+            artists=list(info.artists),
+            album=info.album,
+            album_artist=info.album_artist,
+            year=info.year,
+            disc_number=info.disc_number,
+            track_number=info.track_number,
+            total_discs=getattr(info, "total_discs", None),
+            total_tracks=info.total_tracks,
+            version=info.version,
+            audio_format=info.audio_format,
+            audio_lossless=info.audio_lossless,
+            bit_depth=info.bit_depth,
+            sample_rate=info.sample_rate,
+            bitrate=info.bitrate,
+            duration=info.duration,
+            isrc=info.isrc,
+            media_source=info.media_source,
+            media_id=info.media_id,
+            music_type=getattr(info, "music_type", None),
+            album_type=getattr(info, "album_type", None),
+            secondary_types=getattr(info, "secondary_types", None),
+            music_layout=getattr(info, "music_layout", None),
+            organization_error=getattr(info, "organization_error", None),
+            musicbrainz_release_id=getattr(info, "musicbrainz_release_id", None),
+            musicbrainz_release_group_id=getattr(info, "musicbrainz_release_group_id", None),
+            musicbrainz_release_track_id=getattr(info, "musicbrainz_release_track_id", None),
+            original_year=getattr(info, "original_year", None),
+            release_year=getattr(info, "release_year", None),
+            field_sources=getattr(info, "field_sources", None),
+        )
+
+    @classmethod
+    def from_album_context(
+            cls,
+            directory_name: str,
+            tracks: list["MetaMusic"],
+    ) -> "MetaMusic":
+        """
+        按目录名和多数音轨标签汇总专辑识别条件。
+        """
+        directory = cls.parse_album_dir(directory_name)
+        album_votes: dict[str, int] = {}
+        artist_votes: dict[str, int] = {}
+        for track in tracks:
+            if track.album:
+                album_votes[track.album] = album_votes.get(track.album, 0) + 1
+            artist = track.album_artist or (track.artists[0] if track.artists else None)
+            if artist:
+                artist_votes[artist] = artist_votes.get(artist, 0) + 1
+        majority_album = max(album_votes, key=lambda key: album_votes[key]) if album_votes else None
+        majority_artist = max(artist_votes, key=lambda key: artist_votes[key]) if artist_votes else None
+        threshold = max(2, len(tracks) // 2)
+        album = majority_album if majority_album and album_votes[majority_album] >= threshold else None
+        artist = majority_artist if majority_artist and artist_votes[majority_artist] >= threshold else None
+        album_artist = artist or directory.get("artist")
+        return cls(
+            org_string=directory_name,
+            music_type=MUSIC_ENTITY_ALBUM,
+            title=album or directory.get("album") or directory_name,
+            album=album or directory.get("album"),
+            artists=[album_artist] if album_artist else [],
+            album_artist=artist or directory.get("artist"),
+            year=directory.get("year"),
+            version=directory.get("version"),
+        )
+
+    @property
+    def name(self) -> str:
+        """
+        返回搜索和展示使用的音乐名称，优先专辑名其次标题。
+        """
+        return self.album or self.title or ""
+
+    @name.setter
+    def name(self, value: Optional[str]) -> None:
+        """
+        辅助识别链回写标题时落到 title 字段，保持音乐名称可写。
+        """
+        self.title = value or None
+
+    @property
+    def original_name(self) -> Optional[str]:
+        """
+        返回未经过通用识别词处理的原始名称，兼容影视识别链的公共访问。
+        """
+        return self.org_string or self.title or self.album or ""
+
+    @original_name.setter
+    def original_name(self, value: Optional[str]) -> None:
+        """
+        接受公共识别流程回写的原名，空值保留音乐元数据已有的名称回退规则。
+        """
+        self.org_string = value
+
+    @property
+    def artist(self) -> str:
+        """
+        返回兼容现有展示组件的艺术家文本。
+        """
+        return " / ".join(self.artists)
+
+    @property
+    def audio_quality(self) -> Optional[str]:
+        """
+        返回 hires、lossless 或 lossy 音质等级。
+        """
+        return audio_quality_tier(
+            self.audio_format, self.audio_lossless, self.bit_depth, self.sample_rate, self.bitrate
+        )
+
+    @property
+    def audio_quality_score(self) -> int:
+        """
+        返回订阅洗版使用的音质优先级。
+        """
+        return audio_quality_score(
+            self.audio_format, self.audio_lossless, self.bit_depth, self.sample_rate, self.bitrate
+        )
+
+    @property
+    def audio_specs(self) -> Optional[str]:
+        """
+        返回识别结果和通知使用的格式化音频参数。
+        """
+        return format_audio_quality(
+            self.audio_format, self.audio_lossless, self.bit_depth, self.sample_rate, self.bitrate
+        )
+
+    def apply_audio_quality(
+            self, value: Any, overwrite: bool = False, evidence_source: Optional[str] = None,
+    ) -> None:
+        """
+        从资源文本补充音质参数，默认保留文件标签读取到的实际值。
+        """
+        parsed = parse_audio_quality(value)
+        for key, parsed_value in parsed.items():
+            if parsed_value is not None and (overwrite or getattr(self, key, None) is None):
+                setattr(self, key, parsed_value)
+                if evidence_source:
+                    self.field_sources[key] = evidence_source
+        self.audio_format = normalize_audio_format(self.audio_format)
+        self.audio_lossless = infer_audio_lossless(self.audio_format, self.audio_lossless)
+
+    def apply_title(self, value: Any) -> None:
+        """
+        解析种子/文件名标题字符串，提取艺术家、曲名、年份、版本并补充音质参数。
+
+        公共层先完成字符归一、音质与干扰信息剔除；随后由注册中心依次匹配
+        命名模式和对应解析器，最后统一回填结构化字段并提取曲序前缀。
+        """
+        original = self._normalize_album_year(str(value or ""))
+        self.apply_audio_quality(original)
+        raw, file_title = self._prepare_release_input(original)
+        original_artists = list(self.artists)
+        if not self.version:
+            self.version = self._resource_version(raw, None)
+        accelerator = get_metainfo_accelerator()
+        if accelerator and MusicNameRegistry._uses_default_components():
+            rust_result = accelerator.parse_metamusic(
+                raw,
+                artists=list(self.artists) or None,
+                year=self.year,
+            )
+            if rust_result and self._apply_rust_title_result(rust_result):
+                self._restore_numbered_file_title(file_title, original_artists)
+                return
+        self.apply_audio_quality(raw)
+        context = self._prepare_name_context(
+            raw=raw,
+            artists=self.artists,
+            year=self.year,
+        )
+        if not context.normalized:
+            return
+        parsed = MusicNameRegistry.parse(context)
+        if not parsed:
+            if not context.text:
+                self.title = None
+            if self.year is None:
+                self.year = context.year
+            return
+        self._apply_name_result(context, parsed)
+        self._apply_track_prefix()
+        self._restore_numbered_file_title(file_title, original_artists)
+
+    def _prepare_release_input(self, value: str) -> tuple[str, Optional[str]]:
+        """
+        为两种解析引擎统一清理有格式证据的发行尾标与音频文件曲序。
+
+        点分发行类型只在音频规格前生效；版本括号保留语义，介质和目录编号
+        不进入检索。斜杠规格尾链和 ``FLAC Multi File`` 分轨尾标整段剥离并保留年份，
+        正文中的斜杠仍保留。
+        文件曲序先于艺人拆分，避免 ``01. Artist`` 成为艺人名。
+
+        :param value: 原始音乐资源标题或文件名
+        :return: 两种引擎共用的解析文本及待恢复的编号文件曲名
+        """
+        text, file_title = self._prepare_filename_input(value)
+        text = _MUSIC_SLASH_SPEC_TAIL_RE.sub(r" \g<year>", text)
+        text = _MUSIC_AUDIO_RELEASE_TAIL_RE.sub(r" \g<year>", text)
+        text = _MUSIC_MULTI_FILE_SUFFIX_RE.sub(r" \g<format>", text)
+        text = _MUSIC_EDITION_BRACKET_RE.sub(r"(\1)", text)
+        text = _MUSIC_CATALOG_SPEC_RE.sub("", text)
+        if re.search(r"(?:19|20)\d{2}", text) and len(_SCENE_DOT_RE.findall(value)) >= 3:
+            text = _MUSIC_SCENE_TYPE_RE.sub("", text)
+        text = _MUSIC_CARRIER_RE.sub("", text)
+        text = _MUSIC_RELEASE_LABEL_RE.sub(" ", text)
+        if not re.search(r"-\d+\.(?:19|20)\d{2}", text):
+            text = _MUSIC_SCENE_YEAR_RE.sub(r" \g<year> ", text)
+        # 清理尾链会减少点号数量，场景命名的判定必须使用清理前的证据。
+        if len(_SCENE_DOT_RE.findall(value)) >= 3:
+            text = _SCENE_DOT_RE.sub(" ", text)
+        return text, file_title
+
+    @staticmethod
+    def _split_trailing_track(stem: str) -> Optional[tuple[str, int]]:
+        """
+        从右往左剥离「序号 - 曲名」尾部，处理「艺人 - 专辑 - 序号 - 曲名」四段式命名。
+
+        转码工具常把曲序放在专辑名之后（如 `周杰倫 - 某专辑 - 02 - 曲名`），
+        曲序不在开头，开头的曲序正则匹配不到。这里按最后一个 ` - ` 切出曲名，
+        再取前一段为序号，专辑名本身含 ` - ` 时也能正确切分。
+
+        :param stem: 不含扩展名的文件名
+        :return: (剩余前缀, 曲序)；尾部不是「序号 - 曲名」时返回 None
+        """
+        parts = stem.rsplit(" - ", 2)
+        if len(parts) != 3:
+            return None
+        prefix, sequence, title = parts
+        if not prefix.strip() or not title.strip():
+            return None
+        # 只接受纯数字序号，避免把「曲名 - 副标题」误当成序号段
+        if not re.fullmatch(r"\d{1,2}", sequence):
+            return None
+        number = int(sequence)
+        if not 1 <= number <= 99:
+            return None
+        return prefix, number
+
+    def _apply_leading_credit(self, lead: str) -> None:
+        """
+        从「艺人 - 专辑」前缀中回填艺人或专辑字段。
+
+        四段式命名的前缀既可能是「艺人 - 专辑」，也可能只有艺人，
+        仍需复用常规拆分逻辑，避免曲名被剥离后艺人字段丢失。
+
+        :param lead: 曲序之前的前缀文本
+        """
+        if self.artists:
+            return
+        parsed = type(self).parse_resource(lead)
+        if parsed.artists and not self.artists:
+            self.artists = parsed.artists
+        if parsed.album and not self.album:
+            self.album = parsed.album
+
+    @staticmethod
+    def _is_real_audio_filename(value: str) -> bool:
+        """
+        判断传入文本更像真实音频文件名，而非种子标题。
+
+        真实文件名通常用 ` - ` 分段（`艺人 - 曲名`），或整段就是一个曲名；
+        种子标题则用点号堆叠字段（`Artist.2017.Album.FLAC`）。
+        后者需要保留扩展名让后续解析器识别格式，不能提前剥离。
+
+        :param value: 待判定的文本
+        :return: 是真实音频文件名时返回 True
+        """
+        if " - " in value:
+            return True
+        # 点分种子标题：至少 3 段且含常见发布标签，交由原流程处理
+        segments = value.rsplit(".", 1)[0].split(".")
+        if len(segments) >= 3 and any(seg.isdigit() and len(seg) == 4 for seg in segments):
+            return False
+        return True
+
+    def _prepare_filename_input(self, value: str) -> tuple[str, Optional[str]]:
+        """
+        先按真实扩展名识别文件，再取曲序；数字开头的曲名不能被当作碟号。
+        """
+        if not _MUSIC_AUDIO_EXTENSION_RE.search(value):
+            return value, None
+        stem = Path(value).stem
+        track: Optional[int]
+        disc: Optional[int]
+        prefix = re.match(r"^(\d{1,3})(?:\.\s+|\.(?=[^\d\s])|\s+-\s+)(.+)$", stem)
+        # 4 位只在补零「碟号+曲号」写法下才拆分，避免 `1812`、`2023` 被当曲序
+        combined_prefix = re.match(r"^(0[1-9][0-9]{2})(?:\.\s+|\.(?=[^\d\s])|\s+-\s+)(.+)$", stem)
+        trailing = None if (prefix or combined_prefix) else self._split_trailing_track(stem)
+        combined = _split_combined_disc_track(combined_prefix.group(1)) if combined_prefix else None
+        if combined is not None and combined_prefix is not None:
+            disc, track = combined
+            remainder = combined_prefix.group(2)
+        elif prefix:
+            track, disc, remainder = int(prefix.group(1)), None, prefix.group(2)
+        elif trailing:
+            # 「艺人 - 专辑 - 序号 - 曲名」：曲序在中间。曲名只保留末段，
+            # 前缀（艺人 - 专辑）单独解析，否则艺人会随之丢失。
+            lead, track = trailing
+            disc = None
+            remainder = stem.rsplit(" - ", 2)[2]
+            self._apply_leading_credit(lead)
+        else:
+            track, disc, remainder = self.split_track_prefix(stem)
+        if track is None and disc is None:
+            # M4A 是容器，扩展名不能使底层解析器猜成 AAC。
+            # 真实文件名的扩展名不应带进曲名，否则命名模板会写出 xxx.strm.strm；
+            # 而 `Artist.2017.Album.FLAC` 这类点分种子标题需要保留 .FLAC
+            # 作为格式标签参与后续识别，不能提前剥离。
+            if value.lower().endswith(".m4a") or self._is_real_audio_filename(value):
+                return stem, None
+            return value, None
+        self.track_number = self.track_number or track
+        self.disc_number = self.disc_number or disc
+        file_title = None
+        if remainder and re.match(r"^\d{1,3}\s+-\s+", stem):
+            # 保存原始曲名，供解析后根据作品编号等证据排除错误的乐章/艺人拆分。
+            file_title = self._strip_quality_tokens(remainder)
+        return remainder or stem, file_title
+
+    def _restore_numbered_file_title(self, title: Optional[str], artists: list[str]) -> None:
+        """
+        保留数字曲名和有作品证据的古典乐章，同时兼容「曲序 - 艺人 - 曲名」。
+        """
+        if not title:
+            return
+        prefix = re.split(r"\s+-\s+", title, maxsplit=1)[0]
+        if self.artists and not _MUSIC_CLASSICAL_WORK_RE.search(prefix):
+            return
+        self.title = title
+        self.artists = artists
+
+    def _apply_rust_title_result(self, parsed: dict[str, Any]) -> bool:
+        """
+        回填 Rust 音乐解析结果，并保留调用方已有的高可信字段。
+        """
+        if "title" not in parsed:
+            return False
+        parsed_meta = type(self).from_dict(parsed)
+        self.title = parsed_meta.title
+        for field_name in (
+                "artists",
+                "album",
+                "year",
+                "disc_number",
+                "track_number",
+                "audio_format",
+                "audio_lossless",
+                "bit_depth",
+                "sample_rate",
+                "bitrate",
+        ):
+            current_value = getattr(self, field_name, None)
+            parsed_value = getattr(parsed_meta, field_name, None)
+            if current_value in (None, "", []) and parsed_value not in (None, "", []):
+                setattr(self, field_name, parsed_value)
+        return True
+
+    @classmethod
+    def _prepare_name_context(
+            cls,
+            raw: str,
+            artists: list[str],
+            year: Optional[int],
+    ) -> MusicNameContext:
+        """
+        统一归一命名文本并剔除音质、视频、日期等干扰信息。
+        """
+        normalized = cls._normalize_text(raw)
+        parsed_year = year
+        years = _MUSIC_YEAR_RE.findall(normalized)
+        if years and parsed_year is None:
+            # 多个年份括号时末位通常才是资源的发行年份。
+            parsed_year = int(years[-1])
+        clean_source, release_year = cls._strip_audio_release_tail(normalized)
+        if release_year and parsed_year is None:
+            parsed_year = release_year
+        cleaned = cls._strip_quality_tokens(cls._strip_spec_segments(clean_source))
+        cleaned, range_year = cls._strip_date_prefix(cleaned)
+        if range_year and parsed_year is None:
+            parsed_year = range_year
+        comment = None
+        comment_match = _MUSIC_TITLE_COMMENT_RE.search(cleaned)
+        if comment_match:
+            # 含书名号的版本注释会干扰专辑模式，先移出并在解析后统一拼回。
+            comment = comment_match.group("comment").strip()
+            cleaned = cleaned[: comment_match.start()].strip()
+        return MusicNameContext(
+            raw=raw,
+            normalized=normalized,
+            text=cleaned,
+            artists=tuple(artists),
+            year=parsed_year,
+            comment=comment,
+        )
+
+    def _apply_name_result(
+            self,
+            context: MusicNameContext,
+            parsed: MusicNameParseResult,
+    ) -> None:
+        """
+        把解析器结果回填到当前对象，并保留调用方已有的高可信字段。
+        """
+        self.title = parsed.title
+        if context.comment and self.title:
+            self.title = f"{self.title} ({context.comment})"
+        if parsed.artists is not None:
+            self.artists = list(parsed.artists)
+        if self.artists and not context.artists:
+            # 客串署名是明确艺术家证据，曲名中的原始版本说明仍完整保留。
+            seen = {self.compact_text(artist) for artist in self.artists}
+            for featured in _MUSIC_FEATURED_ARTIST_RE.findall(context.text):
+                for artist in self._split_artists(featured):
+                    if self.compact_text(artist) not in seen:
+                        self.artists.append(artist)
+                        seen.add(self.compact_text(artist))
+        if parsed.album is not None:
+            self.album = parsed.album
+        if self.year is None:
+            self.year = parsed.year or context.year
+        if self.disc_number is None:
+            self.disc_number = parsed.disc_number
+
+    @classmethod
+    def _pop_trailing_year(cls, value: str) -> tuple[str, Optional[int]]:
+        """
+        剥离曲名尾部独立年份并返回 (曲名, 年份)。
+        """
+        match = _MUSIC_TRAILING_YEAR_RE.search(str(value or ""))
+        if not match:
+            return value, None
+        head = value[:match.start()]
+        # 「Live At Montreux 1999 2022」连续双年份属于标题内容，不剥离
+        if re.search(r"(?:19|20)\d{2}\s*$", head):
+            return value, None
+        return head.strip(), int(match.group(1))
+
+    @classmethod
+    def _parse_title_year(cls, value: str) -> tuple[str, Optional[int]]:
+        """
+        返回剥离尾部独立年份后的曲名及发行年份线索。
+        """
+        title, year = cls._pop_trailing_year(value)
+        return title, year
+
+    @staticmethod
+    def _normalize_text(value: Any) -> str:
+        """
+        全角归一为半角后清理多余空白，文件名消毒下划线统一转空格。
+        """
+        text = _to_halfwidth(str(value or "")).replace("_", " ")
+        # 场景命名用点号分隔单词（Shan.Ge.Liao.Zai.2023），归一为空格便于拆分检索
+        text = _normalize_scene_dots(text)
+        # 缩写点号被全角归一/场景点分压平成单字母空格序列，在点分之后还原（S H E -> S.H.E）
+        text = _restore_letter_abbrev(text)
+        return _MUSIC_SPACES_RE.sub(" ", text).strip()
+
+    @classmethod
+    def _scene_token_category(cls, token: str, allow_release_suffix: bool = True) -> Optional[str]:
+        """
+        识别音乐视频场景词元 类别，不在这里决定是否删除。
+        """
+        value = str(token or "").strip(" \t[](){};,\"")
+        if not value:
+            return None
+        if _MUSIC_SCENE_YEAR_TOKEN_RE.fullmatch(value):
+            return "year"
+        if _MUSIC_SCENE_DATE_TOKEN_RE.fullmatch(value):
+            return "date"
+        if _MUSIC_SCENE_YEAR_RANGE_TOKEN_RE.fullmatch(value):
+            return "year_range"
+        patterns = (
+            ("resolution", _MUSIC_SCENE_RESOLUTION_RE),
+            ("source", _MUSIC_SCENE_SOURCE_RE),
+            ("video", _MUSIC_SCENE_VIDEO_RE),
+            ("effect", _MUSIC_SCENE_EFFECT_RE),
+            ("audio", _MUSIC_SCENE_AUDIO_RE),
+            ("audio_aux", _MUSIC_SCENE_AUDIO_AUX_RE),
+            ("channel", _MUSIC_SCENE_CHANNEL_RE),
+            ("bit", _MUSIC_SCENE_BIT_RE),
+            ("fps", _MUSIC_SCENE_FPS_RE),
+            ("audio_count", _MUSIC_SCENE_AUDIO_COUNT_RE),
+        )
+        for category, pattern in patterns:
+            if pattern.fullmatch(value):
+                return category
+        upper_value = value.upper()
+        if upper_value in _MUSIC_SCENE_PLATFORM_TOKENS or value == "iT":
+            return "platform"
+        if upper_value in _MUSIC_SCENE_LOCALE_TOKENS:
+            return "locale"
+        if allow_release_suffix:
+            # 技术词元 与发布组常粘连为 H.265-CHORTLE、x264@JJL；
+            # 完整词元 未命中时只剥离最后一段，再验证左侧确为技术字段。
+            for separator_char in ("-", "@"):
+                head, separator, tail = value.rpartition(separator_char)
+                if not separator or not _MUSIC_SCENE_RELEASE_GROUP_RE.fullmatch(tail):
+                    continue
+                head_category = cls._scene_token_category(head, allow_release_suffix=False)
+                if head_category in {
+                    "resolution", "source", "video", "effect", "audio",
+                    "audio_aux", "channel", "bit", "fps", "audio_count",
+                }:
+                    return head_category
+        return None
+
+    @classmethod
+    def _parse_music_scene_tokens(cls, value: str) -> Optional[_MusicSceneTokenResult]:
+        """
+        按音乐语义清理影视场景词元，强特征不足时不接管标题。
+        """
+        normalized = cls._normalize_text(value)
+        # 分类标签有时紧贴规格（Type-A,D,Blu-ray），只在已知技术词前补空格。
+        normalized = _MUSIC_SCENE_PUNCTUATED_TECH_RE.sub(r"\1 ", normalized)
+        tokens = normalized.split()
+        if not tokens:
+            return None
+        categories = [cls._scene_token_category(token) for token in tokens]
+
+        # 场景点分归一可能把 H.265 拆成 H 265，组合识别后同时标记两个词元。
+        for index in range(len(tokens) - 1):
+            if tokens[index].upper() == "H" and tokens[index + 1] in {"264", "265"}:
+                categories[index] = categories[index + 1] = "video"
+
+        # MA/HRA 与声道数字本身可能是作品名称，只在紧邻音频编码时作为规格清理。
+        for index, category in enumerate(categories):
+            if category != "audio_aux":
+                continue
+            neighbors = categories[max(0, index - 1): index] + categories[index + 1: index + 2]
+            categories[index] = "audio" if "audio" in neighbors else None
+        for index, category in enumerate(categories):
+            if category != "channel":
+                continue
+            nearby = categories[max(0, index - 2): index] + categories[index + 1: index + 3]
+            if "audio" not in nearby:
+                categories[index] = None
+
+        category_set = {category for category in categories if category}
+        primary_count = len(category_set.intersection({"resolution", "source", "video"}))
+        strong_signature = primary_count >= 2 or (
+            "audio" in category_set
+            and bool(category_set.intersection({"resolution", "source"}))
+        )
+        if not strong_signature:
+            return None
+
+        parsed_year = None
+        kept_tokens: list[str] = []
+        standalone_year_count = categories.count("year")
+        removable = {
+            "resolution", "source", "video", "effect", "audio", "channel",
+            "bit", "fps", "audio_count", "platform", "locale",
+        }
+        for token, category in zip(tokens, categories):
+            if category == "year":
+                # 连续双年份常是演出名称的一部分（Live At Montreux 1999 2022），
+                # 只有唯一的独立年份才作为发行线索提取。
+                if standalone_year_count > 1:
+                    kept_tokens.append(token)
+                    continue
+                parsed_year = int(token.strip("[](){};,\""))
+                continue
+            if category == "date":
+                date_match = _MUSIC_SCENE_DATE_TOKEN_RE.fullmatch(token.strip("[](){};,\""))
+                if date_match:
+                    short_year = int(date_match.group("year"))
+                    parsed_year = 2000 + short_year if short_year < 70 else 1900 + short_year
+                continue
+            if category == "year_range":
+                match = _MUSIC_SCENE_YEAR_RANGE_TOKEN_RE.fullmatch(
+                    token.strip("[](){};,\"")
+                )
+                if match:
+                    end_year = match.group("end")
+                    parsed_year = int(
+                        end_year if len(end_year) == 4 else f"{match.group('begin')[:2]}{end_year}"
+                    )
+                continue
+            if category in removable:
+                continue
+            kept_tokens.append(token)
+
+        cleaned = cls._clean_tail(" ".join(kept_tokens)).rstrip(" ,;")
+        cleaned = re.sub(r"\s+([,;:!?])", r"\1", cleaned)
+        cleaned = cls._normalize_text(cleaned)
+        if not cleaned:
+            return None
+        return _MusicSceneTokenResult(
+            text=cleaned,
+            year=parsed_year,
+            categories=frozenset(category_set),
+        )
+
+    @classmethod
+    def _split_artists(cls, value: str) -> list[str]:
+        """
+        拆分多艺术家字段（如 章子怡 & 周深），保留顺序供检索与候选比对使用。
+        """
+        return [
+            cls._canonical_artist(artist.strip())
+            for artist in _MUSIC_ARTIST_SEPARATOR_RE.split(value)
+            if artist.strip()
+        ]
+
+    @staticmethod
+    def _canonical_artist(value: str) -> str:
+        """
+        归一 VA 等合辑艺术家别名为 MusicBrainz 规范署名。
+        """
+        return _MUSIC_ARTIST_ALIASES.get(value.casefold(), value)
+
+    @staticmethod
+    def _clean_tail(value: str) -> str:
+        """
+        修剪曲名尾部残留：流媒体文件名消毒产生的下划线与悬空分隔符。
+        """
+        return re.sub(r"[\s_\-–—−－/.+]+$", "", str(value or "")).strip()
+
+    @classmethod
+    def _strip_spec_segments(cls, value: str) -> str:
+        """
+        从尾部反复剥离纯规格段（- WEB-DL - 16bit ALAC-HHWEB）。
+
+        规格段在艺术家/曲名拆分前整段剔除，避免规格后缀把主拆分位置推到
+        「艺术家 - 曲名」的连字符上；曲名含自然语言文本的段永远不会被误剥。
+        """
+        text = str(value or "").strip()
+        while True:
+            segment_match = _MUSIC_TRAILING_SEGMENT_RE.search(text)
+            if not segment_match:
+                return text
+            prefix = segment_match.group("prefix")
+            segment = segment_match.group("segment")
+            # 无空格连字符段（FLAC-HHWEB）只有紧跟格式词时才是发布组标签，
+            # 否则是「曲名-歌手」类连字符命名，交由后续拆分规则处理
+            if prefix and not re.fullmatch(rf"{_MUSIC_FORMAT_TOKEN_ALT}", prefix, re.IGNORECASE):
+                return text
+            # 年份括号是发行线索不是规格词，占位后再判定，避免「曲名 (2000)」被误当规格段
+            probe = re.sub(r"\((?:19|20)\d{2}\)", " ", segment)
+            has_spec_token = bool(
+                _MUSIC_QUALITY_TOKEN_RE.search(probe) or _MUSIC_VIDEO_TOKEN_RE.search(probe)
+            )
+            # 加号是 APE+CUE 类格式联合写法的分隔符，占位为空格后再判定
+            probe = _MUSIC_VIDEO_TOKEN_RE.sub(" ", _MUSIC_QUALITY_TOKEN_RE.sub(" ", probe))
+            residue = probe.replace("+", " ").strip()
+            if residue and not cls._is_spec_residue(residue, bool(prefix)):
+                return text
+            # 不含任何规格词的纯标签段，仅在紧跟格式词的无空格形态下才是发布组标签；
+            # 「艺术家 - 单词曲名」的曲名段不含规格词，必须保留
+            if not has_spec_token and not prefix:
+                return text
+            text = text[: segment_match.start()].rstrip()
+
+    @staticmethod
+    def _strip_audio_release_tail(value: str) -> tuple[str, Optional[int]]:
+        """
+        剥离年份开头的音频格式发布尾链，并返回发行年份。
+        """
+        text = str(value or "").strip()
+        match = _MUSIC_AUDIO_RELEASE_TAIL_RE.search(text)
+        if not match:
+            return text, None
+        return text[:match.start()].rstrip(" \t-–—−－"), int(match.group("year"))
+
+    @classmethod
+    def _is_spec_residue(cls, residue: str, has_prefix: bool) -> bool:
+        """
+        判定规格词替换后的残留是否为发布组标签而非自然语言曲名。
+
+        发布组标签只出现在格式词无空格连字符形态（FLAC-HHWEB、AAC-FHDMv），
+        此时短字母数字组合可放行；空白连字符分隔的段（艺术家 - 曲名 FLAC）
+        残留可能是自然语言曲名，仅严格规格词表可过。
+        """
+        if _MUSIC_SPEC_SEGMENT_RE.fullmatch(residue):
+            return True
+        tokens = residue.split()
+        return has_prefix and bool(tokens) and all(
+            len(token) <= 8 and re.fullmatch(r"[A-Za-z0-9]+", token) for token in tokens
+        )
+
+    @classmethod
+    def _strip_quality_tokens(cls, value: str) -> str:
+        """
+        剥离音频格式、视频编码、规格参数与年份括号，保留有效的艺术家与曲名文本。
+        """
+        raw = _MUSIC_RIP_NOTE_RE.sub(" ", str(value or ""))
+        raw = _MUSIC_PAREN_SPEC_RE.sub(" ", raw)
+        raw = _MUSIC_RELEASE_GROUP_RE.sub(" ", raw)
+        text = _MUSIC_QUALITY_TOKEN_RE.sub(" ", raw)
+        text = _MUSIC_RIP_METHOD_RE.sub(" ", text)
+        text = _MUSIC_VIDEO_TOKEN_RE.sub(" ", text)
+        text = _MUSIC_TRAILING_CATALOG_RE.sub(" ", text)
+        text = _MUSIC_EMPTY_BRACKET_RE.sub(" ", text)
+        # 规格剥离后可能残留悬空分隔符（含 APE+CUE 类格式联合写法残留的加号），统一修剪
+        text = cls._normalize_text(re.sub(r"^[\s\-–—−－/+]+|[\s\-–—−－/+]+$", "", text))
+        return _MUSIC_RELEASE_TYPE_RE.sub(lambda match: match.group("year") or "", text).strip()
+
+    @classmethod
+    def _strip_artist_suffix(cls, value: str, artists: list[str]) -> str:
+        """
+        剥离曲名尾部重复的艺术家署名，资源标题常见「曲名 - 艺术家」写法。
+        """
+        if not artists or not value:
+            return value
+        match = _MUSIC_ARTIST_SUFFIX_RE.search(value)
+        if not match:
+            return value
+        suffix = cls.compact_text(match.group("suffix"))
+        if not suffix:
+            return value
+        if any(suffix == cls.compact_text(artist) for artist in artists):
+            return value[:match.start()].strip()
+        return value
+
+    @classmethod
+    def _strip_cjk_artist_suffix(cls, value: str) -> str:
+        """
+        无艺术家线索时剥离 CJK 曲名尾部的歌手署名（「因为有你-毛阿敏」）。
+
+        仅限曲名与署名都含 CJK 才剥离，避免误伤英文曲名的连字符组成部分
+        （如 Live-in-XXX）；剥离后的署名身份由候选比对阶段验证。
+        """
+        if not value:
+            return value
+        match = _MUSIC_ARTIST_SUFFIX_RE.search(value)
+        if not match:
+            return value
+        head = value[:match.start()].strip()
+        suffix = match.group("suffix").strip()
+        artist_token = suffix.split(" ", 1)[0].strip(" ,，、;；")
+        if (
+            head
+            and artist_token
+            and cls._contains_cjk(head)
+            and cls._contains_cjk(artist_token)
+        ):
+            return head
+        return value
+
+    @classmethod
+    def _strip_date_prefix(cls, value: str) -> tuple[str, Optional[int]]:
+        """
+        剔除标题开头的广播/发行日期前缀，并提取尾部年份区间结束年。
+
+        :return: (处理后的文本, 年份区间结束年)，无区间时为 None
+        """
+        text = _MUSIC_DATE_PREFIX_RE.sub("", str(value or "")).strip(" -–—_\t")
+        year: Optional[int] = None
+        # 年份区间在日期前缀剔除后提取；位于标题末尾的整段剔除，其余仅提取年份线索
+        range_match = _MUSIC_YEAR_RANGE_STRIP_RE.search(text)
+        strip_span = True
+        if not range_match:
+            range_match = _MUSIC_YEAR_RANGE_DETECT_RE.search(text)
+            strip_span = False
+        if range_match:
+            end_year = int(range_match.group(1) or range_match.group(2))
+            # 两位结束年补世纪：50 以上视为 19xx，否则 20xx
+            year = end_year + (1900 if end_year >= 50 else 2000)
+            if strip_span:
+                text = text[:range_match.start()] + text[range_match.end():]
+        return cls._normalize_text(text), year
+
+    @staticmethod
+    def _contains_cjk(value: str) -> bool:
+        """
+        判断文本是否包含中日韩字符，用于限定裸连字符拆分适用范围。
+        """
+        return any(
+            0x3040 <= code <= 0x30FF or 0x3400 <= code <= 0x9FFF or 0xAC00 <= code <= 0xD7AF
+            for code in map(ord, value or "")
+        )
+
+    @classmethod
+    def _split_cjk_hyphen(cls, value: str) -> tuple[Optional[list[str]], str]:
+        """
+        CJK 文本按无空格连字符拆分「专辑/曲名-艺术家」，两侧均需含 CJK 才采信。
+
+        英文标题连字符多为曲名组成部分（如 Alchemy-Live），不适用此拆分；
+        多个连字符时取最后一段为艺术家，兼容「作品全集-系列名-艺术家」。
+        """
+        text = str(value or "").strip()
+        if not cls._contains_cjk(text):
+            return None, text
+        # 依次尝试双破折号（为你盛开——许巍）、半角连字符、全角连字符（已归一）与单破折号
+        head, sep, tail = "", "", ""
+        for separator in ("——", "-", "－", "—"):
+            head, sep, tail = text.rpartition(separator)
+            if sep:
+                break
+        if not sep:
+            return None, text
+        head = head.strip(" \t-–—−－")
+        tail = tail.strip(" \t-–—−－")
+        if head and tail and cls._contains_cjk(head) and cls._contains_cjk(tail):
+            # 分隔符后跟随多个词时只取首词为艺术家（「为你盛开——许巍 巡回演唱会」）
+            artist_text = tail.split(" ", 1)[0]
+            if not cls._contains_cjk(artist_text):
+                return None, text
+            # 艺术家段常见「xx作品全集」合集修饰，剥离后才能与条目署名比对
+            artist_text = artist_text.strip(" ,，、;；")
+            artist = _MUSIC_COLLECTION_SUFFIX_RE.sub("", artist_text).strip() or artist_text
+            return [artist], head
+        return None, text
+
+    @classmethod
+    def _split_latin_hyphen(cls, value: str) -> tuple[Optional[list[str]], str]:
+        """
+        拉丁「艺术家-专辑」无空格连字符命名拆分（Gene Clark-White Light）。
+
+        首个连字符左侧为艺术家；两侧均需含空格（至少两个词）才采信：
+        左侧保护 Jay-Z 类连字符艺术家名，右侧排除 -ProfessorP 类发布组标签；
+        艺术家身份由候选比对验证。
+        """
+        text = str(value or "").strip()
+        if cls._contains_cjk(text):
+            return None, text
+        head, sep, tail = text.partition("-")
+        if not sep:
+            return None, text
+        head = head.strip(" \t-–—−－")
+        tail = tail.strip(" \t-–—−－")
+        head_suffix_raw = head.rsplit(" ", 1)[-1]
+        head_suffix = head_suffix_raw.casefold()
+        tail_prefix = tail.split(" ", 1)[0]
+        all_caps_compound = (
+            1 < len(head_suffix_raw) <= 5
+            and 1 < len(tail_prefix) <= 5
+            and head_suffix_raw.isalpha()
+            and tail_prefix.isalpha()
+            and head_suffix_raw.isupper()
+            and tail_prefix.isupper()
+        )
+        if (
+            head
+            and tail
+            and " " in head
+            and " " in tail
+            and head_suffix not in _MUSIC_LATIN_HYPHEN_NON_ARTIST_SUFFIXES
+            and not all_caps_compound
+        ):
+            return cls._split_artists(head), tail
+        return None, text
+
+    # 「艺术家 年份 专辑」三明治结构：艺术家段为不超过 4 个词的拉丁词组；
+    # 贪婪匹配艺术家段，避免懒惰量词把首个词当艺术家、剩余词混入专辑名
+    _YEAR_SANDWICH_RE = re.compile(
+        r"^(?P<artist>[A-Za-z][A-Za-z0-9&+.'’\- ]*)\s+(?P<year>(?:19|20)\d{2})\s+(?P<rest>\S.*)$"
+    )
+
+    @classmethod
+    def _split_year_sandwich(cls, value: str) -> tuple[Optional[list[str]], str, Optional[int]]:
+        """
+        按中部独立年份拆分「艺术家 年份 专辑」（Jacky Cheung 1987 Jacky）。
+
+        :return: (艺术家列表, 专辑名, 年份)，不适用时 (None, 原文, None)
+        """
+        match = cls._YEAR_SANDWICH_RE.match(str(value or "").strip())
+        if not match:
+            return None, str(value or ""), None
+        artist_text = match.group("artist").strip()
+        raw_rest = match.group("rest").strip()
+        rest = raw_rest.strip(" \t-–—−－")
+        # 艺术家段限 4 个词以内；年份后紧跟另一个年份时是年份区间不是三明治结构；
+        # 剩余段原文需以字母开头：「… 2014 2.0 -MINIBEL」数字开头、
+        # 「… 2013 -PTer」发布组标签连字符开头都不是专辑名，拒绝拆分
+        if (
+            len(artist_text.split()) <= 4
+            and rest
+            and not re.match(r"(?:19|20)\d{2}\b", raw_rest)
+            and raw_rest[0].isalpha()
+            and any(char.isalpha() for char in rest)
+        ):
+            return cls._split_artists(artist_text), rest, int(match.group("year"))
+        return None, str(value or ""), None
+
+    @staticmethod
+    def compact_text(value: Any) -> str:
+        """
+        移除大小写、空白与标点，生成比对使用的紧凑文本。
+        """
+        return _MUSIC_COMPACT_RE.sub("", str(value or "").casefold())
+
+    @classmethod
+    def is_generic_album_name(cls, value: Optional[str]) -> bool:
+        """
+        通用收件目录不能凭文件名中的歌手升级为专辑线索；真实标签由调用方优先保留。
+        """
+        return cls.compact_text(value) in {
+            "music", "musics", "audio", "downloads", "download", "inbox", "unknown", "untitled",
+            "various", "variousartists", "va", "音乐", "音樂", "下载", "下載", "未分类", "未分類",
+        }
+
+    @staticmethod
+    def _clean_text(value: Any) -> str:
+        """
+        压缩多余空白，返回可用于匹配和展示的文本。
+        """
+        return _MUSIC_SPACES_RE.sub(" ", str(value or "")).strip()
+
+    def _apply_track_prefix(self) -> None:
+        """
+        提取曲名开头的曲序/碟号前缀（01. 曲名、1-02 曲名、CD1.03 曲名）。
+        """
+        if not self.title:
+            return
+        track_number, disc_number, remainder = self.split_track_prefix(self.title)
+        if track_number is None and disc_number is None:
+            return
+        if self.track_number is None:
+            self.track_number = track_number
+        if self.disc_number is None:
+            self.disc_number = disc_number
+        if remainder:
+            self.title = remainder
+
+    @classmethod
+    def split_track_prefix(cls, stem: str) -> tuple[Optional[int], Optional[int], Optional[str]]:
+        """
+        剥离文件名/曲名中的曲序和碟号前缀。
+
+        :param stem: 不含扩展名的文件名或曲名文本
+        :return: (曲序, 碟号, 剥离前缀后的曲名)，无法剥离的字段返回 None；
+                 曲名为 None 表示文本没有携带曲名信息
+        """
+        text = str(stem or "").strip()
+        if not text:
+            return None, None, None
+        match = _MUSIC_DISC_TRACK_PREFIX_RE.match(text)
+        if match:
+            return (
+                int(match.group("num")),
+                int(match.group("disc")),
+                cls._clean_text(match.group("rest")),
+            )
+        match = _MUSIC_COMBINED_TRACK_PREFIX_RE.match(text)
+        if match:
+            combined = _split_combined_disc_track(match.group("num"))
+            if combined:
+                disc, track = combined
+                return track, disc, cls._clean_text(match.group("rest"))
+        match = _MUSIC_TRACK_PREFIX_RE.match(text)
+        if match:
+            return int(match.group("num")), None, cls._clean_text(match.group("rest"))
+        match = _MUSIC_NUMBER_ONLY_RE.match(text)
+        if match:
+            # 纯数字文件名保留原始文本作为兜底标题，只提取曲序
+            return int(match.group("num")), None, None
+        return None, None, None
+
+    @classmethod
+    def split_artist_title(cls, text: str) -> tuple[Optional[str], str]:
+        """
+        拆分 `歌手 - 标题` 结构，未命中时原文作为标题返回。
+        """
+        cleaned = cls._clean_text(text)
+        if not cleaned:
+            return None, ""
+        match = _MUSIC_ARTIST_TITLE_RE.match(cleaned)
+        if match:
+            return cls._clean_text(match.group("artist")), cls._clean_text(match.group("title"))
+        return None, cleaned
+
+    @classmethod
+    def parse_disc_dir(cls, name: str) -> Optional[int]:
+        """
+        识别 CD1、Disc 2 这类碟片子目录并返回碟号。
+        """
+        match = _MUSIC_DISC_DIR_RE.match(str(name or "").strip())
+        return int(match.group("num")) if match and int(match.group("num")) > 0 else None
+
+    @classmethod
+    def parse_disc_dir_suffix(cls, name: str) -> Optional[int]:
+        """
+        识别把碟号后缀在目录名末尾的碟片目录并返回碟号，如 `陈奕迅 - 十年经典 CD1`。
+        """
+        match = _MUSIC_DISC_DIR_SUFFIX_RE.match(str(name or "").strip())
+        return int(match.group("num")) if match and int(match.group("num")) > 0 else None
+
+    @staticmethod
+    def _normalize_album_year(value: str) -> str:
+        """
+        在 Python/Rust 分流前统一艺人-年份-作品，保留数字作品及年份区间。
+        """
+        if _MUSIC_YEAR_RANGE_DETECT_RE.search(value) or _MUSIC_AUDIO_RELEASE_TAIL_RE.search(value):
+            return value
+        match = _MUSIC_ALBUM_YEAR_RE.fullmatch(value.strip())
+        if not match or match.group("artist").strip().isdigit():
+            return value
+        artist, year, title = match.group("artist", "year", "title")
+        return f"{artist.strip()} - {title.strip()} ({year})"
+
+    @staticmethod
+    def _clean_directory_bracket(match: re.Match[str]) -> str:
+        """
+        只删除已知规格/内容评级，未知括号及版本名称保留作为作品证据。
+        """
+        content = match.group()[1:-1].strip()
+        if _MUSIC_SPEC_SEGMENT_RE.fullmatch(content) or content.casefold() in {"explicit", "clean"}:
+            return " "
+        return match.group()
+
+    @classmethod
+    def parse_album_dir(cls, name: str) -> dict[str, Any]:
+        """
+        解析专辑目录名，提取歌手、专辑名、年份和音质描述。
+
+        支持 `歌手 - 专辑 (2004) [FLAC 24bit-96kHz]` 等常见命名。
+        """
+        text = cls._normalize_album_year(cls._normalize_text(name))
+        if not text:
+            return {}
+        quality_text = text
+        year = None
+        prefixed_year = False
+        year_match = _MUSIC_DIR_YEAR_RE.search(text)
+        if year_match:
+            year = int(year_match.group("year"))
+            text = _MUSIC_DIR_YEAR_RE.sub(" ", text)
+        else:
+            prefix_year_match = _MUSIC_DIR_PREFIX_YEAR_RE.match(text)
+            if prefix_year_match:
+                year = int(prefix_year_match.group("year"))
+                text = text[prefix_year_match.end():]
+                prefixed_year = True
+        # Live/Deluxe 以及未知副标题均参与身份确认，不能像音质标签一样整体删除。
+        album_text = cls._clean_text(cls._strip_spec_segments(
+            _MUSIC_BRACKET_RE.sub(cls._clean_directory_bracket, text)
+        ))
+        if not album_text:
+            return {}
+        artist, album = (
+            (None, album_text)
+            if prefixed_year
+            else cls.split_artist_title(album_text)
+        )
+        return {
+            "artist": artist,
+            "album": album,
+            "year": year,
+            "version": cls._resource_version(album, None),
+            "quality_text": quality_text,
+        }
+
+    def apply_path_context(self, path: "str | Path") -> "MetaMusic":
+        """
+        用文件名和目录线索回填音乐元数据中缺失的字段。
+
+        文件名先走与种子标题相同的动态模式注册中心，再按字段补充音频标签的空缺；
+        目录线索优先级最低。标题等于文件主干名时视为读取标签后的文件名兜底，
+        允许用完整模式的清理结果替换，真实标签中的非空字段始终保留。
+        """
+        file_path = Path(path)
+        stem = file_path.stem
+        title_from_name = not self.title or (self.title == stem and self.field_sources.get("title") != "tag")
+
+        # 独立解析完整文件名，让统一入口处理曲序；这里只合并空字段，保护真实音频标签。
+        filename_meta = MetaMusic(
+            org_string=file_path.name,
+            title=file_path.name,
+            audio_format=file_path.suffix.lstrip(".").upper() or None,
+            parse_title=True,
+        )
+        if title_from_name and filename_meta.title:
+            self.title = filename_meta.title
+            self.field_sources["title"] = "filename"
+        for field_name in (
+            "artists",
+            "album",
+            "year",
+            "disc_number",
+            "track_number",
+            "total_discs",
+            "total_tracks",
+            "version",
+            "isrc",
+            "audio_format",
+            "audio_lossless",
+            "bit_depth",
+            "sample_rate",
+            "bitrate",
+        ):
+            current_value = getattr(self, field_name, None)
+            parsed_value = getattr(filename_meta, field_name, None)
+            if current_value in (None, "", []) and parsed_value not in (None, "", []):
+                setattr(self, field_name, parsed_value)
+                self.field_sources[field_name] = "filename"
+
+        # 目录结构：父目录可能是碟片目录，专辑目录再往上一级
+        parent = file_path.parent
+        album_dir = parent
+        parent_disc = self.parse_disc_dir(parent.name)
+        if parent_disc is not None:
+            if self.disc_number is None:
+                self.disc_number = parent_disc
+                self.field_sources["disc_number"] = "directory"
+            album_dir = parent.parent
+        elif self.disc_number is None and (suffix_disc := self.parse_disc_dir_suffix(parent.name)) is not None:
+            # 碟号写进专辑目录名末尾时只补碟号，该目录仍是专辑目录，不能上移专辑根。
+            self.disc_number = suffix_disc
+            self.field_sources["disc_number"] = "directory"
+        dir_info = self.parse_album_dir(album_dir.name)
+        if dir_info:
+            # 文件已明确歌手时，纯专辑名目录也可补足检索线索；通用监控根目录仍须排除。
+            if (dir_info.get("artist") or dir_info.get("year")
+                    or (self.artists and not self.is_generic_album_name(dir_info.get("album")))):
+                if not self.album and dir_info.get("album"):
+                    self.album = dir_info["album"]
+                    self.field_sources["album"] = "directory"
+                if not self.artists and dir_info.get("artist"):
+                    self.artists = [dir_info["artist"]]
+                    self.field_sources["artists"] = "directory"
+                if not self.album_artist and dir_info.get("artist"):
+                    self.album_artist = dir_info["artist"]
+                    self.field_sources["album_artist"] = "directory"
+            if self.year is None and dir_info.get("year"):
+                self.year = dir_info["year"]
+                self.field_sources["year"] = "directory"
+            if title_from_name and not self.version and dir_info.get("version"):
+                # 目录版本可补无标签曲目，真实歌曲标签不能被整张专辑的版本推测覆盖。
+                self.version = dir_info["version"]
+                self.field_sources["version"] = "directory"
+            # 目录名里的格式、位深、采样率可补齐本地标签未声明的音质参数
+            if dir_info.get("quality_text"):
+                self.apply_audio_quality(dir_info["quality_text"], evidence_source="directory")
+        return self
+
+    @property
+    def season(self) -> None:
+        """
+        音乐没有季信息，兼容下载与事件链的通用访问。
+        """
+        return None
+
+    @property
+    def episode(self) -> None:
+        """
+        音乐没有集信息，兼容下载与历史记录的通用访问。
+        """
+        return None
+
+    @property
+    def apply_words(self) -> list[str]:
+        """
+        返回公共元数据工厂实际应用的识别词，兼容缺少该字段的旧缓存。
+        """
+        return getattr(self, "_apply_words", [])
+
+    @apply_words.setter
+    def apply_words(self, value: Optional[list[str]]) -> None:
+        """
+        独立保存识别词记录，避免调用方或其它音乐元数据共用可变列表。
+        """
+        self._apply_words = list(value or [])
+
+    def to_dict(self) -> dict[str, Any]:
+        """
+        转换为可持久化和传输的字典，字段集与 schemas.MusicMeta 对齐。
+        """
+        return {
+            "type": self.type.value,
+            "org_string": self.org_string,
+            "apply_words": list(self.apply_words),
+            "title": self.title,
+            "artists": list(self.artists),
+            "artist": self.artist,
+            "album": self.album,
+            "album_artist": self.album_artist,
+            "year": self.year,
+            "disc_number": self.disc_number,
+            "track_number": self.track_number,
+            "total_discs": self.total_discs,
+            "total_tracks": self.total_tracks,
+            "version": self.version,
+            "audio_format": self.audio_format,
+            "audio_lossless": self.audio_lossless,
+            "audio_quality": self.audio_quality,
+            "audio_quality_score": self.audio_quality_score,
+            "audio_specs": self.audio_specs,
+            "bit_depth": self.bit_depth,
+            "sample_rate": self.sample_rate,
+            "bitrate": self.bitrate,
+            "duration": self.duration,
+            "isrc": self.isrc,
+            "media_source": self.media_source,
+            "media_id": self.media_id,
+            "musicbrainz_release_id": self.musicbrainz_release_id,
+            "musicbrainz_release_group_id": self.musicbrainz_release_group_id,
+            "musicbrainz_release_track_id": self.musicbrainz_release_track_id,
+            "original_year": self.original_year,
+            "release_year": self.release_year,
+            "field_sources": dict(self.field_sources),
+            **music_credit_values(self),
+            "music_type": self.music_type,
+            "album_type": self.album_type,
+            "secondary_types": list(self.secondary_types),
+            "music_layout": self.music_layout,
+            "cue_filename": self.cue_filename,
+            "cue_tracks": [dict(track) for track in self.cue_tracks],
+            "organization_error": self.organization_error,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "MetaMusic":
+        """
+        从字典恢复音乐解析结果，兼容 artists/artist 两种键。
+        """
+        raw_type = data.get("type")
+        if raw_type not in (None, MediaType.MUSIC, MediaType.MUSIC.value, "music"):
+            raise ValueError(f"不支持的音乐媒体类型：{raw_type}")
+        meta = cls(
+            **music_credit_values(data),
+            org_string=data.get("org_string"),
+            title=data.get("title"),
+            artists=_string_list(data.get("artists") or data.get("artist")),
+            album=data.get("album"),
+            album_artist=data.get("album_artist"),
+            year=_optional_int(data.get("year")),
+            disc_number=_optional_int(data.get("disc_number")),
+            track_number=_optional_int(data.get("track_number")),
+            total_discs=_optional_int(data.get("total_discs")),
+            total_tracks=_optional_int(data.get("total_tracks")),
+            version=data.get("version"),
+            audio_format=data.get("audio_format"),
+            audio_lossless=data.get("audio_lossless"),
+            bit_depth=_optional_int(data.get("bit_depth")),
+            sample_rate=_optional_int(data.get("sample_rate")),
+            bitrate=_optional_int(data.get("bitrate")),
+            duration=_optional_int(data.get("duration")),
+            isrc=data.get("isrc"),
+            media_source=data.get("media_source"),
+            media_id=data.get("media_id"),
+            musicbrainz_release_id=data.get("musicbrainz_release_id"),
+            musicbrainz_release_group_id=data.get("musicbrainz_release_group_id"),
+            musicbrainz_release_track_id=data.get("musicbrainz_release_track_id"),
+            original_year=_optional_int(data.get("original_year")),
+            release_year=_optional_int(data.get("release_year")),
+            field_sources=data.get("field_sources"),
+            music_type=data.get("music_type"),
+            album_type=data.get("album_type"),
+            secondary_types=_string_list(data.get("secondary_types")),
+            music_layout=data.get("music_layout"),
+            cue_filename=data.get("cue_filename"),
+            cue_tracks=data.get("cue_tracks"),
+            organization_error=data.get("organization_error"),
+        )
+        meta.apply_words = data.get("apply_words")
+        return meta
+
+
+def _build_name_result(
+        context: MusicNameContext,
+        value: str,
+        artists: Optional[list[str]] = None,
+        album: Optional[str] = None,
+        year: Optional[int] = None,
+        disc_number: Optional[int] = None,
+) -> MusicNameParseResult:
+    """
+    统一剥离曲名尾部年份并构造解析结果。
+    """
+    title, title_year = MetaMusic._parse_title_year(value)
+    return MusicNameParseResult(
+        title=title,
+        artists=artists,
+        album=album,
+        year=context.year or year or title_year,
+        disc_number=disc_number,
+    )
+
+
+def _match_dangling_artist(context: MusicNameContext) -> Optional[Any]:
+    """
+    匹配规格剥离后仅剩艺术家和悬空分隔符的命名。
+    """
+    if context.artists or not context.text:
+        return None
+    return re.fullmatch(r"(?P<artist>.+?)\s+[\-–—−－]+", context.text)
+
+
+def _parse_dangling_artist(
+        context: MusicNameContext,
+        matched: MusicNamePatternMatch,
+) -> MusicNameParseResult:
+    """
+    解析仅包含艺术家的悬空分隔符命名。
+    """
+    return MusicNameParseResult(
+        title=None,
+        artists=MetaMusic._split_artists(matched.payload.group("artist")),
+        year=context.year,
+    )
+
+
+def _match_music_video_scene(context: MusicNameContext) -> Optional[Any]:
+    """
+    匹配具有强影视规格组合的音乐视频或演唱会场景命名。
+    """
+    return MetaMusic._parse_music_scene_tokens(context.normalized)
+
+
+def _parse_music_video_scene(
+        context: MusicNameContext,
+        matched: MusicNamePatternMatch,
+) -> MusicNameParseResult:
+    """
+    清理场景词元 后重新进入音乐模式，避免采用影视媒体类型和标题截断规则。
+    """
+    scene: _MusicSceneTokenResult = matched.payload
+    scene_context = MusicNameContext(
+        raw=scene.text,
+        normalized=scene.text,
+        text=scene.text,
+        artists=context.artists,
+        year=context.year or scene.year,
+    )
+    parsed = MusicNameRegistry.parse(scene_context)
+    if parsed:
+        return parsed
+    return MusicNameParseResult(
+        title=scene.text,
+        year=scene_context.year,
+    )
+
+
+def _match_album_marker(context: MusicNameContext) -> Optional[Any]:
+    """
+    匹配 CJK 书名号专辑命名。
+    """
+    if context.artists:
+        return None
+    matched = _MUSIC_ALBUM_MARKER_RE.match(context.text)
+    if matched and _MUSIC_ARTIST_TITLE_RE.match(context.text):
+        # 标准 artist - title 的作品名可含《片名》；双语双分隔前缀仍走专辑模式。
+        if len(_MUSIC_ARTIST_TITLE_SEPARATOR_RE.findall(matched.group("artist"))) == 1:
+            return None
+    return matched
+
+
+def _parse_album_marker(
+        context: MusicNameContext,
+        matched: MusicNamePatternMatch,
+) -> MusicNameParseResult:
+    """
+    解析 CJK 书名号命名中的艺术家、专辑、碟号和标题。
+    """
+    marker = matched.payload
+    song_hint: Optional[str] = None
+    bilingual_prefix = False
+    artist_prefix = marker.group("artist")
+    artists, head_title = MetaMusic._split_cjk_hyphen(artist_prefix)
+    if artists:
+        song_hint = MetaMusic._clean_tail(head_title)
+    else:
+        # 中英双语原声常写成「English Artist - English Album 中文艺人 - 《中文片名》」。
+        # 优先保留首个标准 artist-title 结构，并只在英文标题后确有 CJK 别名时剥离别名。
+        standard_prefix = _MUSIC_ARTIST_TITLE_RE.match(artist_prefix)
+        if standard_prefix:
+            candidate_artist = standard_prefix.group("artist")
+            candidate_title = MetaMusic._clean_tail(standard_prefix.group("title"))
+            alias_match = _MUSIC_TRAILING_CJK_ALIAS_RE.search(candidate_title)
+            if (
+                alias_match
+                and not MetaMusic._contains_cjk(candidate_artist)
+                and re.search(r"[A-Za-z]", candidate_title[:alias_match.start()])
+            ):
+                artists = MetaMusic._split_artists(candidate_artist)
+                song_hint = candidate_title[:alias_match.start()].strip()
+                bilingual_prefix = True
+            else:
+                artists = MetaMusic._split_artists(artist_prefix)
+        else:
+            artists = MetaMusic._split_artists(artist_prefix)
+    album = MetaMusic._normalize_text(marker.group("album"))
+    disc_number = None
+    disc_match = _MUSIC_ALBUM_DISC_RE.search(album)
+    if disc_match:
+        disc_number = int(disc_match.group(1))
+        album = album[:disc_match.start()].strip()
+    rest = marker.group("rest").strip(" \t-–—−－_《》.")
+    rest, rest_year = MetaMusic._parse_title_year(rest)
+    parsed_year = context.year or rest_year
+    if bilingual_prefix:
+        # 书名号后的「电影原声带」是中文发行类型说明，不应覆盖英文专辑标题。
+        rest = ""
+    if rest and re.fullmatch(r"(?:19|20)\d{2}", rest):
+        parsed_year = parsed_year or int(rest)
+        rest = ""
+    rest_disc = (
+        re.fullmatch(r"(?:cd|disc|disk)\s*(\d{1,2})", rest, re.IGNORECASE)
+        if rest
+        else None
+    )
+    if rest_disc:
+        disc_number = disc_number or int(rest_disc.group(1))
+        rest = ""
+    return _build_name_result(
+        context=context,
+        value=rest or song_hint or album,
+        artists=artists,
+        album=album,
+        year=parsed_year,
+        disc_number=disc_number,
+    )
+
+
+def _match_artist_title(context: MusicNameContext) -> Optional[Any]:
+    """
+    匹配带空格分隔符的标准艺术家和标题命名。
+    """
+    if context.artists:
+        return None
+    return _MUSIC_ARTIST_TITLE_RE.match(context.text)
+
+
+def _parse_artist_title(
+        context: MusicNameContext,
+        matched: MusicNamePatternMatch,
+) -> MusicNameParseResult:
+    """
+    解析标准艺术家和标题命名。
+    """
+    artists = MetaMusic._split_artists(matched.payload.group("artist"))
+    title = MetaMusic._strip_artist_suffix(
+        MetaMusic._clean_tail(matched.payload.group("title")),
+        artists,
+    )
+    return _build_name_result(context=context, value=title, artists=artists)
+
+
+def _match_alias_prefix(context: MusicNameContext) -> Optional[Any]:
+    """
+    匹配 VA 等合辑别名的无空格前缀命名。
+    """
+    if context.artists:
+        return None
+    return _MUSIC_ALIAS_PREFIX_RE.match(context.text)
+
+
+def _parse_alias_prefix(
+        context: MusicNameContext,
+        matched: MusicNamePatternMatch,
+) -> MusicNameParseResult:
+    """
+    解析 VA 等合辑别名前缀并归一艺术家名称。
+    """
+    alias = matched.payload.group("alias").casefold()
+    artists = [_MUSIC_ARTIST_ALIASES.get(alias, "Various Artists")]
+    return _build_name_result(
+        context=context,
+        value=MetaMusic._clean_tail(matched.payload.group("title")),
+        artists=artists,
+    )
+
+
+def _match_cjk_artist_title_rip(context: MusicNameContext) -> Optional[Any]:
+    """
+    匹配带抓轨或 SACD 尾标的 CJK「艺术家-标题」命名，避免反拆。
+    """
+    release_signature = _MUSIC_RIP_SIGNATURE_RE.search(context.normalized) or re.search(
+        r"SACD\s*$", context.normalized, re.IGNORECASE
+    )
+    if context.artists or not release_signature:
+        return None
+    artist, separator, title = context.text.partition("-")
+    artist = artist.strip(" \t-–—−－")
+    title = title.strip(" \t-–—−－")
+    if (
+        separator
+        and artist
+        and title
+        and MetaMusic._contains_cjk(artist)
+        and MetaMusic._contains_cjk(title)
+    ):
+        return artist, title
+    return None
+
+
+def _parse_cjk_artist_title_rip(
+        context: MusicNameContext,
+        matched: MusicNamePatternMatch,
+) -> MusicNameParseResult:
+    """
+    解析带抓轨或 SACD 尾标的 CJK 艺术家和标题。
+    """
+    artist, title = matched.payload
+    return _build_name_result(
+        context=context,
+        value=MetaMusic._clean_tail(title),
+        artists=MetaMusic._split_artists(artist),
+    )
+
+
+def _match_cjk_hyphen(context: MusicNameContext) -> Optional[Any]:
+    """
+    匹配 CJK 无空格连字符命名。
+    """
+    artists, title = MetaMusic._split_cjk_hyphen(context.text)
+    return (artists, title) if artists else None
+
+
+def _parse_cjk_hyphen(
+        context: MusicNameContext,
+        matched: MusicNamePatternMatch,
+) -> MusicNameParseResult:
+    """
+    解析 CJK 无空格连字符命名。
+    """
+    artists, title = matched.payload
+    return _build_name_result(
+        context=context,
+        value=MetaMusic._clean_tail(title),
+        artists=artists,
+    )
+
+
+def _match_latin_hyphen(context: MusicNameContext) -> Optional[Any]:
+    """
+    匹配拉丁多词艺术家和专辑的无空格连字符命名。
+    """
+    artists, title = MetaMusic._split_latin_hyphen(context.text)
+    return (artists, title) if artists else None
+
+
+def _parse_latin_hyphen(
+        context: MusicNameContext,
+        matched: MusicNamePatternMatch,
+) -> MusicNameParseResult:
+    """
+    解析拉丁无空格连字符命名。
+    """
+    artists, title = matched.payload
+    return _build_name_result(
+        context=context,
+        value=MetaMusic._clean_tail(title),
+        artists=artists,
+    )
+
+
+def _match_year_sandwich(context: MusicNameContext) -> Optional[Any]:
+    """
+    匹配艺术家、年份、标题三段式命名。
+    """
+    artists, title, year = MetaMusic._split_year_sandwich(context.text)
+    return (artists, title, year) if artists else None
+
+
+def _parse_year_sandwich(
+        context: MusicNameContext,
+        matched: MusicNamePatternMatch,
+) -> MusicNameParseResult:
+    """
+    解析艺术家、年份、标题三段式命名。
+    """
+    artists, title, year = matched.payload
+    return _build_name_result(
+        context=context,
+        value=MetaMusic._clean_tail(title),
+        artists=artists,
+        year=year,
+    )
+
+
+def _match_fallback(context: MusicNameContext) -> Optional[Any]:
+    """
+    匹配未命中结构化模式的非空音乐标题。
+    """
+    return context.text or None
+
+
+def _parse_fallback(
+        context: MusicNameContext,
+        matched: MusicNamePatternMatch,
+) -> MusicNameParseResult:
+    """
+    解析无结构标题并保留调用方已有艺术家字段。
+    """
+    title = MetaMusic._strip_cjk_artist_suffix(MetaMusic._clean_tail(matched.payload))
+    return _build_name_result(context=context, value=title)
+
+
+def _register_default_name_components() -> None:
+    """
+    注册内置命名模式及其解析器，扩展可用更高优先级覆盖选择。
+    """
+    patterns = (
+        MusicNamePattern("dangling_artist", _match_dangling_artist, 800),
+        MusicNamePattern("music_video_scene", _match_music_video_scene, 750),
+        MusicNamePattern("album_marker", _match_album_marker, 700),
+        MusicNamePattern("artist_title", _match_artist_title, 600),
+        MusicNamePattern("alias_prefix", _match_alias_prefix, 500),
+        MusicNamePattern("cjk_artist_title_rip", _match_cjk_artist_title_rip, 450),
+        MusicNamePattern("cjk_hyphen", _match_cjk_hyphen, 400),
+        MusicNamePattern("latin_hyphen", _match_latin_hyphen, 300),
+        MusicNamePattern("year_sandwich", _match_year_sandwich, 200),
+        MusicNamePattern("fallback", _match_fallback, -100),
+    )
+    parsers = (
+        MusicNameParser("dangling_artist", ("dangling_artist",), _parse_dangling_artist),
+        MusicNameParser("music_video_scene", ("music_video_scene",), _parse_music_video_scene),
+        MusicNameParser("album_marker", ("album_marker",), _parse_album_marker),
+        MusicNameParser("artist_title", ("artist_title",), _parse_artist_title),
+        MusicNameParser("alias_prefix", ("alias_prefix",), _parse_alias_prefix),
+        MusicNameParser(
+            "cjk_artist_title_rip",
+            ("cjk_artist_title_rip",),
+            _parse_cjk_artist_title_rip,
+        ),
+        MusicNameParser("cjk_hyphen", ("cjk_hyphen",), _parse_cjk_hyphen),
+        MusicNameParser("latin_hyphen", ("latin_hyphen",), _parse_latin_hyphen),
+        MusicNameParser("year_sandwich", ("year_sandwich",), _parse_year_sandwich),
+        MusicNameParser("fallback", ("fallback",), _parse_fallback),
+    )
+    for pattern in patterns:
+        MusicNameRegistry.register_pattern(pattern)
+    for parser in parsers:
+        MusicNameRegistry.register_parser(parser)
+    MusicNameRegistry._capture_default_components()
+
+
+_register_default_name_components()

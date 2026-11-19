@@ -1,0 +1,3267 @@
+# Adapted from MoviePilot v3 e0f17f5aafd2a2cdc56d4466e60c11d125c603c9 (GPL-3.0).
+# Music-only host integration; upstream license: ../LICENSE.MoviePilot.
+"""
+MusicBrainz 音乐识别、发行版本匹配与艺术家信息查询。
+"""
+
+import asyncio
+import re
+import threading
+import time
+from copy import deepcopy
+from dataclasses import dataclass
+from difflib import SequenceMatcher
+from itertools import chain
+from typing import Any, Iterable, Optional, Tuple, TypeVar, Union
+
+from etk_music.http import AsyncRequestUtils, RequestUtils
+from etk_music.observation import (
+    BLOCKING_MUSIC_RECOGNITION_STATES,
+    capture_music_recognition,
+    music_recognition_diagnostics,
+    music_recognition_failed,
+    music_request_timeout,
+    music_wait_allowed,
+    report_music_recognition,
+)
+from etk_music.recognition import (
+    async_enrich_music_artist_aliases,
+    enrich_music_artist_aliases,
+    unique_music_match,
+)
+from etk_music.models import (
+    MusicAlbumInfo,
+    MusicArtistInfo,
+    MusicInfo,
+    MusicRelease,
+)
+from etk_music.sources import is_media_source_enabled, is_media_source_selected
+from etk_music.base import MetaBase
+from etk_music.meta import MUSIC_CREDIT_FIELDS, MetaMusic, music_credit_values
+from etk_music.matching import (
+    align_music_tracks,
+    music_album_artist_evidence_matches,
+    music_album_matches,
+    music_album_title_is_weak,
+    music_album_year_matches,
+    music_artist_affix_matches,
+    music_artist_evidence_matches,
+    music_base_title,
+    music_credit_conflicts,
+    music_isrc_conflicts,
+    music_isrc_matches,
+    music_query_artists,
+    music_text_key,
+    music_title_matches,
+    music_titles,
+    music_track_title_is_weak,
+    music_version_matches,
+    music_year_matches,
+    unique_music_texts,
+)
+from etk_music.text import convert as zhconv_convert
+from etk_music.runtime import _ModuleBase
+from etk_music.cache import MusicBrainzCache
+from etk_music.cache import cached
+from etk_music.runtime import logger
+from etk_music.runtime import get_runtime_setting
+
+from etk_music.types import (
+    MUSIC_ENTITY_ALBUM,
+    MUSIC_ENTITY_ARTIST,
+    MUSIC_ENTITY_RECORDING,
+    MUSIC_ENTITY_TYPES,
+    MediaRecognizeType,
+    MediaSource,
+    MediaSourceSelection,
+    MediaType,
+    ModuleType,
+    MusicEntityType,
+)
+
+_RECORDING_INCLUDES = "artists+releases+release-groups+isrcs+genres+aliases+artist-rels+work-rels+work-level-rels"
+_RELEASE_RELATIONS = "+recording-level-rels+work-rels+work-level-rels+artist-rels"
+
+_MusicEvidenceModel = TypeVar("_MusicEvidenceModel", MusicInfo, MusicAlbumInfo)
+
+
+def _musicbrainz_artist_role(credits: dict[str, Any], relation: dict[str, Any], *, work: bool = False) -> None:
+    """
+    只消费实际Artist关系；作品作曲者和录音演奏角色各归其位。
+    """
+    artist = relation.get("artist") or {}
+    name = relation.get("target-credit") or artist.get("name")
+    kind = str(relation.get("type") or "").casefold()
+    if not artist.get("id") or not name:
+        return
+    if work:
+        if kind == "composer":
+            credits["composers"].append(str(name))
+        return
+    field = {"conductor": "conductors", "orchestra": "orchestras", "choir": "orchestras"}.get(kind)
+    if kind == "performer" and str(artist.get("type") or "").casefold() in {"orchestra", "choir"}:
+        field = "orchestras"
+    if field:
+        credits[field].append(str(name))
+    elif kind in {"instrument", "vocal", "performer"}:
+        role = ", ".join(str(item) for item in relation.get("attributes") or []) or kind
+        credits["performers"].setdefault(role, []).append(str(name))
+
+
+def _musicbrainz_credits(payload: dict[str, Any]) -> dict[str, Any]:
+    """
+    同次详情展开录音关系及其作品关系，不逐个作品额外请求或向所有曲目传播专辑角色。
+    """
+    credits = music_credit_values({})
+    for relation in payload.get("relations") or []:
+        _musicbrainz_artist_role(credits, relation)
+        if relation.get("type") == "performance":
+            for related in (relation.get("work") or {}).get("relations") or []:
+                _musicbrainz_artist_role(credits, related, work=True)
+    return music_credit_values(credits)
+
+
+def _remote_music_evidence(info: _MusicEvidenceModel) -> _MusicEvidenceModel:
+    """
+    只为响应中实际存在的标准字段标记远端来源，不给空值制造证据。
+    """
+    fields = ("title", "artists", "album", "album_artist", "year", "original_year", "release_year",
+              "release_date", "disc_number", "track_number", "total_tracks", "total_discs",
+              "version", "media_id", "musicbrainz_release_id", "musicbrainz_release_group_id",
+              "musicbrainz_release_track_id", *MUSIC_CREDIT_FIELDS)
+    info.field_sources.update({
+        key: "remote" for key in fields if getattr(info, key, None) not in (None, "", [], {})
+    })
+    return info
+
+
+@dataclass(frozen=True, slots=True)
+class _MusicBrainzRecognitionPlan:
+    """
+    MusicBrainz 识别的来源身份、实体范围与缓存策略。
+
+    :param meta: 候选搜索的音乐线索；仅按身份查询详情时可为 None
+    :param media_source: 本次查询解析后的媒体来源
+    :param media_id: 详情查询使用的原生标识；None 表示需要候选搜索
+    :param music_type: 请求实体范围，recording 为单曲、album 为专辑；None 保留先单曲后专辑的兼容顺序
+    :param cache_enabled: 是否允许读取本地识别缓存，默认允许；纯详情计划关闭该标志
+    """
+
+    meta: Optional[MetaMusic]
+    media_source: MediaSource
+    media_id: Optional[str]
+    music_type: Optional[str]
+    cache_enabled: bool = True
+
+    @property
+    def search_recording(self) -> bool:
+        """
+        判断计划是否允许查询单曲。
+
+        :return: 仅当实体范围不是 album 时返回 True
+        """
+        return bool(self.music_type != MUSIC_ENTITY_ALBUM)
+
+    @property
+    def search_album(self) -> bool:
+        """
+        判断单曲未命中后是否允许尝试专辑。
+
+        :return: 仅当实体范围不是 recording 时返回 True
+        """
+        return bool(self.music_type != MUSIC_ENTITY_RECORDING)
+
+    def require_meta(self) -> MetaMusic:
+        """
+        读取候选搜索必需的音乐线索。
+
+        :return: 计划保存的音乐线索
+        :raises RuntimeError: 计划未提供 meta，调用方选错了执行分支
+        """
+        if self.meta is None:
+            raise RuntimeError("MusicBrainz 候选识别计划缺少音乐元数据")
+        return self.meta
+
+    def require_media_id(self) -> str:
+        """
+        读取详情查询必需的原生标识。
+
+        :return: 计划保存的来源标识
+        :raises RuntimeError: 计划未提供 media_id，调用方选错了执行分支
+        """
+        if self.media_id is None:
+            raise RuntimeError("MusicBrainz 详情识别计划缺少原生 ID")
+        return self.media_id
+
+    def detail_kwargs(self) -> dict[str, str]:
+        """
+        生成详情调用的可选实体参数，保持旧签名兼容。
+
+        :return: 已指定实体时返回含 music_type 的映射，未指定时为空映射
+        """
+        return (
+            {"music_type": self.music_type}
+            if self.music_type is not None
+            else {}
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class _MusicReleasePreference:
+    """
+    发行版本选择时使用的地区与文字字形优先顺序。
+
+    :param regions: 按优先级排列的地区代码，未列出地区排在最后
+    :param scripts: 按优先级排列的字形代码，未列出字形排在最后
+    """
+
+    regions: tuple[str, ...]
+    scripts: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _MusicBrainzResponseDecision:
+    """
+    单次响应解析结果及是否需要等待重试的决定。
+
+    :param payload: 解析后的业务响应；未得到结果时为 None，空映射可表示未找到
+    :param retry_delay: 重试前等待秒数；None 表示不再重试，默认 None
+    """
+
+    payload: Optional[dict[str, Any]] = None
+    retry_delay: Optional[float] = None
+
+
+@dataclass(frozen=True, slots=True)
+class _MusicBrainzRequestPlan:
+    """
+    同步与异步 MusicBrainz 查询共享的请求计划。
+
+    :param path: 相对 MusicBrainz 服务根地址的接口路径
+    :param params: 查询参数，包含实体展开范围或 JSON 响应格式
+    """
+
+    path: str
+    params: dict[str, Any]
+
+
+class MusicBrainzModule(_ModuleBase):
+    """
+    通过 MusicBrainz 提供音乐元数据搜索和详情识别。
+    """
+
+    _source = MediaSource.MusicBrainz
+    _base_url = "https://musicbrainz.org/ws/2"
+    _detail_url = "https://musicbrainz.org/recording"
+    _album_detail_url = "https://musicbrainz.org/release-group"
+    _artist_detail_url = "https://musicbrainz.org/artist"
+    _cover_url = "https://coverartarchive.org/release-group"
+    # 公共接口的相邻请求至少间隔一秒，同步与异步入口共享预留时间
+    _request_interval = 1.0
+    _request_lock = threading.Lock()
+    _last_request_at = 0.0
+    # 本地识别缓存，由模块管理器初始化时挂载
+    cache: Optional[MusicBrainzCache] = None
+    # 全局复用 HTTP 连接，减少重复 DNS 查询和 TLS 握手。
+    _request: Optional[RequestUtils] = None
+    _client_lock = threading.Lock()
+    # 服务端繁忙（429/5xx）时的重试次数与退避基数，重试间隔随次数翻倍递增
+    _busy_retries = 2
+    _busy_backoff = 5.0
+    # 关联艺术家按关系可读性排序，纪念性质的致敬关系数量庞大且价值低，放到最后
+    _artist_relation_priority = (
+        "member of band",
+        "subgroup",
+        "collaboration",
+        "founder",
+        "artist rename",
+        "supporting musician",
+        "conductor position",
+        "involved with",
+        "teacher",
+        "sibling",
+        "parent",
+        "married",
+    )
+    # 艺术家外链只保留对用户有意义的官方与流媒体入口
+    _artist_link_types = (
+        "official homepage",
+        "wikidata",
+        "wikipedia",
+        "discogs",
+        "allmusic",
+        "social network",
+        "free streaming",
+        "streaming",
+        "youtube",
+        "purchase for download",
+    )
+
+    @staticmethod
+    def _preference_values(
+            values: Optional[Iterable[str]],
+            setting_name: str,
+            *,
+            upper: bool,
+    ) -> tuple[str, ...]:
+        """
+        规范请求级代码；未传入时读取系统默认并稳定去重。
+        """
+        configured: Iterable[str]
+        if values is None:
+            configured = str(get_runtime_setting(setting_name, "") or "").split(",")
+        else:
+            configured = values
+        normalized: list[str] = []
+        for value in configured:
+            code = str(value).strip()
+            code = code.upper() if upper else code.title()
+            if code and code not in normalized:
+                normalized.append(code)
+        return tuple(normalized[:3])
+
+    @classmethod
+    def _release_preference(
+            cls,
+            regions: Optional[Iterable[str]] = None,
+            scripts: Optional[Iterable[str]] = None,
+    ) -> _MusicReleasePreference:
+        """
+        返回本次发行选择的显式偏好或部署默认值。
+        """
+        return _MusicReleasePreference(
+            regions=cls._preference_values(
+                regions,
+                "MUSIC_RELEASE_REGION_PRIORITY",
+                upper=True,
+            ),
+            scripts=cls._preference_values(
+                scripts,
+                "MUSIC_RELEASE_SCRIPT_PRIORITY",
+                upper=False,
+            ),
+        )
+
+    @staticmethod
+    def _release_script(release: dict[str, Any]) -> str:
+        """
+        提取 MusicBrainz Release 的 ISO 15924 文字字形。
+        """
+        representation = release.get("text-representation") or {}
+        return str(representation.get("script") or "").strip().title()
+
+    @classmethod
+    def _release_preference_sort_key(
+            cls,
+            release: dict[str, Any],
+            preference: _MusicReleasePreference,
+    ) -> tuple[int, int]:
+        """
+        生成地区与字形的稳定升序键；未匹配项排在显式偏好之后。
+        """
+        country = str(release.get("country") or "").strip().upper()
+        script = cls._release_script(release)
+        region_rank = preference.regions.index(country) if country in preference.regions else len(preference.regions)
+        script_rank = preference.scripts.index(script) if script in preference.scripts else len(preference.scripts)
+        return region_rank, script_rank
+
+    def init_module(self) -> None:
+        """
+        初始化 MusicBrainz 模块并挂载本地识别缓存。
+        """
+        self.cache = MusicBrainzCache()
+
+    def init_setting(self) -> Optional[Tuple[str, Union[str, bool]]]:
+        """
+        MusicBrainz 无需独立密钥或启用开关。
+        """
+        return None
+
+    def stop(self) -> None:
+        """
+        持久化识别缓存并关闭复用的 HTTP 客户端。
+
+        缓存保存异常记录日志后继续关闭客户端；关闭后清空类级客户端引用。
+        """
+        if self.cache:
+            try:
+                self.cache.save()
+            except Exception as err:
+                logger.error(f"保存音乐识别缓存失败：{str(err)}")
+        if self._request is not None:
+            self._request.close()
+            self.__class__._request = None
+
+    def scheduler_job(self) -> None:
+        """
+        定时任务，每10分钟持久化一次音乐识别缓存。
+        """
+        if self.cache:
+            self.cache.save()
+
+    def clear_cache(self) -> None:
+        """
+        响应全局缓存清理事件，清空音乐识别缓存。
+        """
+        logger.info("开始清除音乐识别缓存 ...")
+        self.music_cache_clear()
+        logger.info("音乐识别缓存清除完成")
+
+    def music_cache_items(self) -> list[dict[str, object]]:
+        """
+        列出可供管理界面展示的音乐识别缓存。
+
+        :return: 按缓存键排序的条目列表；缓存未初始化时为空列表
+        """
+        return self.cache.list_items() if self.cache else []
+
+    def music_cache_delete(self, cache_key: str) -> dict[str, object]:
+        """
+        按键删除识别缓存，删除成功时同时清空 HTTP 请求缓存。
+
+        :param cache_key: 管理界面返回的完整缓存键
+        :return: 删除前的数据；键不存在或缓存未初始化时为空映射
+        """
+        deleted = self.cache.delete(cache_key) if self.cache else {}
+        if deleted:
+            getattr(self._request_json, "cache_clear")()
+        return deleted
+
+    def music_cache_clear(self) -> None:
+        """
+        清空全部音乐识别缓存。
+        """
+        if self.cache:
+            self.cache.clear()
+        getattr(self._request_json, "cache_clear")()
+
+    def test(self) -> Tuple[bool, str]:
+        """
+        测试 MusicBrainz 搜索接口连通性。
+        """
+        result = self._request_json(
+            "/recording",
+            params={"query": "recording:test", "limit": 1, "fmt": "json"},
+        )
+        return (True, "") if result is not None else (False, "MusicBrainz 网络连接失败")
+
+    @staticmethod
+    def get_name() -> str:
+        """
+        返回模块展示名称。
+        """
+        return "MusicBrainz"
+
+    @staticmethod
+    def get_music_source() -> MediaSource:
+        """
+        返回音乐识别使用的数据源标识。
+        """
+        return MusicBrainzModule._source
+
+    @staticmethod
+    def get_type() -> ModuleType:
+        """
+        返回模块所属的媒体识别类型。
+        """
+        return ModuleType.MediaRecognize
+
+    @staticmethod
+    def get_subtype() -> MediaRecognizeType:
+        """
+        返回 MusicBrainz 模块子类型。
+        """
+        return MediaRecognizeType.MusicBrainz
+
+    @staticmethod
+    def get_priority() -> int:
+        """
+        音乐识别在所有 MediaRecognize 模块中最先响应，避免音乐请求被影视模块误识别。
+        """
+        return 0
+
+    def search_music(
+            self,
+            meta: MetaMusic,
+            limit: int = 20,
+            media_source: Optional[MediaSourceSelection] = None,
+            music_types: Optional[Iterable[MusicEntityType]] = None,
+    ) -> Optional[list[MusicInfo]]:
+        """
+        按请求实体搜索音乐候选，并交错合并不同实体结果。
+
+        中文标题和单独专辑搜索会扩大召回窗口再重排，最终仍按 limit 截断。
+
+        :param meta: 标题、艺术家、专辑及其他搜索线索
+        :param limit: 结果数量，限制在 1 至 100
+        :param media_source: 来源选择条件，不包含 MusicBrainz 时不响应
+        :param music_types: 允许的单曲、专辑、艺术家实体；空值使用全部，未知实体被忽略
+        :return: 统一音乐候选列表；来源未选中时为 None，无有效实体或候选时为空列表
+        """
+        if not is_media_source_selected(media_source, self._source):
+            return None
+        normalized_limit = max(1, min(limit, 100))
+        requested_types = {
+            music_type
+            for music_type in (music_types or MUSIC_ENTITY_TYPES)
+            if music_type in MUSIC_ENTITY_TYPES
+        }
+        if not requested_types:
+            return []
+        # 中文逐字召回可能包含很多局部命中，扩大单次窗口后按完整名称重新排序。
+        fetch_limit = min(100, normalized_limit * 3) if self._QUERY_CJK_RE.search(meta.title or "") else normalized_limit
+        # 同名发行组远多于一页；专辑实体单独搜索时扩大召回，再用年份、艺人与发行类型重排。
+        album_fetch_limit = min(100, normalized_limit * 5) if requested_types == {MUSIC_ENTITY_ALBUM} else fetch_limit
+        recordings = (
+            self._rank_search_candidates(meta, self._search_recordings(meta, limit=fetch_limit))
+            if MUSIC_ENTITY_RECORDING in requested_types else []
+        )
+        albums = (
+            self._rank_album_search_candidates(meta, self._search_albums(meta, limit=album_fetch_limit))
+            if MUSIC_ENTITY_ALBUM in requested_types else []
+        )
+        artists = (
+            self._rank_search_candidates(meta, self._search_artists(meta, limit=fetch_limit))
+            if MUSIC_ENTITY_ARTIST in requested_types else []
+        )
+        groups = {
+            MUSIC_ENTITY_RECORDING: recordings,
+            MUSIC_ENTITY_ALBUM: albums,
+            MUSIC_ENTITY_ARTIST: artists,
+        }
+        return self._interleave_results(
+            *(groups[music_type] for music_type in (
+                MUSIC_ENTITY_RECORDING,
+                MUSIC_ENTITY_ALBUM,
+                MUSIC_ENTITY_ARTIST,
+            ) if music_type in requested_types),
+            limit=normalized_limit,
+        )
+
+    def search_persons(
+            self,
+            name: str,
+            media_source: Optional[MediaSourceSelection] = None,
+    ) -> Optional[list[MusicArtistInfo]]:
+        """
+        按名称查询最多 20 个 MusicBrainz 艺术家。
+
+        :param name: 艺术家名称，空值不查询
+        :param media_source: 启用的来源选择条件
+        :return: 艺术家列表；来源未启用时为 None，无名称或结果时为空列表
+        """
+        if not is_media_source_enabled(media_source, self._source):
+            return None
+        if not name:
+            return []
+        return self._search_artist_infos(MetaMusic(title=name), limit=20)
+
+    async def async_search_persons(
+            self,
+            name: str,
+            media_source: Optional[MediaSourceSelection] = None,
+    ) -> Optional[list[MusicArtistInfo]]:
+        """
+        异步按名称查询最多 20 个 MusicBrainz 艺术家。
+
+        :param name: 艺术家名称，空值不查询
+        :param media_source: 启用的来源选择条件
+        :return: 艺术家列表；来源未启用时为 None，无名称或结果时为空列表
+        """
+        if not is_media_source_enabled(media_source, self._source):
+            return None
+        if not name:
+            return []
+        return await self._async_search_artist_infos(MetaMusic(title=name), limit=20)
+
+    @staticmethod
+    def _rank_search_candidates(meta: MetaMusic, candidates: list[MusicInfo]) -> list[MusicInfo]:
+        """
+        按完整作品名及输入署名排序浏览候选，不把逐字 OR 命中视为精确身份。
+        """
+        expected = music_text_key(meta.title)
+        expected_artists = {music_text_key(artist) for artist in meta.artists}
+
+        def score(info: MusicInfo) -> tuple[bool, float, bool]:
+            """
+            整名优先；普通组合输入同时比较艺术家与作品名，原始顺序用于同分稳定排序。
+            """
+            names = [info.title, *(info.title_aliases or [])]
+            if not meta.artists:
+                names.extend(f"{artist} {info.title or ''}" for artist in [*info.artists, *(info.artist_aliases or [])])
+            keys = [music_text_key(name) for name in names if name]
+            artist_match = bool(expected_artists & {
+                music_text_key(artist) for artist in [*info.artists, *(info.artist_aliases or [])]
+            })
+            similarity = max((SequenceMatcher(None, expected, key).ratio() for key in keys), default=0.0)
+            return expected in keys, similarity, artist_match
+
+        return sorted(candidates, key=score, reverse=True)
+
+    @staticmethod
+    def _rank_album_search_candidates(meta: MetaMusic, candidates: list[MusicInfo]) -> list[MusicInfo]:
+        """
+        按完整专辑名、艺人、年份和发行类型排序 Release Group 候选。
+        """
+        expected = music_text_key(meta.album or meta.title)
+        expected_artists = {music_text_key(artist) for artist in meta.artists}
+
+        def score(info: MusicInfo) -> tuple[bool, bool, bool, bool, bool, float]:
+            """
+            按专辑完整标题、署名、年份和发行类型生成稳定排序权重。
+
+            :param info: 统一音乐格式的专辑候选
+            :return: 用于候选排序的匹配权重
+            """
+            names = [info.title, *(info.title_aliases or [])]
+            keys = [music_text_key(name) for name in names if name]
+            candidate_artists = {
+                music_text_key(artist)
+                for artist in [*info.artists, *(info.artist_aliases or [])]
+            }
+            similarity = max((SequenceMatcher(None, expected, key).ratio() for key in keys), default=0.0)
+            return (
+                expected in keys,
+                bool(expected_artists and expected_artists & candidate_artists),
+                bool(meta.year and info.year and int(meta.year) == int(info.year)),
+                str(info.album_type or "").casefold() == "album",
+                not bool(info.secondary_types),
+                similarity,
+            )
+
+        return sorted(candidates, key=score, reverse=True)
+
+    def _search_recordings(self, meta: MetaMusic, limit: int, require_match: bool = False) -> list[MusicInfo]:
+        """
+        查询 Recording；自动识别须确认身份才停止，手动浏览仍保留原始候选。
+        """
+        credit_details: dict[str, Optional[dict[str, Any]]] = {}
+        for query in self._recording_queries(meta):
+            payload = self._request_json(
+                "/recording",
+                params={"query": query, "limit": max(1, min(limit, 100)), "fmt": "json"},
+            )
+            results = self._project_recording_search(payload)
+            if require_match:
+                self._enrich_recording_credits(meta, results, credit_details)
+                enrich_music_artist_aliases(
+                    ((meta, item) for item in results), self._source,
+                    lambda identity: self._lookup_artist_aliases([identity], []),
+                )
+            if results and (not require_match or self._select_candidate(meta, results, self._source)):
+                return results
+        return []
+
+    async def _async_search_recordings(
+            self,
+            meta: MetaMusic,
+            limit: int,
+            require_match: bool = False,
+    ) -> list[MusicInfo]:
+        """
+        异步查询 Recording，与同步入口共用候选准入和停止条件。
+        """
+        credit_details: dict[str, Optional[dict[str, Any]]] = {}
+        for query in self._recording_queries(meta):
+            payload = await self._async_request_json(
+                "/recording",
+                params={
+                    "query": query,
+                    "limit": max(1, min(limit, 100)),
+                    "fmt": "json",
+                },
+            )
+            results = self._project_recording_search(payload)
+            if require_match:
+                await self._async_enrich_recording_credits(meta, results, credit_details)
+                await async_enrich_music_artist_aliases(
+                    ((meta, item) for item in results), self._source,
+                    lambda identity: self._async_lookup_artist_aliases([identity], []),
+                )
+            if results and (not require_match or self._select_candidate(meta, results, self._source)):
+                return results
+        return []
+
+    @classmethod
+    def _project_recording_search(
+            cls, payload: Optional[dict[str, Any]]
+    ) -> list[MusicInfo]:
+        """
+        把 Recording 搜索响应投影为统一音乐候选。
+        """
+        return [
+            info
+            for item in (payload or {}).get("recordings") or []
+            if (info := cls._recording_to_info(item))
+        ]
+
+    @classmethod
+    def _recording_credit_targets(cls, meta: MetaMusic, candidates: list[MusicInfo]) -> dict[str, list[MusicInfo]]:
+        """
+        本地存在角色证据且搜索摘要缺失时，最多核验三个不同录音，沿用现有请求预算。
+        """
+        roles = [key for key, value in music_credit_values(meta).items() if value]
+        targets: dict[str, list[MusicInfo]] = {}
+        if not roles:
+            return targets
+        for candidate in candidates:
+            identity = candidate.media_id
+            if not identity or candidate.media_source != cls._source or all(getattr(candidate, key) for key in roles):
+                continue
+            if not music_title_matches(candidate, meta.title) or not music_version_matches(candidate, meta) or not music_year_matches(candidate, meta):
+                continue
+            if identity in targets or len(targets) < 3:
+                targets.setdefault(identity, []).append(candidate)
+        return targets
+
+    @staticmethod
+    def _apply_recording_credits(identity: str, candidates: list[MusicInfo], payload: Optional[dict[str, Any]]) -> None:
+        """
+        只把同一Recording详情中的非空角色补入本次摘要副本，不改变其主身份。
+        """
+        if not payload or payload.get("id") != identity:
+            return
+        credits = {key: value for key, value in _musicbrainz_credits(payload).items() if value}
+        for candidate in candidates:
+            candidate.__dict__.update(deepcopy(credits))
+            _remote_music_evidence(candidate)
+
+    def _enrich_recording_credits(self, meta: MetaMusic, candidates: list[MusicInfo],
+                                 details: dict[str, Optional[dict[str, Any]]]) -> None:
+        """
+        检索阶梯共用三个录音的补证上限，失败身份同样计数，普通音乐不新增请求。
+        """
+        for identity, targets in self._recording_credit_targets(meta, candidates).items():
+            if identity not in details and len(details) < 3:
+                details[identity] = self._request_json(f"/recording/{identity}", params={"inc": _RECORDING_INCLUDES, "fmt": "json"})
+            self._apply_recording_credits(identity, targets, details.get(identity))
+
+    async def _async_enrich_recording_credits(self, meta: MetaMusic, candidates: list[MusicInfo],
+                                             details: dict[str, Optional[dict[str, Any]]]) -> None:
+        """
+        异步补证使用相同候选上限、身份核验、缓存与请求预算。
+        """
+        for identity, targets in self._recording_credit_targets(meta, candidates).items():
+            if identity not in details and len(details) < 3:
+                details[identity] = await self._async_request_json(f"/recording/{identity}", params={"inc": _RECORDING_INCLUDES, "fmt": "json"})
+            self._apply_recording_credits(identity, targets, details.get(identity))
+
+    @classmethod
+    def _recording_queries(cls, meta: MetaMusic) -> list[str]:
+        """
+        构造 Recording 检索式阶梯，由严到宽逐级放宽避免零命中。
+
+        条目括号多为全角、艺术家署名存在变体（如外文艺名），精确 AND 条件容易零命中；
+        放宽后由候选评分负责收紧（已知艺术家时必须艺术家命中），不会产生错误身份。
+        """
+        title = cls._search_title(meta.title)
+        if not title:
+            return []
+        query_artists = music_query_artists(meta)
+        artist = query_artists[0] if query_artists else None
+        # 括号内的影视关联说明、版本说明多为半角，与条目全角写法不一致，准备去注释曲名兜底
+        bare_title = cls._strip_parenthetical(title)
+        # 曲名开头的艺术家署名前缀是命名习惯不是曲名内容，用主体名检索
+        title = cls._strip_artist_prefix(title, meta.artists)
+        bare_title = cls._strip_artist_prefix(bare_title, meta.artists)
+        queries: list[str] = []
+        for query in [
+            cls._build_query(meta),
+            f"recording:{cls._query_phrase(title)}" if title else None,
+            f'recording:{cls._query_phrase(bare_title)} AND artist:{cls._query_phrase(artist)}'
+            if artist and bare_title and bare_title != title else None,
+            # 艺术家署名变体（外文艺名等）导致 AND 条件零命中时，仅按主体曲名检索，
+            # 候选挑选阶段要求艺术家命中兜住同名异曲
+            f"recording:{cls._query_phrase(bare_title)}" if bare_title else None,
+            f"recording:{cls._query_phrase(bare_title or title, loose=True)}"
+            if cls._QUERY_CJK_RE.search(title) else None,
+        ]:
+            if query and query not in queries:
+                queries.append(query)
+        return queries
+
+    @classmethod
+    def _strip_parenthetical(cls, value: Optional[str]) -> str:
+        """
+        去除标题中的括号注释，保留主体曲名；空标题返回空字符串。
+        """
+        text = re.sub(r"[\(（][^\)）]*[\)）]", " ", str(value or ""))
+        return cls._normalize_text(text)
+
+    @classmethod
+    def _main_title(cls, value: Optional[str]) -> str:
+        """
+        提取冒号副标题结构的主标题，兼容全角/半角冒号。
+        """
+        text = re.split(r"\s*[：:]\s*", str(value or ""), maxsplit=1)[0]
+        return cls._normalize_text(text)
+
+    @classmethod
+    def _head_title(cls, value: Optional[str]) -> str:
+        """
+        提取候选「曲名-歌手」「曲名《巡演名》…」命名的首段曲名。
+        """
+        text = re.split(r"\s*[-–—−－：:]\s*|\s*《", str(value or ""), maxsplit=1)[0]
+        return cls._normalize_text(text)
+
+    @classmethod
+    def _lead_token(cls, value: Optional[str]) -> str:
+        """
+        提取候选标题首个空白分隔段（「愛情電影主題曲 雲且留住」的主体名）。
+        """
+        text = str(value or "").strip()
+        return cls._normalize_text(text.split(" ", 1)[0]) if text else ""
+
+    # 系列专辑的卷号后缀（好歌茹芸, Vol. 3）是发行分卷标记，条目本体不含卷号
+    _VOLUME_SUFFIX_RE = re.compile(r",?\s*vol\.?\s*\d+$", re.IGNORECASE)
+    # 卷号提取：标题任意位置的 Vol. N 写法，系列专辑弱匹配时用于分卷一致性校验
+    _VOLUME_NUMBER_RE = re.compile(r"vol\.?\s*(\d+)", re.IGNORECASE)
+
+    @classmethod
+    def _strip_volume_suffix(cls, value: Optional[str]) -> str:
+        """
+        剔除标题尾部的卷号后缀，返回专辑本体名。
+        """
+        return cls._normalize_text(cls._VOLUME_SUFFIX_RE.sub("", str(value or "")))
+
+    @classmethod
+    def _volume_number(cls, value: Optional[str]) -> Optional[str]:
+        """
+        提取标题中的卷号（Vol. 3 -> 3），无卷号返回 None。
+        """
+        match = cls._VOLUME_NUMBER_RE.search(str(value or ""))
+        return match.group(1) if match else None
+
+    # 原声带资源标题的通用描述词尾部（条目本体是电影名）；
+    # 尾部描述词保留时作为原声带形态标记参与弱匹配判定
+    _SOUNDTRACK_SUFFIX_RE = re.compile(
+        r"\s*(?:original\s+motion\s+picture|motion\s+picture)?\s*"
+        r"(?<![A-Za-z0-9])(?:original\s+)?(?:soundtrack|score|ost)$",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _soundtrack_body(cls, value: Optional[str]) -> str:
+        """
+        剔除原声带标题尾部的通用描述词，返回电影名本体；无描述词返回空串。
+        """
+        text = str(value or "").strip()
+        body = cls._SOUNDTRACK_SUFFIX_RE.sub("", text)
+        if not body or body == text:
+            return ""
+        return cls._normalize_text(body)
+
+    # 演唱会资源的标题常带演出后缀（S.H.E十七音乐会），条目仅保留演出名本体
+    _PERFORMANCE_SUFFIX_RE = re.compile(
+        r"\s*(?:音乐会|音樂會|演唱会|演唱會|巡回|巡演|Live|Tour)$", re.IGNORECASE)
+
+    @classmethod
+    def _performance_title(cls, value: Optional[str]) -> str:
+        """
+        剔除标题尾部的演出形态后缀，返回演出名本体。
+        """
+        return cls._normalize_text(cls._PERFORMANCE_SUFFIX_RE.sub("", str(value or "")))
+
+    @classmethod
+    def _strip_artist_prefix(cls, title: Optional[str], artists: Optional[list[str]]) -> str:
+        """
+        剥离完整署名前缀，不截断单词；保留中文连写与“的/之”署名习惯。
+        """
+        text = str(title or "").strip()
+        for artist in artists or []:
+            artist = str(artist or "").strip()
+            if len(artist) < 2:
+                continue
+            if text.startswith(artist) and music_artist_affix_matches(text, artist):
+                remainder = text[len(artist):].lstrip(" \t-–—−－/|:：;；")
+                remainder = re.sub(r"^[的之]\s*", "", remainder).strip()
+                if remainder:
+                    return remainder
+        return text
+
+    def _search_albums(self, meta: MetaMusic, limit: int, require_match: bool = False) -> list[MusicInfo]:
+        """
+        查询 Release Group；自动识别只在存在可确认专辑时停止检索式回退。
+        """
+        for query in self._album_queries(meta):
+            payload = self._request_json(
+                "/release-group",
+                params={
+                    "query": query,
+                    "limit": max(1, min(limit, 100)),
+                    "fmt": "json",
+                },
+            )
+            results = self._project_album_search(payload)
+            if require_match:
+                enrich_music_artist_aliases(
+                    ((meta, item) for item in results), self._source,
+                    lambda identity: self._lookup_artist_aliases([identity], []),
+                )
+            if results and (not require_match or self._select_album_candidate(meta, results)):
+                return results
+        return []
+
+    async def _async_search_albums(
+            self,
+            meta: MetaMusic,
+            limit: int,
+            require_match: bool = False,
+    ) -> list[MusicInfo]:
+        """
+        异步查询 Release Group，与同步入口共用候选准入和停止条件。
+        """
+        for query in self._album_queries(meta):
+            payload = await self._async_request_json(
+                "/release-group",
+                params={
+                    "query": query,
+                    "limit": max(1, min(limit, 100)),
+                    "fmt": "json",
+                },
+            )
+            results = self._project_album_search(payload)
+            if require_match:
+                await async_enrich_music_artist_aliases(
+                    ((meta, item) for item in results), self._source,
+                    lambda identity: self._async_lookup_artist_aliases([identity], []),
+                )
+            if results and (not require_match or self._select_album_candidate(meta, results)):
+                return results
+        return []
+
+    @classmethod
+    def _project_album_search(
+            cls, payload: Optional[dict[str, Any]]
+    ) -> list[MusicInfo]:
+        """
+        把 Release Group 搜索响应投影为统一音乐候选。
+        """
+        return [
+            album.to_music_info()
+            for item in (payload or {}).get("release-groups") or []
+            if (album := cls._release_group_to_album(item))
+        ]
+
+    @classmethod
+    def _album_queries(cls, meta: MetaMusic) -> list[str]:
+        """
+        构造专辑检索式阶梯：专辑名+艺术家 → 仅专辑名 → 去括号/卷号变体。
+        """
+        original_title = cls._search_title(meta.album or meta.title, preserve_script=True)
+        title = cls._search_title(meta.album or meta.title)
+        if not title:
+            return []
+        artist = meta.artists[0] if meta.artists else None
+        # 括号注释与 Vol. 卷号在条目中常以 disambiguation 形式存在，变体名兜底检索
+        bare_title = cls._strip_parenthetical(title)
+        bare_title = cls._strip_volume_suffix(bare_title)
+        # 专辑名开头的艺术家署名前缀同样是命名习惯，用主体名检索
+        title = cls._strip_artist_prefix(title, meta.artists)
+        bare_title = cls._strip_artist_prefix(bare_title, meta.artists)
+        # 原声带标题的通用描述词（Original Motion Picture Soundtrack）在条目中常省略，
+        # 用电影名本体补充一级检索（The Hateful Eight / Pulp Fiction）；
+        # 本体过短（The Score 类）时不作为独立检索目标避免噪声
+        soundtrack_body = cls._soundtrack_body(bare_title)
+        if len(cls._match_text(soundtrack_body)) < 4:
+            soundtrack_body = ""
+        queries: list[str] = []
+        for query in [
+            f'releasegroup:{cls._query_phrase(original_title)} AND artist:{cls._query_phrase(artist)}'
+            if artist else f"releasegroup:{cls._query_phrase(original_title)}",
+            f'releasegroup:{cls._query_phrase(title)} AND artist:{cls._query_phrase(artist)}'
+            if artist else None,
+            f"releasegroup:{cls._query_phrase(title)}" if title else None,
+            f'releasegroup:{cls._query_phrase(bare_title)} AND artist:{cls._query_phrase(artist)}'
+            if artist and bare_title and bare_title != title else None,
+            f'releasegroup:{cls._query_phrase(soundtrack_body)} AND artist:{cls._query_phrase(artist)}'
+            if artist and soundtrack_body else None,
+            f"releasegroup:{cls._query_phrase(soundtrack_body)}" if soundtrack_body else None,
+            # 署名变体兜底：仅按去注释专辑名检索，挑选阶段要求艺术家同时命中
+            f"releasegroup:{cls._query_phrase(bare_title)}" if bare_title else None,
+            f"releasegroup:{cls._query_phrase(bare_title or title, loose=True)}"
+            if cls._QUERY_CJK_RE.search(title) else None,
+        ]:
+            if query and query not in queries:
+                queries.append(query)
+        return queries
+
+    def _search_artist_infos(self, meta: MetaMusic, limit: int) -> list[MusicArtistInfo]:
+        """
+        按用户输入中的艺术家部分搜索标准 Artist 信息。
+        """
+        artist_name = meta.artists[0] if meta.artists else meta.title
+        phrase = self._query_phrase(artist_name)
+        if not phrase:
+            return []
+        payload = self._request_json(
+            "/artist",
+            params={"query": f"artist:{phrase}", "limit": max(1, min(limit, 100)), "fmt": "json"},
+        )
+        return [
+            artist
+            for item in (payload or {}).get("artists") or []
+            if (artist := self._artist_to_info(item, include_raw=True))
+        ]
+
+    async def _async_search_artist_infos(self, meta: MetaMusic, limit: int) -> list[MusicArtistInfo]:
+        """
+        异步按用户输入中的艺术家部分搜索标准 Artist 信息。
+        """
+        artist_name = meta.artists[0] if meta.artists else meta.title
+        phrase = self._query_phrase(artist_name)
+        if not phrase:
+            return []
+        payload = await self._async_request_json(
+            "/artist",
+            params={"query": f"artist:{phrase}", "limit": max(1, min(limit, 100)), "fmt": "json"},
+        )
+        return [
+            artist
+            for item in (payload or {}).get("artists") or []
+            if (artist := self._artist_to_info(item, include_raw=True))
+        ]
+
+    def _search_artists(self, meta: MetaMusic, limit: int) -> list[MusicInfo]:
+        """
+        按用户输入中的艺术家部分搜索音乐卡片候选。
+        """
+        return [artist.to_music_info() for artist in self._search_artist_infos(meta, limit)]
+
+    @staticmethod
+    def _interleave_results(*groups: list[MusicInfo], limit: int) -> list[MusicInfo]:
+        """
+        按实体轮询合并结果，避免单曲数量占满全局搜索页。
+        """
+        results: list[MusicInfo] = []
+        index = 0
+        while len(results) < limit and any(index < len(group) for group in groups):
+            for group in groups:
+                if index < len(group):
+                    results.append(group[index])
+                    if len(results) >= limit:
+                        break
+            index += 1
+        return results
+
+    def match_music_album(
+            self,
+            meta: MetaMusic,
+            tracks: list[MetaMusic],
+            limit: int = 5,
+            music_release_regions: Optional[list[str]] = None,
+            music_release_scripts: Optional[list[str]] = None,
+    ) -> Optional[MusicAlbumInfo]:
+        """
+        根据目录线索和曲目证据匹配具体发行版本。
+
+        先获取候选发行详情，再比较曲目数、时长、署名与版本证据。
+        任何必要详情请求失败都会放弃本次匹配，避免在不完整候选中错误确认。
+
+        :param meta: 专辑线索，可携带明确的发行标识；含整理错误时不查询
+        :param tracks: 本地曲目线索，至少需要一条
+        :param limit: 候选发行搜索的数量预算
+        :param music_release_regions: 发行地区优先顺序，省略时使用运行配置
+        :param music_release_scripts: 发行文字字形优先顺序，省略时使用运行配置
+        :return: 带完整曲目表的确认专辑；无合格结果、版本歧义或查询失败时返回 None
+        """
+        with capture_music_recognition():
+            if not tracks or meta.organization_error:
+                return None
+            preference = self._release_preference(
+                music_release_regions,
+                music_release_scripts,
+            )
+            details: list[dict[str, Any]] = []
+            releases = [{"id": meta.musicbrainz_release_id}] if meta.musicbrainz_release_id else self._search_release_candidates(
+                meta,
+                tracks,
+                limit=limit,
+                preference=preference,
+            )
+            for request in self._release_detail_requests(releases):
+                detail = self._request_json(request.path, params=request.params)
+                if detail is None or music_recognition_failed():
+                    report_music_recognition("service_error", "音乐发行详情暂时无法获取，请稍后重试")
+                    return None
+                if not detail:
+                    continue
+                details.append(detail)
+            albums = {str(detail["id"]): album for detail in details if (album := self._release_to_album(detail))}
+            pairs: Iterable[tuple[MetaMusic, MusicInfo | MusicAlbumInfo]] = chain(
+                ((meta, album) for album in albums.values()),
+                ((local, remote) for album in albums.values() for remote in album.tracks for local in tracks),
+            )
+            enrich_music_artist_aliases(pairs, self._source, lambda identity: self._lookup_artist_aliases([identity], []))
+            if music_recognition_failed():
+                return None
+            return self._select_release_match(meta, tracks, details, preference, albums)
+
+    async def async_match_music_album(
+            self,
+            meta: MetaMusic,
+            tracks: list[MetaMusic],
+            limit: int = 5,
+            music_release_regions: Optional[list[str]] = None,
+            music_release_scripts: Optional[list[str]] = None,
+    ) -> Optional[MusicAlbumInfo]:
+        """
+        异步根据目录线索和曲目证据匹配具体发行版本。
+
+        先获取候选发行详情，再比较曲目数、时长、署名与版本证据。
+        任何必要详情请求失败都会放弃本次匹配，避免在不完整候选中错误确认。
+
+        :param meta: 专辑线索，可携带明确的发行标识；含整理错误时不查询
+        :param tracks: 本地曲目线索，至少需要一条
+        :param limit: 候选发行搜索的数量预算
+        :param music_release_regions: 发行地区优先顺序，省略时使用运行配置
+        :param music_release_scripts: 发行文字字形优先顺序，省略时使用运行配置
+        :return: 带完整曲目表的确认专辑；无合格结果、版本歧义或查询失败时返回 None
+        """
+        with capture_music_recognition():
+            if not tracks or meta.organization_error:
+                return None
+            preference = self._release_preference(
+                music_release_regions,
+                music_release_scripts,
+            )
+            details: list[dict[str, Any]] = []
+            releases = [{"id": meta.musicbrainz_release_id}] if meta.musicbrainz_release_id else await self._async_search_release_candidates(
+                meta,
+                tracks,
+                limit=limit,
+                preference=preference,
+            )
+            for request in self._release_detail_requests(releases):
+                detail = await self._async_request_json(
+                    request.path, params=request.params
+                )
+                if detail is None or music_recognition_failed():
+                    report_music_recognition("service_error", "音乐发行详情暂时无法获取，请稍后重试")
+                    return None
+                if not detail:
+                    continue
+                details.append(detail)
+            albums = {str(detail["id"]): album for detail in details if (album := self._release_to_album(detail))}
+            pairs: Iterable[tuple[MetaMusic, MusicInfo | MusicAlbumInfo]] = chain(
+                ((meta, album) for album in albums.values()),
+                ((local, remote) for album in albums.values() for remote in album.tracks for local in tracks),
+            )
+            await async_enrich_music_artist_aliases(pairs, self._source, lambda identity: self._async_lookup_artist_aliases([identity], []))
+            if music_recognition_failed():
+                return None
+            return self._select_release_match(meta, tracks, details, preference, albums)
+
+    @classmethod
+    def _select_release_match(
+            cls,
+            meta: MetaMusic,
+            tracks: list[MetaMusic],
+            details: Iterable[dict[str, Any]],
+            preference: Optional[_MusicReleasePreference] = None,
+            albums: Optional[dict[str, MusicAlbumInfo]] = None,
+    ) -> Optional[MusicAlbumInfo]:
+        """
+        统一比较发行；复用本次已补证的模型，避免重新投影丢失Artist别名。
+        """
+        selected_preference = preference or cls._release_preference()
+        ranked: list[tuple[float, tuple[int, int], MusicAlbumInfo]] = []
+        seen: set[str] = set()
+        for detail in details:
+            release_id = str(detail.get("id") or "")
+            if not release_id or release_id in seen:
+                continue
+            seen.add(release_id)
+            summary = cls._release_track_summary(detail)
+            album = albums.get(release_id) if albums is not None else cls._release_to_album(detail)
+            score = cls._score_release(meta, tracks, detail, summary, album=album)
+            if album and score > 0:
+                ranked.append((score, cls._release_preference_sort_key(detail, selected_preference), album))
+        if not ranked:
+            report_music_recognition("not_found", "没有候选发行通过曲目信息核对")
+            return None
+        ranked.sort(key=lambda entry: (-entry[0], entry[1]))
+        best_score, _preference, best = ranked[0]
+        if best_score < cls._album_match_threshold:
+            return None
+        equivalent = cls._release_content_key(best)
+        for score, _rank, candidate in ranked[1:]:
+            if best_score - score <= 5 and cls._release_content_key(candidate) != equivalent:
+                report_music_recognition("ambiguous", "多个发行版本均符合现有信息，请手动选择专辑版本", [
+                    {"release_id": item.musicbrainz_release_id, "album_id": item.media_id,
+                     "title": item.title, "artist": item.artist, "year": item.year, "score": round(points, 2)}
+                    for points, _preference_rank, item in ranked[:5]
+                ])
+                return None
+        best.raw_data.update(match_score=round(best_score, 2), match_coverage=1.0,
+                             match_basis="release_id" if meta.musicbrainz_release_id else "track_evidence")
+        report_music_recognition("matched", "专辑及当前曲目已匹配")
+        return best
+
+    @staticmethod
+    def _release_content_key(album: MusicAlbumInfo) -> tuple[Optional[str], tuple[tuple[int, int, str], ...]]:
+        """
+        同发行组且录音序列一致的文字/地区版本可按偏好选取，其他近分结果保持歧义。
+        """
+        return (album.musicbrainz_release_group_id or album.musicbrainz_release_id, tuple(sorted(
+            (track.disc_number or 1, track.track_number or 0, track.media_id or "")
+            for track in album.tracks
+        )))
+
+    _album_match_threshold = 60.0
+
+    def _search_release_candidates(
+            self,
+            meta: MetaMusic,
+            tracks: list[MetaMusic],
+            limit: int,
+            preference: Optional[_MusicReleasePreference] = None,
+    ) -> list[dict[str, Any]]:
+        """
+        按专辑名和曲名线索搜索候选发行版本，多个查询按命中顺序去重。
+        """
+        releases: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        search_limit = max(25, min(100, limit * 5))
+        for request in self._release_search_requests(meta, tracks, search_limit):
+            payload = self._request_json(
+                request.path, params=request.params
+            )
+            self._merge_release_candidates(releases, seen, payload)
+            if payload is None or music_recognition_failed():
+                report_music_recognition("service_error", "音乐元数据服务暂时不可用，请稍后重试")
+                return []
+        return self._rank_release_candidates(
+            releases,
+            preference or self._release_preference(),
+        )[:limit]
+
+    async def _async_search_release_candidates(
+            self,
+            meta: MetaMusic,
+            tracks: list[MetaMusic],
+            limit: int,
+            preference: Optional[_MusicReleasePreference] = None,
+    ) -> list[dict[str, Any]]:
+        """
+        异步按专辑名和曲名线索搜索并去重候选发行版本。
+        """
+        releases: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        search_limit = max(25, min(100, limit * 5))
+        for request in self._release_search_requests(meta, tracks, search_limit):
+            payload = await self._async_request_json(
+                request.path, params=request.params
+            )
+            self._merge_release_candidates(releases, seen, payload)
+            if payload is None or music_recognition_failed():
+                report_music_recognition("service_error", "音乐元数据服务暂时不可用，请稍后重试")
+                return []
+        return self._rank_release_candidates(
+            releases,
+            preference or self._release_preference(),
+        )[:limit]
+
+    @classmethod
+    def _rank_release_candidates(
+            cls,
+            releases: list[dict[str, Any]],
+            preference: _MusicReleasePreference,
+    ) -> list[dict[str, Any]]:
+        """
+        在相近搜索相关度内优先目标地区与字形，保留强相关性边界。
+        """
+
+        def sort_key(release: dict[str, Any]) -> tuple[int, int, int, int, int]:
+            """
+            同等相关度先看多首录音的共同支持，再应用地区和字形偏好。
+            """
+            try:
+                score = int(release.get("score") or 0)
+            except (TypeError, ValueError):
+                score = 0
+            region_rank, script_rank = cls._release_preference_sort_key(
+                release,
+                preference,
+            )
+            return -(score // 5), -len(release.get("_recording_hits") or []), region_rank, script_rank, -score
+
+        return sorted(releases, key=sort_key)
+
+    @staticmethod
+    def _merge_release_candidates(
+            releases: list[dict[str, Any]],
+            seen: set[str],
+            payload: Optional[dict[str, Any]],
+    ) -> None:
+        """
+        合并发行搜索与录音搜索关联的发行，保留不同录音共同支持的证据。
+        """
+        candidates = list((payload or {}).get("releases") or [])
+        for recording in (payload or {}).get("recordings") or []:
+            candidates.extend({**release, "score": recording.get("score", 0),
+                               "_recording_hits": [recording["id"]] if recording.get("id") else []}
+                              for release in recording.get("releases") or [])
+        existing = {item["id"]: item for item in releases}
+        for item in candidates:
+            release_id = item.get("id")
+            if release_id and release_id not in seen:
+                seen.add(release_id)
+                copied = dict(item)
+                releases.append(copied)
+                existing[release_id] = copied
+            elif release_id and release_id in existing:
+                previous = existing[release_id]
+                previous["_recording_hits"] = sorted(set(previous.get("_recording_hits") or []) | set(item.get("_recording_hits") or []))
+                try:
+                    previous["score"] = max(int(previous.get("score") or 0), int(item.get("score") or 0))
+                except (TypeError, ValueError):
+                    pass
+
+    @classmethod
+    def _release_search_requests(
+            cls,
+            meta: MetaMusic,
+            tracks: list[MetaMusic],
+            limit: int,
+    ) -> list[_MusicBrainzRequestPlan]:
+        """
+        曲名必须查询 recording 索引，再从响应提取发行；release 索引不支持 recording 字段。
+        """
+        normalized_limit = max(1, min(limit, 25))
+        return [
+            _MusicBrainzRequestPlan(
+                path="/recording" if query.startswith("(") else "/release",
+                params={
+                    "query": query,
+                    "limit": normalized_limit,
+                    "fmt": "json",
+                },
+            )
+            for query in cls._release_queries(meta, tracks)
+        ]
+
+    @staticmethod
+    def _release_detail_requests(
+            releases: Iterable[dict[str, Any]],
+    ) -> list[_MusicBrainzRequestPlan]:
+        """
+        按候选顺序构造发行详情请求计划并跳过无 ID 条目。
+        """
+        return [
+            _MusicBrainzRequestPlan(
+                path=f"/release/{release_id}",
+                params={
+                    # Release lookup 默认只返回 Release Group 的最小引用，
+                    # 不包含 primary-type / secondary-types。目录级专辑识别
+                    # 后续需要这些字段执行音乐分类，因此必须显式展开。
+                    "inc": "recordings+media+artist-credits+release-groups+isrcs" + _RELEASE_RELATIONS,
+                    "fmt": "json",
+                },
+            )
+            for release in releases
+            if (release_id := release.get("id"))
+        ]
+
+    @classmethod
+    def _release_queries(cls, meta: MetaMusic, tracks: list[MetaMusic]) -> list[str]:
+        """
+        构造专辑搜索表达式：优先专辑名+歌手，无专辑线索时用曲名兜底。
+        """
+        queries: list[str] = []
+        if meta.musicbrainz_release_group_id:
+            return [f'rgid:{cls._escape_query(meta.musicbrainz_release_group_id)}']
+        album_title = None if music_album_title_is_weak(meta) else meta.album or meta.title
+        artist = meta.artists[0] if meta.artists else meta.album_artist
+        if album_title:
+            if artist:
+                queries.append(
+                    f'release:"{cls._escape_query(album_title)}" AND artist:"{cls._escape_query(artist)}"'
+                )
+            queries.append(f'release:"{cls._escape_query(album_title)}"')
+        # 目录名无意义时（如 Various Artists 合集），用代表性曲名反查所属发行版本
+        titles = cls._unique_texts(
+            [track.title for track in tracks if track.title and not music_track_title_is_weak(track)]
+        )[:3]
+        if titles:
+            recording_clause = " OR ".join(
+                f'recording:"{cls._escape_query(title)}"' for title in titles
+            )
+            query = f"({recording_clause})"
+            if artist:
+                query += f' AND artist:"{cls._escape_query(artist)}"'
+            queries.append(query)
+        return queries
+
+    @classmethod
+    def _release_track_summary(cls, detail: dict[str, Any]) -> list[dict[str, Any]]:
+        """
+        提取发行版本的曲目概要（碟号、曲序、时长、标题）供打分使用。
+        """
+        summary: list[dict[str, Any]] = []
+        for medium in detail.get("media") or []:
+            disc = cls._optional_int(medium.get("position")) or 1
+            for track in medium.get("tracks") or []:
+                recording = track.get("recording") or {}
+                summary.append({
+                    "disc": disc,
+                    "position": cls._optional_int(track.get("position")),
+                    "length": cls._duration_seconds(
+                        track.get("length") or recording.get("length")
+                    ),
+                    "title": track.get("title") or recording.get("title"),
+                })
+        return summary
+
+    @classmethod
+    def _score_release(
+            cls,
+            meta: MetaMusic,
+            tracks: list[MetaMusic],
+            detail: dict[str, Any],
+            summary: list[dict[str, Any]],
+            *, album: Optional[MusicAlbumInfo] = None,
+    ) -> float:
+        """
+        给候选发行版本打分（0-100），综合标题、歌手、曲目数和时长相似度。
+        """
+        album = album or cls._release_to_album(detail)
+        if not album or not tracks or len(album.tracks) != len(summary):
+            return 0.0
+        for field in ("musicbrainz_release_id", "musicbrainz_release_group_id"):
+            expected = getattr(meta, field)
+            if expected and expected != getattr(album, field):
+                return 0.0
+        if not music_album_year_matches(album.to_music_info(), meta):
+            return 0.0
+        known_title = not music_album_title_is_weak(meta)
+        title_sim = cls._text_similarity(meta.album or meta.title, album.title) if known_title else 0.0
+        if known_title and title_sim < 0.7 and not music_album_matches(album.to_music_info(), meta.album or meta.title):
+            return 0.0
+        artists = [meta.album_artist] if meta.album_artist else meta.artists
+        artist_match = music_album_artist_evidence_matches(album, meta)
+        if (artists or any(music_credit_values(meta).values())) and not artist_match:
+            return 0.0
+        if meta.version and not music_version_matches(album.to_music_info(), meta):
+            return 0.0
+        aligned = align_music_tracks(tracks, album.tracks)
+        if len(aligned) != len(tracks):
+            return 0.0
+        # 曲序只是槽位。无标签曲名且没有可比时长时，除非提供具体发行ID，否则不能确认内容。
+        named = sum(not music_track_title_is_weak(track) for track in tracks)
+        durations = [
+            cls._duration_similarity(tracks[local].duration, album.tracks[remote].duration)
+            for local, remote in aligned.items() if tracks[local].duration and album.tracks[remote].duration
+        ]
+        if not meta.musicbrainz_release_id and (not named and not durations or not known_title and len(tracks) < 2):
+            return 0.0
+        score = 40.0 + 25 * title_sim + 15 * artist_match
+        year_hint = meta.original_year or meta.year
+        score += (10 if year_hint else 15) * sum(durations) / len(tracks)
+        # 原始年份也可能描述合辑中歌曲的首发年，仅用于排名；当前发行年份才是版本约束。
+        year_matches = str(year_hint) == str(album.original_year) or (not meta.original_year and str(year_hint) == str(album.year))
+        score += 5 if year_hint and year_matches else 0
+        score += 5 if len(tracks) == len(album.tracks) else 0
+        if meta.musicbrainz_release_id:
+            score += 40
+        return min(score, 100.0)
+
+    @staticmethod
+    def _duration_similarity(left: Optional[int], right: Optional[int]) -> float:
+        """
+        比较两个时长的接近程度，完全一致为 1，差异越大越接近 0。
+        """
+        if not left or not right:
+            return 0.0
+        return max(0.0, 1 - abs(left - right) / max(left, right))
+
+    @classmethod
+    def _text_similarity(cls, left: Optional[str], right: Optional[str]) -> float:
+        """
+        忽略大小写和标点后比较两段音乐文本的相似度。
+        """
+        normalized_left = cls._match_text(left)
+        normalized_right = cls._match_text(right)
+        if not normalized_left or not normalized_right:
+            return 0.0
+        return SequenceMatcher(None, normalized_left, normalized_right).ratio()
+
+    @staticmethod
+    def _match_text(value: Optional[str]) -> str:
+        """
+        与资源匹配共用繁简、全半角、变音符和标点归一化规则。
+        """
+        return music_text_key(value)
+
+    @classmethod
+    def _unique_texts(cls, values: Iterable[Optional[str]]) -> list[str]:
+        """
+        按规范化文本去重并保留原始顺序。
+        """
+        results: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            normalized = cls._normalize_text(value)
+            identity = normalized.casefold()
+            if not normalized or identity in seen:
+                continue
+            seen.add(identity)
+            results.append(normalized)
+        return results
+
+    @classmethod
+    def _release_to_album(cls, detail: dict[str, Any]) -> Optional[MusicAlbumInfo]:
+        """
+        将 MusicBrainz Release 详情转换为带曲目表的标准化专辑信息。
+        """
+        release_id = detail.get("id")
+        title = detail.get("title")
+        if not release_id or not title:
+            return None
+        release_group = detail.get("release-group") or {}
+        group_id = release_group.get("id")
+        artists, artist_ids = cls._artist_credits(detail.get("artist-credit"))
+        album = MusicAlbumInfo(
+            **_musicbrainz_credits(detail),
+            media_source=cls._source,
+            # Release 与 Release Group 是不同实体，缺少 Group 时不能用 Release ID 补位。
+            media_id=str(group_id) if group_id else None,
+            musicbrainz_release_id=str(release_id),
+            musicbrainz_release_group_id=str(group_id) if group_id else None,
+            original_year=cls._year(release_group.get("first-release-date")),
+            total_discs=len(detail.get("media") or []) or None,
+            title=str(title),
+            artists=artists,
+            artist_ids=artist_ids,
+            artist_aliases=cls._credit_aliases(detail.get("artist-credit")),
+            album_type=cls._stripped(release_group.get("primary-type")),
+            secondary_types=[value for item in release_group.get("secondary-types") or [] if (value := cls._stripped(item))],
+            release_date=detail.get("date") or None,
+            cover_url=cls._build_cover_url(group_id),
+            genres=cls._names_of(detail.get("genres")),
+            detail_link=f"https://musicbrainz.org/release/{release_id}",
+            raw_data={
+                "release_id": str(release_id),
+                "release_country": cls._stripped(detail.get("country")),
+                "release_script": cls._release_script(detail) or None,
+            },
+        )
+        album.tracks = [
+            info
+            for medium in detail.get("media") or []
+            for track in medium.get("tracks") or []
+            if (info := cls._track_to_info(album, medium, track))
+        ]
+        return _remote_music_evidence(album)
+
+    def recognize_media(
+            self,
+            meta: Optional[MetaBase] = None,
+            mtype: Optional[MediaType] = None,
+            media_source: Optional[MediaSource] = None,
+            media_id: Optional[str] = None,
+            **kwargs: Any,
+    ) -> Optional[MusicInfo]:
+        """
+        接收统一识别请求，按明确身份查询详情或按音乐线索匹配。
+
+        在音乐识别观察上下文中记录候选与失败原因，并按规则更新本地缓存。
+
+        :param meta: 音乐识别线索；仅按明确的 MusicBrainz 身份查询时可省略
+        :param mtype: 统一媒体类型，用于非 MetaMusic 请求的准入判断
+        :param media_source: 显式来源，其他来源请求不处理；省略时使用线索来源
+        :param media_id: 显式来源标识，优先于线索内的标识
+        :param kwargs: music_type 限制实体范围，cache 控制读取识别缓存，默认允许
+        :return: 统一音乐结果，未匹配时可能保留本地线索与诊断；请求不适用或详情不可用时返回 None
+        """
+        with capture_music_recognition():
+            plan = self._recognition_plan(
+                meta=meta,
+                mtype=mtype,
+                media_source=media_source,
+                media_id=media_id,
+                music_type=kwargs.get("music_type"),
+                cache_enabled=bool(kwargs.get("cache", True)),
+            )
+            if not plan:
+                return None
+            if plan.media_id:
+                info = self.recognize_music(
+                    plan.media_source,
+                    plan.require_media_id(),
+                    **plan.detail_kwargs(),
+                )
+                return self._finalize_detail_recognition(plan, info)
+            return self._recognize_from_candidates_sync(plan)
+
+    def _update_recognize_cache(self, meta: MetaMusic, info: Optional[MusicInfo],
+                                music_type: Optional[str] = None) -> None:
+        """
+        识别完成后把结果写入本地识别缓存，未挂载缓存时静默跳过。
+        """
+        if self.cache and (info and info.media_id or not music_recognition_failed()):
+            self.cache.update(meta, info, music_type=music_type)
+
+    def update_recognize_cache(
+            self,
+            meta: MetaBase,
+            mediainfo: MusicInfo,
+    ) -> Optional[bool]:
+        """
+        回填共享识别结果，覆盖未限定实体及已确认实体的旧缓存。
+
+        :param meta: 原始音乐线索，必须为 MetaMusic
+        :param mediainfo: 已识别的 MusicBrainz 音乐结果
+        :return: 输入类型与来源符合条件时为 True，否则为 None；True 不代表缓存已初始化
+        """
+        if not meta or not mediainfo:
+            return None
+        if not isinstance(meta, MetaMusic) or not isinstance(mediainfo, MusicInfo):
+            return None
+        if mediainfo.media_source != self._source:
+            return None
+        self._update_recognize_cache(meta, mediainfo)
+        if mediainfo.media_id and mediainfo.music_type in (MUSIC_ENTITY_RECORDING, MUSIC_ENTITY_ALBUM):
+            self._update_recognize_cache(meta, mediainfo, music_type=mediainfo.music_type)
+        return True
+
+    async def async_update_recognize_cache(
+            self,
+            meta: MetaBase,
+            mediainfo: MusicInfo,
+    ) -> Optional[bool]:
+        """
+        异步回填共享识别结果，覆盖未限定实体及已确认实体的旧缓存。
+
+        :param meta: 原始音乐线索，必须为 MetaMusic
+        :param mediainfo: 已识别的 MusicBrainz 音乐结果
+        :return: 输入类型与来源符合条件时为 True，否则为 None；True 不代表缓存已初始化
+        """
+        return self.update_recognize_cache(meta=meta, mediainfo=mediainfo)
+
+    async def async_recognize_media(
+            self,
+            meta: Optional[MetaBase] = None,
+            mtype: Optional[MediaType] = None,
+            media_source: Optional[MediaSource] = None,
+            media_id: Optional[str] = None,
+            **kwargs: Any,
+    ) -> Optional[MusicInfo]:
+        """
+        异步接收统一识别请求，按明确身份查询详情或按音乐线索匹配。
+
+        在音乐识别观察上下文中记录候选与失败原因，并按规则更新本地缓存。
+
+        :param meta: 音乐识别线索；仅按明确的 MusicBrainz 身份查询时可省略
+        :param mtype: 统一媒体类型，用于非 MetaMusic 请求的准入判断
+        :param media_source: 显式来源，其他来源请求不处理；省略时使用线索来源
+        :param media_id: 显式来源标识，优先于线索内的标识
+        :param kwargs: music_type 限制实体范围，cache 控制读取识别缓存，默认允许
+        :return: 统一音乐结果，未匹配时可能保留本地线索与诊断；请求不适用或详情不可用时返回 None
+        """
+        with capture_music_recognition():
+            plan = self._recognition_plan(
+                meta=meta,
+                mtype=mtype,
+                media_source=media_source,
+                media_id=media_id,
+                music_type=kwargs.get("music_type"),
+                cache_enabled=bool(kwargs.get("cache", True)),
+            )
+            if not plan:
+                return None
+            if plan.media_id:
+                info = await self.async_recognize_music(
+                    plan.media_source,
+                    plan.require_media_id(),
+                    **plan.detail_kwargs(),
+                )
+                return self._finalize_detail_recognition(plan, info)
+            return await self._recognize_from_candidates_async(plan)
+
+    @classmethod
+    def _recognition_plan(
+            cls,
+            meta: Optional[MetaBase],
+            mtype: Optional[MediaType],
+            media_source: Optional[MediaSource],
+            media_id: Optional[str],
+            music_type: Optional[str],
+            cache_enabled: bool,
+    ) -> Optional[_MusicBrainzRecognitionPlan]:
+        """
+        统一完成来源、音乐类型、显式身份和缓存准入。
+        """
+        if media_source and media_source != cls._source:
+            return None
+        if not isinstance(meta, MetaMusic):
+            if mtype != MediaType.MUSIC and media_source != cls._source:
+                return None
+            if media_source != cls._source or not media_id:
+                return None
+            return _MusicBrainzRecognitionPlan(
+                meta=None,
+                media_source=cls._source,
+                media_id=str(media_id),
+                music_type=music_type,
+                cache_enabled=False,
+            )
+        resolved_source = media_source or meta.media_source
+        resolved_media_id = media_id or meta.media_id
+        return _MusicBrainzRecognitionPlan(
+            meta=meta,
+            media_source=resolved_source or cls._source,
+            media_id=(
+                str(resolved_media_id)
+                if resolved_source and resolved_media_id
+                else None
+            ),
+            music_type=music_type,
+            cache_enabled=cache_enabled,
+        )
+
+    def _cached_recognition(
+            self, plan: _MusicBrainzRecognitionPlan
+    ) -> Optional[MusicInfo]:
+        """
+        读取并标记一次候选识别缓存命中。
+        """
+        meta = plan.require_meta()
+        if not plan.cache_enabled or not self.cache:
+            return None
+        cached_info = self.cache.get(meta, music_type=plan.music_type)
+        if not cached_info:
+            return None
+        if plan.music_type and cached_info.music_type != plan.music_type:
+            return None
+        if cached_info.media_id:
+            album_matches = not meta.album or not cached_info.album or music_album_matches(cached_info, meta.album)
+            release_matches = album_matches and music_year_matches(cached_info, meta)
+            identity_matches = (
+                (not (meta.artists or any(music_credit_values(meta).values())) or music_artist_evidence_matches(cached_info, meta))
+                and (not meta.title or music_title_matches(cached_info, meta.title))
+                and music_version_matches(cached_info, meta)
+            )
+            if (music_credit_conflicts(cached_info, meta) or music_isrc_conflicts(cached_info, meta) or not release_matches
+                    or (not music_isrc_matches(cached_info, meta) and not identity_matches)):
+                return None
+        if cached_info.media_id:
+            logger.info(f"{meta.title} 使用音乐识别缓存：{cached_info.title}")
+        else:
+            logger.info(f"{meta.title} 使用音乐识别缓存：无法识别")
+        cached_info.recognize_cache_hit = True
+        return cached_info
+
+    def _finalize_detail_recognition(
+            self,
+            plan: _MusicBrainzRecognitionPlan,
+            info: Optional[MusicInfo],
+    ) -> Optional[MusicInfo]:
+        """
+        统一完成显式详情识别后的缓存回填。
+        """
+        if info and plan.meta:
+            self._update_recognize_cache(plan.meta, info, music_type=plan.music_type)
+        return info
+
+    @classmethod
+    def _select_recognition_candidate(
+            cls,
+            plan: _MusicBrainzRecognitionPlan,
+            recordings: Iterable[MusicInfo],
+            albums: Iterable[MusicInfo] = (),
+    ) -> Optional[MusicInfo]:
+        """
+        按同一来源和实体规则选择 Recording 或专辑候选。
+        """
+        meta = plan.require_meta()
+        if plan.music_type == MUSIC_ENTITY_ALBUM:
+            return cls._select_album_candidate(meta, albums)
+        matched = cls._select_candidate(
+            meta, recordings, media_source=plan.media_source
+        )
+        if matched or not plan.search_album or not meta.artists:
+            return matched
+        return cls._select_album_candidate(meta, albums)
+
+    @staticmethod
+    def _should_search_albums(
+            plan: _MusicBrainzRecognitionPlan,
+            preliminary: Optional[MusicInfo],
+    ) -> bool:
+        """
+        统一决定候选识别是否需要继续查询专辑。
+        """
+        meta = plan.require_meta()
+        return bool(
+            plan.music_type == MUSIC_ENTITY_ALBUM
+            or (not preliminary and plan.search_album and meta.artists)
+        )
+
+    @staticmethod
+    def _should_probe_album(
+            plan: _MusicBrainzRecognitionPlan,
+            recording: Optional[MusicInfo],
+    ) -> bool:
+        """
+        统一决定 Recording 详情未命中后是否继续探测专辑。
+        """
+        return bool(not recording and plan.search_album)
+
+    def _finalize_recognition(
+            self,
+            plan: _MusicBrainzRecognitionPlan,
+            matched: Optional[MusicInfo],
+    ) -> MusicInfo:
+        """
+        统一生成候选识别兜底并写入本地缓存。
+        """
+        meta = plan.require_meta()
+        diagnostic = music_recognition_diagnostics()
+        if diagnostic.get("status") in BLOCKING_MUSIC_RECOGNITION_STATES:
+            result = self._info_from_meta(meta)
+            result.raw_data["recognition"] = diagnostic
+            return result
+        result = matched or self._info_from_meta(meta)
+        self._update_recognize_cache(meta, result, music_type=plan.music_type)
+        return result
+
+    def _recognize_from_candidates_sync(
+            self, plan: _MusicBrainzRecognitionPlan
+    ) -> Optional[MusicInfo]:
+        """
+        同步获取候选，所有准入与选择由共享决策方法完成。
+        """
+        meta = plan.require_meta()
+        if plan.music_type != MUSIC_ENTITY_ALBUM:
+            cached_info = self._cached_recognition(plan)
+            if cached_info:
+                return cached_info
+        recordings = (
+            self._search_recordings(meta, limit=10, require_match=True)
+            if plan.search_recording else []
+        )
+        preliminary = self._select_recognition_candidate(plan, recordings)
+        albums = (
+            self._search_albums(meta, limit=10, require_match=True)
+            if self._should_search_albums(plan, preliminary)
+            else []
+        )
+        matched = self._select_recognition_candidate(plan, recordings, albums)
+        if plan.music_type == MUSIC_ENTITY_ALBUM and music_recognition_diagnostics().get("status") not in BLOCKING_MUSIC_RECOGNITION_STATES:
+            return matched
+        return self._finalize_recognition(plan, matched)
+
+    async def _recognize_from_candidates_async(
+            self, plan: _MusicBrainzRecognitionPlan
+    ) -> Optional[MusicInfo]:
+        """
+        异步获取候选，所有准入与选择由共享决策方法完成。
+        """
+        meta = plan.require_meta()
+        if plan.music_type != MUSIC_ENTITY_ALBUM:
+            cached_info = self._cached_recognition(plan)
+            if cached_info:
+                return cached_info
+        recordings = (
+            await self._async_search_recordings(meta, limit=10, require_match=True)
+            if plan.search_recording else []
+        )
+        preliminary = self._select_recognition_candidate(plan, recordings)
+        albums = (
+            await self._async_search_albums(meta, limit=10, require_match=True)
+            if self._should_search_albums(plan, preliminary)
+            else []
+        )
+        matched = self._select_recognition_candidate(plan, recordings, albums)
+        if plan.music_type == MUSIC_ENTITY_ALBUM and music_recognition_diagnostics().get("status") not in BLOCKING_MUSIC_RECOGNITION_STATES:
+            return matched
+        return self._finalize_recognition(plan, matched)
+
+    @classmethod
+    def _select_candidate(
+            cls,
+            meta: MetaMusic,
+            candidates: Iterable[MusicInfo],
+            media_source: MediaSource,
+    ) -> Optional[MusicInfo]:
+        """
+        优先采用同一 ISRC，其他候选须满足完整名称、已有署名和录音版本约束。
+        """
+        normalized_source = cls._normalize_text(media_source).casefold()
+        # 完整名称优先，去署名只产生回退名称，不能覆盖实际包含艺名的曲名。
+        original_title = cls._search_title(meta.title)
+        clean_title = cls._strip_artist_prefix(original_title, meta.artists)
+        bare_title = music_base_title(clean_title)
+        ranked: list[tuple[bool, int, MusicInfo]] = []
+        identities: list[MusicInfo] = []
+        for candidate in candidates:
+            if normalized_source and str(candidate.media_source or "").casefold() != normalized_source:
+                continue
+            if music_credit_conflicts(candidate, meta) or music_isrc_conflicts(candidate, meta):
+                continue
+            album_matches = not meta.album or not candidate.album or music_album_matches(candidate, meta.album)
+            release_matches = album_matches and music_year_matches(candidate, meta)
+            if music_isrc_matches(candidate, meta) and release_matches:
+                # 相同 ISRC 是明确录音身份，不能被另一条纯标题命中的得分压过。
+                identities.append(candidate)
+                continue
+            score = 0
+            title_match = False
+            # 多艺术家资源任一命中即可，联名候选不会因主艺术家顺序失配
+            artist_match = music_artist_evidence_matches(candidate, meta)
+            titles = music_titles(candidate)
+            exact_title = bool(original_title and any(cls._same_text(original_title, title) for title in titles))
+            if exact_title:
+                score += 4
+                title_match = True
+            elif (
+                bare_title
+                and artist_match
+                and music_title_matches(candidate, clean_title)
+            ):
+                score += 2
+                title_match = True
+            if artist_match:
+                score += 3
+            if meta.album and cls._same_text(meta.album, candidate.album):
+                score += 2
+            # 同名多版本（如不同年份的重发单曲）靠发行年份消歧
+            if meta.year and candidate.year and int(meta.year) == int(candidate.year):
+                score += 1
+            # 非显式身份必须同时满足作品名、已有署名与版本，不能只靠累计得分确认。
+            if (
+                ((meta.artists or any(music_credit_values(meta).values())) and not artist_match)
+                or not title_match
+                or not music_version_matches(candidate, meta)
+                or not release_matches
+            ):
+                continue
+            ranked.append((exact_title, score, candidate))
+        if identities or not ranked:
+            return unique_music_match(identities)
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return unique_music_match([item[2] for item in ranked if item[:2] == ranked[0][:2]])
+
+    @classmethod
+    def _select_album_candidate(cls, meta: MetaMusic, albums: Iterable[MusicInfo]) -> Optional[MusicInfo]:
+        """
+        单曲检索未命中时，从专辑候选中挑选高置信目标。
+
+        专辑重名多，要求标题（含去括号弱匹配）与艺术家同时命中才返回，
+        避免把音轨身份安到错误专辑上。
+        """
+        original_title = cls._search_title(meta.album or meta.title)
+        clean_title = cls._strip_artist_prefix(original_title, meta.artists)
+        if not clean_title:
+            return None
+        # 去括号与卷号后缀后的本体名用于弱匹配（好歌茹芸, Vol. 3 -> 好歌茹芸）；
+        # 资源带卷号时弱匹配要求候选卷号一致，避免 Ibiza Vol.1 误配 Vol.3
+        bare_title = cls._strip_volume_suffix(cls._strip_parenthetical(clean_title))
+        meta_volume = cls._volume_number(clean_title)
+        ranked: list[tuple[bool, int, MusicInfo]] = []
+        for album in albums:
+            if music_credit_conflicts(album, meta) or not music_album_year_matches(album, meta):
+                continue
+            score = 0
+            album_title = album.title or album.album
+            artist_match = music_artist_evidence_matches(album, meta)
+            title_match = False
+            exact_title = False
+            # 资源带卷号时候选卷号不一致（含其他分卷）直接排除，避免 Vol.1 误配 Vol.3
+            if meta_volume and cls._volume_number(album_title) not in (None, meta_volume):
+                pass
+            elif any(cls._same_text(original_title, title) for title in music_titles(album, album=True)):
+                score += 4
+                title_match = True
+                exact_title = True
+            elif (
+                artist_match
+                and bare_title
+                and (
+                    cls._same_text(bare_title, cls._strip_parenthetical(album_title))
+                    # 条目「天國的情人：鄧麗君逝世十周年…」这类冒号副标题，主标题一致视为弱匹配
+                    or cls._same_text(bare_title, cls._main_title(album_title))
+                    # 条目「为你盛开-许巍《无尽光芒》…」这类连字符前置命名，首段曲名一致视为弱匹配
+                    or cls._same_text(bare_title, cls._head_title(album_title))
+                    # 条目「愛情電影主題曲 雲且留住」这类「主体名 补充说明」结构，首段一致视为弱匹配
+                    or (
+                        len(cls._match_text(bare_title)) >= 3
+                        and cls._same_text(bare_title, cls._lead_token(album_title))
+                    )
+                    # 条目带额外前缀/后缀完整包含资源主体名（好莱坞原声带类），长文本包含视为弱匹配
+                    or (
+                        len(cls._match_text(bare_title)) >= 6
+                        and cls._match_text(bare_title) in cls._match_text(album_title)
+                    )
+                    # 资源标题带演出后缀（S.H.E十七音乐会），条目本体一致视为弱匹配
+                    or (
+                        cls._performance_title(bare_title)
+                        and cls._same_text(cls._performance_title(bare_title), album_title)
+                    )
+                    # 原声带资源的描述词在条目中常省略（Pulp Fiction: Music From the…），
+                    # 电影名本体与条目标题或主标题一致视为弱匹配
+                    or (
+                        len(cls._match_text(cls._soundtrack_body(bare_title))) >= 4
+                        and (
+                            cls._same_text(cls._soundtrack_body(bare_title), album_title)
+                            or cls._same_text(cls._soundtrack_body(bare_title), cls._main_title(album_title))
+                        )
+                    )
+                )
+            ):
+                # 「我爱夜 (新歌+精选)」对位条目「我爱夜」这类注释差异
+                score += 2
+                title_match = True
+            if artist_match:
+                score += 3
+            if meta.year and album.year and int(meta.year) == int(album.year):
+                score += 1
+            # 标题与艺术家缺一不可，仅有标题相似不能采信
+            if title_match and artist_match and music_version_matches(album, meta):
+                ranked.append((exact_title, score, album))
+        if not ranked:
+            return None
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        return unique_music_match([item[2] for item in ranked if item[:2] == ranked[0][:2]])
+
+    @classmethod
+    def _info_from_meta(cls, meta: MetaMusic) -> MusicInfo:
+        """
+        音乐识别无候选时，把元数据转换为可展示的最小信息。
+        """
+        return MusicInfo.from_meta(meta)
+
+    @classmethod
+    def _same_text(cls, left: Optional[str], right: Optional[str]) -> bool:
+        """
+        忽略大小写、空白与标点差异比较两个音乐文本字段。
+        """
+        compact_left = cls._match_text(left)
+        compact_right = cls._match_text(right)
+        if compact_left and compact_left == compact_right:
+            return True
+        # 条目与资源标题的汉字数字写法不一致（十三首/13首），归一后再比对
+        return bool(compact_left) and cls._convert_cjk_numerals(
+            compact_left) == cls._convert_cjk_numerals(compact_right)
+
+    # 常见汉字数字归一为阿拉伯数字：十三首/13首、二十周年/20周年 在条目与资源标题间混用
+    _CJK_DIGIT_MAP = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+                      "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    _CJK_NUMERAL_RUN_RE = re.compile(r"[零一二两三四五六七八九十百]+")
+
+    @classmethod
+    def _convert_cjk_numerals(cls, value: str) -> str:
+        """
+        将文本中连续的汉字数字转换为阿拉伯数字，支持十位与百位组合。
+        """
+
+        def _convert(run: str) -> str:
+            """
+            把连续中文数字转换为阿拉伯数字，保留艺术家名称中的其他文本。
+            """
+            total, current = 0, 0
+            for char in run:
+                if char in cls._CJK_DIGIT_MAP:
+                    current = cls._CJK_DIGIT_MAP[char]
+                elif char == "十":
+                    total += (current or 1) * 10
+                    current = 0
+                elif char == "百":
+                    total += (current or 1) * 100
+                    current = 0
+            return str(total + current)
+
+        return cls._CJK_NUMERAL_RUN_RE.sub(lambda m: _convert(m.group()), str(value or ""))
+
+    @classmethod
+    def _normalize_text(cls, value: Optional[str]) -> str:
+        """
+        清理音乐检索文本中的多余空白，并统一繁简写法避免候选比对失误。
+        """
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        if not text:
+            return text
+        # 仅归一化本地比较；实际查询使用原文和完整繁简变体。
+        try:
+            return zhconv_convert(text, "zh-hans")
+        # 字形转换失败时保留原文，避免可选转换组件影响识别主流程。
+        except Exception:  # pylint: disable=broad-except
+            return text
+
+    # 资源标题中的音质规格（格式、位深采样参数、年份后缀、发行实体标记）会污染检索式，检索前统一剥离
+    _quality_token_pattern = re.compile(
+        r"\[[^\]]*\]|\((?:19|20)\d{2}\)|"
+        r"\b(?:DSD(?:64|128|256|512)?|DSF|DFF|FLAC|ALAC|APE|WAV|WAVE|AIFF?|PCM|"
+        r"MP3|AAC|M4A|OGG|VORBIS|OPUS|WMA|WEB-?DL|WEBRip|WEB)\b|"
+        r"\b\d{1,3}\s*-?\s*bits?\b|\b\d{2,4}(?:\.\d)?\s*k(?:hz|bps?)\b|"
+        # 流媒体发行实体标记（- Single / - EP），不是曲名的一部分
+        r"\s+[-–—]\s*(?:single|ep|album)\s*$",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _search_title(cls, value: Optional[str], *, preserve_script: bool = False) -> str:
+        """
+        剥离资源标题中的音频格式、规格参数与年份后缀，只保留曲名用于检索比对。
+        """
+        text = cls._quality_token_pattern.sub(" ", str(value or ""))
+        normalize_text = (lambda value: re.sub(r"\s+", " ", str(value or "")).strip()) \
+            if preserve_script else cls._normalize_text
+        # 流媒体文件名消毒产生的下划线转空格，避免破坏检索短语
+        text = text.replace("_", " ")
+        # 规格剥离后可能残留悬空分隔符，统一修剪
+        text = re.sub(r"^[\s\-–—/]+|[\s\-–—/]+$", "", normalize_text(text))
+        # 格式标记后紧跟的场景发布组标签（如 ALAC-HHWEB），整体剔除
+        text = re.sub(r"[-–—]\s*[A-Z0-9]{3,}\s*$", "", text)
+        # 曲名尾部独立年份是发行线索不是曲名一部分（解析阶段通常已提取），
+        # 反复剥离尾部年份：场景命名可能重复携带（Live At Montreux 2011 2011）
+        text = normalize_text(text)
+        while True:
+            # 仅剔除空白分隔的尾部年份，纯年份标题（1999）无前导空白不受影响
+            stripped = re.sub(r"\s+(?:19|20)\d{2}$", "", text)
+            if stripped == text:
+                break
+            text = stripped
+        return normalize_text(text)
+
+    def recognize_music(
+            self,
+            media_source: MediaSource,
+            media_id: str,
+            music_type: Optional[str] = None,
+    ) -> Optional[MusicInfo]:
+        """
+        按来源标识查询单曲或专辑详情。
+
+        :param media_source: 请求来源，必须为 MusicBrainz 才执行本模块查询
+        :param media_id: MusicBrainz 录音或发行组标识
+        :param music_type: recording 仅查询单曲，album 仅查询专辑，省略时先单曲后专辑
+        :return: 带来源身份的统一音乐结果；无有效标识、无匹配或查询失败时返回 None
+        """
+        plan = self._detail_plan(media_source, media_id, music_type)
+        if not plan:
+            return None
+        result: Optional[MusicInfo] = None
+        if plan.search_recording:
+            payload = self._request_json(
+                f"/recording/{plan.require_media_id()}",
+                params={
+                    "inc": _RECORDING_INCLUDES,
+                    "fmt": "json",
+                },
+            )
+            result = self._project_recording_detail(payload)
+            if result:
+                result.artist_aliases = self._lookup_artist_aliases(result.artist_ids, result.artist_aliases)
+                return result
+        if not self._should_probe_album(plan, result):
+            return None
+        # MusicBrainz 各实体共用 UUID 形式，统一详情入口在 Recording 未命中后继续探测专辑。
+        album = self.music_album(self._source, plan.require_media_id())
+        return self._project_album_result(album)
+
+    async def async_recognize_music(
+            self,
+            media_source: MediaSource,
+            media_id: str,
+            music_type: Optional[str] = None,
+    ) -> Optional[MusicInfo]:
+        """
+        异步按来源标识查询单曲或专辑详情。
+
+        :param media_source: 请求来源，必须为 MusicBrainz 才执行本模块查询
+        :param media_id: MusicBrainz 录音或发行组标识
+        :param music_type: recording 仅查询单曲，album 仅查询专辑，省略时先单曲后专辑
+        :return: 带来源身份的统一音乐结果；无有效标识、无匹配或查询失败时返回 None
+        """
+        plan = self._detail_plan(media_source, media_id, music_type)
+        if not plan:
+            return None
+        result: Optional[MusicInfo] = None
+        if plan.search_recording:
+            payload = await self._async_request_json(
+                f"/recording/{plan.require_media_id()}",
+                params={
+                    "inc": _RECORDING_INCLUDES,
+                    "fmt": "json",
+                },
+            )
+            result = self._project_recording_detail(payload)
+            if result:
+                result.artist_aliases = await self._async_lookup_artist_aliases(result.artist_ids, result.artist_aliases)
+                return result
+        if not self._should_probe_album(plan, result):
+            return None
+        album = await self._async_music_album(
+            self._source, plan.require_media_id()
+        )
+        return self._project_album_result(album)
+
+    @classmethod
+    def _detail_plan(
+            cls,
+            media_source: MediaSource,
+            media_id: str,
+            music_type: Optional[str],
+    ) -> Optional[_MusicBrainzRecognitionPlan]:
+        """
+        统一校验详情来源并冻结 Recording 到专辑的探测顺序。
+        """
+        if media_source != cls._source or not media_id:
+            return None
+        return _MusicBrainzRecognitionPlan(
+            meta=None,
+            media_source=cls._source,
+            media_id=str(media_id),
+            music_type=music_type,
+            cache_enabled=False,
+        )
+
+    @classmethod
+    def _project_recording_detail(
+            cls, payload: Optional[dict[str, Any]]
+    ) -> Optional[MusicInfo]:
+        """
+        把 Recording 详情响应投影为统一音乐信息。
+        """
+        return cls._recording_to_info(payload) if payload else None
+
+    @staticmethod
+    def _project_album_result(
+            album: Optional[MusicAlbumInfo],
+    ) -> Optional[MusicInfo]:
+        """
+        把专辑详情统一投影到音乐识别返回类型。
+        """
+        return album.to_music_info() if album else None
+
+    async def _async_music_album(
+            self,
+            media_source: MediaSource,
+            media_id: str,
+            music_release_regions: Optional[list[str]] = None,
+            music_release_scripts: Optional[list[str]] = None,
+            musicbrainz_release_id: Optional[str] = None,
+    ) -> Optional[MusicAlbumInfo]:
+        """
+        异步按 MusicBrainz Release Group ID 获取专辑详情及曲目。
+        """
+        if not self._detail_plan(media_source, media_id, MUSIC_ENTITY_ALBUM):
+            return None
+        if musicbrainz_release_id is not None and not re.fullmatch(
+                r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", musicbrainz_release_id):
+            return None
+        payload = await self._async_request_json(
+            f"/release-group/{media_id}",
+            params={
+                "inc": "artists+releases+media+genres+tags+ratings+aliases",
+                "fmt": "json",
+            },
+        )
+        album = self._project_album_detail(payload)
+        if not payload or not album or (musicbrainz_release_id is not None and album.media_id != media_id):
+            return None
+        tracks_payload = await self._async_album_tracks_payload(
+            payload.get("releases") or [],
+            preference=self._release_preference(
+                music_release_regions,
+                music_release_scripts,
+            ),
+            release_id=musicbrainz_release_id,
+            group_id=media_id,
+        )
+        if musicbrainz_release_id is not None and not tracks_payload:
+            return None
+        self._apply_selected_release(album, tracks_payload)
+        album.tracks = self._project_album_tracks(album, tracks_payload)
+        if musicbrainz_release_id is not None and not album.tracks:
+            return None
+        album.artist_aliases = await self._async_lookup_artist_aliases(album.artist_ids, album.artist_aliases)
+        return album
+
+    def music_album(
+            self,
+            media_source: MediaSource,
+            media_id: str,
+            music_release_regions: Optional[list[str]] = None,
+            music_release_scripts: Optional[list[str]] = None,
+            musicbrainz_release_id: Optional[str] = None,
+    ) -> Optional[MusicAlbumInfo]:
+        """
+        按发行组标识获取专辑，并选择具体发行版本填充曲目。
+
+        明确指定发行时核验发行组身份；未指定发行时允许返回暂未加载曲目的专辑。
+
+        :param media_source: 请求来源，必须为 MusicBrainz 才执行本模块查询
+        :param media_id: MusicBrainz 发行组标识
+        :param music_release_regions: 发行地区优先顺序，省略时使用运行配置
+        :param music_release_scripts: 发行文字字形优先顺序，省略时使用运行配置
+        :param musicbrainz_release_id: 明确指定的发行版本 UUID，省略时根据偏好选择
+        :return: 专辑详情；来源或标识无效、详情缺失，或指定发行无有效曲目时返回 None
+        """
+        if not self._detail_plan(media_source, media_id, MUSIC_ENTITY_ALBUM):
+            return None
+        if musicbrainz_release_id is not None and not re.fullmatch(
+                r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", musicbrainz_release_id):
+            return None
+        payload = self._request_json(
+            f"/release-group/{media_id}",
+            params={
+                "inc": "artists+releases+media+genres+tags+ratings+aliases",
+                "fmt": "json",
+            },
+        )
+        album = self._project_album_detail(payload)
+        if not payload or not album or (musicbrainz_release_id is not None and album.media_id != media_id):
+            return None
+        tracks_payload = self._album_tracks_payload(
+            payload.get("releases") or [],
+            preference=self._release_preference(
+                music_release_regions,
+                music_release_scripts,
+            ),
+            release_id=musicbrainz_release_id,
+            group_id=media_id,
+        )
+        if musicbrainz_release_id is not None and not tracks_payload:
+            return None
+        self._apply_selected_release(album, tracks_payload)
+        album.tracks = self._project_album_tracks(album, tracks_payload)
+        if musicbrainz_release_id is not None and not album.tracks:
+            return None
+        album.artist_aliases = self._lookup_artist_aliases(album.artist_ids, album.artist_aliases)
+        return album
+
+    @staticmethod
+    def _alias_artist_ids(artist_ids: list[str]) -> list[str]:
+        """
+        限制补充查询预算，仅使用来源返回的有效 MusicBrainz 艺术家 UUID。
+        """
+        return list(dict.fromkeys(artist_id for artist_id in artist_ids if re.fullmatch(
+            r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", artist_id,
+        )))[:3]
+
+    @classmethod
+    def _artist_alias_values(cls, payload: Optional[dict[str, Any]], artist_id: str) -> list[str]:
+        """
+        只采信精确艺术家 ID 响应中的名称及别名，避免串入搜索得到的同名艺人。
+        """
+        if not payload or payload.get("id") != artist_id:
+            return []
+        return unique_music_texts([payload.get("name"), *cls._names_of(payload.get("aliases"))])
+
+    def _lookup_artist_aliases(self, artist_ids: list[str], aliases: list[str]) -> list[str]:
+        """
+        利用现有请求缓存补全已识别艺术家的可信别名，不按文字猜测其他艺人。
+        """
+        values = list(aliases)
+        for artist_id in self._alias_artist_ids(artist_ids):
+            payload = self._request_json(f"/artist/{artist_id}", params={"inc": "aliases", "fmt": "json"})
+            values.extend(self._artist_alias_values(payload, artist_id))
+        return unique_music_texts(values)
+
+    async def _async_lookup_artist_aliases(self, artist_ids: list[str], aliases: list[str]) -> list[str]:
+        """
+        原生异步补全同一艺术家别名，保留站点客户端的限流和请求缓存。
+        """
+        values = list(aliases)
+        for artist_id in self._alias_artist_ids(artist_ids):
+            payload = await self._async_request_json(f"/artist/{artist_id}", params={"inc": "aliases", "fmt": "json"})
+            values.extend(self._artist_alias_values(payload, artist_id))
+        return unique_music_texts(values)
+
+    @classmethod
+    def _project_album_detail(
+            cls, payload: Optional[dict[str, Any]]
+    ) -> Optional[MusicAlbumInfo]:
+        """
+        把 Release Group 详情投影为尚未装载曲目的专辑。
+        """
+        if not payload:
+            return None
+        album = cls._release_group_to_album(payload)
+        if album:
+            album.releases = cls._release_variants(payload.get("releases") or [])
+        return album
+
+    def music_artist(
+            self,
+            media_source: MediaSource,
+            media_id: str,
+    ) -> Optional[MusicArtistInfo]:
+        """
+        按原生艺术家标识读取详情。
+
+        :param media_source: 请求来源，必须为 MusicBrainz 才执行本模块查询
+        :param media_id: MusicBrainz 艺术家标识
+        :return: 艺术家模型；来源不符、标识缺失或请求失败时返回 None
+        """
+        if media_source != self._source or not media_id:
+            return None
+        payload = self._request_json(
+            f"/artist/{media_id}",
+            params={"inc": "url-rels+genres+tags+aliases", "fmt": "json"},
+        )
+        return self._artist_to_info(payload) if payload else None
+
+    def music_artist_albums(
+            self,
+            media_source: MediaSource,
+            media_id: str,
+            page: int = 1,
+            count: int = 30,
+            album_type: Optional[str] = None,
+    ) -> list[MusicInfo]:
+        """
+        分页浏览艺术家的专辑、EP 和单曲发行组。
+
+        服务端不支持排序，只对当前页按发行日期降序排列，不能保证全局最新作品位于首页。
+
+        :param media_source: 请求来源，必须为 MusicBrainz 才执行本模块查询
+        :param media_id: MusicBrainz 艺术家标识
+        :param page: 从 1 开始的页码，非正值按第一页处理
+        :param count: 每页数量，限制在 1 至 100
+        :param album_type: 可选发行类型，原样传给 MusicBrainz 浏览接口
+        :return: 统一音乐列表；来源不符、输入缺失或请求失败时为空列表
+        """
+        if media_source != self._source or not media_id:
+            return []
+        limit = max(1, min(count, 100))
+        params: dict[str, Any] = {
+            "artist": media_id,
+            "inc": "artist-credits",
+            "limit": limit,
+            "offset": max(page - 1, 0) * limit,
+            "fmt": "json",
+        }
+        if album_type:
+            params["type"] = album_type
+        payload = self._request_json("/release-group", params=params)
+        albums = [
+            album
+            for item in (payload or {}).get("release-groups") or []
+            if (album := self._release_group_to_album(item))
+        ]
+        # 浏览接口不支持排序，只能对当前页按发行日期降序排列，不能推断全局顺序。
+        albums.sort(key=lambda item: item.release_date or "", reverse=True)
+        return [album.to_music_info() for album in albums]
+
+    def music_artist_related(
+            self,
+            media_source: MediaSource,
+            media_id: str,
+            count: int = 24,
+    ) -> list[MusicArtistInfo]:
+        """
+        按艺术家关系查询可继续浏览的关联艺术家。
+
+        :param media_source: 请求来源，必须为 MusicBrainz 才执行本模块查询
+        :param media_id: MusicBrainz 艺术家标识
+        :param count: 最多返回的关联艺术家数量
+        :return: 按关系优先级排列的艺术家列表；来源不符、标识缺失或请求失败时为空列表
+        """
+        if media_source != self._source or not media_id:
+            return []
+        payload = self._request_json(
+            f"/artist/{media_id}",
+            params={"inc": "artist-rels", "fmt": "json"},
+        )
+        if not payload:
+            return []
+        return self._related_artists(payload.get("relations") or [], count=count)
+
+    @classmethod
+    def _build_query(cls, meta: MetaMusic) -> str:
+        """
+        构造 MusicBrainz Recording 搜索表达式。
+        """
+        clauses = []
+        # 资源标题先剥离音质标记，避免规格文本污染检索式导致零命中
+        title = cls._search_title(meta.title, preserve_script=True)
+        if title:
+            clauses.append(f"recording:{cls._query_phrase(title)}")
+        query_artists = music_query_artists(meta)
+        if query_artists:
+            clauses.append(f'artist:{cls._query_phrase(query_artists[0])}')
+        if meta.album:
+            clauses.append(f'release:{cls._query_phrase(meta.album)}')
+        if meta.isrc:
+            clauses.append(f'isrc:"{cls._escape_query(meta.isrc)}"')
+        return " AND ".join(clauses)
+
+    @staticmethod
+    def _escape_query(value: str) -> str:
+        """
+        转义 MusicBrainz 查询中的引号和反斜线。
+        """
+        return value.replace("\\", "\\\\").replace('"', '\\"').strip()
+
+    # 中日韩名称优先完整短语，仅在前置查询无结果时启用逐字兜底。
+    _QUERY_CJK_RE = re.compile(
+        r"[\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF]")
+    # 检索词元切分：按空白、标点与括号拆分，保留 CJK 串与拉丁词（括号对逐字检索无意义）
+    _QUERY_TOKEN_SPLIT_RE = re.compile(
+        r"[\s\-–—−－。，、；：！？·．…()（）「」『』【】\[\]《》,;]+")
+
+    @classmethod
+    def _query_phrase(cls, value: Optional[str], *, loose: bool = False) -> Optional[str]:
+        """
+        优先构造完整名称的繁简短语组，逐字 OR 只作为显式请求的末级兜底。
+        """
+        text = str(value or "").strip()
+        if not text:
+            return None
+        if not cls._QUERY_CJK_RE.search(text):
+            return f'"{cls._escape_query(text)}"'
+        if not loose:
+            variants = sorted(unique_music_texts([
+                text, zhconv_convert(text, "zh-hans"), zhconv_convert(text, "zh-hant"),
+            ]))
+            return cls._or_group([f'"{cls._escape_query(variant)}"' for variant in variants])
+        tokens = [
+            token for token in cls._QUERY_TOKEN_SPLIT_RE.split(text) if token.strip()
+        ]
+        if not tokens:
+            return None
+        parts = [
+            f'"{cls._escape_query(token)}"'
+            if not cls._QUERY_CJK_RE.search(token) else cls._or_group(
+                [f'"{cls._escape_query(char)}"' for char in token]
+            )
+            for token in tokens
+        ]
+        return cls._or_group(parts)
+
+    @staticmethod
+    def _or_group(parts: list[str]) -> str:
+        """
+        拼接 OR 检索表达式，多项时用括号包裹避免与外层 AND 产生优先级歧义。
+        """
+        if len(parts) == 1:
+            return parts[0]
+        return "(" + " OR ".join(parts) + ")"
+
+    @classmethod
+    def _recording_to_info(cls, recording: dict[str, Any]) -> Optional[MusicInfo]:
+        """
+        将 MusicBrainz Recording 响应转换为标准音乐信息。
+        """
+        media_id = recording.get("id")
+        title = recording.get("title")
+        if not media_id or not title:
+            return None
+        releases = recording.get("releases") or []
+        release = cls._select_release(releases)
+        release_group = (release or {}).get("release-group") or {}
+        release_date = cls._release_date(recording, release)
+        album = (release or {}).get("title")
+        artists, artist_ids = cls._artist_credits(recording.get("artist-credit"))
+        album_artists, _ = cls._artist_credits((release or {}).get("artist-credit"))
+        secondary_types = [
+            value
+            for item in release_group.get("secondary-types") or []
+            if (value := cls._stripped(item))
+        ]
+        category_parts = [cls._stripped(release_group.get("primary-type")), *secondary_types]
+        return _remote_music_evidence(MusicInfo(
+            **_musicbrainz_credits(recording),
+            media_source=cls._source,
+            media_id=str(media_id),
+            title=str(title),
+            artists=artists,
+            artist_ids=artist_ids,
+            album=album,
+            album_artist=" / ".join(album_artists) if album_artists else None,
+            album_id=str(release_group["id"]) if release_group.get("id") else None,
+            musicbrainz_release_id=str(release["id"]) if release.get("id") else None,
+            musicbrainz_release_group_id=str(release_group["id"]) if release_group.get("id") else None,
+            original_year=cls._year(recording.get("first-release-date") or release_group.get("first-release-date")),
+            release_year=cls._year(release.get("date")),
+            album_type=cls._stripped(release_group.get("primary-type")),
+            secondary_types=secondary_types,
+            year=cls._year(release_date),
+            release_date=release_date,
+            duration=cls._duration_seconds(recording.get("length")),
+            isrc=next(iter(recording.get("isrcs") or []), None),
+            cover_url=cls._build_cover_url(release_group.get("id")),
+            version=recording.get("disambiguation") or None,
+            metadata_category=" / ".join(str(part) for part in category_parts if part),
+            genres=cls._names_of(recording.get("genres")),
+            release_status=cls._stripped((release or {}).get("status")),
+            names=[name for name in (title, album) if name],
+            title_aliases=cls._names_of(recording.get("aliases")),
+            album_aliases=cls._names_of(release_group.get("aliases")),
+            artist_aliases=cls._credit_aliases(recording.get("artist-credit")),
+            detail_link=f"{cls._detail_url}/{media_id}",
+            raw_data=recording,
+        ))
+
+    @classmethod
+    def _release_group_to_album(cls, release_group: dict[str, Any]) -> Optional[MusicAlbumInfo]:
+        """
+        将 MusicBrainz Release Group 响应转换为标准专辑信息。
+        """
+        media_id = release_group.get("id")
+        title = release_group.get("title")
+        if not media_id or not title:
+            return None
+        artists, artist_ids = cls._artist_credits(release_group.get("artist-credit"))
+        rating = release_group.get("rating") or {}
+        return _remote_music_evidence(MusicAlbumInfo(
+            media_source=cls._source,
+            media_id=str(media_id),
+            musicbrainz_release_group_id=str(media_id),
+            original_year=cls._year(release_group.get("first-release-date")),
+            title=str(title),
+            artists=artists,
+            artist_ids=artist_ids,
+            album_type=cls._stripped(release_group.get("primary-type")),
+            title_aliases=cls._names_of(release_group.get("aliases")),
+            artist_aliases=cls._credit_aliases(release_group.get("artist-credit")),
+            secondary_types=[value for item in release_group.get("secondary-types") or [] if (value := cls._stripped(item))],
+            release_date=release_group.get("first-release-date") or None,
+            cover_url=cls._build_cover_url(media_id),
+            genres=cls._names_of(release_group.get("genres")),
+            tags=cls._names_of(release_group.get("tags")),
+            # MusicBrainz 评分是 5 分制，统一放大到与影视一致的 10 分制展示
+            rating=round(float(rating["value"]) * 2, 1) if rating.get("value") else 0.0,
+            rating_votes=rating.get("votes-count"),
+            detail_link=f"{cls._album_detail_url}/{media_id}",
+            raw_data=release_group,
+        ))
+
+    @classmethod
+    def _release_variants(cls, releases: list[dict[str, Any]]) -> list[MusicRelease]:
+        """
+        整理同一专辑下的发行版本，供详情页对比介质和地区。
+        """
+        variants = []
+        for release in releases:
+            if not release.get("id"):
+                continue
+            media = release.get("media") or []
+            variants.append(
+                MusicRelease(
+                    media_id=str(release["id"]),
+                    title=release.get("title"),
+                    date=release.get("date") or None,
+                    country=release.get("country") or None,
+                    status=release.get("status") or None,
+                    packaging=release.get("packaging") or None,
+                    formats=[str(item["format"]) for item in media if item.get("format")],
+                    track_count=sum(int(item.get("track-count") or 0) for item in media) or None,
+                )
+            )
+        variants.sort(key=lambda item: (cls._date_sort_key(item.date), item.title or ""))
+        return variants
+
+    @staticmethod
+    def _artist_credits(
+            artist_credit: Optional[list[dict[str, Any]]],
+    ) -> Tuple[list[str], list[str]]:
+        """
+        从 MusicBrainz artist-credit 提取有序艺术家名称和按位置对齐的标准 ID。
+        """
+        names: list[str] = []
+        ids: list[str] = []
+        for credit in artist_credit or []:
+            artist = credit.get("artist") or {}
+            name = artist.get("name") or credit.get("name")
+            if not name or str(name) in names:
+                continue
+            names.append(str(name))
+            # 名称与 ID 按下标一一对应，缺少 ID 时补空串，前端据此决定是否可跳转
+            ids.append(str(artist.get("id") or ""))
+        return names, ids
+
+    @classmethod
+    def _credit_aliases(cls, credits: Optional[list[dict[str, Any]]]) -> list[str]:
+        """
+        保留 artist-credit 中同一人的实际署名与来源别名，不丢弃外文艺名。
+        """
+        names: list[str] = []
+        for credit in credits or []:
+            artist = credit.get("artist") or {}
+            names.extend(unique_music_texts([
+                credit.get("name"), artist.get("name"), *cls._names_of(artist.get("aliases")),
+            ]))
+        return unique_music_texts(names)
+
+    @staticmethod
+    def _names_of(items: Optional[list[dict[str, Any]]]) -> list[str]:
+        """
+        提取 MusicBrainz 风格、标签或别名列表的名称，热度高的排在前面。
+        """
+        entries = [item for item in items or [] if item.get("name")]
+        entries.sort(key=lambda item: (-int(item.get("count") or 0), str(item["name"])))
+        return [str(item["name"]) for item in entries]
+
+    @classmethod
+    def _select_track_release(
+            cls,
+            releases: list[dict[str, Any]],
+            preference: Optional[_MusicReleasePreference] = None,
+    ) -> dict[str, Any]:
+        """
+        选择曲目完整的正式版本，并按地区、字形和日期确定代表版本。
+        """
+        candidates = [
+            release
+            for release in releases
+            if release.get("id")
+            and sum(int(item.get("track-count") or 0) for item in release.get("media") or [])
+        ]
+        if not candidates:
+            candidates = [release for release in releases if release.get("id")]
+        if not candidates:
+            return {}
+        official = [release for release in candidates if release.get("status") == "Official"]
+        selected_preference = preference or cls._release_preference()
+        return min(
+            official or candidates,
+            key=lambda release: (
+                *cls._release_preference_sort_key(release, selected_preference),
+                cls._date_sort_key(release.get("date")),
+            ),
+        )
+
+    @classmethod
+    def _album_tracks_payload(
+            cls,
+            releases: list[dict[str, Any]],
+            preference: Optional[_MusicReleasePreference] = None,
+            *,
+            release_id: Optional[str] = None,
+            group_id: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """
+        同步读取指定发行或默认代表版本的曲目，显式版本失败不回退。
+        """
+        release = {"id": release_id.lower()} if release_id is not None else cls._select_track_release(releases, preference)
+        if not release.get("id"):
+            return None
+        payload = cls._request_json(
+            f"/release/{release['id']}",
+            params={"inc": "recordings+artist-credits+isrcs" + _RELEASE_RELATIONS
+                    + ("+release-groups" if release_id is not None else ""), "fmt": "json"},
+        )
+        return cls._validate_album_release(payload, release_id=release_id, group_id=group_id)
+
+    @classmethod
+    async def _async_album_tracks_payload(
+            cls,
+            releases: list[dict[str, Any]],
+            preference: Optional[_MusicReleasePreference] = None,
+            *,
+            release_id: Optional[str] = None,
+            group_id: Optional[str] = None,
+    ) -> Optional[dict[str, Any]]:
+        """
+        异步读取指定发行或默认代表版本的曲目，显式版本失败不回退。
+        """
+        release = {"id": release_id.lower()} if release_id is not None else cls._select_track_release(releases, preference)
+        if not release.get("id"):
+            return None
+        payload = await cls._async_request_json(
+            f"/release/{release['id']}",
+            params={"inc": "recordings+artist-credits+isrcs" + _RELEASE_RELATIONS
+                    + ("+release-groups" if release_id is not None else ""), "fmt": "json"},
+        )
+        return cls._validate_album_release(payload, release_id=release_id, group_id=group_id)
+
+    @staticmethod
+    def _validate_album_release(
+            payload: Optional[dict[str, Any]],
+            *,
+            release_id: Optional[str],
+            group_id: Optional[str],
+    ) -> Optional[dict[str, Any]]:
+        """
+        核验具体发行及所属发行组，不以可能截断的内嵌发行列表决定归属。
+        """
+        if not isinstance(payload, dict):
+            return None
+        if release_id is not None:
+            release_group = payload.get("release-group")
+            if (payload.get("id") != release_id.lower() or not isinstance(release_group, dict)
+                    or release_group.get("id") != group_id):
+                return None
+        return payload
+
+    @classmethod
+    def _apply_selected_release(
+            cls,
+            album: MusicAlbumInfo,
+            payload: Optional[dict[str, Any]],
+    ) -> None:
+        """
+        把代表 Release 的标题、日期和来源身份回填到 Release Group 专辑。
+        """
+        if not payload:
+            return
+        if title := cls._stripped(payload.get("title")):
+            album.title = title
+        if release_date := cls._stripped(payload.get("date")):
+            album.release_date = release_date
+        album.musicbrainz_release_id = cls._stripped(payload.get("id"))
+        album.total_discs = len(payload.get("media") or []) or None
+        album.__dict__.update(_musicbrainz_credits(payload))
+        album.raw_data = {
+            **(album.raw_data or {}),
+            "release_id": cls._stripped(payload.get("id")),
+            "release_country": cls._stripped(payload.get("country")),
+            "release_script": cls._release_script(payload) or None,
+        }
+        _remote_music_evidence(album)
+
+    @classmethod
+    def _project_album_tracks(
+            cls,
+            album: MusicAlbumInfo,
+            payload: Optional[dict[str, Any]],
+    ) -> list[MusicInfo]:
+        """
+        把代表性发行版本响应投影为专辑曲目列表。
+        """
+        tracks: list[MusicInfo] = []
+        for medium in (payload or {}).get("media") or []:
+            for track in medium.get("tracks") or []:
+                info = cls._track_to_info(album, medium, track)
+                if info:
+                    tracks.append(info)
+        return tracks
+
+    @classmethod
+    def _track_to_info(
+            cls,
+            album: MusicAlbumInfo,
+            medium: dict[str, Any],
+            track: dict[str, Any],
+    ) -> Optional[MusicInfo]:
+        """
+        将发行版本中的单条曲目转换为可继续浏览的音乐信息。
+        """
+        recording = track.get("recording") or {}
+        media_id = recording.get("id")
+        title = track.get("title") or recording.get("title")
+        if not media_id or not title:
+            return None
+        artists, artist_ids = cls._artist_credits(
+            track.get("artist-credit") or recording.get("artist-credit")
+        )
+        return _remote_music_evidence(MusicInfo(
+            **_musicbrainz_credits(recording),
+            media_source=cls._source,
+            media_id=str(media_id),
+            title=str(title),
+            artists=artists or list(album.artists),
+            artist_ids=artist_ids or list(album.artist_ids),
+            artist_aliases=cls._credit_aliases(track.get("artist-credit") or recording.get("artist-credit")) if artists else list(album.artist_aliases),
+            album=album.title,
+            album_artist=album.artist or None,
+            album_id=album.media_id,
+            musicbrainz_release_id=album.musicbrainz_release_id,
+            musicbrainz_release_group_id=album.musicbrainz_release_group_id or album.media_id,
+            musicbrainz_release_track_id=cls._stripped(track.get("id")),
+            original_year=cls._year(recording.get("first-release-date")) or album.original_year,
+            release_year=album.year if album.musicbrainz_release_id else None,
+            total_discs=album.total_discs,
+            album_type=album.album_type,
+            year=album.year,
+            release_date=album.release_date,
+            disc_number=cls._optional_int(medium.get("position")),
+            track_number=cls._optional_int(track.get("position")),
+            total_tracks=cls._optional_int(medium.get("track-count")),
+            duration=cls._duration_seconds(track.get("length") or recording.get("length")),
+            isrc=next(iter(recording.get("isrcs") or []), None),
+            cover_url=album.cover_url,
+            version=recording.get("disambiguation") or None,
+            secondary_types=list(album.secondary_types),
+            metadata_category=album.metadata_category,
+            genres=list(album.genres),
+            tags=list(album.tags),
+            artist_country=album.artist_country,
+            release_status=album.release_status,
+            names=[str(title)],
+            detail_link=f"{cls._detail_url}/{media_id}",
+            raw_data={"isrcs": list(recording.get("isrcs") or [])},
+        ))
+
+    @classmethod
+    def _select_release(cls, releases: list[dict[str, Any]]) -> dict[str, Any]:
+        """
+        优先选择正式且符合系统地区、字形优先级的发行记录。
+        """
+        if not releases:
+            return {}
+        official = [release for release in releases if release.get("status") == "Official"]
+        candidates = official or releases
+        preference = cls._release_preference()
+        return min(
+            candidates,
+            key=lambda release: (
+                *cls._release_preference_sort_key(release, preference),
+                cls._date_sort_key(release.get("date")),
+            ),
+        )
+
+    @staticmethod
+    def _date_sort_key(value: Optional[str]) -> tuple[int, str]:
+        """
+        将完整或不完整发行日期转换为稳定排序键。
+        """
+        return (0, value) if value else (1, "")
+
+    @staticmethod
+    def _release_date(recording: dict[str, Any], release: dict[str, Any]) -> Optional[str]:
+        """
+        从录音和发行信息中选择最可靠的发行日期。
+        """
+        return recording.get("first-release-date") or release.get("date")
+
+    @staticmethod
+    def _year(release_date: Optional[str]) -> Optional[int]:
+        """
+        从 MusicBrainz 的可变精度日期提取年份。
+        """
+        if not release_date:
+            return None
+        try:
+            return int(release_date[:4])
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _duration_seconds(value: Any) -> Optional[int]:
+        """
+        将 MusicBrainz 毫秒时长转换为整数秒。
+        """
+        try:
+            return round(int(value) / 1000) if value is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _stripped(value: Any) -> Optional[str]:
+        """
+        去除 MusicBrainz 响应字段两端的空白，空值返回 None。
+        """
+        text = str(value).strip() if value is not None else ""
+        return text or None
+
+    @staticmethod
+    def _optional_int(value: Any) -> Optional[int]:
+        """
+        将 MusicBrainz 的碟号、音轨号等计数字段转换为可选整数。
+        """
+        try:
+            return int(value) if value not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _artist_to_info(
+            cls,
+            artist: dict[str, Any],
+            relation: Optional[str] = None,
+            include_raw: bool = False,
+    ) -> Optional[MusicArtistInfo]:
+        """
+        将 MusicBrainz Artist 响应转换为标准艺术家信息。
+        """
+        media_id = artist.get("id")
+        name = artist.get("name")
+        if not media_id or not name:
+            return None
+        life_span = artist.get("life-span") or {}
+        area = artist.get("area") or {}
+        begin_area = artist.get("begin-area") or {}
+        relations = artist.get("relations") or []
+        return MusicArtistInfo(
+            media_source=cls._source,
+            media_id=str(media_id),
+            name=str(name),
+            sort_name=artist.get("sort-name") or None,
+            disambiguation=artist.get("disambiguation") or None,
+            artist_type=artist.get("type") or None,
+            gender=artist.get("gender") or None,
+            country=artist.get("country") or None,
+            area=area.get("name") or begin_area.get("name") or None,
+            begin_date=life_span.get("begin") or None,
+            end_date=life_span.get("end") or None,
+            ended=bool(life_span.get("ended")),
+            genres=cls._names_of(artist.get("genres")),
+            tags=cls._names_of(artist.get("tags")),
+            aliases=cls._names_of(artist.get("aliases")),
+            relation=relation,
+            image_url=cls._artist_image(relations),
+            detail_link=f"{cls._artist_detail_url}/{media_id}",
+            external_links=cls._artist_links(relations),
+            raw_data=artist if include_raw else {},
+        )
+
+    @classmethod
+    def _artist_image(cls, relations: list[dict[str, Any]]) -> Optional[str]:
+        """
+        从艺术家 image 关系解析可直接展示的图片地址。
+        """
+        for relation in relations:
+            if relation.get("type") != "image":
+                continue
+            resource = (relation.get("url") or {}).get("resource") or ""
+            # MusicBrainz 记录的是维基共享资源页地址，需要转成文件直链才能展示
+            if "commons.wikimedia.org/wiki/File:" in resource:
+                file_name = resource.rsplit("File:", 1)[-1]
+                return (
+                    "https://commons.wikimedia.org/wiki/Special:FilePath/"
+                    f"{file_name}?width=500"
+                )
+            if resource:
+                return resource
+        return None
+
+    @classmethod
+    def _artist_links(cls, relations: list[dict[str, Any]]) -> dict[str, str]:
+        """
+        整理艺术家可对外跳转的官方与流媒体链接。
+        """
+        links: dict[str, str] = {}
+        for relation in relations:
+            relation_type = str(relation.get("type") or "")
+            resource = (relation.get("url") or {}).get("resource")
+            if relation_type in cls._artist_link_types and resource:
+                links.setdefault(relation_type, str(resource))
+        return links
+
+    @classmethod
+    def _related_artists(
+            cls,
+            relations: list[dict[str, Any]],
+            count: int,
+    ) -> list[MusicArtistInfo]:
+        """
+        按关系类型优先级整理关联艺术家，并按来源去重。
+        """
+        ranked: list[tuple[int, MusicArtistInfo]] = []
+        seen: set[str] = set()
+        fallback_priority = len(cls._artist_relation_priority)
+        for relation in relations:
+            if relation.get("target-type") != "artist":
+                continue
+            artist = relation.get("artist") or {}
+            artist_id = str(artist.get("id") or "")
+            if not artist_id or artist_id in seen:
+                continue
+            relation_type = str(relation.get("type") or "")
+            info = cls._artist_to_info(artist, relation=relation_type or None)
+            if not info:
+                continue
+            seen.add(artist_id)
+            priority = (
+                cls._artist_relation_priority.index(relation_type)
+                if relation_type in cls._artist_relation_priority
+                else fallback_priority
+            )
+            ranked.append((priority, info))
+        ranked.sort(key=lambda item: (item[0], item[1].name or ""))
+        return [info for _, info in ranked[: max(1, count)]]
+
+    @classmethod
+    def _build_cover_url(cls, release_group_id: Optional[str]) -> Optional[str]:
+        """
+        根据 Release Group ID 构造 Cover Art Archive 封面地址。
+        """
+        if not release_group_id:
+            return None
+        # 支持配置音乐封面代理地址，解决 coverartarchive.org 无法访问的问题
+        base = (get_runtime_setting('MUSIC_COVER_PROXY') or "https://coverartarchive.org").rstrip("/")
+        return f"{base}/release-group/{release_group_id}/front-500"
+
+    @classmethod
+    def _get_request(cls) -> RequestUtils:
+        """
+        懒创建并复用统一 HTTP 客户端，批量识别时避免重复建连。
+        """
+        if cls._request is None:
+            with cls._client_lock:
+                if cls._request is None:
+                    cls._request = RequestUtils(
+                        headers={
+                            "User-Agent": (
+                                f"{get_runtime_setting('USER_AGENT')} "
+                                "(https://github.com/jxxghp/MoviePilot)"
+                            ),
+                            "Accept": "application/json",
+                        },
+                        proxies=get_runtime_setting('PROXY'),
+                        use_session=True,
+                        timeout=20,
+                    )
+        return cls._request
+
+    @classmethod
+    def _reserve_request_delay(cls) -> float:
+        """
+        为同步和异步 MusicBrainz 请求统一预留发送时间。
+        """
+        from .cache import reserve_request_delay
+        return reserve_request_delay(cls._request_interval)
+
+    @classmethod
+    def _wait_for_rate_limit(cls) -> bool:
+        """
+        同步等待 MusicBrainz 公共接口的已预留请求时间。
+        """
+        delay = cls._reserve_request_delay()
+        if delay < 0:
+            return False
+        if delay:
+            time.sleep(delay)
+        return True
+
+    @classmethod
+    async def _async_wait_for_rate_limit(cls) -> bool:
+        """
+        异步等待 MusicBrainz 公共接口的已预留请求时间。
+        """
+        delay = cls._reserve_request_delay()
+        if delay < 0:
+            return False
+        if delay:
+            await asyncio.sleep(delay)
+        return True
+
+    @classmethod
+    def _response_decision(
+            cls,
+            response: Any,
+            path: str,
+            attempt: int,
+            attempts: int,
+    ) -> _MusicBrainzResponseDecision:
+        """
+        统一分类响应、解析 JSON，并决定是否执行下一次退避重试。
+        """
+        status_code = response.status_code
+        if status_code == 404:
+            logger.debug(f"MusicBrainz 资源不存在：{path}")
+            return _MusicBrainzResponseDecision(payload={})
+        if status_code == 429 or status_code >= 500:
+            logger.warning(
+                f"MusicBrainz 服务繁忙：{status_code} {response.text[:200]}"
+            )
+            if attempt < attempts - 1:
+                return _MusicBrainzResponseDecision(
+                    retry_delay=cls._busy_backoff * (2 ** attempt)
+                )
+            report_music_recognition("service_error", "音乐元数据服务繁忙，请稍后重试")
+            return _MusicBrainzResponseDecision()
+        if status_code != 200:
+            logger.warning(
+                f"MusicBrainz 请求失败：{status_code} {response.text[:200]}"
+            )
+            report_music_recognition("service_error", "音乐元数据服务请求失败，请稍后重试")
+            return _MusicBrainzResponseDecision()
+        try:
+            payload = response.json()
+        except (TypeError, ValueError) as err:
+            logger.warning(f"MusicBrainz 响应解析失败：{err}")
+            report_music_recognition("service_error", "音乐元数据服务返回了无效响应，请稍后重试")
+            return _MusicBrainzResponseDecision()
+        if not isinstance(payload, dict):
+            report_music_recognition("service_error", "音乐元数据服务返回了无效响应，请稍后重试")
+        return _MusicBrainzResponseDecision(
+            payload=payload if isinstance(payload, dict) else None
+        )
+
+    @classmethod
+    @cached(region="musicbrainz:http:v2", maxsize=get_runtime_setting('CONF').musicbrainz, ttl=get_runtime_setting('CONF').meta, skip_none=True,
+            empty_ttl=300, empty_if=lambda value: not value or value.get("count") == 0)
+    def _request_json(
+            cls,
+            path: str,
+            params: Optional[dict[str, Any]] = None,
+    ) -> Optional[dict[str, Any]]:
+        """
+        请求 MusicBrainz JSON 接口并统一处理网络和响应错误。
+
+        服务端繁忙（429/5xx）属于瞬时错误，退避重试后再失败才放弃，
+        避免批量识别场景下把限流误判为检索零命中。
+        """
+        attempts = cls._busy_retries + 1
+        for attempt in range(attempts):
+            if music_request_timeout() is None or cls._wait_for_rate_limit() is False:
+                return None
+            timeout = music_request_timeout(claim=False)
+            if timeout is None:
+                return None
+            response = cls._get_request().get_res(
+                f"{cls._base_url}{path}", params=params, timeout=timeout,
+            )
+            if response is None:
+                report_music_recognition("service_error", "音乐元数据服务连接失败，请稍后重试")
+                return None
+            try:
+                decision = cls._response_decision(
+                    response, path, attempt, attempts
+                )
+            finally:
+                response.close()
+            if decision.retry_delay is not None:
+                if not music_wait_allowed(decision.retry_delay):
+                    return None
+                time.sleep(decision.retry_delay)
+                continue
+            return decision.payload
+        return None
+
+    @classmethod
+    @cached(
+        region="musicbrainz:http:v2",
+        maxsize=get_runtime_setting('CONF').musicbrainz,
+        ttl=get_runtime_setting('CONF').meta,
+        skip_none=True,
+        shared_key="_request_json",
+        empty_ttl=300,
+        empty_if=lambda value: not value or value.get("count") == 0,
+    )
+    async def _async_request_json(
+            cls,
+            path: str,
+            params: Optional[dict[str, Any]] = None,
+    ) -> Optional[dict[str, Any]]:
+        """
+        异步请求 MusicBrainz JSON 接口并统一处理限流与响应错误。
+        """
+        attempts = cls._busy_retries + 1
+        for attempt in range(attempts):
+            if music_request_timeout() is None or await cls._async_wait_for_rate_limit() is False:
+                return None
+            timeout = music_request_timeout(claim=False)
+            if timeout is None:
+                return None
+            response = await AsyncRequestUtils(
+                headers={
+                    "User-Agent": f"{get_runtime_setting('USER_AGENT')} (https://github.com/jxxghp/MoviePilot)",
+                    "Accept": "application/json",
+                },
+                proxies=get_runtime_setting('PROXY'),
+                timeout=20,
+            ).get_res(f"{cls._base_url}{path}", params=params, timeout=timeout)
+            if response is None:
+                report_music_recognition("service_error", "音乐元数据服务连接失败，请稍后重试")
+                return None
+            try:
+                decision = cls._response_decision(
+                    response, path, attempt, attempts
+                )
+            finally:
+                await response.aclose()
+            if decision.retry_delay is not None:
+                if not music_wait_allowed(decision.retry_delay):
+                    return None
+                await asyncio.sleep(decision.retry_delay)
+                continue
+            return decision.payload
+        return None

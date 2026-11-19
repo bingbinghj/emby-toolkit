@@ -11,6 +11,7 @@ pub(crate) fn prepare_resume<'a>(
     context: &'a JobContext,
 ) -> BoxFuture<'a, Result<()>> {
     async move {
+        Box::pin(crate::music::resume_cleanup(state, context)).await?;
         Box::pin(crate::activity::resume_cleanup(state, context)).await?;
         if !context.is_terminal_cleanup() {
             context.ensure_server(state).await?;
@@ -33,6 +34,7 @@ pub(crate) fn execute<'a>(
     context: &'a JobContext,
 ) -> BoxFuture<'a, Result<(u16, Value)>> {
     let execution: BoxFuture<'a, Result<(u16, Value)>> = match spec.kind.as_str() {
+        "music" => crate::music::execute_persisted(state, &spec.payload, context).boxed(),
         "tasks" => crate::tasks::execute_persisted(state, &spec.payload, context).boxed(),
         "actions" => crate::actions::execute_persisted(state, &spec.payload, context).boxed(),
         "audio_tasks" => {

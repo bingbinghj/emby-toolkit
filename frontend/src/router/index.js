@@ -19,6 +19,12 @@ import NotificationSettingsPage from '../components/settings/NotificationSetting
 // --- 2. 定义路由规则 (带 meta.public 标签) ---
 const routes = [
   {
+    path: '/music',
+    name: 'Music',
+    component: () => import('../components/music/MusicPage.vue'),
+    meta: { requiresAuth: true },
+  },
+  {
     path: '/login',
     name: 'Login',
     component: Login,

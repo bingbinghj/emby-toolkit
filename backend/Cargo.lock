@@ -568,6 +568,7 @@ dependencies = [
  "hmac",
  "image",
  "imageproc",
+ "libc",
  "md-5",
  "minijinja",
  "minijinja-contrib",

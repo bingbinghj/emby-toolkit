@@ -277,6 +277,7 @@ const baseMenuOptions = computed(() => {
         label: '整理', defaultLabel: '整理', key: 'group-management', icon: 'mdi-folder-play-outline',
         children: [
           { label: '媒体整理', defaultLabel: '媒体整理', key: 'MediaOrganize', icon: 'mdi-folder-move-outline' },
+          { label: '音乐', defaultLabel: '音乐', key: 'Music', icon: 'mdi-music' },
           { label: '手动处理', defaultLabel: '手动处理', key: 'ReviewList', icon: 'mdi-playlist-edit' },
         ]
       },

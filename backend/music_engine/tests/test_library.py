@@ -1,0 +1,475 @@
+"""真实音频验证做种保护、选中范围、无变化跳过及重启边界。"""
+import os
+import wave
+import pytest
+from etk_music import library, operations
+from etk_music.audio import AudioMetadataHelper
+from etk_music.meta import MetaMusic
+from etk_music.runtime import configure
+
+
+@pytest.fixture
+def fixture(tmp_path):
+    seed, root = tmp_path/"seed", tmp_path/"library"
+    seed.mkdir(); root.mkdir()
+    configure({}, tmp_path/"cache")
+    config = {"music_library_path":str(root),"music_seed_path":str(seed),"music_scraping_policies":{"tags":"missingOnly","cover":"skip","lyrics":"skip"},"music_metadata_to_simplified":False}
+    source = seed/"original.wav"
+    with wave.open(str(source),"wb") as stream:
+        stream.setnchannels(2);stream.setsampwidth(2);stream.setframerate(44100);stream.writeframes(b"\0"*176400)
+    assert AudioMetadataHelper.write(source,MetaMusic(title="原曲名",artists=["歌手"],album="专辑",track_number=1))
+    return config,source,root
+
+
+def plan(config,path,title="新曲名"):
+    result=operations.preview(config,{"operation":"edit","paths":[path],"metadata":{"title":title}})
+    assert result["items"][0]["success"],result
+    return result["items"][0]
+
+
+@pytest.mark.parametrize("kind",["hardlink","symlink","copy"])
+def test_write_preserves_seed_and_independent_copy_can_be_edited_again(fixture,kind):
+    config,source,root=fixture
+    target=root/"renamed.wav"
+    if kind=="hardlink":os.link(source,target)
+    elif kind=="symlink":target.symlink_to(source)
+    else:target.write_bytes(source.read_bytes())
+    before=source.read_bytes()
+    row=plan(config,"renamed.wav")
+    result=operations.execute(config,{"item":row,"operation":"edit","execution_id":"abcd-1"})
+    assert result["success"]
+    assert source.read_bytes()==before
+    assert AudioMetadataHelper.read(target).title=="新曲名"
+    assert not target.samefile(source) and not target.is_symlink()
+    operations.execute(config,{"item":plan(config,"renamed.wav","再次编辑"),"operation":"edit","execution_id":"abcd-2"})
+    assert AudioMetadataHelper.read(target).title=="再次编辑"
+    assert source.read_bytes()==before
+
+
+def test_unchanged_metadata_keeps_hardlink(fixture):
+    config,source,root=fixture
+    os.link(source,root/"song.wav")
+    row=plan(config,"song.wav","原曲名")
+    operations.execute(config,{"item":row,"operation":"edit","execution_id":"abcd-3"})
+    assert source.samefile(root/"song.wav")
+    assert not list(root.glob(".*etk-music*"))
+
+
+def test_rescrape_changes_only_selected_track_without_renaming(fixture,monkeypatch):
+    config,source,root=fixture
+    os.link(source,root/"first.wav");os.link(source,root/"second.wav")
+    original=source.read_bytes()
+    from etk_music.models import MusicInfo
+    monkeypatch.setattr(operations.catalog,"recognize",lambda *_:(AudioMetadataHelper.read(source),MusicInfo(title="刮削标题",artists=["歌手"],album="专辑",media_source="musicbrainz",media_id="a")))
+    config["music_scraping_policies"]["tags"]="overwrite"
+    preview=operations.preview(config,{"operation":"rescrape","paths":["first.wav"]})
+    assert len(preview["items"])==1 and preview["items"][0]["target"]=="first.wav"
+    operations.execute(config,{"item":preview["items"][0],"operation":"rescrape","execution_id":"abcd-4"})
+    assert AudioMetadataHelper.read(root/"first.wav").title=="刮削标题"
+    assert source.read_bytes()==(root/"second.wav").read_bytes()==original
+
+
+def test_seed_directory_traversal_and_symlink_directory_are_rejected(fixture):
+    config,source,root=fixture
+    with pytest.raises(ValueError):library.target(config,str(source))
+    with pytest.raises(ValueError):library.target(config,"../seed/original.wav")
+    (root/"escape").symlink_to(source.parent,target_is_directory=True)
+    with pytest.raises(ValueError):library.target(config,"escape/original.wav")
+    assert library.walk(config)==[]
+
+
+def test_changed_file_is_rejected_before_tag_write(fixture):
+    config,source,root=fixture
+    os.link(source,root/"song.wav")
+    row=plan(config,"song.wav")
+    (root/"song.wav").unlink();(root/"song.wav").write_bytes(source.read_bytes())
+    with pytest.raises(ValueError,match="已变化"):operations.execute(config,{"item":row,"operation":"edit","execution_id":"abcd-5"})
+    assert AudioMetadataHelper.read(source).title=="原曲名"
+
+
+def test_failure_during_tag_write_preserves_library_link(fixture,monkeypatch):
+    config,source,root=fixture
+    os.link(source,root/"song.wav");row=plan(config,"song.wav")
+    original=source.read_bytes()
+    monkeypatch.setattr(AudioMetadataHelper,"write",lambda *_a,**_k:False)
+    with pytest.raises(ValueError,match="写入失败"):operations.execute(config,{"item":row,"operation":"edit","execution_id":"abcd-6"})
+    assert source.samefile(root/"song.wav") and source.read_bytes()==original
+    assert not list(root.glob(".*etk-music*"))
+
+
+def test_resume_after_atomic_replacement_does_not_write_again(fixture,monkeypatch):
+    config,source,root=fixture
+    os.link(source,root/"song.wav");row=plan(config,"song.wav")
+    write=operations.write_json
+    def crash(path,data):
+        if data.get("state")=="audio_done":raise RuntimeError("模拟替换后进程退出")
+        write(path,data)
+    monkeypatch.setattr(operations,"write_json",crash)
+    body={"item":row,"operation":"edit","execution_id":"abcd-7"}
+    with pytest.raises(RuntimeError):operations.execute(config,body)
+    changed=(root/"song.wav").stat().st_ino
+    monkeypatch.setattr(operations,"write_json",write)
+    assert operations.execute(config,body)["success"]
+    assert (root/"song.wav").stat().st_ino==changed
+    assert AudioMetadataHelper.read(source).title=="原曲名"
+
+
+def test_local_search_uses_only_library_index(fixture):
+    config,source,root=fixture
+    os.link(source,root/"song.wav")
+    library.scan_one(config,"song.wav","scan")
+    assert library.listing(config,"歌手")["total"]==1
+    assert library.listing(config,"original.wav")["total"]==0
+    assert library.listing(config,"%_")["total"]==0
+
+
+def test_reorganize_is_not_supported(fixture):
+    config, source, root = fixture
+    os.link(source, root/'song.wav')
+    with pytest.raises(ValueError, match='未知音乐操作'):
+        operations.preview(config, {'operation':'reorganize', 'paths':['song.wav']})
+    row = plan(config, 'song.wav')
+    row['target'] = 'moved.wav'
+    with pytest.raises(ValueError, match='原位置'):
+        operations.execute(config, {'item':row, 'operation':'edit', 'execution_id':'abcd-8'})
+    assert source.samefile(root/'song.wav')
+
+
+def test_resume_after_interrupted_staging_retries_automatically(fixture, monkeypatch):
+    config, source, root = fixture
+    os.link(source, root/'song.wav')
+    row = plan(config, 'song.wav')
+    write = operations.write_json
+    def crash(path, data):
+        write(path, data)
+        if data.get('state') == 'staging':
+            raise SystemExit('模拟中断')
+    monkeypatch.setattr(operations, 'write_json', crash)
+    body = {'item':row, 'operation':'edit', 'execution_id':'abcd-9'}
+    with pytest.raises(SystemExit): operations.execute(config, body)
+    monkeypatch.setattr(operations, 'write_json', write)
+    assert operations.execute(config, body)['success']
+    assert AudioMetadataHelper.read(root/'song.wav').title == '新曲名'
+    assert AudioMetadataHelper.read(source).title == '原曲名'
+
+
+def test_manual_album_does_not_assign_two_files_to_one_track(fixture, monkeypatch):
+    config, source, root = fixture
+    os.link(source, root/'first.wav'); os.link(source, root/'second.wav')
+    from etk_music.models import MusicAlbumInfo, MusicInfo
+    album = MusicAlbumInfo(title='专辑', media_source='musicbrainz', media_id='album', tracks=[MusicInfo(title='原曲名', artists=['歌手'], track_number=1, duration=1, media_source='musicbrainz', media_id='song')])
+    monkeypatch.setattr(operations.catalog, 'detail', lambda *_:album)
+    result = operations.preview(config, {'paths':['first.wav','second.wav'], 'selection':{'media_source':'musicbrainz','media_id':'album','music_type':'album'}})
+    assert len(result['items'])==2
+    assert all(not row['success'] and '唯一对位' in row['message'] for row in result['items'])
+    assert source.samefile(root/'first.wav') and source.samefile(root/'second.wav')
+
+
+def test_single_song_identity_cannot_scrape_multiple_files(fixture):
+    config, source, root = fixture
+    with pytest.raises(ValueError, match='单曲资料'):
+        operations.preview(config, {'paths':['a.wav','b.wav'], 'selection':{'media_source':'musicbrainz','media_id':'song','music_type':'recording'}})
+
+
+def test_cover_globs_cannot_leave_audio_directory(fixture):
+    config, source, root = fixture
+    os.link(source, root/'song.wav')
+    (root.parent/'cover.jpg').write_bytes(b'private')
+    config['music_cover_file_patterns']='../cover.jpg'
+    assert library.image(config, 'song.wav') is None
+
+
+def test_worker_scan_batch_records_failures_and_library_accepts_null_query(fixture, tmp_path):
+    config, source, root = fixture
+    os.link(source, root/'song.wav')
+    from worker import dispatch
+    request={'config':config, 'cache_dir':str(tmp_path/'worker'), 'action':'scan_batch', 'body':{'paths':['song.wav','missing.wav'], 'scan_id':'1'}}
+    result=dispatch(request)
+    assert result[0]['success'] and not result[1]['success']
+    request.update(action='library', body={'query':None})
+    assert dispatch(request)['total']==1
+
+
+def test_lyricsfile_and_lrc_preserve_source_links_and_timestamp_tags(fixture):
+    config, source, root=fixture
+    from etk_music.amll_lyrics import parse_lyrics
+    document='<tt xmlns="http://www.w3.org/ns/ttml"><body><div><p begin="1" end="3"><span begin="1" end="2">聲</span><span begin="2" end="3">音</span></p></div></body></tt>'
+    lyrics=parse_lyrics(document,title='歌曲',artist='歌手',provider_id='a',match_score=95)
+    assert lyrics and lyrics.lyricsfile
+    original=source.parent/'source.lrc';original.write_text('原始歌词',encoding='utf-8')
+    os.link(original,root/'song.lrc')
+    operations.sidecar(root/'song.wav',lyrics,'overwrite',True,'abcd-10')
+    assert original.read_text()=='原始歌词'
+    assert (root/'song.lrc').read_text().strip()=='[00:01.00]声音'
+    assert (root/'song.lyricsfile.yaml').read_text().strip()==lyrics.lyricsfile.strip()
+    assert not list(root.glob('.*etk-lyrics*'))
+
+
+def test_cancel_cleanup_preserves_audio_and_removes_only_own_staging(fixture,monkeypatch):
+    config,source,root=fixture
+    os.link(source,root/'song.wav'); row=plan(config,'song.wav')
+    write=operations.write_json
+    def crash(path,data):
+        write(path,data)
+        if data['state']=='prepared':raise SystemExit('准备完成后中断')
+    monkeypatch.setattr(operations,'write_json',crash)
+    body={'item':row,'operation':'edit','execution_id':'abcd-11'}
+    with pytest.raises(SystemExit):operations.execute(config,body)
+    assert list(root.glob('.*etk-music*'))
+    unrelated=root/'.other.etk-music-abcd-12';unrelated.write_text('别的任务')
+    operations.cleanup(config,{'task_id':'abcd'})
+    assert source.samefile(root/'song.wav') and unrelated.exists()
+    assert len(list(root.glob('.*etk-music*')))==1
+
+
+def test_cue_image_does_not_become_first_recording(fixture,monkeypatch):
+    config,source,root=fixture
+    os.link(source,root/'song.wav')
+    (root/'song.cue').write_text('PERFORMER "歌手"\nTITLE "整轨专辑"\nFILE "song.wav" WAVE\n  TRACK 01 AUDIO\n    TITLE "第一首"\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    TITLE "第二首"\n    INDEX 01 00:00:40\n',encoding='utf-8')
+    from etk_music.models import MusicInfo
+    info=MusicInfo(title='线上专辑',album='线上专辑',artists=['歌手'],music_type='album',media_source='musicbrainz',media_id='album')
+    monkeypatch.setattr(operations,'recognize_group',lambda *_:({str((root/'song.wav').resolve()):info},{}))
+    preview=operations.preview(config,{'paths':['song.wav']})
+    row=preview['items'][0]
+    assert row['success'],row
+    assert row['music_layout']=='image_cue'
+    assert row['metadata']['title']!='第一首'
+    assert row['metadata']['media_id']!='album' or row['metadata']['music_type']=='album'
+    config['music_scraping_policies']['tags']='overwrite'
+    operations.execute(config,{'item':row,'operation':'rescrape','execution_id':'abcd-12'})
+    assert AudioMetadataHelper.read_tags(source).title=='原曲名'
+    assert AudioMetadataHelper.read_tags(root/'song.wav').title!='第一首'
+
+
+def test_fingerprint_cache_survives_new_provider_instance(fixture):
+    from etk_music.acoustid import AcoustIdModule
+    from etk_music.observation import capture_music_recognition
+    with capture_music_recognition() as observation:
+        module=AcoustIdModule()
+        module._set_cached(('song',123,456),'recording',[{'recording_id':'recording','score':1.0}])
+        next_instance=AcoustIdModule()
+        assert next_instance._get_cached(('song',123,456))==(True,'recording')
+        assert observation.fingerprint_candidates[0]['recording_id']=='recording'
+        assert next_instance._get_cached(('song',123,457))==(False,None)
+
+
+def test_inflight_source_change_does_not_write_sidecar_to_new_media(fixture,monkeypatch):
+    config,source,root=fixture
+    os.link(source,root/'song.wav')
+    row=plan(config,'song.wav')
+    config['music_scraping_policies']={'tags':'skip','cover':'skip','lyrics':'overwrite'}
+    from etk_music.models import MusicLyrics
+    def changed(*_):
+        (root/'song.wav').unlink(); (root/'song.wav').write_bytes(source.read_bytes())
+        return MusicLyrics(provider='local',plain_lyrics='不应写入')
+    monkeypatch.setattr(operations.catalog,'lyrics',changed)
+    with pytest.raises(ValueError,match='读取资料时已变化'):
+        operations.execute(config,{'item':row,'operation':'rescrape','execution_id':'abcd-13'})
+    assert not (root/'song.txt').exists()
+
+
+def test_ambiguous_recognition_is_not_cached_as_not_found(fixture):
+    from etk_music.cache import MusicBrainzCache
+    from etk_music.models import MusicInfo
+    meta=MetaMusic(title='同名歌曲',artists=['歌手'])
+    cache=MusicBrainzCache()
+    info=MusicInfo(title='同名歌曲',raw_data={'recognition':{'status':'ambiguous','message':'请人工选择'}})
+    cache.update(meta,info)
+    assert cache.get(meta) is None
+
+
+def test_cue_edit_invalidates_unchanged_audio_index(fixture):
+    config,source,root=fixture
+    os.link(source,root/'song.wav')
+    cue=root/'song.cue'
+    content='PERFORMER "歌手"\nTITLE "原来专辑"\nFILE "song.wav" WAVE\n TRACK 01 AUDIO\n TITLE "第一首"\n INDEX 01 00:00:00\n TRACK 02 AUDIO\n TITLE "第二首"\n INDEX 01 00:00:40\n'
+    cue.write_text(content,encoding='utf-8')
+    first=library.scan_one(config,'song.wav','1')
+    cue.write_text(content.replace('原来专辑','新的专辑'),encoding='utf-8')
+    second=library.scan_one(config,'song.wav','2')
+    assert first['signature']['mtime']==second['signature']['mtime']
+    assert first['title']=='原来专辑' and second['title']=='新的专辑'
+
+
+def test_source_failure_is_exposed_in_search(fixture,monkeypatch):
+    from etk_music.observation import report_music_recognition
+    class Source:
+        def search_music(self,*args,**kwargs):
+            report_music_recognition('service_error','服务暂不可用')
+            return []
+    monkeypatch.setattr(operations.catalog,'provider',lambda _:Source())
+    result=operations.catalog.search('歌曲',['musicbrainz'])
+    assert result['items']==[] and result['errors']=={'musicbrainz':'服务暂不可用'}
+
+
+def test_display_conversion_retains_original_names_identities_and_lyrics(fixture):
+    from etk_music.models import MusicAlbumInfo, MusicInfo
+    from etk_music.display import MusicDisplay
+    album=MusicAlbumInfo(title='歲月',artists=['優里'],artist_ids=['artist'],media_source='musicbrainz',media_id='album',tracks=[MusicInfo(title='後來',artists=['優里'],album='歲月',lyrics='後來的歌詞',media_source='musicbrainz',media_id='song')])
+    converted=MusicDisplay._simplify_recognized_music_info(album)
+    assert converted.title=='岁月' and converted.tracks[0].title=='后来'
+    assert converted.media_id=='album' and converted.tracks[0].media_id=='song'
+    assert converted.tracks[0].lyrics=='後來的歌詞'
+    assert album.title=='歲月' and album.tracks[0].title=='後來'
+    assert '歲月' in converted.title_aliases
+
+
+def test_non_audio_content_is_not_marked_ready_for_tag_edit(fixture):
+    config, source, root=fixture
+    (root/'broken.mp3').write_bytes(b'not audio')
+    result=operations.preview(config,{'operation':'edit','paths':['broken.mp3'],'metadata':{'title':'标题'}})
+    assert not result['items'][0]['success']
+
+
+def test_manual_edit_keeps_traditional_input_when_scraping_simplifies(fixture):
+    config, source, root = fixture
+    config['music_metadata_to_simplified'] = True
+    os.link(source, root/'song.wav')
+    row = plan(config, 'song.wav', '歲月與聲音')
+    assert row['metadata']['title'] == '歲月與聲音'
+    operations.execute(config, {'item':row, 'operation':'edit', 'execution_id':'abcd-14'})
+    assert AudioMetadataHelper.read_tags(root/'song.wav').title == '歲月與聲音'
+
+
+def test_missing_only_lyrics_does_not_query_existing_sidecar(fixture, monkeypatch):
+    config, source, root = fixture
+    os.link(source, root/'song.wav')
+    (root/'song.lrc').write_text('[00:00.00]已有歌词', encoding='utf-8')
+    row = plan(config, 'song.wav', '原曲名')
+    config['music_scraping_policies'] = {'tags':'skip', 'cover':'skip', 'lyrics':'missingOnly'}
+    monkeypatch.setattr(operations.catalog, 'lyrics', lambda *_: pytest.fail('已有歌词不应请求资料源'))
+    result = operations.execute(config, {'item':row, 'operation':'rescrape', 'execution_id':'abcd-15'})
+    assert '保留现有歌词' in result['message']
+    assert source.samefile(root/'song.wav')
+
+
+def test_detail_serialization_honors_simplified_setting(fixture, tmp_path):
+    from etk_music.models import MusicInfo
+    configure({'music_metadata_to_simplified':False}, tmp_path/'cache')
+    assert operations.catalog.serialize(MusicInfo(title='歲月'))['title'] == '歲月'
+
+
+def test_scan_rejects_non_audio_instead_of_indexing_filename(fixture):
+    config, source, root = fixture
+    (root/'broken.mp3').write_bytes(b'not audio')
+    with pytest.raises(Exception):
+        library.scan_one(config, 'broken.mp3', 'scan')
+    assert library.listing(config)['total'] == 0
+
+
+@pytest.mark.parametrize('policy', ['skip', 'missingOnly', 'overwrite'])
+def test_preview_shows_actual_tag_policy(fixture, monkeypatch, policy):
+    config, source, root = fixture
+    os.link(source, root/'song.wav')
+    from etk_music.models import MusicInfo
+    monkeypatch.setattr(operations.catalog, 'recognize', lambda *_: (AudioMetadataHelper.read(source), MusicInfo(title='在线曲名', artists=['歌手'], media_source='musicbrainz', media_id='a')))
+    config['music_scraping_policies']['tags'] = policy
+    row = operations.preview(config, {'paths':['song.wav']})['items'][0]
+    assert row['success'], row
+    assert row['before']['title'] == '原曲名'
+    assert ('title' in row['tag_updates']) == (policy == 'overwrite')
+
+
+def test_cue_changed_during_recognition_requires_new_preview(fixture, monkeypatch):
+    config, source, root = fixture
+    os.link(source, root/'song.wav')
+    cue = root/'song.cue'
+    cue.write_text('PERFORMER "歌手"\nTITLE "专辑"\nFILE "song.wav" WAVE\n TRACK 01 AUDIO\n TITLE "曲名"\n INDEX 01 00:00:00\n', encoding='utf-8')
+    from etk_music.models import MusicInfo
+    def recognize(*_):
+        cue.write_text(cue.read_text().replace('曲名','新曲名'), encoding='utf-8')
+        return {str((root/'song.wav').resolve()):MusicInfo(title='原曲名')}, {}
+    monkeypatch.setattr(operations, 'recognize_group', recognize)
+    row = operations.preview(config, {'paths':['song.wav']})['items'][0]
+    assert not row['success'] and 'CUE 在识别期间已变化' in row['message']
+
+
+def test_truncated_fingerprint_candidates_require_confirmation(fixture, monkeypatch):
+    config, source, root = fixture
+    from etk_music.models import MusicInfo
+    from etk_music.observation import report_music_fingerprints
+    catalog = operations.catalog
+    class Fingerprint:
+        def init_module(self): pass
+        def identify_music_by_fingerprint(self, path):
+            report_music_fingerprints([{'recording_id':'song', 'score':1.0, 'duration':1, 'truncated':True}])
+    monkeypatch.setattr(catalog, 'AcoustIdModule', Fingerprint)
+    monkeypatch.setattr(catalog, 'detail', lambda *_:MusicInfo(title='原曲名', artists=['歌手'], media_source='musicbrainz', media_id='song'))
+    monkeypatch.setattr(catalog, '_fingerprint_info_matches_evidence', lambda *_a, **_k:True)
+    _, info = catalog.recognize(source, ['musicbrainz'])
+    assert info.raw_data['recognition']['status']=='ambiguous' and not info.media_id
+
+
+def test_manual_credit_edits_are_not_overwritten_by_original_tags(fixture):
+    config, source, root = fixture
+    assert AudioMetadataHelper.write(source, MetaMusic(composers=['旧作曲'], conductors=['旧指挥'], orchestras=['旧乐团']))
+    os.link(source, root/'song.wav')
+    expected = {'composers':['新作曲'], 'conductors':['新指挥'], 'orchestras':['新乐团']}
+    row = operations.preview(config, {'operation':'edit', 'paths':['song.wav'], 'metadata':expected})['items'][0]
+    assert row['success'], row
+    assert all(row['metadata'][key]==value for key,value in expected.items())
+    operations.execute(config, {'item':row, 'operation':'edit', 'execution_id':'abcd-16'})
+    result = AudioMetadataHelper.read_tags(root/'song.wav')
+    assert all(getattr(result,key)==value for key,value in expected.items())
+    assert AudioMetadataHelper.read_tags(source).composers == ['旧作曲']
+
+
+def test_selected_disc_directories_share_album_alignment_without_expanding_scope(fixture, monkeypatch):
+    config, source, root = fixture
+    for disc in (1,2):
+        folder = root/'专辑'/f'CD{disc}'; folder.mkdir(parents=True)
+        os.link(source, folder/'01.wav')
+    os.link(source, root/'专辑'/'CD2'/'未选.wav')
+    paths = ['专辑/CD1/01.wav','专辑/CD2/01.wav']
+    assert library.preview_groups(paths) == {'专辑':paths}
+    from etk_music.models import MusicAlbumInfo, MusicInfo
+    album = MusicAlbumInfo(title='专辑',media_source='musicbrainz',media_id='album',total_discs=2,tracks=[MusicInfo(title='原曲名',artists=['歌手'],disc_number=disc,track_number=1,duration=1,media_source='musicbrainz',media_id=f'song-{disc}') for disc in (1,2)])
+    monkeypatch.setattr(operations.catalog, 'detail', lambda *_:album)
+    rows = operations.preview(config, {'paths':paths,'selections':{'专辑':{'media_source':'musicbrainz','media_id':'album','music_type':'album'}}})['items']
+    assert len(rows)==2 and all(row['success'] for row in rows), rows
+    assert len({row['music']['group_id'] for row in rows})==1
+    assert {row['metadata']['disc_number'] for row in rows}=={1,2}
+    assert source.samefile(root/'专辑'/'CD2'/'未选.wav')
+
+
+def test_secondary_album_source_preserves_local_edition_fields(fixture, monkeypatch):
+    from etk_music import album as albums
+    from etk_music.models import MusicAlbumInfo, MusicInfo
+    config, source, root = fixture
+    files = [root/'01.wav', root/'02.wav']
+    metas = [MetaMusic(title=f'曲目{i}',artists=['歌手'],album='专辑',disc_number=1,track_number=i,total_discs=2,release_year=2020,original_year=1990,year=2020) for i in (1,2)]
+    album = MusicAlbumInfo(title='专辑',media_source='theaudiodb',media_id='a',tracks=[MusicInfo(title=f'曲目{i}',artists=['歌手'],disc_number=1,track_number=i,total_discs=1,release_year=1990,year=1990,media_source='theaudiodb',media_id=f'track{i}') for i in (1,2)])
+    monkeypatch.setattr(albums, 'recognize_music_sources', lambda *_:(album, {'status':'matched'}))
+    rows, _ = albums.recognize_group(files, metas, ['theaudiodb'])
+    assert len(rows)==2
+    assert all(info.total_discs==2 and info.release_year==2020 and info.original_year==1990 for info in rows.values())
+
+
+@pytest.mark.parametrize('clear', [False, True])
+def test_recognition_cache_cleanup_matches_mp_without_removing_cover_cache(fixture, tmp_path, clear):
+    from etk_music.cache import Cache, MusicBrainzCache
+    from etk_music.models import MusicInfo
+    from worker import dispatch
+    config, source, root = fixture
+    cache_dir = tmp_path/'cache'
+    configure(config, cache_dir)
+    meta = MetaMusic(title='测试曲目',artists=['歌手'])
+    cache = MusicBrainzCache()
+    cache.update(meta, MusicInfo(title='测试曲目', media_source='musicbrainz', media_id='song'))
+    Cache(region='musicbrainz:http:v2').set('response', {'value':{'title':'旧查询'}})
+    Cache(region='covers').set('cover', {'data':'保留封面'})
+    body = {'clear':True} if clear else {'key':cache.key(meta)}
+    assert dispatch({'action':'cache','config':config,'body':body,'cache_dir':str(cache_dir)})['items']==[]
+    assert Cache(region='musicbrainz:http:v2').get('response') is None
+    assert Cache(region='covers').get('cover') == {'data':'保留封面'}
+
+
+def test_douban_explore_uses_mp_tag_filters_and_sort(fixture, monkeypatch):
+    captured = {}
+    class Douban:
+        def music_discover(self, source, **options):
+            captured.update(options)
+            return []
+    monkeypatch.setattr(operations.catalog,'DoubanMusic',Douban)
+    operations.catalog.explore({'source':'doubanmusic','tags':'爵士,美国','douban_sort':'S','page':2})
+    assert captured['mode']=='tag' and captured['tags']=='爵士,美国' and captured['sort']=='S' and captured['page']==2

@@ -127,5 +127,29 @@
     "start": "00:00",
     "end": "23:59"
   },
-  "auto_extract_credits_on_ingest": false
+  "auto_extract_credits_on_ingest": false,
+  "music_library_path": "/media/Media/Link/Music",
+  "music_seed_path": "/media/Media/Downloads/音乐",
+  "music_sources": [
+    "musicbrainz"
+  ],
+  "music_cue_enable": true,
+  "music_metadata_to_simplified": true,
+  "music_lyrics_to_simplified": false,
+  "music_local_cover_enable": true,
+  "music_cover_file_patterns": "cover.jpg,cover.jpeg,cover.png,folder.jpg,folder.jpeg,folder.png,front.jpg,front.jpeg,front.png,*.png",
+  "music_cover_proxy": "",
+  "music_release_region_priority": "CN,TW,HK",
+  "music_release_script_priority": "Hans,Hant,Latn",
+  "acoustid_api_key": "b1auxfOzAg",
+  "theaudiodb_api_key": "123",
+  "lrclib_base_url": "https://lrclib.net",
+  "amll_base_url": "https://api.amll.dev",
+  "lyrics_batch_timeout": 120,
+  "lyrics_provider_retry_max_wait": 5,
+  "music_scraping_policies": {
+    "tags": "missingOnly",
+    "cover": "missingOnly",
+    "lyrics": "upgrade"
+  }
 }

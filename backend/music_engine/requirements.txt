@@ -1,0 +1,13 @@
+mutagen==1.47.0
+requests==2.32.5
+chardet==5.2.0
+PyYAML==6.0.3
+lxml==6.0.2
+pydantic==2.12.4
+Pinyin2Hanzi==0.1.1
+zhconv==1.4.3
+regex==2025.11.3
+cn2an==0.5.23
+ruamel.yaml==0.19.1
+beautifulsoup4==4.14.2
+setuptools==80.9.0

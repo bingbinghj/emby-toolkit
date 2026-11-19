@@ -1033,7 +1033,7 @@ impl JobManager {
                 spec.server_url = server_url(&config);
             }
         }
-        if let Some(spec) = spec.as_mut().filter(|spec| spec.kind == "database_admin") {
+        if let Some(spec) = spec.as_mut().filter(|spec| matches!(spec.kind.as_str(), "database_admin" | "music")) {
             spec.server_id = None;
             spec.server_url = None;
         }
