@@ -123,6 +123,109 @@ def test_local_search_uses_only_library_index(fixture):
     assert library.listing(config,"%_")["total"]==0
 
 
+def test_browse_uses_real_artist_album_disc_tree_and_deduplicates_selection(fixture):
+    config, source, root = fixture
+    album = root/'歌手'/'专辑'/'Disc 1'
+    album.mkdir(parents=True)
+    os.link(source, album/'01.wav')
+    (album/'01.lrc').write_text('[00:01.00]歌词')
+    (root/'不允许的目录').symlink_to(source.parent, target_is_directory=True)
+    assert [item['name'] for item in library.browse(config)['items']] == ['歌手']
+    assert [item['name'] for item in library.browse(config, '歌手')['items']] == ['专辑']
+    songs = library.browse(config, '歌手/专辑/Disc 1')['items']
+    assert len(songs) == 2 and sum(item['is_audio'] for item in songs) == 1
+    assert library.selection(config, ['歌手','歌手/专辑/Disc 1/01.wav'])['paths'] == ['歌手/专辑/Disc 1/01.wav']
+    with pytest.raises(ValueError): library.browse(config, '../seed')
+    with pytest.raises(ValueError): library.selection(config, ['不允许的目录'])
+
+
+def test_manual_lyrics_atomic_save_preserves_seed_audio_and_linked_lyrics(fixture):
+    config, source, root = fixture
+    os.link(source, root/'song.wav')
+    seed_lyrics = source.with_suffix('.lrc')
+    seed_lyrics.write_text('[00:01.00]原歌词\n')
+    os.link(seed_lyrics, root/'song.lrc')
+    original = source.read_bytes()
+    editor = library.inspect(config, 'song.wav')
+    assert editor['lyrics'] == seed_lyrics.read_text()
+    editor['lyrics'] = '[00:03.50]修改后的歌词\n'
+    row = operations.preview(config, {'operation':'edit','paths':['song.wav'],'metadata':editor})['items'][0]
+    assert row['success'], row
+    result = operations.execute(config, {'item':row,'operation':'edit','execution_id':'aacd-1'})
+    assert result['success']
+    assert (root/'song.lrc').read_text() == editor['lyrics']
+    assert seed_lyrics.read_text() == '[00:01.00]原歌词\n'
+    assert source.read_bytes() == original and source.samefile(root/'song.wav')
+    assert not seed_lyrics.samefile(root/'song.lrc')
+
+
+def test_manual_lyrics_changed_after_preview_rejects_before_audio_changes(fixture):
+    config, source, root = fixture
+    os.link(source, root/'song.wav')
+    (root/'song.lrc').write_text('[00:01.00]原歌词')
+    editor = library.inspect(config, 'song.wav')
+    editor.update(title='新的标题', lyrics='[00:03.00]新歌词')
+    row = operations.preview(config, {'operation':'edit','paths':['song.wav'],'metadata':editor})['items'][0]
+    (root/'song.lrc').write_text('[00:02.00]外部修改')
+    with pytest.raises(ValueError, match='歌词在预览后已变化'):
+        operations.execute(config, {'item':row,'operation':'edit','execution_id':'aacd-2'})
+    assert source.samefile(root/'song.wav')
+    assert (root/'song.lrc').read_text() == '[00:02.00]外部修改'
+
+
+def test_manual_edit_all_mp_identity_and_credit_tags(fixture):
+    config, source, root = fixture
+    os.link(source, root/'song.wav')
+    ids = ['12345678-1234-1234-1234-123456789ab'+digit for digit in 'cdef']
+    values = dict(media_source='musicbrainz',music_type='recording',media_id=ids[0],musicbrainz_release_id=ids[1],musicbrainz_release_group_id=ids[2],musicbrainz_release_track_id=ids[3], performers={'guitar':['演奏者']})
+    row = operations.preview(config, {'operation':'edit','paths':['song.wav'],'metadata':values})['items'][0]
+    assert row['success'], row
+    operations.execute(config, {'item':row,'operation':'edit','execution_id':'aacd-3'})
+    result = library.inspect(config,'song.wav')
+    for key in values:
+        assert result[key] == values[key], key
+
+
+def test_manual_lyrics_resume_after_commit_keeps_new_file_and_seed(fixture, monkeypatch):
+    config, source, root = fixture
+    os.link(source, root/'song.wav')
+    seed_lyrics = source.with_suffix('.lrc')
+    seed_lyrics.write_text('[00:01.00]歌词')
+    os.link(seed_lyrics, root/'song.lrc')
+    row = operations.preview(config, {'operation':'edit','paths':['song.wav'],'metadata':{'lyrics':'[00:02.00]歌词'}})['items'][0]
+    body = {'item':row,'operation':'edit','execution_id':'aacd-4'}
+    write = operations.write_json
+    def crash(path, data):
+        if data.get('state') == 'lyrics_done': raise RuntimeError('歌词提交后退出')
+        write(path,data)
+    monkeypatch.setattr(operations,'write_json',crash)
+    with pytest.raises(RuntimeError): operations.execute(config,body)
+    inode = (root/'song.lrc').stat().st_ino
+    monkeypatch.setattr(operations,'write_json',write)
+    assert operations.execute(config,body)['success']
+    assert (root/'song.lrc').stat().st_ino == inode
+    assert seed_lyrics.read_text() == '[00:01.00]歌词'
+
+
+def test_manual_offset_updates_existing_lyricsfile_and_preserves_word_timings(fixture):
+    import yaml
+    config, source, root = fixture
+    os.link(source, root/'song.wav')
+    (root/'song.lrc').write_text('[00:01.00]歌词')
+    seed_yaml = source.with_suffix('.lyricsfile.yaml')
+    payload = {'version':'1.0','metadata':{'title':'歌曲','artist':'歌手'},'lines':[{'text':'歌词','start_ms':1000,'end_ms':2000,'words':[{'text':'歌词','start_ms':1100,'end_ms':1800}]}]}
+    seed_yaml.write_text(yaml.safe_dump(payload,allow_unicode=True))
+    os.link(seed_yaml,root/'song.lyricsfile.yaml')
+    row=operations.preview(config,{'operation':'edit','paths':['song.wav'],'metadata':{'lyrics':'[00:03.50]歌词'}})['items'][0]
+    assert row['success'],row
+    assert operations.execute(config,{'item':row,'operation':'edit','execution_id':'aacd-5'})['success']
+    actual=yaml.safe_load((root/'song.lyricsfile.yaml').read_text())
+    assert actual['lines'][0]['start_ms']==3500
+    assert actual['lines'][0]['words'][0]['start_ms']==3600
+    assert yaml.safe_load(seed_yaml.read_text())==payload
+    assert not seed_yaml.samefile(root/'song.lyricsfile.yaml')
+
+
 def test_reorganize_is_not_supported(fixture):
     config, source, root = fixture
     os.link(source, root/'song.wav')

@@ -665,7 +665,7 @@
                 </VCol>
                         </VRow>
             </VWindowItem>
-            <VWindowItem value="directory" eager>
+            <VWindowItem value="music" eager>
               <VRow class="mp-aligned-grid settings-card-grid settings-grid">
                 <VCol id="music-settings" cols="12" v-show="settingsSearch.showCard('音乐')">
                   <SettingCard title="音乐" subtitle="本地音乐库、识别与刮削" class="dashboard-card">
@@ -694,6 +694,10 @@
                     <VCardActions class="app-dialog-actions"><VSpacer /><VBtn variant="flat" color="primary" prepend-icon="mdi-content-save-outline" :loading="savingCard === 'music'" :disabled="savingConfig || loadingConfig" @click="saveCard('music')">保存</VBtn></VCardActions>
                   </SettingCard>
                 </VCol>
+              </VRow>
+            </VWindowItem>
+            <VWindowItem value="directory" eager>
+              <VRow class="mp-aligned-grid settings-card-grid settings-grid">
                 <VCol cols="12" v-show="settingsSearch.showCard('存储')">
                   <SettingCard class="dashboard-card storage-setting-card" title="存储" subtitle="115 授权方式与连接状态">
                     <VCardText class="service-setting-card-content">
@@ -2006,7 +2010,7 @@ import { useConfig } from '../../composables/useConfig.js';
 import axios from 'axios';
 
 const route = useRoute();
-const activeSettingsTab = computed(() => ['system', 'directory', 'rule', 'search'].includes(route.query.tab) ? route.query.tab : 'system');
+const activeSettingsTab = computed(() => ['system', 'directory', 'rule', 'search', 'music'].includes(route.query.tab) ? route.query.tab : 'system');
 const activePromptTab = ref('fast_mode');
 const revealedPasswords = reactive({});
 const importFiles = ref([]);
@@ -2116,7 +2120,7 @@ let mediaServerProbeVersion = 0, mediaServerProbeController = null;
 const formRef = ref(null);
 const { configModel, loadingConfig, savingConfig, configError, handleSaveConfig, captureConfigRefresh } = useConfig();
 watch([() => route.hash, activeSettingsTab, loadingConfig], async ([hash, tab, loading]) => {
-  if (hash !== '#music-settings' || tab !== 'directory' || loading) return;
+  if (hash !== '#music-settings' || tab !== 'music' || loading) return;
   await nextTick();
   document.getElementById('music-settings')?.scrollIntoView({ block: 'start' });
 }, { immediate: true, flush: 'post' });

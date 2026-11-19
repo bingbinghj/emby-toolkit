@@ -11,14 +11,21 @@ def dispatch(request):
     config, body = request.get("config", {}), request.get("body", {})
     configure(config, request["cache_dir"])
     action = request["action"]
-    if action in {"library", "scope", "scan", "scan_batch", "scan_finish", "inspect", "image", "preview_groups"}:
+    if action in {"library", "selection", "scope", "scan", "scan_batch", "scan_finish", "inspect", "image", "preview_groups"}:
         from etk_music import library
     elif action in {"preview", "execute", "cleanup"}:
         from etk_music import operations
     else:
         from etk_music import catalog
     if action=="library":
+        if body.get("directory") is not None and not body.get("query"):
+            return library.browse(config, body["directory"], int(body.get("page", 1)), int(body.get("page_size", 50)))
         return library.listing(config, body.get("query", ""), int(body.get("page", 1)), int(body.get("page_size", 50)))
+    if action=="selection":
+        paths = body.get("paths")
+        if not isinstance(paths, list) or not 1 <= len(paths) <= 1000 or any(not isinstance(path, str) for path in paths):
+            raise ValueError("请选择音乐文件或目录")
+        return library.selection(config, paths)
     if action=="scope":
         return {"paths": library.walk(config)}
     if action=="preview_groups":
@@ -54,6 +61,11 @@ def dispatch(request):
         return catalog.explore(body)
     if action=="detail":
         return catalog.serialize(catalog.detail(body["source"], body["id"], body.get("kind", "recording"), body.get("release")))
+    if action=="edit_metadata":
+        from etk_music import library
+        path = library.target(config, body["path"])
+        _, info = catalog.recognize(path, config.get("music_sources") or ["musicbrainz"], body["selection"])
+        return catalog.serialize(info)
     if action=="related":
         return {"items": catalog.related(body["source"], body["id"], body["kind"], int(body.get("page",1)), body.get("album_type"))}
     if action=="preview":

@@ -248,7 +248,7 @@ async fn library(
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Json<Value>> {
     let config = state.config.read().await.clone();
-    Ok(Json(engine(&state,"library",json!({"query":query.get("query"),"page":query.get("page").and_then(|v|v.parse::<u32>().ok()).unwrap_or(1),"page_size":query.get("page_size").and_then(|v|v.parse::<u32>().ok()).unwrap_or(50)}),&config,None).await?))
+    Ok(Json(engine(&state,"library",json!({"query":query.get("query"),"directory":query.get("directory"),"page":query.get("page").and_then(|v|v.parse::<u32>().ok()).unwrap_or(1),"page_size":query.get("page_size").and_then(|v|v.parse::<u32>().ok()).unwrap_or(50)}),&config,None).await?))
 }
 
 async fn image(
@@ -291,7 +291,14 @@ async fn query(
 ) -> Result<Json<Value>> {
     if !matches!(
         action.as_str(),
-        "search" | "explore" | "detail" | "related" | "inspect" | "cache"
+        "search"
+            | "explore"
+            | "detail"
+            | "related"
+            | "inspect"
+            | "cache"
+            | "selection"
+            | "edit_metadata"
     ) {
         return Err(ApiError::bad("未知音乐查询"));
     }

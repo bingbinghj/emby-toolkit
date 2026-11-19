@@ -1,12 +1,13 @@
 import { test, expect } from './fixtures.js';
 
-const track = {path:'专辑/01 - 测试歌曲.flac',title:'测试歌曲',artists:['测试歌手'],album:'测试专辑',audio_specs:'FLAC / 24bit / 96kHz',signature:{mtime:1}};
+const track = {name:'01 - 测试歌曲.flac',type:'file',is_audio:true,path:'专辑/01 - 测试歌曲.flac',title:'测试歌曲',artists:['测试歌手'],album:'测试专辑',audio_specs:'FLAC / 24bit / 96kHz',signature:{mtime:1}};
 const previewItem = {...track,source:track.path,source_storage:'local',source_item:{storage:'local',path:track.path,type:'file'},target:track.path,success:true,metadata:{title:'新曲名'},before:{title:track.title},music:{title:'新曲名',album:'测试专辑',artists:track.artists,group_id:'group',group_directory:'专辑',file_role:'audio',status:'matched',online_confirmed:true,read_status:'tags',field_sources:{title:'remote'},media_source:'musicbrainz',media_id:'song'}};
 
 function music(api) {
   api.respond('GET','/api/music/image',{message:'没有封面'},404);
   api.respond('GET','/api/music/library',{items:[track],total:1});
-  api.respond('POST','/api/music/query/inspect',track);
+  api.respond('POST','/api/music/query/inspect',{...track,lyrics:'[00:01.00]测试歌词',lyrics_revision:{}});
+  api.respond('POST','/api/music/query/selection',request=>({paths:request.body.paths}));
   api.respond('POST','/api/music/jobs/preview',{task_id:'music-preview'});
   api.respond('GET','/api/tasks/result/music-preview',{state:'completed',result:{preview:{operation:'rescrape',items:[previewItem]}}});
   api.respond('POST','/api/music/jobs/execute',{task_id:'music-write'});
@@ -18,8 +19,9 @@ function music(api) {
 test('音乐只提供所选文件刮削，确认后关闭弹窗并保留日志入口', async ({page,api}) => {
   music(api);
   await page.goto('/music');
-  await expect(page.getByTestId('music-library')).toContainText(track.title);
-  await page.getByRole('checkbox',{name:`选择 ${track.title}`}).check();
+  await expect(page.getByTestId('music-library')).toContainText(track.name);
+  await page.getByRole('button',{name:'选择',exact:true}).click();
+  await page.getByRole('checkbox',{name:`选择 ${track.name}`}).check();
   await expect(page.getByRole('button',{name:'批量重新整理'})).toHaveCount(0);
   await page.getByRole('button',{name:'批量重新刮削'}).click();
   await page.getByRole('button',{name:'预览',exact:true}).click();
@@ -36,7 +38,8 @@ test('音乐只提供所选文件刮削，确认后关闭弹窗并保留日志�
 test('MP 专辑纠正选择真实发行后重新预览原文件范围', async ({page,api}) => {
   music(api);
   await page.goto('/music');
-  await page.getByRole('checkbox',{name:`选择 ${track.title}`}).check();
+  await page.getByRole('button',{name:'选择',exact:true}).click();
+  await page.getByRole('checkbox',{name:`选择 ${track.name}`}).check();
   await page.getByRole('button',{name:'批量重新刮削'}).click();
   await page.getByRole('button',{name:'预览',exact:true}).click();
   await page.getByRole('button',{name:'纠正专辑：测试专辑'}).click();
@@ -51,13 +54,14 @@ test('MP 专辑纠正选择真实发行后重新预览原文件范围', async ({
   expect(request.body.selections['专辑'].musicbrainz_release_id).toBe('11111111-1111-1111-1111-111111111111');
 });
 
-for(const width of [390,1440]) test(`音乐页面和标签弹窗在 ${width}px 可读`, async({page,api})=>{
+for(const width of [390,1440]) test(`音乐页面和标签弹窗在 ${width}px 可读`, async({page,api}, testInfo)=>{
   await page.setViewportSize({width,height:900});
   music(api);
   await page.goto('/music');
-  await page.getByRole('button',{name:track.title,exact:true}).click();
-  await expect(page.getByRole('dialog')).toContainText('音乐标签');
+  await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await expect(page.getByRole('dialog')).toContainText('编辑音乐标签');
   await expect(page.getByRole('button',{name:'预览修改'})).toBeVisible();
+  await page.screenshot({path:testInfo.outputPath('music-editor.png')});
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBeTruthy();
   await page.getByRole('button',{name:'取消',exact:true}).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
@@ -91,11 +95,61 @@ test('音乐探索采用 MP 筛选控件，结果可打开专辑详情', async({
   await expect(page.getByRole('dialog')).toContainText('新曲名');
 });
 
+test('音乐库按真实目录浏览歌手、专辑、歌曲，目录选择仅展开该范围', async({page,api})=>{
+  music(api);
+  api.respond('GET','/api/music/library',request=>({items:request.query.directory==='歌手/专辑' ? [track] : [{path:request.query.directory ? '歌手/专辑':'歌手',name:request.query.directory ? '专辑':'歌手',type:'dir'}],total:1}));
+  await page.goto('/music');
+  await expect(page.getByRole('tab',{name:'资料搜索',exact:true})).toHaveCount(0);
+  await page.getByTestId('music-library').getByText('歌手',{exact:true}).click();
+  await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/library').at(-1)?.query.directory).toBe('歌手');
+  await page.getByTestId('music-library').getByText('专辑',{exact:true}).click();
+  await expect(page.getByTestId('music-library')).toContainText(track.name);
+  await page.getByRole('button',{name:'上级目录'}).click();
+  await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/library').at(-1)?.query.directory).toBe('歌手');
+});
+
+test('标签编辑内搜索填入资料，歌词偏移进入同一次预览', async({page,api})=>{
+  music(api);
+  api.respond('POST','/api/music/query/edit_metadata',{title:'填入的曲名',album:'所选专辑'});
+  await page.goto('/music');
+  await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await page.getByRole('button',{name:'搜索音乐资料'}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(1);
+  await page.locator('.media-id-selector input').fill('测试专辑');
+  await page.locator('.media-id-selector input').press('Enter');
+  // 单曲模式不会混入专辑结果；通过同一 MP ID 控件读取已知身份。
+  await page.locator('.media-id-selector').getByRole('button',{name:'关闭',exact:true}).click();
+  await page.getByLabel('MusicBrainz ID',{exact:true}).fill('11111111-1111-1111-1111-111111111111');
+  await page.getByRole('button',{name:'读取资料'}).click();
+  await expect(page.getByLabel('标题',{exact:true})).toHaveValue('填入的曲名');
+  await page.getByLabel('整体偏移（秒）',{exact:true}).fill('2');
+  await page.getByRole('button',{name:'应用到歌词'}).click();
+  await expect(page.getByLabel('旁挂歌词（LRC / 纯文本）',{exact:true})).toHaveValue('[00:03.000]测试歌词');
+  await page.getByRole('button',{name:'预览修改'}).click();
+  await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/jobs/preview').length).toBe(1);
+  const body=api.requests.find(row=>row.path==='/api/music/jobs/preview').body;
+  expect(body.operation).toBe('edit');
+  expect(body.metadata.title).toBe('填入的曲名');
+  expect(body.metadata.lyrics).toBe('[00:03.000]测试歌词');
+});
+
+test('探索上游失败可重试，筛选后数量不足仍保留下一页',async({page,api})=>{
+  music(api);
+  api.respond('POST','/api/music/query/explore',{items:[],has_more:false,errors:{musicbrainz:'ListenBrainz 上游返回 HTTP 502'}});
+  await page.goto('/music');
+  await page.getByRole('tab',{name:'探索',exact:true}).click();
+  await expect(page.getByRole('alert')).toContainText('HTTP 502');
+  api.respond('POST','/api/music/query/explore',{items:[],has_more:true,errors:{}});
+  await page.getByRole('button',{name:'重试',exact:true}).click();
+  await expect(page.getByRole('button',{name:'下一页',exact:true})).toBeEnabled();
+});
+
 test('音乐资料选择器显示上游错误', async ({page,api}) => {
   music(api);
   api.respond('POST','/api/music/query/search',{items:[],errors:{musicbrainz:'音乐资料源暂时不可用'}});
   await page.goto('/music');
-  await page.getByRole('checkbox',{name:`选择 ${track.title}`}).check();
+  await page.getByRole('button',{name:'选择',exact:true}).click();
+  await page.getByRole('checkbox',{name:`选择 ${track.name}`}).check();
   await page.getByRole('button',{name:'批量重新刮削'}).click();
   await page.getByRole('button',{name:'选择音乐资料'}).click();
   await expect(page.getByRole('dialog')).toHaveCount(1);
@@ -111,7 +165,7 @@ for (const width of [390,1440]) test(`音乐设置定位和独立保存 ${width}
     const scroll = Element.prototype.scrollIntoView;
     Element.prototype.scrollIntoView = function(...args) { if(this.id==='music-settings') window.__musicScrolled=true; return scroll.apply(this,args); };
   });
-  await page.goto('/settings/general?tab=directory#music-settings');
+  await page.goto('/settings/general?tab=music#music-settings');
   const card=page.locator('#music-settings');
   await expect(card.getByLabel('本地音乐库目录',{exact:true})).toBeVisible();
   await expect.poll(()=>page.evaluate(()=>window.__musicScrolled)).toBeTruthy();

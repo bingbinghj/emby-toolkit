@@ -1,5 +1,5 @@
 import { notificationKinds, scopeOptions } from './notificationOptions.js';
-export const settingsCategoryNames = { system: '系统', directory: '存储 & 目录', rule: '规则', search: '数据源', notification: '通知' };
+export const settingsCategoryNames = { music: '音乐', system: '系统', directory: '存储 & 目录', rule: '规则', search: '数据源', notification: '通知' };
 
 const notificationKeywords = { telegram_notify_types: notificationKinds.map(kind => kind.title).join(' '), notification_scope: scopeOptions.map(scope => scope.title).join(' ') };
 

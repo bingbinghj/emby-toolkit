@@ -7,6 +7,8 @@ import { useRouter } from 'vue-router';
 import { useTaskStatus } from '@/composables/useTaskStatus';
 import DialogCloseBtn from '@/components/theme/DialogCloseBtn.vue';
 import MusicCard from './MusicCard.vue';
+import MusicFileBrowser from './MusicFileBrowser.vue';
+import MusicTagEditor from './MusicTagEditor.vue';
 import MusicArtistCard from './MusicArtistCard.vue';
 import MusicDoubanFilters from './MusicDoubanFilters.vue';
 import MusicTrackList from './MusicTrackList.vue';
@@ -21,8 +23,9 @@ import { musicSources, sourceLabel, formatMusicDuration } from './utils';
 
 const router = useRouter(), { smAndDown } = useDisplay();
 const { backgroundTaskStatus, refreshTaskStatus } = useTaskStatus();
+const directory = ref(''), exploreMore = ref(false);
 const tab = ref('library'), query = ref(''), items = ref([]), total = ref(0), page = ref(1), pageSize = ref(50);
-const loading = ref(false), error = ref(''), selected = ref([]), sources = ref(['musicbrainz']), kind = ref('');
+const loading = ref(false), error = ref(''), selected = ref([]);
 const exploreSource = ref('musicbrainz'), doubanParams=ref({tags:'流行',douban_sort:'U',with_cover:false});
 const detailAlbum=ref(null);
 const detailOpen = ref(false), detail = ref(null), detailKind = ref('recording'), detailError = ref(''), detailBusy = ref(false), related = ref([]), editions = ref([]), release = ref('');
@@ -37,25 +40,22 @@ const previewGroups = computed(() => groupMusicPreview(preview.value?.items || [
 let request = 0, detailRequest = 0, relatedRequest = 0, editorRequest = 0, polling, active = true;
 const busy = computed(() => Boolean(taskId.value || submitting.value));
 const pages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)));
-const allSelected = computed(() => items.value.length > 0 && items.value.every(item => selected.value.includes(item.path)));
 const actionLabel = computed(() => ({ rescrape: '重新刮削', edit: '保存标签' })[action.value]);
 const canExecute = computed(() => preview.value?.items?.length > 0 && preview.value.items.every(item => item.success) && !busy.value);
 const detailFacts=computed(()=>{const d=detail.value || {};return [['类型',d.artist_type || d.metadata_category || d.album_type],['专辑',d.album],['专辑艺术家',d.album_artist],['发行日期',d.release_date || d.year],['曲目数',d.total_tracks],['碟数',d.total_discs],['时长',formatMusicDuration(d.duration)],['曲序',d.track_number],['ISRC',d.isrc],['播放次数',d.listen_count],['评分',d.rating],['评分人数',d.rating_votes],['地区',d.area || d.country],['活动时间',d.life_span],['性别',d.gender],['别名',d.aliases?.slice(0,6).join('、')],[`${sourceLabel(d.media_source)} ID`,d.media_id]].filter(([,value])=>value);});
 const failure = cause => cause.response?.data?.message || cause.message || '音乐操作失败';
 const api = async (operation, body = {}) => (await axios.post(`/api/music/query/${operation}`, body, { timeout: 190000 })).data;
-const artwork = item => `/api/music/image?${new URLSearchParams({ path: item.path, v: String(item.signature?.mtime || '') })}`;
 
 async function load() {
   const version = ++request;
   loading.value = true; error.value = '';
   try {
     let result;
-    if (tab.value === 'library') result = (await axios.get('/api/music/library', { params: { query: query.value, page: page.value, page_size: pageSize.value } })).data;
-    else if (tab.value === 'search') result = query.value.trim() ? await api('search', { query: query.value, sources: sources.value, kind: kind.value || undefined, count: 100 }) : { items: [] };
+    if (tab.value === 'library') result = (await axios.get('/api/music/library', { params: { directory:directory.value, query: query.value, page: page.value, page_size: pageSize.value } })).data;
     else if (tab.value === 'explore') result = await api('explore', { ...(exploreSource.value==='musicbrainz' ? exploreParams.value : doubanParams.value), source:exploreSource.value, page: page.value, count:30 });
     else result = await api('cache');
     if (!active || version !== request) return;
-    items.value = result.items || []; total.value = result.total ?? items.value.length;
+    items.value = result.items || []; total.value = result.total ?? items.value.length; exploreMore.value = result.has_more ?? items.value.length >= 30;
     selected.value = [];
     if (Object.keys(result.errors || {}).length) error.value = Object.entries(result.errors).map(([source, text]) => `${sourceLabel(source)}：${text}`).join('；');
   } catch (cause) { if (active && version === request) { error.value = failure(cause); items.value = []; total.value = 0; } }
@@ -64,9 +64,16 @@ async function load() {
 function search() { page.value = 1; load(); }
 function exploreChanged(params) {exploreParams.value=params; search();}
 function doubanChanged(params) {doubanParams.value=params; search();}
-function selectPage(value) { selected.value = value ? items.value.map(item => item.path) : []; }
-function openAction(operation, paths = selected.value) {
-  action.value = operation; actionPaths.value = [...paths]; selection.value = null; corrections.value = {}; actionOpen.value = true; taskError.value = '';
+function navigateDirectory(path) { directory.value=path; query.value=''; page.value=1; load(); }
+async function openAction(operation, paths = selected.value) {
+  if (busy.value) return;
+  submitting.value = true; taskError.value = '';
+  try {
+    const result = await api('selection',{paths});
+    if (!active) return;
+    action.value = operation; actionPaths.value = result.paths; selection.value = null; corrections.value = {}; actionOpen.value = true;
+  } catch(cause) { if(active) taskError.value=failure(cause); }
+  finally { if(active) submitting.value=false; }
 }
 async function openEditor(item) {
   const version = ++editorRequest;
@@ -142,7 +149,7 @@ async function poll() {
   if (active && taskId.value) polling = setTimeout(poll, 1500);
 }
 function previewAction() { submit('preview', { operation: action.value, paths: actionPaths.value, selection: selection.value, selections:corrections.value }); }
-function saveEditor() { action.value = 'edit'; submit('preview', { operation: 'edit', paths: [editor.value.path], metadata: editor.value }); }
+function saveEditor(metadata) { action.value = 'edit'; submit('preview', { operation: 'edit', paths: [metadata.path], metadata }); }
 async function clearSelectedCache() {try{await api('cache',{keys:selectedCache.value});selectedCache.value=[];load();}catch(cause){error.value=failure(cause);}}
 async function clearCache(key) {
   try { await api('cache', key ? { key } : { clear: true }); cacheConfirm.value = false; load(); }
@@ -153,18 +160,15 @@ watch(tab, () => { query.value = ''; page.value = 1; selected.value = []; select
 watch(backgroundTaskStatus, status => {
   if (!taskId.value && status.is_running && /音乐/.test(status.current_action || '')) { taskId.value = status.task_id; poll(); }
 });
-onMounted(async () => { load(); try{const {data}=await axios.get('/api/config'); if(data.music_sources?.length)sources.value=[...data.music_sources];}catch{}; const pending = sessionStorage.getItem('etk.music.task'); if (pending) {taskId.value=pending; poll();} });
+onMounted(() => { load(); const pending = sessionStorage.getItem('etk.music.task'); if (pending) {taskId.value=pending; poll();} });
 onBeforeUnmount(() => { active = false; request++; detailRequest++; editorRequest++; clearTimeout(polling); });
 </script>
 
 <template>
   <div class="mp-page music-page-shell">
-    <header class="music-toolbar"><h2 class="text-h5">音乐</h2><VSpacer /><VBtn icon="mdi-cog-outline" variant="text" aria-label="音乐设置" @click="router.push('/settings/general?tab=directory#music-settings')" /></header>
-    <VTabs v-model="tab" color="primary" show-arrows><VTab value="library">音乐库</VTab><VTab value="search">资料搜索</VTab><VTab value="explore">探索</VTab><VTab value="cache">识别缓存</VTab></VTabs>
+    <div class="music-toolbar"><VTabs v-model="tab" color="primary" show-arrows><VTab value="library">音乐库</VTab><VTab value="explore">探索</VTab><VTab value="cache">识别缓存</VTab></VTabs><VSpacer /><VBtn icon="mdi-cog-outline" variant="text" aria-label="音乐设置" @click="router.push('/settings/general?tab=music')" /></div>
     <div v-if="tab !== 'explore'" class="music-toolbar my-4">
       <VTextField v-if="tab !== 'cache'" v-model="query" :label="tab === 'library' ? '搜索音乐库' : '搜索音乐资料'" :placeholder="tab === 'library' ? '歌名、艺术家、专辑或文件名' : '单曲、专辑、艺术家'" prepend-inner-icon="mdi-magnify" variant="solo" flat rounded="pill" clearable hide-details @keyup.enter="search" @click:clear="query = ''; search()"><template #append-inner><VBtn icon="mdi-magnify" variant="text" aria-label="搜索音乐" :loading="loading" @click="search" /></template></VTextField>
-      <VSelect v-if="tab === 'search'" v-model="sources" :items="musicSources" label="资料来源" multiple chips hide-details class="music-sources" />
-      <VSelect v-if="tab === 'search'" v-model="kind" :items="[{title:'单曲和专辑',value:''},{title:'单曲',value:'recording'},{title:'专辑',value:'album'},{title:'艺术家',value:'artist'}]" label="类型" hide-details class="music-kind" />
       <VBtn v-if="tab === 'library'" prepend-icon="mdi-folder-sync-outline" variant="tonal" :disabled="busy" @click="submit('scan', {})">扫描音乐库</VBtn>
       <VTextField v-if="tab === 'cache'" v-model="query" label="搜索识别缓存" prepend-inner-icon="mdi-magnify" hide-details clearable /><VBtn v-if="tab==='cache' && selectedCache.length" color="error" variant="tonal" @click="clearSelectedCache">删除选中缓存</VBtn>
       <VBtn v-if="tab === 'cache'" color="error" variant="tonal" prepend-icon="mdi-delete-outline" @click="cacheConfirm = true">清空识别缓存</VBtn>
@@ -172,29 +176,24 @@ onBeforeUnmount(() => { active = false; request++; detailRequest++; editorReques
     </div>
     <VCard v-if="tab === 'explore'" class="my-4"><VCardText>
       <div class="music-filter-row"><VLabel>来源</VLabel><VChipGroup v-model="exploreSource" mandatory><VChip value="musicbrainz" filter tile>MusicBrainz</VChip><VChip value="doubanmusic" filter tile>豆瓣音乐</VChip></VChipGroup></div>
+      <div v-if="error" class="d-flex ga-2 mb-3"><VBtn variant="tonal" :loading="loading" @click="load">重试</VBtn><VBtn v-if="exploreSource==='musicbrainz'" variant="text" @click="exploreSource='doubanmusic'">豆瓣音乐</VBtn></div>
       <MusicExploreFilters v-if="exploreSource === 'musicbrainz'" @change="exploreChanged" />
       <MusicDoubanFilters v-else @change="doubanChanged" />
     </VCardText></VCard>
     <VAlert v-if="error || taskError" type="error" variant="tonal" class="my-3">{{ error || taskError }}</VAlert>
-    <VAlert v-if="busy" type="info" variant="tonal" class="my-3"><div class="music-toolbar"><span>{{ taskState?.current_action }} · {{ taskState?.message }}</span><VSpacer /><VBtn variant="text" to="/logs">查看日志</VBtn></div><VProgressLinear class="mt-2" :model-value="taskState?.progress" :indeterminate="!taskState?.progress_known" /></VAlert>
+    <VAlert v-if="taskId" type="info" variant="tonal" class="my-3"><div class="music-toolbar"><span>{{ taskState?.current_action }} · {{ taskState?.message }}</span><VSpacer /><VBtn variant="text" to="/logs">查看日志</VBtn></div><VProgressLinear class="mt-2" :model-value="taskState?.progress" :indeterminate="!taskState?.progress_known" /></VAlert>
     <VAlert v-if="resultData && !busy" :type="resultData.failed || resultData.warning_details?.length ? 'warning' : 'success'" variant="tonal" class="my-3"><div class="music-toolbar"><span>{{ resultData.message }}</span><VSpacer /><VBtn variant="text" @click="resultOpen=true">查看详情</VBtn></div></VAlert>
     <template v-if="tab === 'library'">
-      <div v-if="selected.length" class="music-selection"><VCheckbox :model-value="allSelected" label="全选本页" hide-details :indeterminate="selected.length > 0 && !allSelected" @update:model-value="selectPage" /><span>{{ selected.length }}/{{ items.length }} 项</span><VBtn color="primary" variant="tonal" :disabled="busy" @click="openAction('rescrape')">批量重新刮削</VBtn><VBtn variant="text" @click="selected = []">取消全选</VBtn></div>
-      <VDataTableVirtual :items="items" :headers="[{title:'',key:'select',width:44},{title:'音乐',key:'title'},{title:'专辑',key:'album'},{title:'规格',key:'audio_specs'},{title:'',key:'actions'}]" :loading="loading" item-value="path" class="music-library" data-testid="music-library">
-        <template #item.select="{ item }"><VCheckbox v-model="selected" :value="item.path" :aria-label="`选择 ${item.title || item.path}`" hide-details density="compact" /></template>
-        <template #item.title="{ item }"><div class="music-library-identity"><VAvatar rounded="lg" size="52"><VImg :src="artwork(item)"><template #error><VIcon icon="mdi-music-note" /></template></VImg></VAvatar><div><button type="button" class="music-title-link text-primary" @click="openEditor(item)">{{ item.title || item.path }}</button><div class="text-body-2">{{ (item.artists || []).join(' / ') }}</div><div class="text-caption text-medium-emphasis music-path" :title="item.path">{{ item.path }}</div></div></div></template>
-        <template #item.actions="{ item }"><VMenu><template #activator="{ props }"><VBtn v-bind="props" icon="mdi-dots-vertical" variant="text" :aria-label="`操作 ${item.title || item.path}`" /></template><VList><VListItem title="编辑标签" prepend-icon="mdi-pencil-outline" @click="openEditor(item)" /><VListItem title="重新刮削" prepend-icon="mdi-music-box-outline" :disabled="busy" @click="openAction('rescrape', [item.path])" /></VList></VMenu></template>
-        <template #no-data><div class="pa-8">{{ query ? '没有匹配的音乐' : '请扫描设置中配置的本地音乐库' }}</div></template>
-      </VDataTableVirtual>
+      <MusicFileBrowser v-model:selected="selected" :items="items" :directory="directory" :searching="!!query" :loading="loading" :busy="busy" @navigate="navigateDirectory" @edit="openEditor" @rescrape="openAction('rescrape', $event)" />
       <footer class="music-pagination"><VSelect v-model="pageSize" :items="[25,50,100,500,1000]" label="每页条数" hide-details density="compact" @update:model-value="search" /><span>{{ total ? (page-1)*pageSize+1 : 0 }} - {{ Math.min(page*pageSize,total) }} / {{ total }}</span><VPagination v-model="page" :length="pages" :total-visible="smAndDown ? 3 : 7" show-first-last-page color="primary" @update:model-value="load" /></footer>
     </template>
     <MusicRecognitionCachePanel v-else-if="tab==='cache'" v-model:selected-items="selectedCache" :items="items.filter(item=>[item.title,item.album,(item.artists||[]).join(' '),item.key].join(' ').toLowerCase().includes((query||'').toLowerCase()))" :loading="loading" @delete="clearCache" />
-    <template v-else><VProgressLinear v-if="loading" indeterminate color="primary" /><VRow class="mt-2"><VCol v-for="item in items" :key="`${item.media_source}:${item.music_type}:${item.media_id}`" cols="12" md="6" lg="4"><MusicCard :music="item" @open="openDetail" @artist="openDetail" @album="openDetail" /></VCol></VRow><div v-if="!loading && !items.length" class="text-center pa-8 text-medium-emphasis">暂无音乐结果</div><div v-if="tab === 'explore'" class="music-pagination"><VBtn variant="text" :disabled="page <= 1 || loading" @click="page--; load()">上一页</VBtn><span>{{ page }}</span><VBtn variant="text" :disabled="items.length < 30 || loading" @click="page++; load()">下一页</VBtn></div></template>
+    <template v-else><VProgressLinear v-if="loading" indeterminate color="primary" /><VRow class="mt-2"><VCol v-for="item in items" :key="`${item.media_source}:${item.music_type}:${item.media_id}`" cols="12" md="6" lg="4"><MusicCard :music="item" @open="openDetail" @artist="openDetail" @album="openDetail" /></VCol></VRow><div v-if="!loading && !items.length" class="text-center pa-8 text-medium-emphasis">暂无音乐结果</div><div v-if="tab === 'explore'" class="music-pagination"><VBtn variant="text" :disabled="page <= 1 || loading" @click="page--; load()">上一页</VBtn><span>{{ page }}</span><VBtn variant="text" :disabled="!exploreMore || loading" @click="page++; load()">下一页</VBtn></div></template>
 
     <VDialog v-model="detailOpen" max-width="76rem" :fullscreen="smAndDown" scrollable><VCard><VCardItem title="音乐详情" class="pe-16" /><DialogCloseBtn @click="detailOpen = false; detailRequest++" /><VDivider /><VCardText><VProgressLinear v-if="detailBusy" indeterminate /><VAlert v-if="detailError" type="error" variant="tonal">{{ detailError }}</VAlert><MusicDetailLayout v-if="detail" :title="detail.title || detail.name" :cover="detail.cover_url || detail.image_url" :rounded="detailKind === 'artist'" :attributes="[sourceLabel(detail.media_source),detail.release_date,detail.audio_specs,formatMusicDuration(detail.duration)].filter(Boolean)"><template #subtitle><span v-if="detailKind==='artist'">{{ detail.disambiguation || detail.sort_name }}</span><VBtn v-for="(artist,index) in detail.artists || []" :key="index" variant="text" :disabled="!detail.artist_ids?.[index]" @click="openDetail({media_source:detail.media_source,media_id:detail.artist_ids[index],music_type:'artist'})">{{ artist }}</VBtn></template><template #body><p v-if="detail.overview" class="music-overview-text">{{ detail.overview }}</p><VBtn v-if="/^https?:\/\//i.test(detail.detail_link || '')" :href="detail.detail_link" target="_blank" rel="noopener noreferrer" variant="text" prepend-icon="mdi-link">{{ sourceLabel(detail.media_source) }}</VBtn><VSelect v-if="editions.length" :model-value="release" :items="editions.map(item=>({value:item.media_id,title:[item.title,item.date,item.country,(item.formats||[]).join('/')].filter(Boolean).join(' · ')}))" label="发行版本" :disabled="detailBusy" @update:model-value="openDetail(detail,$event)" /><template v-if="detailAlbum"><VBtn variant="text" color="primary" prepend-icon="mdi-album" @click="openDetail({...detailAlbum,music_type:'album'})">{{ detailAlbum.title }}</VBtn><MusicTrackList :tracks="detailAlbum.tracks || []" :active-media-id="detail.media_id" @open="openDetail" /></template><MusicTrackList v-if="detail.tracks?.length" :tracks="detail.tracks" @open="openDetail" /></template><template #facts><div v-for="[label,value] in detailFacts" :key="label" class="music-detail-fact"><span>{{ label }}</span><span>{{ value }}</span></div><div v-if="detail.genres?.length"><strong>流派</strong><p>{{ detail.genres.join(' / ') }}</p></div><div v-if="detail.tags?.length"><strong>标签</strong><p>{{ detail.tags.join(' / ') }}</p></div><div v-for="field in ['composers','conductors','orchestras']" :key="field"><template v-if="detail[field]?.length"><strong>{{ {composers:'作曲',conductors:'指挥',orchestras:'乐团'}[field] }}</strong><p>{{ detail[field].join(' / ') }}</p></template></div></template><template v-if="detailKind==='artist'"><h3 class="text-h6 mt-4">艺术家作品</h3><VTabs v-model="artistType" color="primary" show-arrows @update:model-value="loadArtistAlbums(true)"><VTab value="album">专辑</VTab><VTab value="ep">EP</VTab><VTab value="single">单曲</VTab><VTab value="compilation">合辑</VTab><VTab value="soundtrack">原声</VTab><VTab value="live">现场</VTab><VTab value="remix">混音</VTab></VTabs><VProgressLinear v-if="relatedBusy" indeterminate /></template><h3 v-else-if="related.length" class="text-h6 mt-4">{{ relatedLabel }}</h3><VRow class="mt-4"><VCol v-for="item in related" :key="item.media_id" cols="12" md="6"><MusicCard :music="item" @open="openDetail" @artist="openDetail" @album="openDetail" /></VCol></VRow><div v-if="detailKind==='artist'" class="music-pagination"><VBtn :disabled="relatedPage<=1 || relatedBusy" variant="text" @click="relatedPage--; loadArtistAlbums()">上一页</VBtn><span>{{ relatedPage }}</span><VBtn :disabled="related.length<30 || relatedBusy" variant="text" @click="relatedPage++; loadArtistAlbums()">下一页</VBtn></div><template v-if="relatedArtists.length"><h3 class="text-h6 mt-4">相关艺术家</h3><VRow><VCol v-for="item in relatedArtists" :key="item.media_id" cols="12" md="6"><MusicArtistCard :artist="item" @open="openDetail" /></VCol></VRow></template></MusicDetailLayout></VCardText></VCard></VDialog>
 
     <MusicCorrectionDialog v-if="correctionGroup" :group="correctionGroup" :busy="busy" @close="correctionGroup = null" @apply="correctGroup" />
-    <VDialog v-model="editorOpen" max-width="48rem" :fullscreen="smAndDown" scrollable><VCard><VCardItem title="音乐标签" class="pe-16" /><DialogCloseBtn @click="editorOpen = false; editorRequest++" /><VDivider /><VCardText><VAlert v-if="editorError" type="error" variant="tonal">{{ editorError }}</VAlert><template v-if="editor"><div class="text-caption music-path mb-4">{{ editor.path }}</div><VRow><VCol cols="12"><VTextField v-model="editor.title" label="标题" /></VCol><VCol cols="12"><VCombobox v-model="editor.artists" label="艺术家" multiple chips closable-chips /></VCol><VCol cols="12" sm="6"><VTextField v-model="editor.album" label="专辑" /></VCol><VCol cols="12" sm="6"><VTextField v-model="editor.album_artist" label="专辑艺术家" /></VCol><VCol v-for="field in [{key:'track_number',label:'曲序'},{key:'total_tracks',label:'总曲数'},{key:'disc_number',label:'碟号'},{key:'total_discs',label:'总碟数'},{key:'release_year',label:'发行年份'},{key:'original_year',label:'原始年份'}]" :key="field.key" cols="6" sm="4"><VTextField v-model.number="editor[field.key]" :label="field.label" type="number" min="0" /></VCol><VCol cols="12"><VTextField v-model="editor.isrc" label="ISRC" /></VCol><VCol v-for="field in [{key:'composers',label:'作曲'},{key:'conductors',label:'指挥'},{key:'orchestras',label:'乐团'}]" :key="field.key" cols="12"><VCombobox v-model="editor[field.key]" :label="field.label" multiple chips closable-chips /></VCol></VRow></template><VProgressLinear v-else-if="!editorError" indeterminate /></VCardText><VDivider /><VCardActions class="app-dialog-actions"><VSpacer /><VBtn color="default" variant="text" @click="editorOpen = false; editorRequest++">取消</VBtn><VBtn color="primary" variant="flat" :disabled="!editor || busy" @click="saveEditor">预览修改</VBtn></VCardActions></VCard></VDialog>
+    <MusicTagEditor v-if="editorOpen" :key="editor?.path || 'loading'" :item="editor" :error="editorError || taskError" :busy="busy" @close="editorOpen=false; editorRequest++" @save="saveEditor" />
 
     <VDialog :model-value="actionOpen && !selectorOpen" @update:model-value="actionOpen = $event" max-width="42rem" :fullscreen="smAndDown" scrollable><VCard><VCardItem :title="actionLabel" :subtitle="`共 ${actionPaths.length} 项`" class="pe-16" /><DialogCloseBtn @click="actionOpen = false" /><VDivider /><VCardText><VAlert v-if="taskError" type="error" variant="tonal" class="mb-3">{{ taskError }}</VAlert><p class="mb-4">按音乐刮削设置更新所选文件的标签、封面和歌词，保留当前文件名和位置。</p><VTextField :model-value="selection ? `${sourceLabel(selection.media_source)} · ${selection.media_id}` : ''" label="指定音乐或专辑" placeholder="留空自动识别" readonly clearable @click:clear="selection = null"><template #append-inner><VBtn icon="mdi-magnify" variant="text" aria-label="选择音乐资料" @click="selectorOpen = true" /></template></VTextField><VTextField v-if="selection?.media_source === 'musicbrainz' && selection?.music_type === 'album'" v-model="selection.musicbrainz_release_id" label="具体发行版本 ID（可选）" hint="保留专辑 ID；预览时会核对发行归属和曲目。" persistent-hint /></VCardText><VDivider /><VCardActions class="app-dialog-actions"><VSpacer /><VBtn color="default" variant="text" @click="actionOpen = false">取消</VBtn><VBtn color="primary" variant="flat" :disabled="busy || !actionPaths.length" @click="previewAction">预览</VBtn></VCardActions></VCard></VDialog>
 

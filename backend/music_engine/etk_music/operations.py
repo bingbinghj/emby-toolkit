@@ -21,6 +21,9 @@ from .observation import music_recognition_is_blocked
 from .runtime import get_runtime_setting
 from .http import RequestUtils
 from .text import convert
+from . import lyrics as local_lyrics
+
+EDIT_FIELDS = {"title", "artists", "album", "album_artist", "track_number", "total_tracks", "disc_number", "total_discs", "year", "release_year", "original_year", "composers", "conductors", "orchestras", "performers", "isrc", "media_source", "media_id", "music_type", "musicbrainz_release_id", "musicbrainz_release_group_id", "musicbrainz_release_track_id"}
 
 def write_json(path, data):
     temporary = path.with_name(path.name+".new")
@@ -87,8 +90,19 @@ def preview(config, body):
             if operation == "edit":
                 info = MusicInfo.from_meta(meta)
                 values = body.get("metadata") or {}
-                allowed = {"title", "artists", "album", "album_artist", "track_number", "total_tracks", "disc_number", "total_discs", "year", "release_year", "original_year", "composers", "conductors", "orchestras", "performers", "isrc"}
-                info = MusicInfo.from_dict({**info.to_dict(), **{key: value for key, value in values.items() if key in allowed}})
+                if values.get("signature") is not None and values["signature"] != identity:
+                    raise ValueError("音乐文件在打开编辑器后已变化，请重新打开")
+                identity_keys = ["musicbrainz_release_id", "musicbrainz_release_group_id", "musicbrainz_release_track_id"]
+                if values.get("media_source", info.media_source) == "musicbrainz":
+                    identity_keys.append("media_id")
+                for key in identity_keys:
+                    if values.get(key) and not AudioMetadataHelper._normalize_musicbrainz_id(values[key]):
+                        raise ValueError("MusicBrainz 身份必须为有效 UUID")
+                info = MusicInfo.from_dict({**info.to_dict(), **{key: value for key, value in values.items() if key in EDIT_FIELDS}})
+                manual_lyrics = local_lyrics.prepare_edit(path, values)
+                cover_url = values.get("cover_url") or ""
+                if cover_url and not re.match(r"^https?://[^/\s]+", cover_url):
+                    raise ValueError("封面地址必须为 HTTP 或 HTTPS 地址")
             elif relative in recognized:
                 info = recognized[relative]
             else:
@@ -110,6 +124,9 @@ def preview(config, body):
                 raise ValueError("CUE 在识别期间已变化，请重新预览")
             before = MusicInfo.from_meta(AudioMetadataHelper.read_tags(path) or MetaMusic()).to_dict()
             rows.append({"path": relative, "target": relative, "signature": identity, "metadata": info.to_dict(), "before": before, "tag_updates": tag_updates(path, info, config, operation), "success": True, "music_layout": meta.music_layout, "cue_filename": meta.cue_filename, "cue_digest":cue_digests.get(relative)})
+            if operation == "edit":
+                rows[-1]["lyrics_edit"] = manual_lyrics
+                rows[-1]["cover_edit"] = cover_url
         except Exception as error:
             rows.append({"path": relative, "success": False, "message": str(error)})
     for row in rows:
@@ -252,12 +269,18 @@ def execute(config, body):
                     raise ValueError("CUE 在预览后已变化，请重新预览")
             if library.signature(path)!=row["signature"]:
                 raise ValueError("音乐文件在预览后已变化，请重新预览")
+            local_lyrics.verify_edit(path, row.get("lyrics_edit"))
             info = MusicInfo.from_dict(row["metadata"])
             policies = config.get("music_scraping_policies") or {"tags":"missingOnly","cover":"missingOnly","lyrics":"upgrade"}
             write_tags = operation=="edit" or policies.get("tags")!="skip"
             overwrite = operation=="edit" or policies.get("tags")=="overwrite"
             audio = AudioMetadataHelper._open_audio(path)
             cover_data, cover_mime = None, "image/jpeg"
+            if operation=="edit" and row.get("cover_edit"):
+                info.cover_url = row["cover_edit"]
+                cover_data, cover_mime = cover(info, path, {**config, "music_local_cover_enable": False})
+                if not cover_data:
+                    raise ValueError("指定封面无法读取，未修改音频")
             if operation!="edit" and policies.get("cover")!="skip" and (policies.get("cover")=="overwrite" or not AudioMetadataHelper._has_cover(audio)):
                 cover_data, cover_mime = cover(info, path, config)
             started = time.monotonic()
@@ -270,6 +293,7 @@ def execute(config, body):
             changed = (write_tags and AudioMetadataHelper._needs_tag_write(audio, info, overwrite)) or bool(cover_data)
             temporary = path.with_name("."+path.name[:40]+".etk-music-"+identifier)
             saved = {"state":"staging","path":row["path"],"target":row["target"],"original":row["signature"],"temporary":str(temporary),"changed":bool(changed),
+                "lyrics_edit":row.get("lyrics_edit"),
                 "lyric":asdict(lyric) if lyric else None,"lyrics_elapsed":lyrics_elapsed,"lyrics_policy":policies.get("lyrics"),"lyrics_simplified":config.get("music_lyrics_to_simplified",False),
                 "lyrics_result":"保留现有歌词" if keep_lyrics else "未匹配歌词" if lyrics_enabled and not lyric else ""}
             write_json(receipt, saved)
@@ -279,7 +303,7 @@ def execute(config, body):
                         shutil.copyfileobj(source, output, 1024*1024)
                         output.flush(); os.fsync(output.fileno())
                     temporary.chmod(path.stat().st_mode | 0o600)
-                    if not AudioMetadataHelper.write(temporary, info, cover_data=cover_data, cover_mime=cover_mime, write_tags=write_tags, overwrite=overwrite, cover_overwrite=policies.get("cover")=="overwrite"):
+                    if not AudioMetadataHelper.write(temporary, info, cover_data=cover_data, cover_mime=cover_mime, write_tags=write_tags, overwrite=overwrite, cover_overwrite=operation=="edit" or policies.get("cover")=="overwrite"):
                         raise ValueError("音乐标签或封面写入失败")
                     with temporary.open("rb") as stream: os.fsync(stream.fileno())
                     saved["prepared"] = library.signature(temporary)
@@ -294,6 +318,7 @@ def execute(config, body):
         destination = root/saved["target"]
         if saved["state"]=="prepared":
             library.target(config,row["path"])
+            local_lyrics.verify_edit(path, saved.get("lyrics_edit"))
             if saved["changed"]:
                 if identity_matches(path,saved["prepared"]):
                     pass
@@ -308,7 +333,10 @@ def execute(config, body):
             if not identity_matches(path,saved["prepared"]):
                 raise ValueError("音乐文件在写入后被其他程序替换")
             lyric = MusicLyrics.from_dict(saved["lyric"]) if saved["lyric"] else None
-            if lyric:
+            if saved.get("lyrics_edit"):
+                local_lyrics.apply_edit(path, saved["lyrics_edit"], identifier, write_sidecar)
+                saved["lyrics_result"] = "旁挂歌词已保存"
+            elif lyric:
                 saved["lyrics_result"] = sidecar(path,lyric,saved["lyrics_policy"],saved["lyrics_simplified"],identifier)
             saved["state"]="lyrics_done"; write_json(receipt,saved)
         result={"path":row["path"],"target":row["target"],"success":True,"lyrics_elapsed":saved.get("lyrics_elapsed",0),"message":"音乐处理完成"+("，"+saved["lyrics_result"] if saved.get("lyrics_result") else "")}

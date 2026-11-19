@@ -146,8 +146,72 @@ def listing(config, query="", page=1, page_size=50):
 def inspect(config, relative):
     path = target(config, relative)
     info = metadata(path)
-    embedded = AudioMetadataHelper.read_lyrics(path)
-    return {"path": relative, **info, "signature": signature(path), "lyrics": embedded.content if embedded else "", "write_mode": "isolate" if path.is_symlink() or path.stat().st_nlink > 1 else "independent"}
+    from .lyrics import read_lyrics
+    return {"path": relative, **info, "signature": signature(path), **read_lyrics(path), "write_mode": "isolate" if path.is_symlink() or path.stat().st_nlink > 1 else "independent"}
+
+
+def directory(config, relative=""):
+    root, _ = roots(config)
+    part = Path(relative or ".")
+    if part.is_absolute() or ".." in part.parts:
+        raise ValueError("音乐目录必须位于配置的音乐库内")
+    path = root / part
+    if path.resolve(strict=True) != path or not path.is_dir():
+        raise ValueError("音乐目录不可用或包含符号链接")
+    return root, path
+
+
+def browse(config, relative="", page=1, page_size=50):
+    """浏览 MP 已整理的真实目录，不依据标签重建或移动歌手/专辑。"""
+    root, path = directory(config, relative)
+    items = []
+    children = list(path.iterdir())
+    audio_names = {}
+    for child in children:
+        if child.suffix.lower() in AUDIO_EXTENSIONS and child.is_file():
+            audio_names.setdefault(child.stem, []).append(str(child.relative_to(root)))
+    for child in children:
+        if child.name.startswith(".") or (child.is_symlink() and child.is_dir()):
+            continue
+        is_dir = child.is_dir()
+        if not is_dir and not child.is_file():
+            continue
+        stat = child.stat()
+        stem = child.name.removesuffix('.lyricsfile.yaml') if child.name.endswith('.lyricsfile.yaml') else child.stem if child.suffix.lower() in {'.lrc', '.txt'} else None
+        companions = audio_names.get(stem, [])
+        items.append({"path": str(child.relative_to(root)), "name": child.name,
+                      "type": "dir" if is_dir else "file", "is_audio": not is_dir and child.suffix.lower() in AUDIO_EXTENSIONS,
+                      "audio_path": companions[0] if not is_dir and len(companions) == 1 else None,
+                      "size": None if is_dir else stat.st_size, "modify_time": stat.st_mtime})
+    items.sort(key=lambda item: (item["type"] != "dir", item["name"].casefold()))
+    size = min(max(page_size, 1), 1000)
+    start = (max(page, 1)-1)*size
+    return {"items": items[start:start+size], "total": len(items), "path": str(path.relative_to(root)), "page": page, "page_size": size}
+
+
+def selection(config, paths):
+    root, _ = roots(config)
+    selected = set()
+    for relative in paths:
+        if (root / relative).is_dir():
+            _, folder = directory(config, relative)
+            def failure(error):
+                raise error
+            for parent, folders, files in os.walk(folder, followlinks=False, onerror=failure):
+                folders[:] = sorted(name for name in folders if not name.startswith(".") and not (Path(parent)/name).is_symlink())
+                for name in sorted(files):
+                    if not name.startswith(".") and Path(name).suffix.lower() in AUDIO_EXTENSIONS:
+                        value = str((Path(parent)/name).relative_to(root))
+                        target(config, value)
+                        selected.add(value)
+                        if len(selected)>1000:
+                            raise ValueError("一次最多选择 1000 首音乐，请缩小选择范围")
+        else:
+            target(config, relative)
+            selected.add(relative)
+    if not selected or len(selected)>1000:
+        raise ValueError("请选择 1 至 1000 个音乐文件")
+    return {"paths": sorted(selected)}
 
 
 def image(config, relative):

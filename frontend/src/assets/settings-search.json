@@ -490,7 +490,7 @@
     "field": "music_library_path",
     "label": "本地音乐库目录",
     "card": "音乐",
-    "category": "directory",
+    "category": "music",
     "keywords": [
       "本地音乐库目录",
       "音乐",
@@ -503,7 +503,7 @@
     "field": "music_seed_path",
     "label": "音乐做种目录",
     "card": "音乐",
-    "category": "directory",
+    "category": "music",
     "keywords": [
       "音乐做种目录",
       "音乐",
@@ -516,7 +516,7 @@
     "field": "music_sources",
     "label": "音乐资料源",
     "card": "音乐",
-    "category": "directory",
+    "category": "music",
     "keywords": [
       "音乐资料源",
       "音乐",
@@ -529,7 +529,7 @@
     "field": "music_cue_enable",
     "label": "音乐 CUE 识别",
     "card": "音乐",
-    "category": "directory",
+    "category": "music",
     "keywords": [
       "音乐 CUE 识别",
       "音乐",
@@ -541,7 +541,7 @@
     "field": "music_metadata_to_simplified",
     "label": "音乐媒体信息转简体中文",
     "card": "音乐",
-    "category": "directory",
+    "category": "music",
     "keywords": [
       "音乐媒体信息转简体中文",
       "音乐",
@@ -553,7 +553,7 @@
     "field": "music_lyrics_to_simplified",
     "label": "歌词正文转简体中文",
     "card": "音乐",
-    "category": "directory",
+    "category": "music",
     "keywords": [
       "歌词正文转简体中文",
       "音乐",
@@ -565,7 +565,7 @@
     "field": "music_local_cover_enable",
     "label": "音乐本地封面",
     "card": "音乐",
-    "category": "directory",
+    "category": "music",
     "keywords": [
       "音乐本地封面",
       "音乐",
@@ -577,7 +577,7 @@
     "field": "music_cover_file_patterns",
     "label": "本地封面匹配规则",
     "card": "音乐",
-    "category": "directory",
+    "category": "music",
     "keywords": [
       "本地封面匹配规则",
       "音乐",
@@ -589,7 +589,7 @@
     "field": "music_cover_proxy",
     "label": "音乐封面代理地址",
     "card": "音乐",
-    "category": "directory",
+    "category": "music",
     "keywords": [
       "音乐封面代理地址",
       "音乐",
@@ -601,7 +601,7 @@
     "field": "music_release_region_priority",
     "label": "音乐发行地区优先级",
     "card": "音乐",
-    "category": "directory",
+    "category": "music",
     "keywords": [
       "音乐发行地区优先级",
       "音乐",
@@ -614,7 +614,7 @@
     "field": "music_release_script_priority",
     "label": "音乐文字字形优先级",
     "card": "音乐",
-    "category": "directory",
+    "category": "music",
     "keywords": [
       "音乐文字字形优先级",
       "音乐",
@@ -627,7 +627,7 @@
     "field": "acoustid_api_key",
     "label": "AcoustID API Key",
     "card": "音乐",
-    "category": "directory",
+    "category": "music",
     "keywords": [
       "AcoustID API Key",
       "音乐",
@@ -639,7 +639,7 @@
     "field": "theaudiodb_api_key",
     "label": "TheAudioDB API Key",
     "card": "音乐",
-    "category": "directory",
+    "category": "music",
     "keywords": [
       "TheAudioDB API Key",
       "音乐",
@@ -651,7 +651,7 @@
     "field": "lrclib_base_url",
     "label": "LRCLIB 服务地址",
     "card": "音乐",
-    "category": "directory",
+    "category": "music",
     "keywords": [
       "LRCLIB 服务地址",
       "音乐",
@@ -663,7 +663,7 @@
     "field": "amll_base_url",
     "label": "AMLL TTML 服务地址",
     "card": "音乐",
-    "category": "directory",
+    "category": "music",
     "keywords": [
       "AMLL TTML 服务地址",
       "音乐",
@@ -675,7 +675,7 @@
     "field": "lyrics_batch_timeout",
     "label": "歌词批次查询预算（秒）",
     "card": "音乐",
-    "category": "directory",
+    "category": "music",
     "keywords": [
       "歌词批次查询预算（秒）",
       "音乐",
@@ -687,7 +687,7 @@
     "field": "lyrics_provider_retry_max_wait",
     "label": "歌词来源最大重试等待（秒）",
     "card": "音乐",
-    "category": "directory",
+    "category": "music",
     "keywords": [
       "歌词来源最大重试等待（秒）",
       "音乐",
@@ -699,7 +699,7 @@
     "field": "music_scraping_policies",
     "label": "音乐刮削策略",
     "card": "音乐",
-    "category": "directory",
+    "category": "music",
     "keywords": [
       "音乐刮削策略",
       "音乐",

@@ -160,6 +160,10 @@ router.beforeEach(async (to, from, next) => {
     next({ name: 'settings-notifications', query: { ...to.query, tab: undefined }, replace: true });
     return;
   }
+  if (to.name === 'settings-general' && to.hash === '#music-settings' && to.query.tab === 'directory') {
+    next({ ...to, query: { ...to.query, tab: 'music' }, replace: true });
+    return;
+  }
   const authStore = useAuthStore();
 
   // 1. 如果是公共页面 (Login, Setup)，直接放行

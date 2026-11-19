@@ -11,6 +11,7 @@ from etk_music.runtime import _ModuleBase
 from etk_music.cache import cached
 from etk_music.runtime import logger
 from etk_music.runtime import get_runtime_setting
+from etk_music.observation import report_music_recognition
 from etk_music.types import (
     LISTENBRAINZ_CHART_RANGES,
     LISTENBRAINZ_FRESH_MAX_DAYS,
@@ -209,15 +210,23 @@ class ListenBrainzModule(_ModuleBase):
         """
         请求 ListenBrainz JSON 接口并统一处理网络和响应错误。
         """
-        response = RequestUtils(
+        client = RequestUtils(
             headers={
                 "User-Agent": f"{get_runtime_setting('USER_AGENT')} (https://github.com/jxxghp/MoviePilot)",
                 "Accept": "application/json",
             },
             proxies=get_runtime_setting('PROXY'),
-            timeout=20,
-        ).get_res(f"{cls._base_url}{path}", params=params)
+            timeout=10,
+        )
+        response = client.get_res(f"{cls._base_url}{path}", params=params)
+        # 只重试一次暂时性网关故障，不把失败缓存成空榜单。
+        if response is None or response.status_code in {502, 503, 504}:
+            if response is not None:
+                response.close()
+            response = client.get_res(f"{cls._base_url}{path}", params=params)
         if response is None:
+            client.close()
+            report_music_recognition("service_error", "ListenBrainz 连接失败或超时，请重试或切换豆瓣音乐")
             return None
         try:
             if response.status_code == 204:
@@ -225,17 +234,23 @@ class ListenBrainzModule(_ModuleBase):
                 logger.debug(f"ListenBrainz 统计尚未生成：{path}")
                 return {}
             if response.status_code != 200:
+                report_music_recognition("service_error", f"ListenBrainz 上游返回 HTTP {response.status_code}，请重试或切换豆瓣音乐")
                 logger.warning(
                     f"ListenBrainz 请求失败：{response.status_code} {response.text[:200]}"
                 )
                 return None
             payload = response.json()
-            return payload if isinstance(payload, dict) else None
+            if not isinstance(payload, dict):
+                report_music_recognition("service_error", "ListenBrainz 返回了无效响应")
+                return None
+            return payload
         except (TypeError, ValueError) as err:
+            report_music_recognition("service_error", "ListenBrainz 返回了无效响应")
             logger.warning(f"ListenBrainz 响应解析失败：{err}")
             return None
         finally:
             response.close()
+            client.close()
 
     @classmethod
     def _recording_to_info(cls, recording: dict[str, Any]) -> Optional[MusicInfo]:

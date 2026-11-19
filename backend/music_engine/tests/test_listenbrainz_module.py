@@ -5,6 +5,28 @@
 from etk_music.listenbrainz import ListenBrainzModule
 
 
+def test_explore_surfaces_gateway_failure_and_retries_once(monkeypatch):
+    from etk_music import catalog, listenbrainz
+    calls = []
+    class Response:
+        status_code = 502
+        text = 'Bad Gateway'
+        def close(self): pass
+    monkeypatch.setattr(listenbrainz.RequestUtils, 'get_res', lambda *_a, **_k: calls.append(1) or Response())
+    result = catalog.explore({'source':'musicbrainz','entity':'album'})
+    assert len(calls) == 2
+    assert '502' in result['errors']['musicbrainz']
+    assert result['items'] == [] and not result['has_more']
+
+
+def test_explore_cover_filter_keeps_next_page(monkeypatch):
+    from etk_music import catalog
+    from etk_music.models import MusicInfo
+    monkeypatch.setattr(ListenBrainzModule, 'music_chart', lambda *_a, **_k: [MusicInfo(title='无封面')]*30)
+    result = catalog.explore({'with_cover':True})
+    assert result['has_more'] and not result['errors'] and not result['items']
+
+
 def test_recording_to_info_maps_listenbrainz_payload():
     """
     ListenBrainz 榜单录音应转换为可搜索和订阅的 MusicInfo。

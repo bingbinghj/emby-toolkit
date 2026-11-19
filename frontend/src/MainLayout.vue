@@ -134,6 +134,7 @@ const settingsTabs = [
   { value: 'directory', title: '存储 & 目录', icon: 'mdi-folder' },
   { value: 'rule', title: '规则', icon: 'mdi-filter' },
   { value: 'search', title: '数据源', icon: 'mdi-database-search-outline' },
+  { value: 'music', title: '音乐', icon: 'mdi-music' },
   { value: 'notification', title: '通知', icon: 'mdi-bell' },
 ];
 const activeSettingsTab = computed(() => route.name === 'settings-notifications' ? 'notification'

@@ -92,21 +92,29 @@ def related(source, identity, kind, page=1, album_type=None):
 
 
 def explore(body):
+    with capture_music_recognition(seconds=25), request_budget(25):
+        return _explore(body)
+
+
+def _explore(body):
     count, page = min(max(int(body.get("count", 30)), 1), 100), max(int(body.get("page", 1)), 1)
-    if body.get("source") == "doubanmusic":
-        items = DoubanMusic().music_discover(MediaSource.DoubanMusic, page=page, count=count, mode="tag", tags=body.get("tags", ""), sort=body.get("douban_sort", "U"))
-    elif body.get("mode") == "fresh":
-        items = ListenBrainzModule().music_fresh_releases(days=int(body.get("days", 14)), sort=body.get("sort", "release_date"), past=body.get("past", True), future=body.get("future", True), offset=(page-1)*count, count=count)
-    else:
-        items = ListenBrainzModule().music_chart(body.get("range_name", "this_month"), offset=(page-1)*count, count=count, entity=body.get("entity", "recording"))
+    with capture_music_recognition() as observed:
+        if body.get("source") == "doubanmusic":
+            items = DoubanMusic().music_discover(MediaSource.DoubanMusic, page=page, count=count, mode="tag", tags=body.get("tags", ""), sort=body.get("douban_sort", "U"))
+        elif body.get("mode") == "fresh":
+            items = ListenBrainzModule().music_fresh_releases(days=int(body.get("days", 14)), sort=body.get("sort", "release_date"), past=body.get("past", True), future=body.get("future", True), offset=(page-1)*count, count=count)
+        else:
+            items = ListenBrainzModule().music_chart(body.get("range_name", "this_month"), offset=(page-1)*count, count=count, entity=body.get("entity", "album"))
     items = items or []
+    has_more = len(items) >= count
     if body.get("min_listen_count") and body.get("source") != "doubanmusic":
         items = [item for item in items if (item.listen_count or 0)>=max(0,int(body["min_listen_count"]))]
     if body.get("with_cover"):
         items = [item for item in items if item.cover_url]
     if body.get("sort_by") in {"listen_count.asc", "listen_count.desc"}:
         items = sorted(items,key=lambda item:item.listen_count or 0,reverse=body["sort_by"].endswith("desc"))
-    return {"items": serialize(items), "page": page}
+    return {"items": serialize(items), "page": page, "has_more": has_more,
+            "errors": {body.get("source") or "musicbrainz": observed.message} if observed.failed else {}}
 
 
 def recognize(path, sources, selected=None):
