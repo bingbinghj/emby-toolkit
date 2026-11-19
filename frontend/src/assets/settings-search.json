@@ -566,6 +566,19 @@
     "route": "general"
   },
   {
+    "field": "p115_media_read_mode",
+    "label": "115 媒体读取方式",
+    "card": "目录",
+    "category": "directory",
+    "keywords": [
+      "115 媒体读取方式",
+      "目录",
+      "媒体目录与文件身份",
+      "ETK 使用现有读取流程。CD2 通过下方挂载目录读取媒体，用于片尾、截图和媒体信息提取。挂载不可用时重试 3 次后回退 ETK。"
+    ],
+    "route": "general"
+  },
+  {
     "field": "cd2_media_root",
     "label": "CD2 媒体库本地根目录",
     "card": "目录",

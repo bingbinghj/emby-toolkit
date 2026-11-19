@@ -952,7 +952,7 @@ async fn retire_fallback_files(
         .await
 }
 pub(crate) async fn resume_cleanup(state: &AppState, context: &JobContext) -> Result<()> {
-    for (key, saved) in context.saved_plans().await? {
+    for (key, saved) in context.saved_plans(|key| key == "thumbnail-fallback" || key.ends_with(":thumbnail-fallback")).await? {
         let Some(prefix) = key.strip_suffix("thumbnail-fallback") else {
             continue;
         };

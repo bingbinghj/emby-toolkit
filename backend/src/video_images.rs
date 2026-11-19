@@ -290,7 +290,13 @@ async fn capture(
         let operation = async {
             let (pc, sha, _) =
                 crate::fingerprints::lookup(state, file.to_str().unwrap_or("")).await?;
-            let pc = pc.ok_or_else(|| ApiError::bad("视频截图缺少可验证115 PC"))?;
+            let local = crate::media_input::cd2_file(
+                state,
+                file.to_str().unwrap_or(""),
+                pc.as_deref(),
+                context,
+            )
+            .await?;
             let info: Option<Value> = sqlx::query_scalar(
                 "SELECT mediainfo_json FROM p115_mediainfo_cache WHERE UPPER(sha1)=UPPER($1)",
             )
@@ -304,19 +310,27 @@ async fn capture(
             .flatten();
             let name = file.file_name().unwrap_or_default().to_string_lossy();
             let (timestamp, filter) = capture_options(&info.unwrap_or(json!({})), &name, data);
-            let url = crate::p115::download_url(state, &pc).await?;
+            let url = match local.as_ref() {
+                Some(path) => path.to_string_lossy().into_owned(),
+                None => {
+                    crate::p115::download_url(
+                        state,
+                        &pc.ok_or_else(|| ApiError::bad("视频截图缺少可验证115 PC"))?,
+                    )
+                    .await?
+                }
+            };
             tracing::debug!(file = %name, timestamp, "[视频截图] 开始截取缺失图片");
             let mut command = tokio::process::Command::new("ffmpeg");
+            command.kill_on_drop(true);
+            if local.is_none() {
+                command.args(["-user_agent", "Mozilla/5.0", "-rw_timeout", "15000000"]);
+            }
             command
-                .kill_on_drop(true)
                 .args([
                     "-hide_banner",
                     "-loglevel",
                     "error",
-                    "-user_agent",
-                    "Mozilla/5.0",
-                    "-rw_timeout",
-                    "15000000",
                     "-fflags",
                     "+fastseek",
                     "-ss",

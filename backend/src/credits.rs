@@ -158,12 +158,10 @@ async fn episode(state: &AppState, item: Value) -> Result<Episode> {
     if sha.len() != 40 || !sha.bytes().all(|c| c.is_ascii_hexdigit()) {
         return Err(ApiError::bad("分集缺少可验证 SHA1，请先补齐缓存指纹"));
     }
-    let pc = target
-        .pc
-        .as_deref()
-        .filter(|pc| !pc.is_empty())
-        .ok_or_else(|| ApiError::bad("分集缺少 115 PC，请先补齐缓存指纹"))?
-        .to_string();
+    let pc = target.pc.clone().unwrap_or_default();
+    if pc.is_empty() && state.config.read().await["p115_media_read_mode"] != "cd2" {
+        return Err(ApiError::bad("分集缺少 115 PC，请先补齐缓存指纹"));
+    }
     let cached_runtime = media_info::container(&info)
         .and_then(|source| source["RunTimeTicks"].as_f64())
         .unwrap_or(0.0)
@@ -241,6 +239,55 @@ async fn season_items(state: &AppState, item: &Value, context: &JobContext) -> R
         .collect())
 }
 
+// Persist only fields consumed by eligibility, file identity and season selection.
+// Keep full chapters because successful skips also refresh their cache.
+fn compact_plan_item(item: &mut Value) {
+    fn compact_streams(value: &mut Value) {
+        if let Some(streams) = value["MediaStreams"].as_array_mut() {
+            streams.retain(|stream| stream["Type"] == "Audio");
+            for stream in streams {
+                if let Some(fields) = stream.as_object_mut() {
+                    fields.retain(|key, _| {
+                        [
+                            "Type",
+                            "Index",
+                            "Codec",
+                            "IsDefault",
+                            "IsExternal",
+                            "Language",
+                            "Channels",
+                        ]
+                        .contains(&key.as_str())
+                    });
+                }
+            }
+        }
+    }
+    if let Some(fields) = item.as_object_mut() {
+        fields.retain(|key, _| FIELDS.split(',').any(|field| field == key));
+    }
+    compact_streams(item);
+    if let Some(sources) = item["MediaSources"].as_array_mut() {
+        for source in sources {
+            if let Some(fields) = source.as_object_mut() {
+                fields.retain(|key, _| {
+                    [
+                        "Id",
+                        "ItemId",
+                        "Path",
+                        "Size",
+                        "Container",
+                        "RunTimeTicks",
+                        "MediaStreams",
+                    ]
+                    .contains(&key.as_str())
+                });
+            }
+            compact_streams(source);
+        }
+    }
+}
+
 pub async fn extract_all(state: &AppState, full: bool, context: &JobContext) -> Result<Value> {
     let mode = if full { Mode::Full } else { Mode::Incremental };
     if let Some(items) = context.plan("credits-all").await? {
@@ -260,6 +307,7 @@ pub async fn extract_all(state: &AppState, full: bool, context: &JobContext) -> 
     )
     .await?;
     crate::media_order::sort(&mut items);
+    for item in &mut items { compact_plan_item(item); }
     context.save_plan("credits-all", &json!(items)).await?;
     extract_items(state, items, mode, context).await
 }
@@ -317,6 +365,7 @@ async fn extract_items(state: &AppState, items: Vec<Value>, mode: Mode, context:
         }
     }
     let total = groups.values().map(Vec::len).sum::<usize>() + reports.len();
+    let mut persisted_reports = 0;
     for selected in groups.into_values() {
         context.checkpoint().await?;
         let mut siblings = match season_items(state, &selected[0], context).await {
@@ -392,7 +441,7 @@ async fn extract_items(state: &AppState, items: Vec<Value>, mode: Mode, context:
                 reports.push(persist_report(state, &server, &inputs, context, report).await?);
             }
         }
-        for report in &reports {
+        for report in &reports[persisted_reports..] {
             if report["status"] != "failed"
                 && context
                     .completed(&format!("credits:{}", string(report, "item_id")))
@@ -405,6 +454,7 @@ async fn extract_items(state: &AppState, items: Vec<Value>, mode: Mode, context:
             }
             selected_ids.remove(&string(report, "item_id"));
         }
+        persisted_reports = reports.len();
         if selected_ids.is_empty() {
             continue;
         }
@@ -746,7 +796,10 @@ async fn fingerprint(
     }
     guard_recovery(state, &reference.target.id).await?;
     let _main = crate::strm::slot(state, "main", Some(context)).await?;
-    let url = crate::p115::download_url(state, &reference.pc).await?;
+    let url = match crate::media_input::cd2_file(state, &reference.target.path, Some(&reference.pc), Some(context)).await? {
+        Some(path) => path.to_string_lossy().into_owned(),
+        None => crate::p115::download_url(state, &reference.pc).await?,
+    };
     let args = chromaprint_arguments(&url, start, seconds, audio_stream(&reference.info));
     let mut command = tokio::process::Command::new("ffmpeg");
     command.kill_on_drop(true).args(args);
@@ -761,7 +814,7 @@ async fn fingerprint(
     drop(_main);
     if !output.status.success() {
         return Err(ApiError::bad(
-            "ffmpeg 未成功提取片尾声纹，请检查 115 直链、音轨及 chromaprint 支持",
+            "ffmpeg 未成功提取片尾声纹，请检查媒体读取方式、音轨及 chromaprint 支持",
         ));
     }
     let values = parse_raw(&output.stdout)?;
@@ -831,47 +884,57 @@ fn fingerprint_audio_identity(info: &Value) -> Value {
 }
 
 fn chromaprint_arguments(url: &str, start: f64, seconds: f64, stream: Option<u64>) -> Vec<String> {
-    [
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-nostdin",
-        "-user_agent",
-        "Mozilla/5.0",
-        "-rw_timeout",
-        "15000000",
-        "-reconnect",
-        "1",
-        "-reconnect_streamed",
-        "1",
-        "-reconnect_delay_max",
-        "5",
-        "-ss",
-        &format!("{start:.3}"),
-        "-i",
-        url,
-        "-map",
-        &stream.map_or("0:a:0".into(), |index| format!("0:{index}")),
-        "-t",
-        &seconds.to_string(),
-        "-ac",
-        "1",
-        "-acodec",
-        "pcm_s16le",
-        "-ar",
-        "16000",
-        "-vn",
-        "-sn",
-        "-dn",
-        "-f",
-        "chromaprint",
-        "-fp_format",
-        "raw",
-        "-",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
+    let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error", "-nostdin"]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    if url.starts_with("http://") || url.starts_with("https://") {
+        args.extend(
+            [
+                "-user_agent",
+                "Mozilla/5.0",
+                "-rw_timeout",
+                "15000000",
+                "-reconnect",
+                "1",
+                "-reconnect_streamed",
+                "1",
+                "-reconnect_delay_max",
+                "5",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        );
+    }
+    args.extend(
+        [
+            "-ss",
+            &format!("{start:.3}"),
+            "-i",
+            url,
+            "-map",
+            &stream.map_or("0:a:0".into(), |index| format!("0:{index}")),
+            "-t",
+            &seconds.to_string(),
+            "-ac",
+            "1",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            "16000",
+            "-vn",
+            "-sn",
+            "-dn",
+            "-f",
+            "chromaprint",
+            "-fp_format",
+            "raw",
+            "-",
+        ]
+        .into_iter()
+        .map(str::to_string),
+    );
+    args
 }
 
 pub(crate) fn credits_start(chapters: &Value) -> Option<u64> {
@@ -1136,6 +1199,24 @@ async fn cache_chapters(state: &AppState, reference: &Episode, chapters: &Value)
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn compact_plan_preserves_audio_identity_and_original_chapters() {
+        let mut item = json!({"Id":"1", "Type":"Episode", "Path":"/media/episode.strm", "Overview":"unused".repeat(100),
+            "Chapters":[{"MarkerType":"IntroStart","StartPositionTicks":100,"ImageTag":"keep"}],
+            "MediaStreams":[{"Type":"Video","Codec":"h264"}, {"Type":"Audio","Index":1,"IsDefault":true,"Codec":"aac","Language":"jpn","Channels":2,"Title":"unused"}],
+            "MediaSources":[{"Id":"mediasource_1","ItemId":"1","Path":"/cd2/episode.mkv","Size":300,"RunTimeTicks":12000000000u64,"Container":"mkv","MediaStreams":[{"Type":"Audio","Index":1,"Codec":"aac","Language":"jpn","Channels":2}],"Formats":["unused"]}]
+        });
+        let before = item.clone();
+        compact_plan_item(&mut item);
+        assert_eq!(item["Chapters"], before["Chapters"]);
+        assert_eq!(native_runtime(&item), native_runtime(&before));
+        assert_eq!(fingerprint_audio_identity(&item), fingerprint_audio_identity(&before));
+        assert_eq!(fingerprint_audio_identity(&item["MediaSources"][0]), fingerprint_audio_identity(&before["MediaSources"][0]));
+        assert!(serde_json::to_vec(&item).unwrap().len() < serde_json::to_vec(&before).unwrap().len() / 2);
+        let args = chromaprint_arguments("/cd2/episode.mkv", 1020.0, 180.0, Some(1));
+        assert!(!args.iter().any(|arg| arg == "-user_agent" || arg == "-reconnect"));
+        assert!(args.windows(2).any(|pair| pair == ["-i", "/cd2/episode.mkv"]));
+    }
     #[test]
     fn television_scope_requires_matching_identity_and_parent() {
         for kind in ["Series", "Season", "Episode"] {

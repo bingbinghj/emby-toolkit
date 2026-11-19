@@ -298,7 +298,7 @@ for (const [name, flags, label, disabled, indeterminate] of [
     const pause = shellSource.match(/<VBtn\b[^>]*:prepend-icon="taskPaused[^>]*:disabled="([^"]+)"/)[1];
     assert.equal(taskBinding(pause, f), disabled);
     const bars = [...source.matchAll(/<VProgressLinear\b[^>]*:indeterminate="([^"]+)"/g)];
-    assert.equal(bars.length, 2, 'desktop and mobile progress must use the same task state');
+    assert.equal(bars.length, 1, 'task cards share one progress control');
     for (const bar of bars) assert.equal(taskBinding(bar[1], f), indeterminate);
     f.background.value.progress_known = true;
     for (const bar of bars) {

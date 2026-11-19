@@ -40,6 +40,7 @@ pub mod media_edit;
 pub mod media_extra;
 pub mod media_images;
 pub mod media_info;
+mod media_input;
 pub mod media_manual;
 mod media_order;
 pub mod media_organize_history;

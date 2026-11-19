@@ -117,6 +117,9 @@ impl AppState {
         next.as_object_mut().unwrap().extend(updates.clone());
         next.as_object_mut().unwrap().remove("min_score_for_review");
         crate::notifications::validate_config(&next)?;
+        if next.get("p115_media_read_mode").is_some_and(|mode| !matches!(mode.as_str(), Some("etk" | "cd2"))) {
+            return Err(ApiError::bad("115 媒体读取方式必须为 ETK 或 CD2"));
+        }
         for key in [
             "emby_api_key",
             "emby_admin_pass",

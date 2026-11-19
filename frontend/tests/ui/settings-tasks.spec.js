@@ -91,3 +91,16 @@ test('202 fingerprint task waits for terminal state and displays its warning det
   await expect(audit).toContainText('101：文件身份尚未确认');
   expect(api.requests.filter(request => request.path === '/api/tasks/result/ui-background-task').length).toBeGreaterThanOrEqual(2);
 });
+
+test('115 media reader defaults to ETK and persists the CD2 choice with directory settings', async ({ page, api }) => {
+  await page.goto('/setting?tab=directory');
+  const field = page.locator('[data-field="p115_media_read_mode"]');
+  await expect(field.locator('.v-select__selection-text')).toHaveText('ETK');
+  await field.locator('.v-field').click();
+  await page.getByRole('option', { name: 'CD2', exact: true }).click();
+  await page.getByRole('button', { name: '保存目录', exact: true }).click();
+  await expect.poll(() => api.requests.some(r => r.method === 'POST' && r.path === '/api/config')).toBe(true);
+  expect(api.requests.find(r => r.method === 'POST' && r.path === '/api/config').body.p115_media_read_mode).toBe('cd2');
+  await page.reload();
+  await expect(field.locator('.v-select__selection-text')).toHaveText('CD2');
+});

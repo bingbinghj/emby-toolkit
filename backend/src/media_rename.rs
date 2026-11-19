@@ -234,7 +234,45 @@ async fn plan(state: &AppState, source: &Source, body: &Value) -> Result<Value> 
     )
 }
 async fn probe_fields(state: &AppState, source: &Source, context: Option<&JobContext>) -> Value {
-    let path = source.cloud.clone().unwrap_or(source.target.path.clone());
+    let cd2_selected = state.config.read().await["p115_media_read_mode"] == "cd2";
+    let local = match crate::media_input::cd2_file(
+        state,
+        &source.target.path,
+        source.target.pc.as_deref(),
+        context,
+    )
+    .await
+    {
+        Ok(local) => local,
+        Err(error) => {
+            tracing::warn!("[重命名预览] CD2 媒体读取失败：{}", error.1);
+            return json!({});
+        }
+    };
+    let path = if let Some(path) = local {
+        path.to_string_lossy().into_owned()
+    } else if cd2_selected {
+        let pc = source
+            .target
+            .pc
+            .clone()
+            .or_else(|| {
+                source
+                    .cache
+                    .as_ref()
+                    .map(|cache| string(cache, "pick_code"))
+            })
+            .unwrap_or_default();
+        match crate::p115::download_url(state, &pc).await {
+            Ok(url) => url,
+            Err(error) => {
+                tracing::warn!("[重命名预览] ETK 回退读取失败：{}", error.1);
+                return json!({});
+            }
+        }
+    } else {
+        source.cloud.clone().unwrap_or(source.target.path.clone())
+    };
     if source.ext == ".iso" {
         let probe = if std::path::Path::new(&path).is_file() {
             let Ok(_slot) = crate::strm::slot(state, "main", context).await else {
@@ -284,6 +322,9 @@ async fn probe_fields(state: &AppState, source: &Source, context: Option<&JobCon
         return json!({});
     };
     let mut command = tokio::process::Command::new("ffprobe");
+    if cd2_selected && path.starts_with("http") {
+        command.args(["-user_agent", "Mozilla/5.0", "-rw_timeout", "15000000"]);
+    }
     command.kill_on_drop(true).args([
         "-v",
         "error",
@@ -306,6 +347,7 @@ async fn probe_fields(state: &AppState, source: &Source, context: Option<&JobCon
         _ => json!({}),
     }
 }
+
 async fn submit_probe(
     State(state): State<AppState>,
     Path(id): Path<String>,

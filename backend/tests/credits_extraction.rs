@@ -1158,3 +1158,122 @@ async fn native_source_size_mismatch_is_rejected_before_audio_download_or_marker
     assert_eq!(start(&fixture.cache("101").await[0]["Chapters"]), None);
     fixture.close().await;
 }
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL and ffmpeg with chromaprint; all HTTP stays local"]
+async fn cd2_reads_match_etk_fingerprints_and_retry_missing_mount_before_etk_fallback() {
+    let fixture = Fixture::new(false).await;
+    let original = fixture.run_mode(true).await;
+    assert_eq!(original["result"]["updated"], 2, "{original}");
+    let cache_dir = fixture.state.data_dir.join("credits-fingerprints");
+    let expected: HashMap<_, _> = fixture.sha.iter().map(|(id, sha)| {
+        (id.clone(), std::fs::read(cache_dir.join(format!("{sha}-180.json"))).unwrap())
+    }).collect();
+    for (id, item) in &fixture.before {
+        fixture.host.items.lock().await.insert(id.clone(), item.clone());
+        let size = std::fs::metadata(fixture._root.path().join(format!("media/{id}.mkv"))).unwrap().len();
+        sqlx::query("INSERT INTO p115_filesystem_cache(id,parent_id,name,pick_code,local_path,size,sha1) VALUES($1,'root',$2,$3,$2,$4,$5)")
+            .bind(id).bind(format!("{id}.mkv")).bind(format!("pc{id}")).bind(size as i64).bind(&fixture.sha[id])
+            .execute(&fixture.state.db).await.unwrap();
+    }
+    fixture.state.save_config(&json!({"p115_media_read_mode":"cd2","cd2_media_root":fixture._root.path().join("media")})).await.unwrap();
+    fixture.host.downloads.lock().await.clear();
+    std::fs::remove_dir_all(&cache_dir).unwrap();
+    let result = fixture.run_mode(true).await;
+    assert_eq!(result["result"]["updated"], 2, "{result}");
+    assert!(fixture.host.downloads.lock().await.is_empty());
+    for (id, sha) in &fixture.sha {
+        assert_eq!(std::fs::read(cache_dir.join(format!("{sha}-180.json"))).unwrap(), expected[id]);
+        let item = fixture.host.items.lock().await[id].clone();
+        for field in ["MediaStreams", "MediaSources"] {
+            assert_eq!(item[field], fixture.before[id][field]);
+        }
+        assert!(item["Chapters"].as_array().unwrap().starts_with(fixture.before[id]["Chapters"].as_array().unwrap()));
+    }
+    // Resolve the same mounted media through the normal media-info extraction entry.
+    let state = fixture.state.clone();
+    let job = fixture.state.jobs.submit("CD2 媒体信息读取", move |context| async move {
+        Ok(emby_toolkit::media_restore::probe(&state, "pc101", "101.mkv", &context).await?.1)
+    }).await.unwrap();
+    let probe = fixture.wait(&job).await;
+    assert_eq!(probe["state"], "completed", "{probe}");
+    assert_eq!(probe["result"]["streams"][1]["codec_name"], "pcm_s16le");
+    fixture.state.save_config(&json!({"extract_thumb":true})).await.unwrap();
+    for (id, item) in &fixture.before {
+        std::fs::write(item["Path"].as_str().unwrap(), fixture._root.path().join(format!("media/{id}.mkv")).to_str().unwrap()).unwrap();
+    }
+    let paths: Vec<_> = fixture.before.values().filter_map(|item| item["Path"].as_str().map(std::path::PathBuf::from)).collect();
+    let images = emby_toolkit::video_images::missing_report(&fixture.state, &paths, &json!({}), None).await.unwrap();
+    assert_eq!(images["captured"], 2, "{images}");
+    assert!(fixture.host.downloads.lock().await.is_empty());
+    for (id, item) in &fixture.before {
+        fixture.host.items.lock().await.insert(id.clone(), item.clone());
+    }
+    sqlx::query("UPDATE media_metadata SET file_pickcode_json='[null]'").execute(&fixture.state.db).await.unwrap();
+    sqlx::query("UPDATE p115_filesystem_cache SET pick_code=NULL").execute(&fixture.state.db).await.unwrap();
+    std::fs::remove_dir_all(&cache_dir).unwrap();
+    let local_only = fixture.run_mode(true).await;
+    assert_eq!(local_only["result"]["updated"], 2, "{local_only}");
+    assert!(fixture.host.downloads.lock().await.is_empty());
+    for (id, item) in &fixture.before {
+        fixture.host.items.lock().await.insert(id.clone(), item.clone());
+    }
+    std::fs::remove_dir_all(&cache_dir).unwrap();
+    fixture.state.save_config(&json!({"cd2_media_root":fixture._root.path().join("unmounted")})).await.unwrap();
+    for id in ["101", "102"] {
+        sqlx::query("UPDATE media_metadata SET file_pickcode_json=$2 WHERE tmdb_id=$1")
+            .bind(id).bind(json!([format!("pc{id}")])).execute(&fixture.state.db).await.unwrap();
+        sqlx::query("UPDATE p115_filesystem_cache SET pick_code=$2 WHERE id=$1")
+            .bind(id).bind(format!("pc{id}")).execute(&fixture.state.db).await.unwrap();
+    }
+    let start = Instant::now();
+    let fallback = fixture.run_mode(true).await;
+    assert_eq!(fallback["result"]["updated"], 2, "{fallback}");
+    assert!(fixture.host.downloads.lock().await.is_empty(), "ETK reuses its valid download URLs during fallback");
+    assert!(start.elapsed() >= Duration::from_secs(6), "each media read retries three times before falling back");
+    assert_eq!(fixture.state.config.read().await["p115_media_read_mode"], "cd2");
+    fixture.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL and ffmpeg; all HTTP stays local"]
+async fn cd2_retry_accepts_a_recovered_mount_and_cancellation_never_falls_back() {
+    let fixture = Fixture::new(false).await;
+    let mount = fixture._root.path().join("mount");
+    let media = fixture._root.path().join("media");
+    fixture.state.save_config(&json!({"p115_media_read_mode":"cd2","cd2_media_root":mount})).await.unwrap();
+    let work = fixture.state.clone();
+    let file = media.join("101.mkv");
+    let task = fixture.state.jobs.submit("CD2 挂载恢复测试", move |context| async move {
+        Ok(emby_toolkit::media_restore::probe(&work, "pc101", file.to_str().unwrap(), &context).await?.1)
+    }).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    std::os::unix::fs::symlink(&media, &mount).unwrap();
+    let result = fixture.wait(&task).await;
+    assert_eq!(result["state"], "completed", "{result}");
+    assert!(fixture.host.downloads.lock().await.is_empty());
+    std::fs::remove_file(&mount).unwrap();
+    let work = fixture.state.clone();
+    let file = media.join("101.mkv");
+    let start = Instant::now();
+    let task = fixture.state.jobs.submit("取消 CD2 重试", move |context| async move {
+        Ok(emby_toolkit::media_restore::probe(&work, "pc101", file.to_str().unwrap(), &context).await?.1)
+    }).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    fixture.state.jobs.control(Some(&task), "stop").await.unwrap();
+    let result = fixture.wait(&task).await;
+    assert_eq!(result["state"], "cancelled", "{result}");
+    assert!(start.elapsed() < Duration::from_secs(3));
+    assert!(fixture.host.downloads.lock().await.is_empty());
+    let work = fixture.state.clone();
+    let started = Instant::now();
+    let task = fixture.state.jobs.submit("CD2 媒体信息回退测试", move |context| async move {
+        Ok(emby_toolkit::media_restore::probe(&work, "pc101", "101.mkv", &context).await?.1)
+    }).await.unwrap();
+    let result = fixture.wait(&task).await;
+    assert_eq!(result["state"], "completed", "{result}");
+    assert_eq!(fixture.host.downloads.lock().await.len(), 1);
+    assert!(started.elapsed() >= Duration::from_secs(3));
+    assert_eq!(fixture.state.config.read().await["p115_media_read_mode"], "cd2");
+    fixture.close().await;
+}

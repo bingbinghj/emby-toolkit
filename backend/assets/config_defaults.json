@@ -44,6 +44,7 @@
   "p115_request_interval": 1.0,
   "p115_max_workers": 3,
   "p115_api_priority": "cookie",
+  "p115_media_read_mode": "etk",
   "local_strm_root": "/mnt/media",
   "cd2_media_root": "",
   "p115_fingerprint_media_root_cid": "",

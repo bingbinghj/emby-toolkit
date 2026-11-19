@@ -31,29 +31,7 @@
         <VCard v-for="group in manualTaskGroups" :key="group.name" class="dashboard-card manual-tasks-card scheduler-category-card" :data-task-category="group.name">
           <VCardItem :title="group.name"><template #prepend><VIcon :icon="getTaskIcon(group.tasks[0])" color="primary" /></template></VCardItem>
           <VCardText>
-            <VTable v-if="mdAndUp" class="scheduler-task-table">
-              <thead><tr><th>提供方</th><th>任务名称</th><th>任务状态</th><th>下次执行时间</th><th>操作</th></tr></thead>
-              <Draggable :list="group.tasks" item-key="key" tag="tbody" :force-fallback="true" :fallback-on-body="true" :animation="150" handle=".task-drag-handle" :group="manualTaskDragGroup" @change="reorderManualTaskGroup(group)">
-                <template #item="{ element: task }">
-                  <tr class="task-record" :data-task-key="task.key">
-                    <td>ETK</td>
-                    <td><div class="temp-task-name">{{ task.name }}</div><p class="temp-task-description">{{ getTaskHelp(task) }}</p><div v-if="isCurrentTask(task) && isBackgroundTaskRunning" class="scheduler-progress">
-                      <VProgressLinear :model-value="backgroundTaskStatus.progress" :indeterminate="!taskPaused && !taskStopping && !backgroundTaskStatus.progress_known" color="primary" height="4" rounded />
-                      <div class="scheduler-progress-meta"><span>{{ backgroundTaskStatus.message }}</span><strong v-if="backgroundTaskStatus.progress_known">{{ backgroundTaskStatus.progress }}%</strong></div>
-                    </div>
-                  </td>
-                    <td><VChip :color="getTaskRowColor(task)" size="small" variant="tonal">{{ getTaskRowState(task) }}</VChip></td>
-                    <td>手动执行</td>
-                    <td><div class="task-row-actions"><VBtn color="primary" variant="flat" size="small" prepend-icon="mdi-play"
-                    :loading="isTriggeringTask === task.key" :disabled="isBackgroundTaskRunning || Boolean(isTriggeringTask)"
-                    @click="triggerTaskNow(task.key)">执行</VBtn>
-                    <VBtn v-if="isCurrentTask(task) && isTerminalTask(backgroundTaskStatus)" variant="text" size="small" :disabled="Boolean(isTriggeringTask)" @click="openTaskResult(backgroundTaskStatus)">查看结果</VBtn>
-                  <VBtn icon="mdi-drag" variant="text" size="small" class="task-drag-handle" :aria-label="`拖动${task.name}调整顺序`" /></div></td>
-                  </tr>
-                </template>
-              </Draggable>
-            </VTable>
-            <Draggable v-else :list="group.tasks" item-key="key" tag="div" class="scheduler-task-grid"
+            <Draggable :list="group.tasks" item-key="key" tag="div" class="scheduler-task-grid"
               handle=".task-drag-handle" :group="manualTaskDragGroup"
               :animation="150" :delay="150" :delay-on-touch-only="true" :force-fallback="true" :fallback-on-body="true"
               @change="reorderManualTaskGroup(group)">
@@ -570,10 +548,4 @@ watch([() => configModel.value?.tg_menu_tasks, availableTasksForTgMenu], ([saved
 .sync-mode-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; padding: 16px; }
 @media (max-width: 899px) { .scheduler-overview { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 540px) { .sync-mode-actions { flex-direction: column; align-items: stretch; } }
-.scheduler-task-table { width: 100%; }
-.scheduler-task-table td { padding-block: 8px !important; }
-.scheduler-task-table .temp-task-description { margin: 4px 0 0; overflow-wrap: anywhere; }
-.scheduler-task-table .temp-task-name { font-weight: 600; }
-.scheduler-task-table th, .scheduler-task-table td:not(:nth-child(2)) { white-space: nowrap; }
-.task-row-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 </style>

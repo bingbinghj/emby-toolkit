@@ -851,7 +851,7 @@ async fn validate_legacy_scope(
 }
 pub(crate) async fn resume_cleanup(state: &AppState, context: &JobContext) -> Result<()> {
     let root = state.data_dir.join("backups/media-info-reload");
-    for (key, value) in context.saved_plans().await? {
+    for (key, value) in context.saved_plans(|key| key.ends_with("legacy-restore-settings") || key.ends_with("saved-refresh-directory")).await? {
         if let Some(prefix) = key.strip_suffix("legacy-restore-settings") {
             let scoped = context.scoped(prefix.trim_end_matches(':'));
             if scoped.completed("media-save-result").await?.is_some() {

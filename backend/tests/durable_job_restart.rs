@@ -968,3 +968,41 @@ async fn monitor_only_recovery_blocks_new_main_tasks_until_common_resource_prepa
     cold.jobs.shutdown().await;
     f.finish().await;
 }
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL"]
+async fn selective_recovery_reads_skip_large_plans_and_preserve_legacy_precedence() {
+    let f = Fixture::new().await;
+    let pool = f.pool.clone();
+    let id = f.state.jobs.submit_persistent("恢复计划读取", JobSpec::new("test", json!({})), move |context| async move {
+        let legacy = json!({"plans":{"old:rescrape-recovery":"legacy","new:rescrape-recovery":"old"},"completed":{"old":"legacy","scoped:done":"legacy"}});
+        sqlx::query("UPDATE durable_jobs SET checkpoint_json=$2 WHERE id=$1").bind(&context.id).bind(legacy).execute(&pool).await?;
+        sqlx::query("INSERT INTO durable_job_steps(job_id,step_key,value_json) VALUES($1,'old','\"legacy-step\"'),($1,'scoped:done','\"legacy-scoped-step\"')")
+            .bind(&context.id).execute(&pool).await?;
+        assert_eq!(context.completed("old").await?, Some(json!("legacy-step")));
+        assert_eq!(context.scoped("scoped").completed("done").await?, Some(json!("legacy-scoped-step")));
+        context.scoped("scoped").complete("done", &Value::Null).await?;
+        assert_eq!(context.scoped("scoped").completed("done").await?, Some(Value::Null));
+        assert_eq!(context.completed("missing").await?, None);
+        let large = json!((0..14000).map(|id| json!({"Id":id,"MediaStreams":[{"Codec":"h264","Title":"媒体流".repeat(100)}]})).collect::<Vec<_>>());
+        context.save_plan("credits-all", &large).await?;
+        context.save_plan("new:rescrape-recovery", &json!("current")).await?;
+        let start = std::time::Instant::now();
+        let all: Vec<Value> = sqlx::query_scalar("SELECT value_json FROM durable_job_steps WHERE job_id=$1 AND step_key LIKE 'plans:%'")
+            .bind(&context.id).fetch_all(&pool).await?;
+        let all_millis = start.elapsed().as_millis();
+        assert_eq!(all.len(), 2);
+        let start = std::time::Instant::now();
+        let plans = context.saved_plans(|key| key.ends_with(":rescrape-recovery")).await?;
+        let selective_millis = start.elapsed().as_millis();
+        assert_eq!(plans.len(), 2);
+        assert_eq!(plans["old:rescrape-recovery"], "legacy");
+        assert_eq!(plans["new:rescrape-recovery"], "current");
+        assert_eq!(context.plan("credits-all").await?, Some(large.clone()));
+        eprintln!("recovery_plan_benchmark bytes={} all_ms={all_millis} selected_ms={selective_millis}", serde_json::to_vec(&large).unwrap().len());
+        Ok(json!({"all_ms":all_millis,"selected_ms":selective_millis}))
+    }).await.unwrap();
+    let result = ended(&f.state.jobs, &id).await;
+    assert_eq!(result["state"], "completed", "{result}");
+    f.finish().await;
+}

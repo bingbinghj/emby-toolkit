@@ -272,7 +272,7 @@ fn recovery_directory(state: &AppState, saved: Value) -> Result<PathBuf> {
 /// A paused job may release its submitted native refresh guard without doing
 /// any new scrape, media import, or replacement of an original media file.
 pub(crate) async fn resume_cleanup(state: &AppState, context: &JobContext) -> Result<()> {
-    for (key, saved) in context.saved_plans().await? {
+    for (key, saved) in context.saved_plans(|key| key.rsplit(':').next() == Some("rescrape-recovery")).await? {
         if key.rsplit(':').next() != Some("rescrape-recovery") {
             continue;
         }

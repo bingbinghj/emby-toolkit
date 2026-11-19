@@ -107,9 +107,13 @@ async fn reference(
         raw = None;
     }
     if raw.is_none() {
+        let cd2_selected = state.config.read().await["p115_media_read_mode"] == "cd2";
+        let selected_cd2 =
+            crate::media_input::cd2_file(state, &target.path, target.pc.as_deref(), Some(context))
+                .await?;
         let config = state.config.read().await.clone();
         let root = string(&config, "cd2_media_root");
-        if !root.is_empty() {
+        if !root.is_empty() || cd2_selected {
             let source = crate::media_paths::strm_target(&target.path)
                 .await
                 .unwrap_or(target.path.clone());
@@ -118,7 +122,16 @@ async fn reference(
                 &source,
                 &[&string(&config, "local_strm_root"), &root],
             );
-            let path = if is_iso {
+            let path = if cd2_selected {
+                match selected_cd2 {
+                    Some(path) => Some(path),
+                    None if !is_iso => Some(PathBuf::from(
+                        crate::p115::download_url(state, target.pc.as_deref().unwrap_or(""))
+                            .await?,
+                    )),
+                    None => None,
+                }
+            } else if is_iso {
                 let mut unique = std::collections::BTreeSet::new();
                 let cd2_root = tokio::fs::canonicalize(&root).await?;
                 for path in candidates.iter().map(|p| PathBuf::from(&root).join(p)) {
@@ -151,6 +164,9 @@ async fn reference(
                 } else {
                     let _slot = crate::strm::slot(state, "main", Some(context)).await?;
                     let mut command = tokio::process::Command::new("ffprobe");
+                    if path.to_string_lossy().starts_with("http") {
+                        command.args(["-user_agent", "Mozilla/5.0", "-rw_timeout", "15000000"]);
+                    }
                     command
                         .kill_on_drop(true)
                         .args([
@@ -170,7 +186,12 @@ async fn reference(
                         && output.status.success()
                     {
                         raw = serde_json::from_slice(&output.stdout).ok();
-                        evidence = "CD2 ffprobe 原始结构".into();
+                        evidence = if path.to_string_lossy().starts_with("http") {
+                            "ETK ffprobe 原始结构"
+                        } else {
+                            "CD2 ffprobe 原始结构"
+                        }
+                        .into();
                     }
                 }
             }
@@ -419,6 +440,7 @@ pub async fn repair_all(state: &AppState, context: &JobContext) -> Result<Value>
     context.save_plan("audio-all", &plan).await?;
     repair_all_plan(state, context, &plan).await
 }
+
 async fn repair_all_plan(state: &AppState, context: &JobContext, plan: &Value) -> Result<Value> {
     let ids: Vec<String> = serde_json::from_value(plan["ids"].clone()).map_err(|_| ApiError::bad("音轨修复任务计划无效"))?;
     let scanned = plan["scanned"].as_u64().unwrap_or(0);

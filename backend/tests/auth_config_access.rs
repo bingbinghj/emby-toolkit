@@ -381,3 +381,23 @@ async fn login_does_not_issue_successful_session_when_admin_mirror_write_fails()
     assert_ne!(result["status"], "ok");
     f.cleanup().await;
 }
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL in DATABASE_URL; Emby is localhost"]
+async fn media_reader_defaults_to_etk_and_saves_only_supported_modes() {
+    let f = Fixture::new().await;
+    let recovery = f.cookie(false, true);
+    assert_eq!(f.state.config.read().await["p115_media_read_mode"], "etk");
+    for mode in ["cd2", "etk"] {
+        let (status, _, result) = f.request("/api/config", &recovery, Some(json!({"p115_media_read_mode":mode}))).await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        f.state.reload_config().await.unwrap();
+        assert_eq!(f.state.config.read().await["p115_media_read_mode"], mode);
+    }
+    for invalid in [json!("other"), json!(true), json!(1), Value::Null] {
+        let (status, _, _) = f.request("/api/config", &recovery, Some(json!({"p115_media_read_mode":invalid}))).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(f.state.config.read().await["p115_media_read_mode"], "etk");
+    }
+    f.cleanup().await;
+}

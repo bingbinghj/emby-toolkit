@@ -26,6 +26,7 @@ pub async fn probe(
             &format!("正在提取 {filename} 的媒体流和章节信息"),
         )
         .await;
+    let local = crate::media_input::cd2_file(state, filename, Some(pc), Some(context)).await?;
     if crate::media_paths::extension(filename) == ".iso" {
         let size: Option<i64> = sqlx::query_scalar::<_, Option<i64>>(
             "SELECT size FROM p115_filesystem_cache WHERE pick_code=$1 LIMIT 1",
@@ -34,15 +35,20 @@ pub async fn probe(
         .fetch_optional(&state.db)
         .await?
         .flatten();
-        match crate::p115_iso::probe_115(
-            state,
-            pc,
-            filename,
-            size.unwrap_or(0).max(0) as u64,
-            Some(context),
-        )
-        .await
-        {
+        let probe = if let Some(path) = local.as_ref() {
+            let _slot = crate::strm::slot(state, "main", Some(context)).await?;
+            crate::p115_iso::probe_file(path, Some(context)).await
+        } else {
+            crate::p115_iso::probe_115(
+                state,
+                pc,
+                filename,
+                size.unwrap_or(0).max(0) as u64,
+                Some(context),
+            )
+            .await
+        };
+        match probe {
             Ok(raw) => {
                 let mappings = crate::db::setting(&state.db, "language_mapping")
                     .await?
@@ -59,20 +65,25 @@ pub async fn probe(
             ),
         }
     }
-    let url = match crate::p115::download_url(state, pc).await {
-        Ok(url) => url,
-        Err(_) => crate::p115::openapi_downurl_with_user_agent(state, pc, "Mozilla/5.0").await?,
+    let url = match local.as_ref() {
+        Some(path) => path.to_string_lossy().into_owned(),
+        None => match crate::p115::download_url(state, pc).await {
+            Ok(url) => url,
+            Err(_) => {
+                crate::p115::openapi_downurl_with_user_agent(state, pc, "Mozilla/5.0").await?
+            }
+        },
     };
     let _slot = crate::strm::slot(state, "main", Some(context)).await?;
     let mut command = tokio::process::Command::new("ffprobe");
-    command.kill_on_drop(true).args([
+    command.kill_on_drop(true);
+    if local.is_none() {
+        command.args(["-user_agent", "Mozilla/5.0", "-rw_timeout", "15000000"]);
+    }
+    command.args([
         "-hide_banner",
         "-v",
         "error",
-        "-user_agent",
-        "Mozilla/5.0",
-        "-rw_timeout",
-        "15000000",
         "-analyzeduration",
         "20000000",
         "-probesize",
@@ -107,6 +118,7 @@ pub async fn probe(
         .ok_or_else(|| ApiError::bad("ffprobe 未返回可用媒体流"))?;
     Ok((info, raw))
 }
+
 enum CacheMode {
     Reuse,
     Rebuild,

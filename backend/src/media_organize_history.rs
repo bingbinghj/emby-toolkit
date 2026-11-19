@@ -428,7 +428,7 @@ pub async fn finish_moviepilot(
     // Original file plans retain admissions when the same job resumes. A new
     // event's unchanged files have only skipped attempts and add no history.
     let paths = context
-        .saved_plans()
+        .saved_plans(|key| key.starts_with("moviepilot_file:") || key.starts_with("moviepilot_attempt:"))
         .await?
         .into_iter()
         .filter_map(|(key, value)| {

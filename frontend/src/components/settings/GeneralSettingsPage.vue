@@ -896,6 +896,9 @@
                       <div class="settings-field" data-field="local_strm_root">
                         <LocalPathField v-model="configModel.local_strm_root" label="本地 STRM 根目录" placeholder="例如: /mnt/media" hint="用于从 Emby 路径反查 115 缓存位置，辅助补齐 PC/SHA1。" persistent-hint />
                       </div>
+                      <div class="settings-field" data-field="p115_media_read_mode">
+                        <VSelect v-model="configModel.p115_media_read_mode" label="115 媒体读取方式" :items="[{ title: 'ETK', value: 'etk' }, { title: 'CD2', value: 'cd2' }]" hint="ETK 使用现有读取流程。CD2 通过下方挂载目录读取媒体，用于片尾、截图和媒体信息提取。挂载不可用时重试 3 次后回退 ETK。" persistent-hint />
+                      </div>
                       <div class="settings-field" data-field="cd2_media_root">
                         <LocalPathField v-model="configModel.cd2_media_root" label="CD2 媒体库本地根目录" placeholder="例如: /cd2/115open/媒体库" />
                       </div>
@@ -3028,7 +3031,7 @@ const cardFields = {
   monitor: ['monitor_enabled', 'monitor_paths', 'monitor_exclude_dirs', 'monitor_exclude_refresh_delay', 'monitor_extensions'],
   sources: ['tmdb_api_key', 'tmdb_api_base_url', 'douban_enable_online_api', 'api_douban_default_cooldown_seconds', 'douban_cookie'],
   p115Account: storageConfigFields,
-  fingerprints: ['monitor_sha1_pc_search', 'emby_metadata_path', 'local_strm_root', 'cd2_media_root', 'p115_fingerprint_media_root_cid', 'p115_fingerprint_media_root_path', 'p115_generate_mediainfo', 'p115_enable_sync_delete'],
+  fingerprints: ['monitor_sha1_pc_search', 'emby_metadata_path', 'local_strm_root', 'cd2_media_root', 'p115_media_read_mode', 'p115_fingerprint_media_root_cid', 'p115_fingerprint_media_root_path', 'p115_generate_mediainfo', 'p115_enable_sync_delete'],
   ai: ['ai_provider', 'ai_api_key', 'ai_model_name', 'ai_base_url', 'ai_request_timeout', 'ai_max_retries', 'ai_translation_batch_size', 'ai_translate_actor_role', 'ai_translate_on_sync', 'ai_translate_title', 'ai_translate_overview', 'ai_translate_episode_overview', 'ai_joke_fallback', 'ai_translation_mode'],
   logs: ['log_rotation_size_mb', 'log_rotation_backup_count'],
   ingest: ['auto_repair_truehd_core_on_ingest', 'auto_fill_language_titles_on_ingest', 'auto_extract_intro_fingerprint_on_ingest', 'auto_extract_credits_on_ingest', 'auto_extract_video_thumbnails_on_ingest', 'extract_video_thumbnails_after_save'],
@@ -3282,6 +3285,7 @@ onMounted(async () => {
       if (!Array.isArray(configModel.value.libraries_to_ignore)) configModel.value.libraries_to_ignore = [];
       if (!configModel.value.p115_auth_method) configModel.value.p115_auth_method = 'web';
       if (!configModel.value.p115_api_priority) configModel.value.p115_api_priority = 'cookie';
+      if (!configModel.value.p115_media_read_mode) configModel.value.p115_media_read_mode = 'etk';
       if (configModel.value.emby_server_url && configModel.value.emby_api_key) {
         fetchEmbyLibrariesInternal();
       }

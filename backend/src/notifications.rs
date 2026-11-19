@@ -497,7 +497,7 @@ async fn register_intent(state: &AppState, intent: &RegistrationIntent) -> Resul
 
 pub(crate) async fn has_pending_registration(context: &JobContext) -> Result<bool> {
     for key in context
-        .saved_plans()
+        .saved_plans(|key| key.starts_with(REGISTRATION_PREFIX))
         .await?
         .keys()
         .filter(|key| key.starts_with(REGISTRATION_PREFIX))
@@ -511,7 +511,7 @@ pub(crate) async fn has_pending_registration(context: &JobContext) -> Result<boo
 
 pub(crate) async fn resume_registration(state: &AppState, context: &JobContext) -> Result<()> {
     let mut pending = Vec::new();
-    for (key, value) in context.saved_plans().await? {
+    for (key, value) in context.saved_plans(|key| key.starts_with(REGISTRATION_PREFIX)).await? {
         if key.starts_with(REGISTRATION_PREFIX) && context.completed(&key).await?.is_none() {
             pending.push((key.clone(), registration_intent(&key, value)?));
         }

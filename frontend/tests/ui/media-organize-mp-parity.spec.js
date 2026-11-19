@@ -304,3 +304,25 @@ test('missing tags use live Emby artwork, filename gets the wide column, and Shi
   await page.getByRole('button',{name:/葫芦小金刚 · 3 项/}).click();
   await expect(rows(page)).toHaveCount(3);
 });
+
+for (const width of [1440, 1024, 390, 320]) {
+  test(`${width}px episode identity stays on one line with reachable full text`, async ({ page, api }, testInfo) => {
+    await page.setViewportSize({ width, height: 900 });
+    api.respond('GET', historyPath, { items: [{ ...records[0], name: '擒贼擒王（主地点：鼠国）', series_name: '福五鼠之三十六计', episode_number: 18,
+      file_name: '福五鼠之三十六计.S01E18.2008.1080p.H264.AAC.mp4', created_at: '2026-11-18T19:33:39Z' }], total: 1 });
+    await page.goto('/media-organize');
+    const label = page.locator('.organize-episode-label');
+    await expect(label).toHaveText('S01E18 · 擒贼擒王（主地点：鼠国）');
+    const geometry = await label.evaluate(element => {
+      const range = document.createRange(); range.selectNodeContents(element);
+      const box = range.getBoundingClientRect();
+      return { textHeight: box.height, lineHeight: parseFloat(getComputedStyle(element).lineHeight),
+        width: element.clientWidth, fullWidth: element.scrollWidth, overflow: getComputedStyle(element).overflowX };
+    });
+    expect(geometry.textHeight).toBeLessThanOrEqual(geometry.lineHeight + 1);
+    if (width >= 390) expect(geometry.fullWidth).toBeLessThanOrEqual(geometry.width + 1);
+    else expect(geometry.overflow).toBe('auto');
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath('episode-title.png') });
+  });
+}

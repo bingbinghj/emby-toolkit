@@ -6,7 +6,7 @@ const tasks = [
 ];
 const active = { task_id: 'full-library-credits', is_running: true, state: 'running', last_action: '提取片尾', current_action: '比较第九集声纹', message: '已处理第九集，读取第十集', progress_known: true, progress: 55, logs: [] };
 
-test('desktop tasks use MP service table rows with a drag handle and primary execute button', async ({ page, api }) => {
+test('desktop tasks use separate summary cards with a drag handle and primary execute button', async ({ page, api }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   api.respond('GET', '/api/tasks/available', tasks);
   await page.goto('/settings/scheduler');
@@ -16,9 +16,9 @@ test('desktop tasks use MP service table rows with a drag handle and primary exe
   await expect(table.locator('.scheduler-category-card')).toHaveCount(1);
   await expect(table.locator('.v-card-title')).toHaveText('媒体信息');
   await expect(table.getByRole('columnheader', { name: '分类', exact: true })).toHaveCount(0);
-  await expect(table.getByRole('table')).toHaveCount(1);
-  await expect(table.getByRole('columnheader', { name: /下次|提供方/ })).toHaveCount(2);
-  await expect(table.locator('tbody > .task-record')).toHaveCount(2);
+  await expect(table.getByRole('table')).toHaveCount(0);
+  await expect(table.getByRole('columnheader', { name: /下次|提供方/ })).toHaveCount(0);
+  await expect(table.locator('.scheduler-task-grid > .scheduler-task-card')).toHaveCount(2);
   await expect(table.locator('[data-task-key="extract-episode-credits"] .task-drag-handle')).toBeVisible();
   await expect(table.locator('[data-task-key="backup-mediainfo"] .task-drag-handle')).toBeVisible();
   const execute = table.locator('[data-task-key="extract-episode-credits"]').getByRole('button', { name: '执行', exact: true });

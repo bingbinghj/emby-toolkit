@@ -63,9 +63,9 @@
         <div class="organize-media-copy">
           <RouterLink v-if="item.item_id" class="media-title" :to="`/edit-media/${encodeURIComponent(item.item_id)}`">{{ itemTitle(item) }}</RouterLink>
           <strong v-else>{{ itemTitle(item) }}</strong>
-          <small>{{ episodeLabel(item) || (item.item_type === 'Movie' ? '电影' : '剧集') }}</small>
           <small v-if="!item.item_id">尚未关联媒体</small>
         </div>
+        <small class="organize-episode-label">{{ episodeLabel(item) || (item.item_type === 'Movie' ? '电影' : '剧集') }}</small>
         <div v-if="mediaFileName(item) || item.library_name || item.source_path" class="organize-record-file">
           <small v-if="item.library_name">{{ item.library_name }}</small>
           <button v-if="smAndDown && item.source_path" type="button" class="organize-file-name text-start" :aria-expanded="expandedPath === item.id" @click="expandedPath = expandedPath === item.id ? '' : item.id">{{ mediaFileName(item) || item.source_path }}</button>
@@ -501,8 +501,8 @@ onBeforeUnmount(() => { active = false; ++itemSequence; clearTimeout(searchTimer
 .organize-record-row > td { padding: 0 0 10px !important; border: 0 !important; }
 .organize-record {
   display: grid;
-  grid-template-columns: 36px 42px minmax(5rem, 9.125rem) minmax(0, 1fr) minmax(5rem, 11rem) 36px;
-  grid-template-areas: "check poster identity file status menu" "check poster identity file time time";
+  grid-template-columns: 36px 42px minmax(5rem, max-content) minmax(0, 1fr) minmax(5rem, 11rem) 36px;
+  grid-template-areas: "check poster identity file status menu" "check poster episode file time time";
   align-items: center;
   gap: 4px 12px;
   min-block-size: 90px;
@@ -514,6 +514,8 @@ onBeforeUnmount(() => { active = false; ++itemSequence; clearTimeout(searchTimer
 .organize-check { grid-area: check; }
 .record-poster { grid-area: poster; }
 .organize-media-copy { grid-area: identity; display: grid; gap: 6px; min-inline-size: 0; overflow-wrap: anywhere; }
+.organize-episode-label { grid-area: episode; min-inline-size: 0; white-space: nowrap; overflow-x: auto; scrollbar-width: thin; }
+.organize-media-copy, .organize-episode-label { max-inline-size: min(35vw, 28rem); }
 .media-title { color: inherit; font-size: 1.05rem; font-weight: 600; line-height: 1.35; }
 .media-title:hover { text-decoration: underline; }
 .organize-record small, .organize-record time { color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); line-height: 1.4; }
@@ -536,10 +538,11 @@ onBeforeUnmount(() => { active = false; ++itemSequence; clearTimeout(searchTimer
 .history-card {
   min-width: 0;
   grid-template-columns: 56px minmax(0, 1fr) auto 36px;
-  grid-template-areas: "poster identity status menu" "poster time time time" "file file file file";
+  grid-template-areas: "poster identity status menu" "poster identity time time" "episode episode episode episode" "file file file file";
   align-items: start;
   gap: 8px;
 }
+.history-card .organize-media-copy, .history-card .organize-episode-label { max-inline-size: none; }
 .history-card .organize-check { grid-area: menu; }
 .history-card time { justify-self: start; }
 .history-card .organize-record-file { border-block-start: 1px solid rgba(var(--v-theme-on-surface), 0.12); padding-block-start: 10px; }

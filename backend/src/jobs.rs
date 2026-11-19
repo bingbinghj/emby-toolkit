@@ -192,37 +192,8 @@ impl JobContext {
         let key = format!("{}{key}", self.checkpoint_prefix);
         if let Some(pool) = &self.persistence {
             let step_key = format!("{namespace}:{key}");
-            let value: Option<Value> = sqlx::query_scalar(
-                "SELECT value_json FROM durable_job_steps WHERE job_id=$1 AND step_key=$2",
-            )
-            .bind(&self.id)
-            .bind(&step_key)
-            .fetch_optional(pool)
-            .await?;
-            if value.is_some() {
-                return Ok(value);
-            }
-            if namespace == "completed" {
-                let old: Option<Value> = sqlx::query_scalar(
-                    "SELECT value_json FROM durable_job_steps WHERE job_id=$1 AND step_key=$2",
-                )
-                .bind(&self.id)
-                .bind(&key)
-                .fetch_optional(pool)
-                .await?;
-                if old.is_some() {
-                    return Ok(old);
-                }
-            }
-            let value: Option<Value> = sqlx::query_scalar(
-                "SELECT checkpoint_json #> ARRAY[$2,$3] FROM durable_jobs WHERE id=$1",
-            )
-            .bind(&self.id)
-            .bind(namespace)
-            .bind(&key)
-            .fetch_optional(pool)
-            .await?
-            .flatten();
+            let value: Option<Value> = sqlx::query_scalar("SELECT COALESCE((SELECT value_json FROM durable_job_steps WHERE job_id=$1 AND step_key=$2), (SELECT value_json FROM durable_job_steps WHERE job_id=$1 AND step_key=$3 AND $4='completed'), (SELECT checkpoint_json #> ARRAY[$4,$3] FROM durable_jobs WHERE id=$1))")
+                .bind(&self.id).bind(step_key).bind(&key).bind(namespace).fetch_one(pool).await?;
             Ok(value)
         } else {
             Ok(self.checkpoint_state.lock().await[namespace]
@@ -233,29 +204,37 @@ impl JobContext {
     pub async fn plan(&self, key: &str) -> Result<Option<Value>> {
         self.stored("plans", key).await
     }
-    pub async fn saved_plans(&self) -> Result<BTreeMap<String, Value>> {
+    pub async fn saved_plans(
+        &self,
+        matches: impl Fn(&str) -> bool,
+    ) -> Result<BTreeMap<String, Value>> {
         if let Some(pool) = &self.persistence {
-            let legacy: Option<Value> =
-                sqlx::query_scalar("SELECT checkpoint_json->'plans' FROM durable_jobs WHERE id=$1")
-                    .bind(&self.id)
-                    .fetch_optional(pool)
-                    .await?;
-            let mut plans: BTreeMap<String, Value> = legacy
-                .and_then(|value| value.as_object().cloned())
-                .map(|values| values.into_iter().collect())
-                .unwrap_or_default();
-            let rows: Vec<(String, Value)> = sqlx::query_as("SELECT step_key,value_json FROM durable_job_steps WHERE job_id=$1 AND step_key LIKE 'plans:%'")
+            // Recovery callers need a few small plans. Fetch their keys first so
+            // full-library inventories and image bytes stay in the database.
+            let keys: Vec<String> = sqlx::query_scalar("SELECT substring(step_key from 7) FROM durable_job_steps WHERE job_id=$1 AND step_key LIKE 'plans:%' UNION SELECT jsonb_object_keys(CASE WHEN jsonb_typeof(checkpoint_json->'plans')='object' THEN checkpoint_json->'plans' ELSE '{}'::jsonb END) FROM durable_jobs WHERE id=$1")
                 .bind(&self.id).fetch_all(pool).await?;
+            let keys: Vec<_> = keys.into_iter().filter(|key| matches(key)).collect();
+            if keys.is_empty() {
+                return Ok(BTreeMap::new());
+            }
+            let legacy: Vec<(String, Value)> = sqlx::query_as("SELECT p.key,p.value FROM durable_jobs j, LATERAL jsonb_each(CASE WHEN jsonb_typeof(j.checkpoint_json->'plans')='object' THEN j.checkpoint_json->'plans' ELSE '{}'::jsonb END) p WHERE j.id=$1 AND p.key=ANY($2)")
+                .bind(&self.id).bind(&keys).fetch_all(pool).await?;
+            let mut plans: BTreeMap<_, _> = legacy.into_iter().collect();
+            let step_keys: Vec<_> = keys.iter().map(|key| format!("plans:{key}")).collect();
+            let rows: Vec<(String, Value)> = sqlx::query_as("SELECT step_key,value_json FROM durable_job_steps WHERE job_id=$1 AND step_key=ANY($2)")
+                .bind(&self.id).bind(step_keys).fetch_all(pool).await?;
             for (key, value) in rows {
-                plans.insert(key.trim_start_matches("plans:").into(), value);
+                plans.insert(key[6..].into(), value);
             }
             Ok(plans)
         } else {
             Ok(self.checkpoint_state.lock().await["plans"]
                 .as_object()
-                .cloned()
-                .map(|values| values.into_iter().collect())
-                .unwrap_or_default())
+                .into_iter()
+                .flatten()
+                .filter(|(key, _)| matches(key))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect())
         }
     }
     pub async fn completed(&self, key: &str) -> Result<Option<Value>> {
