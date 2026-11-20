@@ -25,3 +25,47 @@ export function parseLyrics(text = '') {
   }
   return rows.sort((a,b)=>a.time-b.time);
 }
+
+export function formatLyrics(text) {
+  // 统一分秒位数与毫秒精度，保持正文、重复时间和逐字时间标签。
+  const normalized = text.replace(/([\[<])(\d+):(\d{1,2})([.:]\d+)?([\]>])/g, (all, open, minutes, seconds, fraction, close) => {
+    if (Number(seconds) >= 60) throw new Error('歌词时间的秒数必须小于 60');
+    return `${open}${minutes.padStart(2,'0')}:${seconds.padStart(2,'0')}${fraction || '.000'}${close}`;
+  });
+  return shiftLyrics(normalized, 0);
+}
+
+export function formatLyricTime(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) throw new Error('请输入有效的歌词时间');
+  const ms = Math.round(seconds * 1000);
+  return `${String(Math.floor(ms/60000)).padStart(2,'0')}:${String(Math.floor(ms/1000)%60).padStart(2,'0')}.${String(ms%1000).padStart(3,'0')}`;
+}
+
+function timelineTime(value) {
+  if (!/^\d+:([0-5]?\d)(?:\.\d{1,3})?$/.test(value)) throw new Error('时间请使用 分:秒.毫秒 格式，秒数小于 60');
+  const [minutes,seconds] = value.split(':').map(Number);
+  return minutes*60+seconds;
+}
+
+export function timelineRows(text) {
+  const normalized = /\[\d+:\d/.test(text) ? formatLyrics(text) : text;
+  return normalized.split(/\r?\n/).flatMap(line => {
+    const prefix = line.match(/^(?:\[\d+:\d{2}\.\d{3}\])+/)?.[0] || '';
+    if (!prefix) return [{time:'',originalTime:null,text:line}];
+    const times = [...prefix.matchAll(/\[([^\]]+)\]/g)].map(match=>match[1]);
+    const content = line.slice(prefix.length), first = timelineTime(times[0]);
+    return times.map(time=>{
+      const seconds=timelineTime(time);
+      return {time,originalTime:seconds,text:/<\d+:\d/.test(content) ? shiftLyrics(content,seconds-first) : content};
+    });
+  });
+}
+
+export function serializeTimeline(rows) {
+  return rows.map(row=>{
+    if (!row.time.trim()) return row.text;
+    const seconds=timelineTime(row.time.trim());
+    const content=row.originalTime!==null && /<\d+:\d/.test(row.text) ? shiftLyrics(row.text,seconds-row.originalTime) : row.text;
+    return `[${formatLyricTime(seconds)}]${content}`;
+  }).join('\n');
+}

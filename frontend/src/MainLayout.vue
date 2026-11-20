@@ -740,7 +740,7 @@ onBeforeUnmount(() => { ++menuEditorSession; clearDragState(); });
 .app-brand-name { font-size: 17px; font-weight: 700; white-space: nowrap; }
 .navbar-search { color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)) !important; }
 .navbar-search-desktop, .navbar-search-mobile { display: flex; align-items: center; gap: 10px; min-inline-size: 0; padding: 8px 12px; border-radius: var(--app-field-radius); }
-.navbar-search-desktop { inline-size: clamp(240px, 30vw, 440px); max-inline-size: 100%; min-inline-size: 0; }
+.navbar-search-desktop { flex:0 1 clamp(240px, 30vw, 440px); inline-size: auto; max-inline-size: 100%; min-inline-size: 0; }
 .navbar-context-search { flex: 1; min-inline-size: 0; inline-size: 100%; color: inherit; font: inherit; font-size: 15px; line-height: 1.5; background: transparent; border: 0; outline: none; }
 .navbar-context-search::placeholder { color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); opacity: 1; }
 .navbar-context-search::-webkit-search-cancel-button { display: none; }

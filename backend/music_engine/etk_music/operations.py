@@ -25,6 +25,19 @@ from . import lyrics as local_lyrics
 
 EDIT_FIELDS = {"title", "artists", "album", "album_artist", "track_number", "total_tracks", "disc_number", "total_discs", "year", "release_year", "original_year", "composers", "conductors", "orchestras", "performers", "isrc", "media_source", "media_id", "music_type", "musicbrainz_release_id", "musicbrainz_release_group_id", "musicbrainz_release_track_id"}
 
+def uploaded_cover(value):
+    if not isinstance(value, str) or len(value) > 1_400_000:
+        raise ValueError("上传封面格式无效或超过 1 MiB")
+    match = re.fullmatch(r"data:(image/(?:jpeg|png));base64,([A-Za-z0-9+/=]+)", value)
+    if not match:
+        raise ValueError("上传封面只支持 JPEG 或 PNG")
+    data = base64.b64decode(match[2], validate=True)
+    valid = data.startswith(b"\x89PNG\r\n\x1a\n") if match[1] == "image/png" else data.startswith(b"\xff\xd8\xff")
+    if not valid or len(data) > 1024 * 1024:
+        raise ValueError("上传封面内容无效或超过 1 MiB")
+    return data, match[1]
+
+
 def write_json(path, data):
     temporary = path.with_name(path.name+".new")
     with temporary.open("w", encoding="utf-8") as stream:
@@ -45,6 +58,8 @@ def preview(config, body):
     selected = body.get("selection")
     rows = []
     paths = list(dict.fromkeys(body.get("paths") or []))
+    if (body.get("metadata") or {}).get("cover_upload") and len(paths) != 1:
+        raise ValueError("本地封面上传只用于当前歌曲")
     overrides = body.get("selections") or {}
     if selected and selected.get("music_type", "recording")=="recording" and len(paths)!=1:
         raise ValueError("单曲资料只能用于一个所选音频，请选择专辑")
@@ -101,6 +116,11 @@ def preview(config, body):
                 info = MusicInfo.from_dict({**info.to_dict(), **{key: value for key, value in values.items() if key in EDIT_FIELDS}})
                 manual_lyrics = local_lyrics.prepare_edit(path, values)
                 cover_url = values.get("cover_url") or ""
+                cover_upload = values.get("cover_upload") or ""
+                if cover_upload:
+                    uploaded_cover(cover_upload)
+                    if cover_url:
+                        raise ValueError("请只选择上传封面或封面地址之一")
                 if cover_url and not re.match(r"^https?://[^/\s]+", cover_url):
                     raise ValueError("封面地址必须为 HTTP 或 HTTPS 地址")
             elif relative in recognized:
@@ -127,6 +147,7 @@ def preview(config, body):
             if operation == "edit":
                 rows[-1]["lyrics_edit"] = manual_lyrics
                 rows[-1]["cover_edit"] = cover_url
+                rows[-1]["cover_upload"] = cover_upload
         except Exception as error:
             rows.append({"path": relative, "success": False, "message": str(error)})
     for row in rows:
@@ -276,7 +297,9 @@ def execute(config, body):
             overwrite = operation=="edit" or policies.get("tags")=="overwrite"
             audio = AudioMetadataHelper._open_audio(path)
             cover_data, cover_mime = None, "image/jpeg"
-            if operation=="edit" and row.get("cover_edit"):
+            if operation=="edit" and row.get("cover_upload"):
+                cover_data, cover_mime = uploaded_cover(row["cover_upload"])
+            elif operation=="edit" and row.get("cover_edit"):
                 info.cover_url = row["cover_edit"]
                 cover_data, cover_mime = cover(info, path, {**config, "music_local_cover_enable": False})
                 if not cover_data:

@@ -10,4 +10,5 @@ regex==2025.11.3
 cn2an==0.5.23
 ruamel.yaml==0.19.1
 beautifulsoup4==4.14.2
+translators==6.0.4
 setuptools==80.9.0

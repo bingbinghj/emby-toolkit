@@ -1,4 +1,6 @@
 """手动歌词候选搜索与读取；应用由既有编辑预览和原子保存流程完成。"""
+import base64
+import html
 import re
 import time
 from .cache import cached, connection
@@ -6,7 +8,8 @@ from .lrclib import LrclibModule
 from .streaming import read_json
 
 GD_API = "https://music-api.gdstudio.xyz/api.php"
-GD_SOURCES = {"netease", "joox", "bilibili"}
+GD_SOURCES = {"gd_netease": "netease", "gd_joox": "joox", "gd_bilibili": "bilibili"}
+DIRECT_SOURCES = {"netease", "qqmusic", "kugou", "kuwo"}
 ALBUM_SOURCES = {"netease", "qqmusic", "kuwo"}
 
 
@@ -26,7 +29,12 @@ def _reserve_gd():
 def _gd(params):
     _reserve_gd()
     data = read_json(GD_API, params, "GD 音乐台")
-    valid = isinstance(data, list) if params["types"] == "search" else isinstance(data, dict) and any(key in data for key in ("lyric", "tlyric"))
+    if params["types"] == "search":
+        valid = isinstance(data, list)
+    elif params["types"] == "pic":
+        valid = isinstance(data, dict) and isinstance(data.get("url"), str) and re.match(r"^https?://", data["url"])
+    else:
+        valid = isinstance(data, dict) and any(key in data for key in ("lyric", "tlyric"))
     if not valid:
         raise ValueError("GD 音乐台暂时未返回有效结果，请稍后再试或选择其他来源")
     return data
@@ -34,7 +42,7 @@ def _gd(params):
 
 def _source(body):
     source = body.get("source") or "netease"
-    if source not in GD_SOURCES | {"lrclib", "qqmusic", "kuwo"}:
+    if source not in set(GD_SOURCES) | DIRECT_SOURCES | {"lrclib"}:
         raise ValueError("请选择有效的歌词来源")
     return source
 
@@ -45,7 +53,9 @@ def search(body):
     if not isinstance(query, str) or not query.strip() or len(query) > 200:
         raise ValueError("请输入不超过 200 字的歌曲或歌手名称")
     page = max(1, min(int(body.get("page", 1)), 100))
-    if body.get("kind") == "album" or body.get("album_id") or source in {"qqmusic", "kuwo"}:
+    if (body.get("kind") == "album" or body.get("album_id")) and source not in ALBUM_SOURCES:
+        raise ValueError("当前渠道不提供专辑浏览，请使用歌曲搜索或切换到直连资料源")
+    if source in DIRECT_SOURCES:
         from . import streaming_metadata
         if body.get("kind") == "album" and source not in ALBUM_SOURCES:
             raise ValueError("当前来源不提供专辑搜索，请选择网易云音乐、QQ 音乐或酷我音乐")
@@ -66,13 +76,14 @@ def search(body):
                   "album": row.get("albumName"), "duration": row.get("duration"), "synced": bool(row.get("syncedLyrics"))}
                  for row in available[(page-1)*20:page*20]]
         return {"items": items, "page": page, "has_more": page*20 < len(available)}
-    rows = _gd({"types": "search", "source": source, "name": query.strip(), "count": 20, "pages": page})
+    channel = GD_SOURCES[source]
+    rows = _gd({"types": "search", "source": channel, "name": query.strip(), "count": 20, "pages": page})
     if not isinstance(rows, list):
         raise ValueError("GD 音乐台暂时未返回搜索结果，请稍后再试或选择其他来源")
     items = [{"id": str(row.get("lyric_id") or row["id"]), "source": source, "title": row.get("name"),
               "artists": row.get("artist") if isinstance(row.get("artist"), list) else [str(row.get("artist") or "")],
               "album": row.get("album"), "duration": row.get("duration")}
-             for row in rows if row.get("id") is not None and row.get("source", source) == source]
+             for row in rows if row.get("id") is not None and row.get("source", channel) == channel]
     return {"items": items, "page": page, "has_more": len(rows) >= 20}
 
 
@@ -80,7 +91,29 @@ def detail(body):
     source, identity = _source(body), body.get("id")
     if not isinstance(identity, str) or not re.fullmatch(r"[\w=-]{1,200}", identity, re.ASCII):
         raise ValueError("歌词 ID 无效")
-    if source == "qqmusic":
+    if source == "netease":
+        if not identity.isdigit():
+            raise ValueError("网易云音乐歌词 ID 无效")
+        data = read_json("https://music.163.com/api/song/lyric", {"id":identity,"lv":-1,"kv":-1,"tv":-1}, "网易云音乐")
+        if not isinstance(data, dict) or data.get("code") != 200:
+            raise ValueError("网易云音乐暂时无法读取歌词，请稍后重试")
+        variants = [("original","原文",(data.get("lrc") or {}).get("lyric")),
+                    ("translation","译文",(data.get("tlyric") or {}).get("lyric")),
+                    ("romanized","音译",(data.get("romalrc") or {}).get("lyric"))]
+    elif source == "kugou":
+        if not re.fullmatch(r"[0-9a-fA-F]{32}", identity):
+            raise ValueError("酷狗音乐歌词 ID 无效")
+        data = read_json("https://lyrics.kugou.com/search", {"ver":1,"man":"yes","client":"pc","hash":identity}, "酷狗音乐")
+        candidates = data.get("candidates") or []
+        if not candidates:
+            raise ValueError("此歌曲没有可用歌词，请选择其他版本")
+        selected = candidates[0]
+        data = read_json("https://lyrics.kugou.com/download", {"ver":1,"client":"pc","id":selected["id"],"accesskey":selected["accesskey"],"fmt":"lrc","charset":"utf8"}, "酷狗音乐")
+        content = data.get("content") or ""
+        if not isinstance(content, str) or len(content) > 1400000:
+            raise ValueError("酷狗音乐返回的歌词无效")
+        variants = [("original","原文",base64.b64decode(content, validate=True).decode("utf-8-sig"))]
+    elif source == "qqmusic":
         from .streaming_metadata import get
         data = get("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg", {"format":"json","songmid":identity,"nobase64":1})
         variants = [("original","原文",data.get("lyric")),("translation","译文",data.get("trans"))]
@@ -98,11 +131,11 @@ def detail(body):
         data = LrclibModule()._request_json(f"/api/get/{identity}")
         variants = [("synced", "同步歌词", (data or {}).get("syncedLyrics")), ("plain", "纯文本", (data or {}).get("plainLyrics"))]
     else:
-        data = _gd({"types": "lyric", "source": source, "id": identity})
+        data = _gd({"types": "lyric", "source": GD_SOURCES[source], "id": identity})
         if not isinstance(data, dict):
             raise ValueError("此歌曲没有返回可用歌词")
         variants = [("original", "原文", data.get("lyric")), ("translation", "译文", data.get("tlyric"))]
-    items = [{"value": key, "title": title, "text": text} for key, title, text in variants
+    items = [{"value": key, "title": title, "text": html.unescape(text)} for key, title, text in variants
              if isinstance(text, str) and text.strip() and len(text.encode("utf-8")) <= 1024*1024]
     if not items:
         raise ValueError("此歌曲没有可用歌词，请选择其他版本")

@@ -8,7 +8,10 @@ use serde_json::{Value, json};
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/api/telegram/test", post(telegram))
+        .route(
+            "/api/telegram/test",
+            post(telegram).layer(axum::extract::DefaultBodyLimit::max(8 * 1024 * 1024)),
+        )
         .route("/api/system/restart", post(restart))
 }
 pub fn chat_id(value: &str) -> String {

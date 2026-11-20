@@ -55,6 +55,25 @@ def test_unchanged_metadata_keeps_hardlink(fixture):
     assert not list(root.glob(".*etk-music*"))
 
 
+def test_uploaded_cover_uses_existing_atomic_write_without_touching_seed(fixture):
+    import base64
+    config,source,root=fixture
+    os.link(source,root/'song.wav')
+    original=source.read_bytes()
+    png=base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/lS0AAAAASUVORK5CYII=')
+    value='data:image/png;base64,'+base64.b64encode(png).decode()
+    row=operations.preview(config,{'operation':'edit','paths':['song.wav'],'metadata':{'cover_upload':value}})['items'][0]
+    assert row['success'],row
+    assert source.samefile(root/'song.wav') and source.read_bytes()==original
+    operations.execute(config,{'item':row,'operation':'edit','execution_id':'abcd-19'})
+    assert source.read_bytes()==original and not source.samefile(root/'song.wav')
+    assert base64.b64decode(library.image(config,'song.wav')['data'])==png
+    assert AudioMetadataHelper.read(root/'song.wav').title=='原曲名'
+    for bad in ['data:image/svg+xml;base64,YQ==','data:image/png;base64,YQ==']:
+        result=operations.preview(config,{'operation':'edit','paths':['song.wav'],'metadata':{'cover_upload':bad}})
+        assert not result['items'][0]['success']
+
+
 def test_rescrape_changes_only_selected_track_without_renaming(fixture,monkeypatch):
     config,source,root=fixture
     os.link(source,root/"first.wav");os.link(source,root/"second.wav")

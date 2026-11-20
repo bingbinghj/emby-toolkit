@@ -83,6 +83,7 @@ pub mod sync;
 pub mod system_ops;
 pub mod tasks;
 pub mod telegram_bot;
+pub mod telegram_media;
 pub mod thumbnails;
 pub mod titles;
 pub mod tmdb;

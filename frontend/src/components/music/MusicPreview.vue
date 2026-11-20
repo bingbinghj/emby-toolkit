@@ -110,6 +110,7 @@ function evidence(item) {
               t(prefix + 'read.' + item.music.read_status)
             }}</span>
           </div>
+          <div v-if="item.cover_upload" class="my-3"><p class="mb-2">替换内嵌封面</p><VImg :src="item.cover_upload" width="160" height="160" contain rounded /></div>
           <VAlert v-if="item.cover_edit" type="info" variant="tonal" class="my-2">替换内嵌封面：{{ item.cover_edit }}</VAlert>
           <details v-if="item.lyrics_edit" class="my-2"><summary>更新旁挂歌词（替换现有版本）</summary><pre class="lyrics-preview">{{ item.lyrics_edit.text }}</pre></details>
           <p v-if="item.music?.artists?.length" class="text-caption mt-1">{{ item.music.artists.join(' / ') }}</p>

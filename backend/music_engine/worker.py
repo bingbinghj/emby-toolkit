@@ -17,8 +17,11 @@ def dispatch(request):
         manual_source = (body.get("sources") or [None])[0]
     elif action == "edit_metadata":
         manual_source = (body.get("selection") or {}).get("media_source")
-    if action in {"search", "detail", "edit_metadata"} and manual_source in streaming_sources:
-        from etk_music import streaming_metadata
+    if action in {"search", "detail", "edit_metadata"} and manual_source in streaming_sources | {"gd_netease", "gd_joox", "gd_bilibili"}:
+        if manual_source.startswith("gd_"):
+            from etk_music import gd_metadata as streaming_metadata
+        else:
+            from etk_music import streaming_metadata
         from etk_music.runtime import request_budget
         with request_budget(30):
             if action == "search":
@@ -35,6 +38,9 @@ def dispatch(request):
         from etk_music import library
     elif action in {"preview", "execute", "cleanup"}:
         from etk_music import operations
+    elif action == "lyrics_translate":
+        from etk_music.lyrics_translate import translate
+        return translate(body)
     elif action in {"lyrics_search", "lyrics_detail"}:
         from etk_music import lyrics_search
         from etk_music.runtime import request_budget

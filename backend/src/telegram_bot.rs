@@ -1,9 +1,4 @@
-use crate::{
-    AppState,
-    error::{ApiError, Result},
-    media_edit::list,
-    state::string,
-};
+use crate::{AppState, error::Result, media_edit::list, state::string};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use std::{collections::BTreeSet, error::Error as _, time::Duration};
@@ -56,25 +51,7 @@ async fn call(state: &AppState, token: &str, method: &str, payload: &Value) -> R
     } else {
         payload.clone()
     };
-    let response = state
-        .http
-        .post(format!("{}/bot{token}/{method}", api_base))
-        .timeout(Duration::from_secs(15))
-        .json(&payload)
-        .send()
-        .await?;
-    let status = response.status();
-    if !status.is_success() {
-        return Err(ApiError(status, format!("Telegram {method} 请求失败")));
-    }
-    let response: Value = response.json().await?;
-    if response["ok"] != true {
-        return Err(ApiError(
-            StatusCode::BAD_GATEWAY,
-            format!("Telegram {method} 未确认成功"),
-        ));
-    }
-    Ok(response)
+    crate::telegram_media::request(&state.http, &api_base, token, method, &payload).await
 }
 
 async fn send(

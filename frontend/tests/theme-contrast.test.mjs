@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { textColorForBackground } from '../src/utils/colorContrast.js';
 
@@ -19,5 +20,14 @@ test('custom gray and preset accents retain readable solid-button text', () => {
 test('invalid accent inputs keep the safe fallback', () => {
   for (const value of [null, undefined, '', '#123', 'red', 'not-a-color']) {
     assert.equal(textColorForBackground(value), '#FFFFFF');
+  }
+});
+
+test('MP 主题信息和错误按钮的前景达到正文对比度', () => {
+  const source=readFileSync(new URL('../src/utils/themePalette.ts',import.meta.url),'utf8');
+  for(const key of ['info','error']){
+    const pairs=[...source.matchAll(new RegExp("'"+key+"': '(#[A-Fa-f0-9]{6})',\\s*'on-"+key+"': '(#[A-Fa-f0-9]{6})'",'g'))];
+    assert.equal(pairs.length,2);
+    for(const [,fill,ink] of pairs){const a=luminance(fill),b=luminance(ink);assert.ok((Math.max(a,b)+.05)/(Math.min(a,b)+.05)>=4.5,`${fill} / ${ink}`);}
   }
 });

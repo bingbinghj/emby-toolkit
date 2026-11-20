@@ -140,7 +140,7 @@ def listing(config, query="", page=1, page_size=50):
     with database() as db:
         total = db.execute("SELECT COUNT(*) FROM tracks WHERE "+clause, values).fetchone()[0]
         rows = db.execute("SELECT path,signature,data FROM tracks WHERE "+clause+" ORDER BY path LIMIT ? OFFSET ?", (*values, size, (max(page,1)-1)*size)).fetchall()
-    return {"items": [{"path": path, **json.loads(data), "signature": json.loads(identity)} for path, identity, data in rows], "total": total, "page": page, "page_size": size}
+    return {"items": [{"path": path, **json.loads(data), "signature": json.loads(identity)} for path, identity, data in rows], "total": total, "library_path": str(root), "page": page, "page_size": size}
 
 
 def inspect(config, relative):
@@ -202,7 +202,7 @@ def browse(config, relative="", page=1, page_size=50):
             tracks.append({**info, **item, "signature": current})
         except Exception as error:
             tracks.append({**item, "error": str(error)})
-    return {"items": items[start:start+size], "tracks": tracks, "total": len(items), "path": str(path.relative_to(root)), "page": page, "page_size": size}
+    return {"items": items[start:start+size], "tracks": tracks, "total": len(items), "library_path": str(root), "path": str(path.relative_to(root)), "page": page, "page_size": size}
 
 
 def selection(config, paths):

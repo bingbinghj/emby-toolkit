@@ -175,6 +175,8 @@ export const test = base.extend({
     page.on('pageerror', error => errors.push(error.message));
     await page.route('**/image_proxy/**', route => route.fulfill({ contentType: 'image/svg+xml', body: image }));
     await page.route('https://**', route => route.abort());
+    // 外部字体按成功的空样式响应，固定使用系统字体，避免截图等待已中断的样式表。
+    await page.route('https://fonts.googleapis.com/**', route => route.fulfill({contentType:'text/css',body:''}));
     await page.route('**/api/**', async route => {
       const source = route.request(), url = new URL(source.url());
       let body;

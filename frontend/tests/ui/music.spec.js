@@ -15,8 +15,10 @@ for(const theme of ['light','dark']) for(const width of [390,1440]) test(`歌曲
   const songs=page.getByTestId('music-folder-tracks');
   const titleButton=songs.getByRole('button',{name:`编辑标题：${title}`,exact:true});
   await titleButton.scrollIntoViewIfNeeded();
-  const readings=await measureReadingContrast(page,[{role:'歌曲标题',locator:titleButton},{role:'专辑名',locator:songs.getByRole('button',{name:`编辑专辑：${title}`,exact:true})}]);
-  for(const reading of readings)expect(reading.contrast).toBeGreaterThanOrEqual(4.5);
+  for(const probe of [{role:'歌曲标题',locator:titleButton},{role:'专辑名',locator:songs.getByRole('button',{name:`编辑专辑：${title}`,exact:true})}]){
+    await probe.locator.evaluate(node=>node.scrollIntoView({block:'center',behavior:'instant'}));
+    for(const reading of await measureReadingContrast(page,[probe]))expect(reading.contrast).toBeGreaterThanOrEqual(4.5);
+  }
   for(const element of [titleButton,songs.getByRole('button',{name:`编辑专辑：${title}`,exact:true})]){
     const box=await element.evaluate(node=>({width:node.clientWidth,scrollWidth:node.scrollWidth,height:node.clientHeight,scrollHeight:node.scrollHeight}));
     expect(box.scrollWidth).toBeLessThanOrEqual(box.width+1);expect(box.scrollHeight).toBeLessThanOrEqual(box.height+1);
@@ -449,4 +451,136 @@ test('专辑详情复用艺术家作品与关联艺人并显示来源字段',asy
   await expect(page.getByRole('dialog')).toContainText('另一张专辑');
   await expect(page.locator('.music-artist-card')).toContainText('关联歌手');
   expect(api.requests.find(row=>row.path==='/api/music/query/related' && row.body.kind==='artist_albums').body.id).toBe('artist-id');
+});
+
+test('官方与 GD 资料和歌词入口独立，切换渠道不沿用结果',async({page,api})=>{
+  test.setTimeout(60000);
+  music(api);
+  api.respond('POST','/api/music/query/search',request=>({items:[{media_source:request.body.sources[0],media_id:'song',music_type:'recording',type:'音乐',title:request.body.sources[0]+' 曲名'}]}));
+  api.respond('POST','/api/music/query/lyrics_search',request=>({items:[{source:request.body.source,id:'song',title:request.body.source+' 歌词'}]}));
+  await page.goto('/music');
+  await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  for(const [name,id] of [['网易云音乐','netease'],['网易云音乐 · GD 音乐台','gd_netease']]){
+    await page.getByRole('combobox').filter({has:page.getByLabel('资料来源',{exact:true})}).click();
+    await page.getByRole('option',{name,exact:true}).click();
+    await page.getByRole('button',{name:'搜索资料',exact:true}).click();
+    await expect(page.locator('.media-id-selector')).toContainText(id+' 曲名');
+    await page.locator('.media-id-selector').getByRole('button',{name:'关闭',exact:true}).click();
+  }
+  await page.getByRole('button',{name:'搜索替换歌词'}).click();
+  await expect(page.locator('.lyrics-results')).toContainText('netease 歌词');
+  await page.getByRole('combobox').filter({has:page.getByLabel('歌词来源',{exact:true})}).click();
+  await page.getByRole('option',{name:'网易云音乐 · GD 音乐台',exact:true}).click();
+  await expect(page.locator('.lyrics-results')).toContainText('gd_netease 歌词');
+  await expect(page.locator('.v-chip').filter({hasText:'搜索专辑'})).toHaveClass(/v-chip--disabled/);
+});
+
+test('本地封面上传先预览，提交保留其他标签',async({page,api})=>{
+  music(api);await page.goto('/music');
+  const png=await page.evaluate(()=>{const c=document.createElement('canvas');c.width=20;c.height=20;return c.toDataURL('image/png').split(',')[1];});
+  await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await page.getByLabel('上传本地封面',{exact:true}).setInputFiles({name:'cover.png',mimeType:'image/png',buffer:Buffer.from(png,'base64')});
+  await expect(page.getByRole('button',{name:'撤销上传'})).toBeVisible();
+  expect(api.requests.filter(row=>row.path.startsWith('/api/music/jobs/'))).toHaveLength(0);
+  await page.getByRole('button',{name:'预览修改',exact:true}).click();
+  await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/jobs/preview').length).toBe(1);
+  const value=api.requests.find(row=>row.path==='/api/music/jobs/preview').body.metadata;
+  expect(value.cover_upload).toMatch(/^data:image\/jpeg;base64,/);
+  expect(value.cover_url).toBe('');expect(value.title).toBe(track.title);
+});
+
+test('歌词翻译上下显示，取消不更改草稿，双语应用不立即写入',async({page,api})=>{
+  music(api);
+  api.respond('POST','/api/music/query/inspect',{...track,lyrics:'[00:01]Hello'});
+  api.respond('POST','/api/music/query/lyrics_translate',{translation:'[00:01]你好',bilingual:'[00:01]Hello\n[00:01]你好',provider:'youdao'});
+  await page.goto('/music');await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await page.getByRole('button',{name:'机器翻译',exact:true}).click();
+  await expect(page.getByText('百度翻译',{exact:true})).toHaveCount(0);
+  await page.getByRole('button',{name:'开始翻译',exact:true}).click();
+  await expect(page.getByLabel('歌词译文',{exact:true})).toContainText('你好');
+  const original=await page.getByLabel('歌词原文',{exact:true}).boundingBox(),translated=await page.getByLabel('歌词译文',{exact:true}).boundingBox();
+  expect(translated.y).toBeGreaterThan(original.y+original.height);
+  await page.getByRole('button',{name:'取消',exact:true}).click();
+  await expect(page.getByLabel('旁挂歌词（LRC / 纯文本）',{exact:true})).toHaveValue('[00:01]Hello');
+  await page.getByRole('button',{name:'机器翻译',exact:true}).click();await page.getByRole('button',{name:'开始翻译',exact:true}).click();
+  await page.getByRole('button',{name:'应用双语歌词',exact:true}).click();
+  await expect(page.getByLabel('旁挂歌词（LRC / 纯文本）',{exact:true})).toHaveValue('[00:01]Hello\n[00:01]你好');
+  expect(api.requests.filter(row=>row.path.startsWith('/api/music/jobs/'))).toHaveLength(0);
+});
+
+test('时间轴逐行编辑与格式化保留内容，具体发行版传入读取资料',async({page,api})=>{
+  music(api);api.respond('POST','/api/music/query/inspect',{...track,lyrics:'[0:1.5]第一句\n[00:02]第二句'});
+  api.respond('POST','/api/music/query/edit_metadata',{title:track.title});
+  await page.goto('/music');await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await page.getByRole('button',{name:'格式化时间',exact:true}).click();
+  await expect(page.getByLabel('旁挂歌词（LRC / 纯文本）',{exact:true})).toHaveValue('[00:01.500]第一句\n[00:02.000]第二句');
+  await page.getByRole('button',{name:'时间轴编辑器',exact:true}).click();
+  await page.getByLabel('第 2 行时间',{exact:true}).fill('00:03.500');
+  await page.getByRole('button',{name:'应用时间轴',exact:true}).click();
+  await expect(page.getByLabel('旁挂歌词（LRC / 纯文本）',{exact:true})).toHaveValue('[00:01.500]第一句\n[00:03.500]第二句');
+  await page.getByRole('combobox').filter({has:page.getByLabel('音乐类型',{exact:true})}).click();await page.getByRole('option',{name:'专辑',exact:true}).click();
+  await page.getByLabel('MusicBrainz ID',{exact:true}).fill('11111111-1111-1111-1111-111111111111');
+  const release=page.getByLabel('MusicBrainz 具体发行版本 ID（可选）',{exact:true});
+  await release.fill('wrong');await expect(page.getByRole('button',{name:'读取资料',exact:true})).toBeDisabled();
+  await release.fill('22222222-2222-2222-2222-222222222222');await page.getByRole('button',{name:'读取资料',exact:true}).click();
+  await expect.poll(()=>api.requests.find(row=>row.path==='/api/music/query/edit_metadata')?.body.selection.musicbrainz_release_id).toBe('22222222-2222-2222-2222-222222222222');
+  await page.getByLabel('MusicBrainz ID',{exact:true}).fill('33333333-3333-3333-3333-333333333333');await expect(release).toHaveValue('');
+});
+
+for(const width of [390,1440]) test(`音乐分页在长列表中固定可见且路径独立 ${width}px`,async({page,api},testInfo)=>{
+  music(api);await page.setViewportSize({width,height:1000});
+  api.respond('GET','/api/music/library',{library_path:'/media/Media/Link/Music',items:[track],tracks:Array.from({length:60},(_,i)=>({...track,path:`album/${i}.flac`,title:`第 ${i+1} 首歌曲`})),total:150});
+  await page.goto('/music');
+  const footer=page.getByRole('contentinfo',{name:'音乐库分页'});
+  await expect(footer).toBeVisible();
+  expect(await footer.evaluate(node=>getComputedStyle(node).backgroundColor)).toMatch(/^rgb\(/);
+  const start=await footer.boundingBox();expect(start.y+start.height).toBeLessThanOrEqual(1001);expect(start.y).toBeGreaterThan(0);
+  expect(await page.getByTestId('music-library').locator('nav[aria-label="音乐目录"]').count()).toBe(0);
+  await expect(page.getByTestId('music-library-path')).toContainText('/media/Media/Link/Music');
+  await page.evaluate(()=>window.scrollTo(0,document.documentElement.scrollHeight));
+  const end=await footer.boundingBox();expect(Math.abs(end.y-start.y)).toBeLessThan(2);
+  await footer.getByRole('button',{name:'下一页',exact:true}).click();
+  await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/library').at(-1)?.query.page).toBe('2');
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBeTruthy();
+  await page.screenshot({path:testInfo.outputPath('fixed-pagination.png')});
+});
+
+test('点击搜索歌词从对应时间播放本地歌曲，首次加载也能跳转',async({page,api})=>{
+  music(api);
+  api.respond('POST','/api/music/query/lyrics_search',{items:[{source:'netease',id:'remote-song',title:'候选歌词'}]});
+  api.respond('POST','/api/music/query/lyrics_detail',{variants:[{value:'original',title:'原文',text:'[00:02.00]点击这一句'}]});
+  const wav=Buffer.alloc(44+8000*6*2);wav.write('RIFF');wav.writeUInt32LE(wav.length-8,4);wav.write('WAVEfmt ',8);wav.writeUInt32LE(16,16);wav.writeUInt16LE(1,20);wav.writeUInt16LE(1,22);wav.writeUInt32LE(8000,24);wav.writeUInt32LE(16000,28);wav.writeUInt16LE(2,32);wav.writeUInt16LE(16,34);wav.write('data',36);wav.writeUInt32LE(wav.length-44,40);
+  const audioRequests=[];
+  await page.route('**/api/music/audio?*',route=>{audioRequests.push(new URL(route.request().url()).searchParams.get('path'));return route.fulfill({status:200,contentType:'audio/wav',body:wav});});
+  await page.goto('/music');await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();await page.getByRole('button',{name:'搜索替换歌词'}).click();await page.getByText('候选歌词',{exact:true}).click();
+  await page.getByRole('button',{name:'跳至 2.00 秒：点击这一句',exact:true}).click();
+  const player=page.getByLabel('本地歌曲试听',{exact:true});
+  await expect.poll(()=>player.evaluate(node=>!node.paused && node.currentTime>=2)).toBe(true);
+  expect(audioRequests.length).toBeGreaterThan(0);expect(audioRequests.every(path=>path===track.path)).toBe(true);
+});
+
+for(const theme of ['light','dark'])for(const width of [390,1440])test(`音乐新工具与固定分页可读 ${theme} ${width}px`,async({page,api},testInfo)=>{
+  music(api);await page.setViewportSize({width,height:1000});
+  await page.addInitScript(theme=>localStorage.setItem('moviepilot-theme-customizer',JSON.stringify({theme,glassEnabled:true,glassAppearance:'frosted',glassQuality:'css'})),theme);
+  api.respond('POST','/api/music/query/inspect',{...track,lyrics:'[00:01]Into The New World — long line for checking readable lyrics and controls'});
+  api.respond('POST','/api/music/query/lyrics_translate',{translation:'[00:01]再次重逢的世界 — 检查歌词显示及按钮是否完整可读',bilingual:'[00:01]Into The New World\n[00:01]再次重逢的世界',provider:'youdao'});
+  await page.goto('/music');
+  const footer=page.getByRole('contentinfo',{name:'音乐库分页'});
+  const current=footer.locator('.v-pagination__item--is-active .v-btn');
+  await expect(current).toBeVisible();
+  for(const reading of await measureReadingContrast(page,[{role:'当前页码',locator:current}]))expect(reading.contrast).toBeGreaterThanOrEqual(4.5);
+  await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();await page.getByRole('button',{name:'机器翻译',exact:true}).click();await page.getByRole('button',{name:'开始翻译',exact:true}).click();
+  await expect(page.getByLabel('歌词译文',{exact:true})).toBeVisible();
+  const source=page.locator('.lyrics-translation .v-chip--selected .v-chip__content');
+  for(const reading of await measureReadingContrast(page,[{role:'翻译服务',locator:source},{role:'译文',locator:page.getByLabel('歌词译文',{exact:true})}]))expect(reading.contrast).toBeGreaterThanOrEqual(4.5);
+  for(const element of [page.getByLabel('歌词译文',{exact:true}),page.getByRole('button',{name:'应用双语歌词',exact:true}),source]){
+    const size=await element.evaluate(node=>({width:node.clientWidth,scrollWidth:node.scrollWidth,height:node.clientHeight,scrollHeight:node.scrollHeight}));expect(size.scrollWidth).toBeLessThanOrEqual(size.width+1);expect(size.scrollHeight).toBeLessThanOrEqual(size.height+1);
+  }
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBeTruthy();await page.screenshot({path:testInfo.outputPath('translation-readable.png')});
+  await page.getByRole('button',{name:'取消',exact:true}).click();
+  await page.getByRole('button',{name:'时间轴编辑器',exact:true}).click();
+  for(const control of [page.getByLabel('第 1 行时间',{exact:true}),page.getByLabel('第 1 行歌词',{exact:true}),page.getByRole('button',{name:'第 1 行使用当前时间',exact:true}),page.getByRole('button',{name:'应用时间轴',exact:true})]){
+    const box=await control.boundingBox();expect(box.x).toBeGreaterThanOrEqual(0);expect(box.x+box.width).toBeLessThanOrEqual(width+1);
+  }
+  await page.screenshot({path:testInfo.outputPath('timeline-readable.png')});
 });

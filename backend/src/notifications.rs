@@ -1549,17 +1549,21 @@ pub async fn test_message_draft(
         "🔔 Emby Toolkit 测试消息\n\n这是一条测试消息。\n时间：{}",
         chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
     );
-    // A test is an explicit user action and, like MP, bypasses the scheduled window.
-    send_with_config(
-        state,
-        &config,
-        token,
-        "sendMessage",
-        &json!({
-            "chat_id":chat, "text":text, "disable_web_page_preview":true
-        }),
-    )
-    .await
+    // 测试由用户主动触发，沿用 MP 绕过发送时段的行为。
+    let (method, payload) = if let Some(image) = draft["image"].as_str().filter(|s| !s.is_empty()) {
+        if !(image.starts_with("data:image/") || image.starts_with("https://") || image.starts_with("http://")) {
+            return Err(ApiError::bad("测试图片需为上传图片或 HTTP(S) 地址"));
+        }
+        ("sendPhoto", json!({"chat_id":chat,"photo":image,"native_image":true,"caption":text}))
+    } else if let Some(attachment) = draft["attachment"].as_object() {
+        if attachment.get("path").is_some() || attachment.get("data").and_then(Value::as_str).is_none() {
+            return Err(ApiError::bad("请选择需要发送的本地附件"));
+        }
+        ("sendDocument", json!({"chat_id":chat,"document":attachment,"caption":text}))
+    } else {
+        ("sendMessage", json!({"chat_id":chat,"text":text,"disable_web_page_preview":true}))
+    };
+    send_with_config(state, &config, token, method, &payload).await
 }
 
 async fn send(state: &AppState, token: &str, method: &str, payload: &Value) -> Result<()> {
@@ -1576,39 +1580,7 @@ async fn send_with_config(
 ) -> Result<()> {
     let api_base = telegram_api_base(config, &state.notifications.api_base)?;
     let payload = topic_payload(config, payload)?;
-    let response = state
-        .http
-        .post(format!("{}/bot{token}/{method}", api_base))
-        .timeout(std::time::Duration::from_secs(if method == "sendPhoto" {
-            30
-        } else {
-            15
-        }))
-        .json(&payload)
-        .send()
-        .await?;
-    if response.status() != reqwest::StatusCode::OK {
-        return Err(ApiError(
-            reqwest::StatusCode::BAD_GATEWAY,
-            format!("Telegram 返回 HTTP {}", response.status().as_u16()),
-        ));
-    }
-    let response: Value = response.json().await?;
-    if response["ok"] != true {
-        return Err(ApiError(
-            reqwest::StatusCode::BAD_GATEWAY,
-            format!(
-                "Telegram 发送失败：{}",
-                crate::logs::redact(
-                    &response["description"]
-                        .as_str()
-                        .unwrap_or("未确认发送成功")
-                        .replace(token, "********")
-                        .replace(&api_base, "Telegram API")
-                )
-            ),
-        ));
-    }
+    crate::telegram_media::request(&state.http, &api_base, token, method, &payload).await?;
     Ok(())
 }
 

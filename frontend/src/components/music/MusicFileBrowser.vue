@@ -16,7 +16,6 @@ const rows = computed(() => [...(props.items || [])].sort((a,b) => {
 }));
 const choices = computed(() => rows.value.filter(selectable));
 const allSelected = computed(() => choices.value.length > 0 && choices.value.every(item => selected.value.includes(item.path)));
-const crumbs = computed(() => (props.directory || '').split('/').filter(Boolean).map((title, i, parts) => ({ title, path: parts.slice(0,i+1).join('/') })));
 function toggle(item) { if (!selectable(item)) return; selected.value = selected.value.includes(item.path) ? selected.value.filter(path => path !== item.path) : [...selected.value, item.path]; }
 function activate(item) { if (selectMode.value) toggle(item); else if (item.type === 'dir') emit('navigate', item.path); else if (item.is_audio !== false || item.audio_path) emit('edit', item.audio_path ? {path:item.audio_path} : item); }
 function changeSort(key) { if (sort.value === key) descending.value = !descending.value; else { sort.value = key; descending.value = false; } }
@@ -28,8 +27,7 @@ watch(() => props.directory, () => { selectMode.value = false; selected.value = 
 <template>
   <VCard class="music-file-browser" data-testid="music-library">
     <div class="file-list__toolbar">
-      <VBtn icon="mdi-arrow-up" variant="text" aria-label="上级目录" :disabled="!directory || loading" @click="emit('navigate', directory.split('/').slice(0,-1).join('/'))" />
-      <nav class="file-breadcrumbs" aria-label="音乐目录"><VBtn variant="text" prepend-icon="mdi-home-outline" @click="emit('navigate', '')">音乐库</VBtn><template v-for="crumb in crumbs" :key="crumb.path"><VIcon icon="mdi-chevron-right" size="16" /><VBtn variant="text" :title="crumb.title" @click="emit('navigate', crumb.path)">{{ crumb.title }}</VBtn></template></nav>
+      <span class="text-subtitle-1">文件</span>
       <VSpacer /><VBtn variant="text" :prepend-icon="selectMode ? 'mdi-close' : 'mdi-checkbox-marked-outline'" @click="selectMode = !selectMode; selected = []">{{ selectMode ? '取消选择' : '选择' }}</VBtn>
     </div>
     <div v-if="selectMode" class="file-list__selection">
@@ -56,13 +54,11 @@ watch(() => props.directory, () => { selectMode.value = false; selected.value = 
 
 <style scoped>
 .music-file-browser{min-inline-size:0;container-type:inline-size;}
-.file-list__toolbar,.file-list__selection{display:flex;align-items:center;gap:.5rem;padding:.5rem 1rem;flex-wrap:wrap;}
+.file-list__toolbar,.file-list__selection{display:flex;align-items:center;gap:.5rem;padding:.5rem .75rem;flex-wrap:wrap;}
 .file-list__selection>.v-input{flex:0 1 auto;min-inline-size:12rem;}
-.file-breadcrumbs{display:flex;align-items:center;flex:1 1 12rem;min-inline-size:0;flex-wrap:wrap;}
-.file-breadcrumbs :deep(.v-btn){max-inline-size:100%;height:auto;min-height:36px;}.file-breadcrumbs :deep(.v-btn__content){white-space:normal;overflow-wrap:anywhere;}
 .file-list__columns{display:grid;grid-template-columns:minmax(0,1fr) 6rem 10rem 5.5rem;gap:1rem;padding:1rem;font-size:.875rem;border-block:1px solid rgba(var(--v-border-color),var(--v-border-opacity));}
 .file-list__columns>button{text-align:start;}
-.file-list-container{padding:0;max-block-size:65vh;overflow:auto;}
+.file-list-container{padding:0;max-block-size:52vh;overflow:auto;}
 .file-row{min-block-size:3.625rem;padding-inline:1rem .5rem;border-block-end:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:0;cursor:pointer;}
 .file-row :deep(.v-list-item__content){display:grid;grid-template-columns:minmax(0,1fr) 6rem 10rem;align-items:center;gap:1rem;}
 .file-row :deep(.v-list-item__append){inline-size:5.5rem;margin-inline-start:1rem;justify-content:flex-end;}
@@ -73,5 +69,5 @@ watch(() => props.directory, () => { selectMode.value = false; selected.value = 
 .file-row__path{overflow-wrap:anywhere;}
 .file-row__size,.file-row__time{font-size:.875rem;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));}
 .file-row__name :deep(.v-input){flex:0 0 auto;}
-@container(max-width:600px){.file-list__columns{grid-template-columns:minmax(0,1fr) 2.75rem;}.file-list__columns>button:not(:first-child),.file-row__size,.file-row__time{display:none;}.file-row :deep(.v-list-item__content){grid-template-columns:minmax(0,1fr);}.file-row__filename{white-space:normal;overflow-wrap:anywhere;}.file-row{padding-block:.65rem;}}
+@container(max-width:600px){.file-list__columns{grid-template-columns:minmax(0,1fr) 5rem;}.file-list__columns>button:not(:first-child),.file-row__size,.file-row__time{display:none;}.file-row :deep(.v-list-item__content){grid-template-columns:minmax(0,1fr);}.file-row__filename{white-space:normal;overflow-wrap:anywhere;}.file-row{padding:.5rem .375rem .5rem .75rem;}.file-row :deep(.v-list-item__append){inline-size:5rem;margin-inline-start:.25rem;}.file-row :deep(.v-list-item__append .v-btn){width:36px;height:36px;}.file-row__name{gap:.5rem;}}
 </style>

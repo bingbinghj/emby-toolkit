@@ -8,6 +8,7 @@ const plain = value => JSON.parse(JSON.stringify(value));
 function fixture({ save = async () => true, post = async () => ({ data: { message: '已保存' } }), account = async () => ({ telegram_chat_id: '123' }) } = {}) {
   const calls = [], messages = [], opened = [], user = { id: 'test-user' };
   const context = vm.createContext({
+    testKind:{value:'text'}, testFile:{value:null},
     pageActive: true, loadedChatId: '', user, window: { open: url => opened.push(url) },
     authStore: { user, isLoggedIn: true, accountInfo: {}, fetchAccountInfo: account },
     configModel: { value: { telegram_bot_token: 'fixture-token', telegram_channel_id: '@fixture', telegram_notify_types: ['library_new'], telegram_enabled: true, telegram_channel_name: 'Telegram', telegram_topic_id: '', telegram_users: '', telegram_admins: '', telegram_api_url: '', notification_scope: { library_new: 'admin', recognize_fail: 'admin' }, notification_time: { start: '00:00', end: '23:59' }, unrelated: 'keep' } },

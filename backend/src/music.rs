@@ -72,6 +72,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/music/audio", get(audio))
         .route("/api/music/query/{action}", post(query))
         .route("/api/music/jobs/{action}", post(submit))
+        .layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024))
 }
 
 pub fn validate_config(config: &Value) -> Result<()> {
@@ -302,6 +303,7 @@ async fn query(
             | "edit_metadata"
             | "lyrics_search"
             | "lyrics_detail"
+            | "lyrics_translate"
     ) {
         return Err(ApiError::bad("未知音乐查询"));
     }
@@ -333,6 +335,38 @@ async fn audio(
     Ok(response)
 }
 
+fn validate_uploaded_cover(value: &Value) -> Result<()> {
+    let text = value
+        .as_str()
+        .ok_or_else(|| ApiError::bad("上传封面格式无效"))?;
+    if text.len() > 1_400_000 {
+        return Err(ApiError::bad("上传封面超过 1 MiB，请缩小图片"));
+    }
+    let (data, format) = if let Some(data) = text.strip_prefix("data:image/jpeg;base64,") {
+        (data, image::ImageFormat::Jpeg)
+    } else if let Some(data) = text.strip_prefix("data:image/png;base64,") {
+        (data, image::ImageFormat::Png)
+    } else {
+        return Err(ApiError::bad("上传封面只支持 JPEG 或 PNG"));
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .map_err(|_| ApiError::bad("上传封面编码无效"))?;
+    if bytes.len() > 1024 * 1024 {
+        return Err(ApiError::bad("上传封面超过 1 MiB，请缩小图片"));
+    }
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(bytes), format);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(2048);
+    limits.max_image_height = Some(2048);
+    limits.max_alloc = Some(32 * 1024 * 1024);
+    reader.limits(limits);
+    reader
+        .decode()
+        .map_err(|_| ApiError::bad("上传封面损坏或尺寸超过 2048 像素"))?;
+    Ok(())
+}
+
 async fn submit(
     State(state): State<AppState>,
     Path(action): Path<String>,
@@ -345,10 +379,23 @@ async fn submit(
         if !matches!(body["operation"].as_str(), Some("rescrape" | "edit")) {
             return Err(ApiError::bad("ETK 音乐仅支持刮削和标签编辑"));
         }
+        if let Some(upload) = body["metadata"]
+            .get("cover_upload")
+            .filter(|v| !v.is_null() && **v != "")
+        {
+            validate_uploaded_cover(upload)?;
+        }
         let paths = body["paths"]
             .as_array()
             .filter(|paths| !paths.is_empty() && paths.len() <= 1000)
             .ok_or_else(|| ApiError::bad("请选择 1 至 1000 个音乐文件"))?;
+        if paths.len() != 1
+            && body["metadata"]["cover_upload"]
+                .as_str()
+                .is_some_and(|v| !v.is_empty())
+        {
+            return Err(ApiError::bad("本地封面上传只用于当前歌曲"));
+        }
         if paths.iter().any(|value| {
             value.as_str().is_none_or(|text| {
                 text.is_empty()
@@ -707,4 +754,27 @@ pub(crate) async fn resume_cleanup(state: &AppState, context: &JobContext) -> Re
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cover_upload_tests {
+    use super::*;
+
+    #[test]
+    fn validates_image_contents_and_size_before_scheduling() {
+        let mut image = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut image, image::ImageFormat::Png)
+            .unwrap();
+        let png = base64::engine::general_purpose::STANDARD.encode(image.into_inner());
+        assert!(validate_uploaded_cover(&json!(format!("data:image/png;base64,{png}"))).is_ok());
+        for value in [
+            json!("data:image/png;base64,YQ=="),
+            json!("data:image/svg+xml;base64,YQ=="),
+            json!(12),
+            json!("x".repeat(1_400_001)),
+        ] {
+            assert!(validate_uploaded_cover(&value).is_err());
+        }
+    }
 }

@@ -26,7 +26,8 @@ html {
   --mp-popover: rgb(var(--mp-popover-rgb));
   --mp-fg: rgb(var(--v-theme-on-surface, var(--mp-fg-rgb)));
   --mp-muted-fg: rgba(var(--v-theme-on-surface, var(--mp-fg-rgb)), var(--v-medium-emphasis-opacity, 0.72));
-  --mp-faint: rgba(var(--v-theme-on-surface, var(--mp-fg-rgb)), 0.46);
+  --mp-faint-alpha: 0.46;
+  --mp-faint: rgba(var(--v-theme-on-surface, var(--mp-fg-rgb)), var(--mp-faint-alpha));
 
   // 压在海报或剧照底图上的文字与压暗遮罩不随浅色主题反转为深色
   --mp-on-media: #f8fafc;
@@ -85,6 +86,7 @@ html[data-theme='glass']:not([data-glass-color-scheme='light']) {
 
 // 玻璃材质透出底层壁纸，卡片与弹层改走共享玻璃透射表面，次级底座保持静态吸光
 html[data-theme='glass'] {
+  --mp-faint-alpha: 0.6;
   --mp-bg: transparent;
   --mp-surface: var(--glass-surface);
   --mp-card: var(--glass-surface);
@@ -101,7 +103,7 @@ html[data-theme='glass'][data-glass-color-scheme='light'] {
 :where(.v-theme--glass, .v-theme--plain) {
   --mp-fg: rgb(var(--v-theme-on-surface));
   --mp-muted-fg: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity));
-  --mp-faint: rgba(var(--v-theme-on-surface), 0.46);
+  --mp-faint: rgba(var(--v-theme-on-surface), var(--mp-faint-alpha));
   --mp-ring: color-mix(in oklab, rgb(var(--v-theme-primary)) 68%, transparent);
   --mp-success-soft: rgba(var(--v-theme-success), var(--mp-badge-soft-alpha));
   --mp-success-border: rgba(var(--v-theme-success), var(--mp-badge-border-alpha));

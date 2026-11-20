@@ -10,7 +10,7 @@
         <VProgressLinear v-if="loadingConfig" indeterminate />
         <VCardText v-if="configModel">
           <div class="grid gap-3 grid-app-card">
-          <VCard class="notification-channel app-card-shell app-card-colorful" style="--app-card-accent-rgb:36,169,224" data-field="notification_channel" data-settings-label="Telegram" variant="tonal" role="button" tabindex="0" aria-label="编辑 Telegram 通知渠道" @click="editChannel" @keydown.enter.prevent="editChannel" @keydown.space.prevent="editChannel">
+          <VCard class="notification-channel app-card-shell app-card-colorful" style="--app-card-accent-rgb:36,169,224" data-field="notification_channel" data-settings-label="Telegram" variant="tonal" role="button" :tabindex="busy || !canSave ? -1 : 0" :aria-disabled="busy || !canSave" aria-label="编辑 Telegram 通知渠道" @click="editChannel" @keydown.enter.prevent="editChannel" @keydown.space.prevent="editChannel">
             <VCardText class="app-card-summary app-card-summary--title-subtitle">
               <div class="app-card-summary__content">
                 <div class="app-card-summary__title-row"><VBadge v-if="configModel.telegram_enabled" dot inline color="success" class="me-1" /><span class="app-card-summary__title text-h6">{{ configModel.telegram_channel_name || 'Telegram' }}</span></div>
@@ -81,6 +81,7 @@
           </VRow>
           <VDivider class="my-4" />
           <VTextField data-field="telegram_chat_id" v-model="channelDraft.chat_id" label="个人 Chat ID" placeholder="例如 123456789" hint="先向 Telegram 机器人发送 /start，再填写私聊ID，用于接收个人通知。" persistent-hint prepend-inner-icon="mdi-account" :disabled="busy || loading || Boolean(accountError)" />
+          <VDivider class="my-4" /><div class="notification-test-controls"><VSelect v-model="testKind" label="测试内容" :items="[{title:'文本消息',value:'text'},{title:'原图消息',value:'image'},{title:'文件附件',value:'file'}]" :disabled="busy" @update:model-value="testFile=null" /><VFileInput v-if="testKind!=='text'" v-model="testFile" :accept="testKind==='image' ? 'image/jpeg,image/png' : undefined" label="测试附件" hint="选择本地文件，最大 4 MiB。点击发送测试后才会上传。" persistent-hint :disabled="busy" /></div>
           <div v-if="globalChannelLink" class="global-notification-link mt-4"><VBtn variant="text" :href="globalChannelLink" target="_blank" rel="noopener noreferrer" prepend-icon="mdi-open-in-new">加入频道 / 群组</VBtn></div>
         </VCardText>
         <VCardActions class="app-dialog-actions notification-actions">
@@ -113,6 +114,7 @@ const message = useMessage();
 const display = useDisplay();
 const { configModel, loadingConfig, savingConfig, handleSaveConfig, configError, fetchConfigData } = useConfig();
 const loading = ref(true), accountError = ref(''), telegramChatId = ref('');
+const testKind=ref('text'), testFile=ref(null);
 const showBotToken = ref(false), isSavingChatId = ref(false), isTestingTelegram = ref(false), isFetchingBotLink = ref(false);
 const savingCard = ref('');
 let pageActive = true;
@@ -156,7 +158,7 @@ function editChannel() {
   channelDraft.value = { telegram_bot_token: config.telegram_bot_token || '', telegram_channel_id: config.telegram_channel_id || '', telegram_enabled: config.telegram_enabled,
     telegram_channel_name: config.telegram_channel_name || 'Telegram', telegram_topic_id: config.telegram_topic_id || '', telegram_users: config.telegram_users || '', telegram_admins: config.telegram_admins || '', telegram_api_url: config.telegram_api_url || '',
     telegram_notify_types: [...(config.telegram_notify_types || [])], chat_id: telegramChatId.value };
-  showBotToken.value = false;
+  showBotToken.value = false;testKind.value='text';testFile.value=null;
   channelDialogOpen.value = true;
 }
 function applyChannelDraft() {
@@ -250,7 +252,17 @@ const testTelegram = async () => {
   const user = authStore.user;
   isTestingTelegram.value = true;
   try {
-    const { data } = await axios.post('/api/telegram/test', { token: channelDraft.value?.telegram_bot_token ?? configModel.value.telegram_bot_token,
+    let media={};
+    if(testKind.value!=='text'){
+      const file=Array.isArray(testFile.value) ? testFile.value[0] : testFile.value;
+      if(!file)throw new Error('请选择测试附件');
+      if(file.size>4*1024*1024)throw new Error('测试附件不能超过 4 MiB');
+      if(testKind.value==='image' && !['image/jpeg','image/png'].includes(file.type))throw new Error('原图测试只支持 JPG 或 PNG');
+      const data=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(new Error('附件读取失败'));reader.readAsDataURL(file);});
+      if(!isCurrentAccount(user))return;
+      media=testKind.value==='image' ? {image:data} : {attachment:{name:file.name,data:data.split(',')[1]}};
+    }
+    const { data } = await axios.post('/api/telegram/test', { ...media, token: channelDraft.value?.telegram_bot_token ?? configModel.value.telegram_bot_token,
       chat_id: channelDraft.value ? (channelDraft.value.chat_id?.trim() || channelDraft.value.telegram_channel_id) : (telegramChatId.value.trim() || configModel.value.telegram_channel_id),
       api_url: channelDraft.value?.telegram_api_url ?? configModel.value.telegram_api_url ?? '',
       topic_id: channelDraft.value?.chat_id?.trim() || (!channelDraft.value && telegramChatId.value.trim()) ? '' : (channelDraft.value?.telegram_topic_id ?? configModel.value.telegram_topic_id ?? '') });
@@ -258,7 +270,7 @@ const testTelegram = async () => {
     if (data.success === true) message.success(data.message || '测试消息已发送');
     else message.error(data.error || data.message || '测试消息发送失败');
   } catch (error) {
-    if (isCurrentAccount(user)) message.error(error.response?.data?.error || error.response?.data?.message || '测试消息发送失败');
+    if (isCurrentAccount(user)) message.error(error.response?.data?.error || error.response?.data?.message || error.message || '测试消息发送失败');
   } finally { isTestingTelegram.value = false; }
 };
 
@@ -285,6 +297,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.notification-test-controls{display:flex;gap:1rem;flex-wrap:wrap;}.notification-test-controls>.v-input{flex:1 1 16rem;min-inline-size:0;}
 .notification-actions { display:flex; flex-wrap:wrap; gap:12px; }
 .notification-channel { cursor:pointer; }
 .notification-channel .app-card-summary__content { padding-inline-end:4rem; }

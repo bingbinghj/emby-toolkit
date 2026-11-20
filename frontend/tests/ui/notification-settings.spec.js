@@ -214,3 +214,15 @@ test('Telegram channel requires a name and cancelling message-type changes prese
   await expect(types.locator('.v-chip__content')).toHaveText(originalTypes);
   expect(api.requests.filter(request => request.method === 'POST')).toEqual([]);
 });
+
+test('Telegram 原图和附件测试使用上传内容，切换方式不保存到渠道设置',async({page,api})=>{
+  api.respond('POST','/api/telegram/test',{success:true,message:'模拟发送成功'});
+  await page.goto('/settings/notifications');await page.getByRole('button',{name:'编辑 Telegram 通知渠道',exact:true}).click();
+  await page.getByLabel('Bot Token',{exact:true}).fill('fixture-token');await page.getByLabel('Chat ID',{exact:true}).fill('123456');
+  await page.getByRole('combobox').filter({has:page.getByLabel('测试内容',{exact:true})}).click();await page.getByRole('option',{name:'文件附件',exact:true}).click();
+  await page.getByLabel('测试附件',{exact:true}).setInputFiles({name:'song.lrc',mimeType:'text/plain',buffer:Buffer.from('[00:01]歌词')});
+  await page.getByRole('button',{name:'发送测试',exact:true}).click();
+  await expect.poll(()=>api.requests.filter(row=>row.path==='/api/telegram/test').length).toBe(1);
+  const body=api.requests.find(row=>row.path==='/api/telegram/test').body;expect(body.attachment.name).toBe('song.lrc');expect(Buffer.from(body.attachment.data,'base64').toString()).toBe('[00:01]歌词');
+  expect(api.requests.filter(row=>row.path==='/api/config' && row.method==='POST')).toHaveLength(0);
+});
