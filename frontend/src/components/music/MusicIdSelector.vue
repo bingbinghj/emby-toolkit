@@ -5,14 +5,25 @@ import axios from "axios";
 import { ref, watch, onMounted, onBeforeUnmount } from "vue";
 import { useMusicI18n as useI18n } from "./i18n";
 const { t } = useI18n();
-const props = defineProps({ type: String, musicTypes: Array, initialKeyword: String });
+const props = defineProps({ type: String, musicTypes: Array, initialKeyword: String, browseTracks:Boolean, initialAlbumId:String });
 const emit = defineEmits(["update:modelValue", "select", "close"]);
 const items = ref([]);
 const keyword = ref(props.initialKeyword?.trim() || "");
+const album=ref(null);
 const loading = ref(false), error = ref('');
 let searchRequestId = 0;
 const inputKeyword = ref(null);
-function selectMedia(item) {
+async function selectMedia(item) {
+  if(props.browseTracks && item.music_type==='album') {
+    const requestId=++searchRequestId; loading.value=true; error.value='';
+    try {
+      const {data}=await axios.post('/api/music/query/detail',{source:props.type,id:item.id,kind:'album'},{timeout:35000});
+      if(requestId!==searchRequestId)return;
+      album.value=item;items.value=(data.tracks || []).map(row=>({id:row.media_id,poster:row.cover_url || data.cover_url,title:row.title,music_type:'recording',label:'单曲',overview:[row.artists?.join(' / '),row.album].filter(Boolean).join(' · ')}));
+    } catch(cause){if(requestId===searchRequestId)error.value=cause.response?.data?.message || cause.message;}
+    finally{if(requestId===searchRequestId)loading.value=false;}
+    return;
+  }
   emit("update:modelValue", item.id);
   emit("select", item);
   emit("close");
@@ -22,7 +33,7 @@ async function searchMedias() {
   if (!searchKeyword) return;
   const requestId = ++searchRequestId;
   try {
-    loading.value = true; error.value = '';
+    loading.value = true; error.value = '';album.value=null;
     const { data } = await axios.post("/api/music/query/search", { query: searchKeyword, sources: [props.type], kind: props.musicTypes?.length === 1 ? props.musicTypes[0] : void 0, count: 20 }, { timeout: 19e4 });
     const result = data.items || [];
     if (requestId !== searchRequestId) return;
@@ -65,7 +76,8 @@ async function searchMedias() {
   }
 }
 onMounted(() => {
-  if (keyword.value) void searchMedias();
+  if(props.initialAlbumId) void selectMedia({id:props.initialAlbumId,music_type:'album',title:props.initialAlbumId});
+  else if (keyword.value) void searchMedias();
   focusTimer = setTimeout(() => {
     inputKeyword.value?.focus();
   }, 500);
@@ -121,16 +133,18 @@ onBeforeUnmount(() => {
         @keydown.enter="searchMedias"
       />
     </VCardText>
+    <div v-if="album" class="px-4 pb-3 d-flex align-center ga-2"><VBtn variant="text" prepend-icon="mdi-arrow-left" :disabled="loading" @click="searchMedias">返回专辑</VBtn><span>{{ album.title }}</span></div>
+    <VProgressLinear v-if="loading" indeterminate color="primary" />
     <VDivider />
     <VList v-if="items.length > 0" class="media-id-selector__results" lines="three">
       <template v-for="item in items" :key="`${item.type || 'media'}-${item.id}`">
         <VListItem @click="selectMedia(item)">
           <template #prepend>
             <VImg
-              height="75"
-              width="50"
+              height="64"
+              width="64"
               :src="item.poster"
-              aspect-ratio="2/3"
+              aspect-ratio="1"
               class="object-cover rounded ring-gray-500 me-3"
               cover
             >
@@ -154,6 +168,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style lang="scss" scoped>
+.media-id-selector :deep(.v-list-item-title),.media-id-selector :deep(.v-list-item-subtitle){white-space:normal;overflow-wrap:anywhere;-webkit-line-clamp:unset;}
 .media-id-selector {
   overflow: hidden !important;
 }

@@ -166,27 +166,43 @@ def browse(config, relative="", page=1, page_size=50):
     root, path = directory(config, relative)
     items = []
     children = list(path.iterdir())
-    audio_names = {}
-    for child in children:
-        if child.suffix.lower() in AUDIO_EXTENSIONS and child.is_file():
-            audio_names.setdefault(child.stem, []).append(str(child.relative_to(root)))
     for child in children:
         if child.name.startswith(".") or (child.is_symlink() and child.is_dir()):
             continue
         is_dir = child.is_dir()
-        if not is_dir and not child.is_file():
+        if not is_dir and (not child.is_file() or child.suffix.lower() not in AUDIO_EXTENSIONS):
             continue
         stat = child.stat()
-        stem = child.name.removesuffix('.lyricsfile.yaml') if child.name.endswith('.lyricsfile.yaml') else child.stem if child.suffix.lower() in {'.lrc', '.txt'} else None
-        companions = audio_names.get(stem, [])
         items.append({"path": str(child.relative_to(root)), "name": child.name,
                       "type": "dir" if is_dir else "file", "is_audio": not is_dir and child.suffix.lower() in AUDIO_EXTENSIONS,
-                      "audio_path": companions[0] if not is_dir and len(companions) == 1 else None,
                       "size": None if is_dir else stat.st_size, "modify_time": stat.st_mtime})
     items.sort(key=lambda item: (item["type"] != "dir", item["name"].casefold()))
     size = min(max(page_size, 1), 1000)
     start = (max(page, 1)-1)*size
-    return {"items": items[start:start+size], "total": len(items), "path": str(path.relative_to(root)), "page": page, "page_size": size}
+    # 当前目录全部歌曲一次读取；使用有界签名缓存，不启动逐首 worker 或请求歌词。
+    from .cache import Cache
+    cache = Cache(2000, 86400, "library-display")
+    tracks = []
+    for item in items:
+        if item["type"] == "dir":
+            continue
+        try:
+            audio = target(config, item["path"])
+            current = signature(audio)
+            key = str(root / item["path"])
+            previous = cache.get(key)
+            if previous and previous["signature"] == current:
+                info = previous["data"]
+            else:
+                tags = AudioMetadataHelper.read_tags(audio)
+                if tags is None:
+                    raise ValueError("音频标签无法读取")
+                info = MusicInfo.from_meta(tags).to_dict()
+                cache.set(key, {"signature": current, "data": info})
+            tracks.append({**info, **item, "signature": current})
+        except Exception as error:
+            tracks.append({**item, "error": str(error)})
+    return {"items": items[start:start+size], "tracks": tracks, "total": len(items), "path": str(path.relative_to(root)), "page": page, "page_size": size}
 
 
 def selection(config, paths):

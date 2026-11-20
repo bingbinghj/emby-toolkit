@@ -73,5 +73,5 @@ watch(() => props.directory, () => { selectMode.value = false; selected.value = 
 .file-row__path{overflow-wrap:anywhere;}
 .file-row__size,.file-row__time{font-size:.875rem;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));}
 .file-row__name :deep(.v-input){flex:0 0 auto;}
-@media(max-width:600px){.file-list__columns{grid-template-columns:minmax(0,1fr) 2.75rem;}.file-list__columns>button:not(:first-child),.file-row__size,.file-row__time{display:none;}.file-row :deep(.v-list-item__content){grid-template-columns:minmax(0,1fr);}.file-row__filename{white-space:normal;overflow-wrap:anywhere;}.file-row{padding-block:.65rem;}}
+@container(max-width:600px){.file-list__columns{grid-template-columns:minmax(0,1fr) 2.75rem;}.file-list__columns>button:not(:first-child),.file-row__size,.file-row__time{display:none;}.file-row :deep(.v-list-item__content){grid-template-columns:minmax(0,1fr);}.file-row__filename{white-space:normal;overflow-wrap:anywhere;}.file-row{padding-block:.65rem;}}
 </style>

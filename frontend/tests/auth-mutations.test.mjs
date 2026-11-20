@@ -59,7 +59,7 @@ test('a superseded login cannot announce success or navigate from the actual Log
   const routes = [], successes = [];
   const code = loginSource.match(/^async function handleLogin\(\) \{[\s\S]*?^}/m)[0];
   const handle = new Function('authStore', 'formRef', 'credentials', 'remember', 'loading', 'errorMessage', 'router', 'message', 'isPageActive', code + '\nreturn handleLogin;')(
-    f.store, { value: { validate: async () => ({ valid: true }) } }, { value: { username: 'A', password: 'fixture-only' } }, { value: true },
+    f.store, { value: { querySelector: () => null, reportValidity: () => true } }, { value: { username: 'A', password: 'fixture-only' } }, { value: true },
     { value: false }, { value: '' }, { push: route => routes.push(route.name) }, { success: message => successes.push(message) }, true,
   );
   try {

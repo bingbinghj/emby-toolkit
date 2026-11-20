@@ -12,7 +12,8 @@ REGIONS = {"cn": "中国大陆", "hk": "中国香港", "tw": "中国台湾", "us
 
 def read_json(url, params=None, label="音乐来源"):
     host = urlsplit(url).netloc
-    headers = {} if host == "rss.marketingtools.apple.com" else {"Referer": f"https://{host}/"}
+    referer = "https://y.qq.com/" if host.endswith("y.qq.com") else f"https://{host}/"
+    headers = {} if host in {"rss.marketingtools.apple.com", "itunes.apple.com"} else {"Referer": referer}
     client = RequestUtils(ua="Mozilla/5.0", headers=headers, timeout=18)
     try:
         response = client.get_res(url, params=params, stream=True)

@@ -1,7 +1,136 @@
 import { test, expect } from './fixtures.js';
+import { measureReadingContrast } from './reading-contrast.js';
 
 const track = {name:'01 - 测试歌曲.flac',type:'file',is_audio:true,path:'专辑/01 - 测试歌曲.flac',title:'测试歌曲',artists:['测试歌手'],album:'测试专辑',audio_specs:'FLAC / 24bit / 96kHz',signature:{mtime:1}};
 const previewItem = {...track,source:track.path,source_storage:'local',source_item:{storage:'local',path:track.path,type:'file'},target:track.path,success:true,metadata:{title:'新曲名'},before:{title:track.title},music:{title:'新曲名',album:'测试专辑',artists:track.artists,group_id:'group',group_directory:'专辑',file_role:'audio',status:'matched',online_confirmed:true,read_status:'tags',field_sources:{title:'remote'},media_source:'musicbrainz',media_id:'song'}};
+
+for(const theme of ['light','dark']) for(const width of [390,1440]) test(`歌曲长标签与分页可读且不裁切 ${theme} ${width}px`,async({page,api},testInfo)=>{
+  music(api);
+  const title='少女时代 Girls’ Generation — Into The New World 现场演唱会特别版';
+  const album='The First Asia Tour Concert — Into The New World (Live Album)';
+  api.respond('GET','/api/music/library',{items:[{...track,name:`01 - ${title}.flac`}],tracks:[{...track,title,album}],total:1});
+  await page.addInitScript(theme=>localStorage.setItem('moviepilot-theme-customizer',JSON.stringify({theme,glassEnabled:false})),theme);
+  await page.setViewportSize({width,height:1100});
+  await page.goto('/music');
+  const songs=page.getByTestId('music-folder-tracks');
+  const titleButton=songs.getByRole('button',{name:`编辑标题：${title}`,exact:true});
+  await titleButton.scrollIntoViewIfNeeded();
+  const readings=await measureReadingContrast(page,[{role:'歌曲标题',locator:titleButton},{role:'专辑名',locator:songs.getByRole('button',{name:`编辑专辑：${title}`,exact:true})}]);
+  for(const reading of readings)expect(reading.contrast).toBeGreaterThanOrEqual(4.5);
+  for(const element of [titleButton,songs.getByRole('button',{name:`编辑专辑：${title}`,exact:true})]){
+    const box=await element.evaluate(node=>({width:node.clientWidth,scrollWidth:node.scrollWidth,height:node.clientHeight,scrollHeight:node.scrollHeight}));
+    expect(box.scrollWidth).toBeLessThanOrEqual(box.width+1);expect(box.scrollHeight).toBeLessThanOrEqual(box.height+1);
+  }
+  const current=page.locator('.music-pagination .v-pagination__item--is-active .v-btn');
+  await current.scrollIntoViewIfNeeded();
+  const pageReadings=await measureReadingContrast(page,[{role:'当前页',locator:current}]);
+  expect(pageReadings[0].contrast).toBeGreaterThanOrEqual(4.5);
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBeTruthy();
+  await page.screenshot({path:testInfo.outputPath(`music-readable-${theme}-${width}.png`),fullPage:true});
+  api.respond('POST','/api/music/query/explore',{items:[],charts:[{title:'流行歌曲排行榜',value:'hot'},{title:'新歌榜',value:'new'}],chart:'hot',has_more:false});
+  await page.getByRole('tab',{name:'探索',exact:true}).click();
+  await page.locator('.music-filter-row .v-chip').filter({hasText:'网易云音乐'}).click();
+  const sourceBounds=await page.locator('.music-source-chips .v-chip').evaluateAll(nodes=>nodes.map(node=>{const box=node.getBoundingClientRect(),parent=node.closest('.v-slide-group__container').getBoundingClientRect();return box.left>=parent.left-1 && box.right<=parent.right+1;}));
+  expect(sourceBounds.every(Boolean)).toBeTruthy();
+  const selectedChart=page.locator('.streaming-chart-chips .v-chip--selected .v-chip__content');
+  await selectedChart.scrollIntoViewIfNeeded();
+  const filterReadings=await measureReadingContrast(page,[{role:'已选榜单',locator:selectedChart}]);
+  expect(filterReadings[0].contrast).toBeGreaterThanOrEqual(4.5);
+  await page.screenshot({path:testInfo.outputPath(`music-filters-${theme}-${width}.png`)});
+});
+
+for(const width of [390,1440]) test(`进入目录直接显示全部歌曲并定位标签编辑 ${width}px`,async({page,api},testInfo)=>{
+  music(api);
+  const second={...track,path:'专辑/02.flac',name:'02.flac',title:'第二首歌曲'};
+  api.respond('GET','/api/music/library',{items:[track],tracks:[track,second],total:2});
+  api.respond('POST','/api/music/query/inspect',request=>({...second,path:request.body.path,lyrics:'[00:01.00]歌词'}));
+  await page.setViewportSize({width,height:1000});
+  await page.goto('/music');
+  const songs=page.getByTestId('music-folder-tracks');
+  await expect(songs).toContainText('2 首歌曲');
+  await expect(songs).toContainText('第二首歌曲');
+  expect(api.requests.filter(row=>row.path==='/api/music/query/inspect')).toHaveLength(0);
+  await page.screenshot({path:testInfo.outputPath(`music-folder-${width}.png`)});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBeTruthy();
+  await songs.getByRole('button',{name:'编辑艺术家：第二首歌曲',exact:true}).click();
+  await expect(page.getByRole('dialog')).toContainText('编辑音乐标签');
+  await expect(page.locator('[data-music-field="artists"] input')).toBeFocused();
+  expect(api.requests.find(row=>row.path==='/api/music/query/inspect').body.path).toBe(second.path);
+});
+
+test('标签支持名称与 MusicBrainz ID，流媒体专辑逐首选择，单独替换封面保留其他标签',async({page,api})=>{
+  music(api);
+  const mbid='11111111-1111-1111-1111-111111111111';
+  api.respond('POST','/api/music/query/edit_metadata',request=>request.body.selection.media_source==='musicbrainz' ? {title:'MB 曲名',media_source:'musicbrainz',media_id:mbid,music_type:'recording'} : {title:'不应覆盖的曲名',media_source:'netease',media_id:'song123',music_type:'recording',cover_url:'https://example.com/cover.jpg'});
+  await page.goto('/music');
+  await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await page.getByLabel('MusicBrainz ID',{exact:true}).fill(mbid);
+  await page.getByRole('button',{name:'读取资料',exact:true}).click();
+  await expect(page.getByLabel('标题',{exact:true})).toHaveValue('MB 曲名');
+  await page.getByRole('combobox').filter({has:page.getByLabel('资料来源',{exact:true})}).click();
+  await page.getByRole('option',{name:'网易云音乐',exact:true}).click();
+  await page.getByRole('combobox').filter({has:page.getByLabel('音乐类型',{exact:true})}).click();
+  await page.getByRole('option',{name:'专辑',exact:true}).click();
+  await expect(page.getByLabel('按名称搜索音乐资料',{exact:true})).toHaveValue(track.album);
+  await page.getByLabel('按名称搜索音乐资料',{exact:true}).fill('手工输入的专辑名');
+  api.respond('POST','/api/music/query/search',{items:[{media_source:'netease',media_id:'album123',music_type:'album',title:'专辑候选',type:'音乐'}]});
+  api.respond('POST','/api/music/query/detail',{title:'专辑候选',tracks:[{media_id:'song123',title:'封面曲目',music_type:'recording'}]});
+  await page.getByRole('button',{name:'从资料源替换封面',exact:true}).click();
+  await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/query/search').at(-1)?.body.query).toBe('手工输入的专辑名');
+  await page.locator('.media-id-selector').getByRole('button',{name:'关闭',exact:true}).click();
+  await expect(page.getByLabel('按名称搜索音乐资料',{exact:true})).toHaveValue(track.album);
+  await page.getByRole('button',{name:'从资料源替换封面',exact:true}).click();
+  await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/query/search').at(-1)?.body.query).toBe(track.album);
+  await page.getByText('专辑候选',{exact:true}).click();
+  await expect(page.getByRole('button',{name:'返回专辑',exact:true})).toBeVisible();
+  await page.getByText('封面曲目',{exact:true}).click();
+  await expect(page.getByLabel('替换封面地址',{exact:true})).toHaveValue('https://example.com/cover.jpg');
+  await expect(page.getByLabel('标题',{exact:true})).toHaveValue('MB 曲名');
+  await page.getByRole('button',{name:'预览修改',exact:true}).click();
+  const request=api.requests.find(row=>row.path==='/api/music/jobs/preview');
+  expect(request.body.metadata.media_id).toBe(mbid);
+  expect(request.body.metadata.cover_url).toBe('https://example.com/cover.jpg');
+  expect(request.body.metadata.title).toBe('MB 曲名');
+});
+
+test('歌词可搜索专辑并浏览曲目，应用前不写入',async({page,api})=>{
+  music(api);
+  api.respond('POST','/api/music/query/lyrics_search',request=>({items:request.body.album_id ? [{source:'netease',id:'song2',title:'专辑第二首',music_type:'recording'}] : request.body.kind==='album' ? [{source:'netease',id:'album1',title:'现场专辑',music_type:'album'}] : [],has_more:false}));
+  api.respond('POST','/api/music/query/lyrics_detail',{variants:[{value:'original',title:'原文',text:'[00:02]专辑歌词'}]});
+  await page.goto('/music');
+  await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await page.getByRole('button',{name:'搜索替换歌词'}).click();
+  await page.locator('.v-chip').filter({hasText:'搜索专辑'}).click();
+  await expect(page.getByLabel('搜索专辑或歌手',{exact:true})).toHaveValue(track.album);
+  await page.getByLabel('搜索专辑或歌手',{exact:true}).fill('修改后的专辑名');
+  await page.getByLabel('搜索专辑或歌手',{exact:true}).press('Enter');
+  await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/query/lyrics_search').at(-1)?.body.query).toBe('修改后的专辑名');
+  await page.getByText('现场专辑',{exact:true}).click();
+  await page.getByText('专辑第二首',{exact:true}).click();
+  await expect(page.getByLabel('歌词内容',{exact:true})).toHaveValue('[00:02]专辑歌词');
+  expect(api.requests.find(row=>row.path==='/api/music/query/lyrics_detail').body.id).toBe('song2');
+  await page.getByRole('button',{name:'应用歌词',exact:true}).click();
+  await expect(page.getByLabel('旁挂歌词（LRC / 纯文本）',{exact:true})).toHaveValue('[00:02]专辑歌词');
+  expect(api.requests.filter(row=>row.path.startsWith('/api/music/jobs/'))).toHaveLength(0);
+});
+
+test('资料选择器再次打开可按新的专辑 ID 浏览歌曲',async({page,api})=>{
+  music(api);
+  api.respond('POST','/api/music/query/detail',request=>({title:`专辑 ${request.body.id}`,tracks:[{media_id:'track1',title:`歌曲 ${request.body.id}`}]}));
+  await page.goto('/music');
+  await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await page.getByRole('combobox').filter({has:page.getByLabel('资料来源',{exact:true})}).click();
+  await page.getByRole('option',{name:'QQ 音乐',exact:true}).click();
+  await page.getByRole('combobox').filter({has:page.getByLabel('音乐类型',{exact:true})}).click();
+  await page.getByRole('option',{name:'专辑',exact:true}).click();
+  for(const identity of ['albumA','albumB']){
+    await page.getByLabel('QQ 音乐 ID',{exact:true}).fill(identity);
+    await page.getByRole('button',{name:'读取资料',exact:true}).click();
+    await expect(page.locator('.media-id-selector')).toContainText(`歌曲 ${identity}`);
+    await page.locator('.media-id-selector').getByRole('button',{name:'关闭',exact:true}).click();
+  }
+  expect(api.requests.filter(row=>row.path==='/api/music/query/detail').map(row=>row.body.id)).toEqual(['albumA','albumB']);
+});
 
 function music(api) {
   api.respond('GET','/api/music/image',{message:'没有封面'},404);
@@ -74,6 +203,7 @@ test('音乐搜索只查询本地曲库，缓存沿用 MP 表格并可删除选�
   await page.getByLabel('搜索音乐库',{exact:true}).fill('测试歌曲');
   await page.getByLabel('搜索音乐库',{exact:true}).press('Enter');
   await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/library').at(-1)?.query.query).toBe('测试歌曲');
+  await expect(page.getByTestId('music-folder-tracks')).toContainText('搜索结果');
   expect(api.requests.filter(row=>row.path==='/api/search_emby_library')).toEqual([]);
   await page.getByRole('tab',{name:'识别缓存'}).click();
   await expect(page.locator('.music-cache-panel')).toContainText('缓存曲名');
@@ -152,8 +282,7 @@ test('五个流媒体来源沿用探索卡片，榜单切换重置分页，详�
   }
   await page.getByRole('button',{name:'下一页',exact:true}).click();
   await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/query/explore').at(-1)?.body.page).toBe(2);
-  await page.getByRole('combobox').filter({has:page.getByLabel('音乐榜单',{exact:true})}).click();
-  await page.getByRole('option',{name:'新歌榜',exact:true}).click();
+  await page.locator('.streaming-chart-chips .v-chip').filter({hasText:'新歌榜'}).click();
   await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/query/explore').at(-1)?.body).toMatchObject({page:1,chart:'new'});
   await page.setViewportSize({width:390,height:900});
   await page.screenshot({path:testInfo.outputPath('music-streaming-mobile.png')});

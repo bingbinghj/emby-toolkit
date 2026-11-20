@@ -6,6 +6,15 @@ const evidence = '/root/emby-toolkit-nov11-verification/remember-login';
 mkdirSync(evidence, { recursive: true });
 test.use({ authState: 'login_required' });
 
+test('login accepts password manager values without synthetic input events', async ({ page, api }) => {
+  await page.goto('/login');
+  await page.locator('input[name="username"]').evaluate(input => { input.value = 'Saved account'; });
+  await page.locator('input[name="password"]').evaluate(input => { input.value = 'saved-password'; });
+  await page.getByRole('button', { name: '登录', exact: true }).click();
+  await expect(page).toHaveURL(/\/dashboard$/);
+  expect(api.requests.find(request => request.path === '/api/auth/login').body).toEqual({ username: 'Saved account', password: 'saved-password', remember: true });
+});
+
 for (const remember of [false, true]) {
   test(`login submits explicit remember=${remember} and never stores credentials`, async ({ page, api }) => {
     await page.goto('/login');

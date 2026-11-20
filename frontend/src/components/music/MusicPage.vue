@@ -8,6 +8,7 @@ import { useTaskStatus } from '@/composables/useTaskStatus';
 import DialogCloseBtn from '@/components/theme/DialogCloseBtn.vue';
 import MusicCard from './MusicCard.vue';
 import MusicFileBrowser from './MusicFileBrowser.vue';
+import MusicFolderTracks from './MusicFolderTracks.vue';
 import MusicTagEditor from './MusicTagEditor.vue';
 import MusicSongPreview from './MusicSongPreview.vue';
 import MusicArtistCard from './MusicArtistCard.vue';
@@ -24,7 +25,7 @@ import { musicSources, streamingSources, sourceLabel, formatMusicDuration } from
 
 const router = useRouter(), { smAndDown } = useDisplay();
 const { backgroundTaskStatus, refreshTaskStatus } = useTaskStatus();
-const directory = ref(''), exploreMore = ref(false);
+const directory = ref(''), exploreMore = ref(false), folderTracks = ref([]);
 const tab = ref('library'), query = ref(''), items = ref([]), total = ref(0), page = ref(1), pageSize = ref(50);
 const loading = ref(false), error = ref(''), selected = ref([]);
 const exploreSource = ref('musicbrainz'), doubanParams=ref({tags:'流行',douban_sort:'U',with_cover:false});
@@ -60,9 +61,10 @@ async function load() {
     if (!active || version !== request) return;
     items.value = result.items || []; total.value = result.total ?? items.value.length; exploreMore.value = result.has_more ?? items.value.length >= 30;
     if(tab.value==='explore' && isStreaming.value){charts.value=result.charts || [];streamParams.value.chart=result.chart || '';}
+    if(tab.value==='library')folderTracks.value=result.tracks || items.value.filter(item=>item.type!=='dir' && item.is_audio!==false);
     selected.value = [];
     if (Object.keys(result.errors || {}).length) error.value = Object.entries(result.errors).map(([source, text]) => `${sourceLabel(source)}：${text}`).join('；');
-  } catch (cause) { if (active && version === request) { error.value = failure(cause); items.value = []; total.value = 0; } }
+  } catch (cause) { if (active && version === request) { error.value = failure(cause); items.value = []; folderTracks.value=[]; total.value = 0; } }
   finally { if (active && version === request) loading.value = false; }
 }
 function search() { page.value = 1; load(); }
@@ -176,25 +178,33 @@ onBeforeUnmount(() => { active = false; request++; detailRequest++; editorReques
   <div class="mp-page music-page-shell">
     <div class="music-toolbar"><VTabs v-model="tab" color="primary" show-arrows><VTab value="library">音乐库</VTab><VTab value="explore">探索</VTab><VTab value="cache">识别缓存</VTab></VTabs><VSpacer /><VBtn icon="mdi-cog-outline" variant="text" aria-label="音乐设置" @click="router.push('/settings/general?tab=music')" /></div>
     <div v-if="tab !== 'explore'" class="music-toolbar my-4">
-      <VTextField v-if="tab !== 'cache'" v-model="query" :label="tab === 'library' ? '搜索音乐库' : '搜索音乐资料'" :placeholder="tab === 'library' ? '歌名、艺术家、专辑或文件名' : '单曲、专辑、艺术家'" prepend-inner-icon="mdi-magnify" variant="solo" flat rounded="pill" clearable hide-details @keyup.enter="search" @click:clear="query = ''; search()"><template #append-inner><VBtn icon="mdi-magnify" variant="text" aria-label="搜索音乐" :loading="loading" @click="search" /></template></VTextField>
+      <VTextField :mobile-layout="false" v-if="tab !== 'cache'" v-model="query" :label="tab === 'library' ? '搜索音乐库' : '搜索音乐资料'" :placeholder="tab === 'library' ? '歌名、艺术家、专辑或文件名' : '单曲、专辑、艺术家'" prepend-inner-icon="mdi-magnify" variant="solo" flat rounded="pill" clearable hide-details @keyup.enter="search" @click:clear="query = ''; search()"><template #append-inner><VBtn icon="mdi-magnify" variant="text" aria-label="搜索音乐" :loading="loading" @click="search" /></template></VTextField>
       <VBtn v-if="tab === 'library'" prepend-icon="mdi-folder-sync-outline" variant="tonal" :disabled="busy" @click="submit('scan', {})">扫描音乐库</VBtn>
       <VTextField v-if="tab === 'cache'" v-model="query" label="搜索识别缓存" prepend-inner-icon="mdi-magnify" hide-details clearable /><VBtn v-if="tab==='cache' && selectedCache.length" color="error" variant="tonal" @click="clearSelectedCache">删除选中缓存</VBtn>
       <VBtn v-if="tab === 'cache'" color="error" variant="tonal" prepend-icon="mdi-delete-outline" @click="cacheConfirm = true">清空识别缓存</VBtn>
       <VBtn v-if="preview && !busy" variant="tonal" @click="previewOpen = true">查看预览</VBtn><VBtn icon="mdi-refresh" variant="text" aria-label="刷新音乐" :loading="loading" @click="load" />
     </div>
     <VCard v-if="tab === 'explore'" class="my-4"><VCardText>
-      <div class="music-filter-row"><VLabel>来源</VLabel><VChipGroup v-model="exploreSource" mandatory show-arrows><VChip value="musicbrainz" filter tile>MusicBrainz</VChip><VChip value="doubanmusic" filter tile>豆瓣音乐</VChip><VChip v-for="source in streamingSources" :key="source.value" :value="source.value" filter tile>{{ source.title }}</VChip></VChipGroup></div>
+      <div class="music-filter-row"><VLabel>来源</VLabel><VChipGroup column color="primary" v-model="exploreSource" mandatory class="music-source-chips"><VChip value="musicbrainz" filter tile>MusicBrainz</VChip><VChip value="doubanmusic" filter tile>豆瓣音乐</VChip><VChip v-for="source in streamingSources" :key="source.value" :value="source.value" filter tile>{{ source.title }}</VChip></VChipGroup></div>
       <div v-if="error" class="d-flex ga-2 mb-3"><VBtn variant="tonal" :loading="loading" @click="load">重试</VBtn><VBtn v-if="exploreSource==='musicbrainz'" variant="text" @click="exploreSource='doubanmusic'">豆瓣音乐</VBtn></div>
       <MusicExploreFilters v-if="exploreSource === 'musicbrainz'" @change="exploreChanged" />
       <MusicDoubanFilters v-else-if="exploreSource === 'doubanmusic'" @change="doubanChanged" />
-      <div v-else class="streaming-filters"><VSelect :mobile-layout="false" v-model="streamParams.chart" :items="charts" label="音乐榜单" :loading="loading" :disabled="!charts.length" hide-details @update:model-value="search" /><VSelect :mobile-layout="false" v-if="exploreSource==='apple'" v-model="streamParams.region" :items="[{title:'中国大陆',value:'cn'},{title:'中国香港',value:'hk'},{title:'中国台湾',value:'tw'},{title:'美国',value:'us'},{title:'日本',value:'jp'},{title:'韩国',value:'kr'},{title:'英国',value:'gb'}]" label="榜单地区" hide-details @update:model-value="search" /><VBtn icon="mdi-refresh" variant="text" aria-label="刷新音乐榜单" :loading="loading" @click="load" /></div>
+      <template v-else>
+        <div class="music-filter-row"><VLabel>榜单</VLabel><VChipGroup column color="primary" v-model="streamParams.chart" mandatory class="streaming-chart-chips" @update:model-value="search"><VChip v-for="chart in charts" :key="chart.value" :value="chart.value" filter tile>{{ chart.title }}</VChip></VChipGroup></div>
+        <div v-if="exploreSource==='apple'" class="music-filter-row"><VLabel>地区</VLabel><VChipGroup column color="primary" v-model="streamParams.region" mandatory @update:model-value="search"><VChip v-for="region in [{title:'中国大陆',value:'cn'},{title:'中国香港',value:'hk'},{title:'中国台湾',value:'tw'},{title:'美国',value:'us'},{title:'日本',value:'jp'},{title:'韩国',value:'kr'},{title:'英国',value:'gb'}]" :key="region.value" :value="region.value" filter tile>{{ region.title }}</VChip></VChipGroup></div>
+      </template>
     </VCardText></VCard>
     <VAlert v-if="error || taskError" type="error" variant="tonal" class="my-3">{{ error || taskError }}</VAlert>
     <VAlert v-if="taskId" type="info" variant="tonal" class="my-3"><div class="music-toolbar"><span>{{ taskState?.current_action }} · {{ taskState?.message }}</span><VSpacer /><VBtn variant="text" to="/logs">查看日志</VBtn></div><VProgressLinear class="mt-2" :model-value="taskState?.progress" :indeterminate="!taskState?.progress_known" /></VAlert>
     <VAlert v-if="resultData && !busy" :type="resultData.failed || resultData.warning_details?.length ? 'warning' : 'success'" variant="tonal" class="my-3"><div class="music-toolbar"><span>{{ resultData.message }}</span><VSpacer /><VBtn variant="text" @click="resultOpen=true">查看详情</VBtn></div></VAlert>
     <template v-if="tab === 'library'">
+      <div class="music-workbench">
+        <div class="music-workbench-files">
       <MusicFileBrowser v-model:selected="selected" :items="items" :directory="directory" :searching="!!query" :loading="loading" :busy="busy" @navigate="navigateDirectory" @edit="openEditor" @preview="songPreview=$event" @rescrape="openAction('rescrape', $event)" />
-      <footer class="music-pagination"><VSelect v-model="pageSize" :items="[25,50,100,500,1000]" label="每页条数" hide-details density="compact" @update:model-value="search" /><span>{{ total ? (page-1)*pageSize+1 : 0 }} - {{ Math.min(page*pageSize,total) }} / {{ total }}</span><VPagination v-model="page" :length="pages" :total-visible="smAndDown ? 3 : 7" show-first-last-page color="primary" @update:model-value="load" /></footer>
+      <footer class="music-pagination"><VSelect :mobile-layout="false" v-model="pageSize" :items="[25,50,100,500,1000]" label="每页条数" hide-details density="compact" @update:model-value="search" /><span>{{ total ? (page-1)*pageSize+1 : 0 }} - {{ Math.min(page*pageSize,total) }} / {{ total }}</span><VPagination v-model="page" :length="pages" :total-visible="smAndDown ? 3 : 7" show-first-last-page color="primary" @update:model-value="load" /></footer>
+        </div>
+        <MusicFolderTracks :searching="!!query" :items="folderTracks" :directory="directory" :loading="loading" :busy="busy" @edit="openEditor" @preview="songPreview=$event" />
+      </div>
     </template>
     <MusicRecognitionCachePanel v-else-if="tab==='cache'" v-model:selected-items="selectedCache" :items="items.filter(item=>[item.title,item.album,(item.artists||[]).join(' '),item.key].join(' ').toLowerCase().includes((query||'').toLowerCase()))" :loading="loading" @delete="clearCache" />
     <template v-else><VProgressLinear v-if="loading" indeterminate color="primary" /><VRow class="mt-2"><VCol v-for="item in items" :key="`${item.media_source}:${item.music_type}:${item.media_id}`" cols="12" md="6" lg="4"><MusicCard :music="item" @open="openDetail" @artist="openDetail" @album="openDetail" /></VCol></VRow><div v-if="!loading && !items.length" class="text-center pa-8 text-medium-emphasis">暂无音乐结果</div><div v-if="tab === 'explore'" class="music-pagination"><VBtn variant="text" :disabled="page <= 1 || loading" @click="page--; load()">上一页</VBtn><span>{{ page }}</span><VBtn variant="text" :disabled="!exploreMore || loading" @click="page++; load()">下一页</VBtn></div></template>
@@ -216,7 +226,11 @@ onBeforeUnmount(() => { active = false; request++; detailRequest++; editorReques
 </template>
 
 <style scoped>
-.streaming-filters{display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-block-start:1rem;}.streaming-filters>.v-input{flex:1 1 15rem;min-inline-size:0;}
+.music-filter-row :deep(.v-chip--selected){background:rgb(var(--v-theme-primary))!important;color:rgb(var(--v-theme-on-primary))!important;}.music-filter-row :deep(.v-chip--selected :is(.v-chip__underlay, .v-chip__overlay)){opacity:0!important;}.music-filter-row :deep(.v-chip--selected .v-chip__content){color:inherit!important;}
+
+.music-workbench{display:grid;grid-template-columns:minmax(17rem,30%) minmax(0,1fr);gap:1.25rem;align-items:start;}.music-workbench-files{min-inline-size:0;}.music-pagination :deep(.v-pagination__item--is-active .v-btn){opacity:1!important;color:rgb(var(--v-theme-on-primary))!important;background:rgb(var(--v-theme-primary))!important;}.music-pagination :deep(.v-pagination__item--is-active .v-btn__content){opacity:1!important;}.streaming-chart-chips{min-inline-size:0;}.music-workbench-files .music-pagination{gap:.5rem;}.music-workbench-files .music-pagination :deep(.v-pagination){max-width:100%;}
+@media(max-width:960px){.music-workbench{grid-template-columns:minmax(0,1fr);}}
+
 .music-page-shell { min-inline-size: 0; }
 .music-toolbar,.music-selection,.music-pagination,.music-filter-row,.music-preview-header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
 .music-toolbar > .v-input { flex:1 1 220px; min-inline-size:0; }

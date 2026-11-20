@@ -7,6 +7,7 @@ from .streaming import read_json
 
 GD_API = "https://music-api.gdstudio.xyz/api.php"
 GD_SOURCES = {"netease", "joox", "bilibili"}
+ALBUM_SOURCES = {"netease", "qqmusic", "kuwo"}
 
 
 def _reserve_gd():
@@ -33,7 +34,7 @@ def _gd(params):
 
 def _source(body):
     source = body.get("source") or "netease"
-    if source not in GD_SOURCES | {"lrclib"}:
+    if source not in GD_SOURCES | {"lrclib", "qqmusic", "kuwo"}:
         raise ValueError("请选择有效的歌词来源")
     return source
 
@@ -44,6 +45,18 @@ def search(body):
     if not isinstance(query, str) or not query.strip() or len(query) > 200:
         raise ValueError("请输入不超过 200 字的歌曲或歌手名称")
     page = max(1, min(int(body.get("page", 1)), 100))
+    if body.get("kind") == "album" or body.get("album_id") or source in {"qqmusic", "kuwo"}:
+        from . import streaming_metadata
+        if body.get("kind") == "album" and source not in ALBUM_SOURCES:
+            raise ValueError("当前来源不提供专辑搜索，请选择网易云音乐、QQ 音乐或酷我音乐")
+        if body.get("album_id"):
+            album = streaming_metadata.detail(source, str(body["album_id"]), "album")
+            rows = album["tracks"]
+            result = {"items":rows[(page-1)*20:page*20],"has_more":page*20<len(rows),"page":page}
+        else:
+            result = streaming_metadata.search(source, query, body.get("kind") or "recording", page)
+        result["items"] = [{**row,"id":row["media_id"],"source":source} for row in result["items"]]
+        return result
     if source == "lrclib":
         rows = LrclibModule()._request_json("/api/search", params={"q": query.strip()})
         if not isinstance(rows, list):
@@ -67,7 +80,19 @@ def detail(body):
     source, identity = _source(body), body.get("id")
     if not isinstance(identity, str) or not re.fullmatch(r"[\w=-]{1,200}", identity, re.ASCII):
         raise ValueError("歌词 ID 无效")
-    if source == "lrclib":
+    if source == "qqmusic":
+        from .streaming_metadata import get
+        data = get("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg", {"format":"json","songmid":identity,"nobase64":1})
+        variants = [("original","原文",data.get("lyric")),("translation","译文",data.get("trans"))]
+    elif source == "kuwo":
+        data = read_json("https://m.kuwo.cn/newh5/singles/songinfoandlrc", {"musicId":identity}, "酷我音乐")
+        rows = (data.get("data") or {}).get("lrclist") or []
+        lines=[]
+        for row in rows:
+            seconds=float(row.get("time") or 0)
+            lines.append(f"[{int(seconds//60):02d}:{seconds%60:05.2f}]{row.get('lineLyric') or ''}")
+        variants = [("original","原文","\n".join(lines))]
+    elif source == "lrclib":
         if not identity.isdigit():
             raise ValueError("LRCLIB 歌词 ID 无效")
         data = LrclibModule()._request_json(f"/api/get/{identity}")

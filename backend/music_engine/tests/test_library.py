@@ -133,10 +133,27 @@ def test_browse_uses_real_artist_album_disc_tree_and_deduplicates_selection(fixt
     assert [item['name'] for item in library.browse(config)['items']] == ['歌手']
     assert [item['name'] for item in library.browse(config, '歌手')['items']] == ['专辑']
     songs = library.browse(config, '歌手/专辑/Disc 1')['items']
-    assert len(songs) == 2 and sum(item['is_audio'] for item in songs) == 1
+    assert len(songs) == 1 and songs[0]['name'] == '01.wav'
     assert library.selection(config, ['歌手','歌手/专辑/Disc 1/01.wav'])['paths'] == ['歌手/专辑/Disc 1/01.wav']
     with pytest.raises(ValueError): library.browse(config, '../seed')
     with pytest.raises(ValueError): library.selection(config, ['不允许的目录'])
+
+
+def test_folder_displays_all_tracks_reuses_tags_and_hides_sidecars(fixture, monkeypatch):
+    config, source, root = fixture
+    for name in ['01.wav', '02.wav']:
+        os.link(source, root/name)
+    (root/'cover.jpg').write_bytes(b'cover')
+    (root/'01.lrc').write_text('[00:01.00]歌词')
+    first = library.browse(config, page_size=1)
+    assert first['total'] == 2 and len(first['items']) == 1
+    assert [row['title'] for row in first['tracks']] == ['原曲名', '原曲名']
+    read = AudioMetadataHelper.read_tags
+    monkeypatch.setattr(AudioMetadataHelper, 'read_tags', lambda *_: pytest.fail('未变化的标签不应重复读取'))
+    assert library.browse(config, page=2, page_size=1)['tracks'] == first['tracks']
+    monkeypatch.setattr(AudioMetadataHelper, 'read_tags', read)
+    assert AudioMetadataHelper.write(root/'01.wav', MetaMusic(title='改后标题'), overwrite=True)
+    assert library.browse(config)['tracks'][0]['title'] == '改后标题'
 
 
 def test_manual_lyrics_atomic_save_preserves_seed_audio_and_linked_lyrics(fixture):

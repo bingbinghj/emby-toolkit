@@ -11,6 +11,26 @@ def dispatch(request):
     config, body = request.get("config", {}), request.get("body", {})
     configure(config, request["cache_dir"])
     action = request["action"]
+    streaming_sources = {"netease", "qqmusic", "apple", "kugou", "kuwo"}
+    manual_source = body.get("source")
+    if action == "search":
+        manual_source = (body.get("sources") or [None])[0]
+    elif action == "edit_metadata":
+        manual_source = (body.get("selection") or {}).get("media_source")
+    if action in {"search", "detail", "edit_metadata"} and manual_source in streaming_sources:
+        from etk_music import streaming_metadata
+        from etk_music.runtime import request_budget
+        with request_budget(30):
+            if action == "search":
+                return streaming_metadata.search(manual_source, body.get("query"), body.get("kind") or "recording", body.get("page",1), body.get("count",20))
+            if action == "edit_metadata":
+                from etk_music import library
+                library.target(config, body["path"])
+                selected = body["selection"]
+                if selected.get("music_type") == "album":
+                    raise ValueError("请在专辑中选择对应歌曲")
+                return streaming_metadata.detail(manual_source, selected["media_id"])
+            return streaming_metadata.detail(manual_source, body["id"], body.get("kind") or "recording")
     if action in {"library", "selection", "scope", "scan", "scan_batch", "scan_finish", "inspect", "image", "preview_groups", "audio_path"}:
         from etk_music import library
     elif action in {"preview", "execute", "cleanup"}:

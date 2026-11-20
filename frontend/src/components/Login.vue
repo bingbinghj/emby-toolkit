@@ -20,41 +20,18 @@
         </div>
 
         <VCardText class="login-body pa-0">
-          <VForm ref="formRef" class="login-form" autocomplete="on" @submit.prevent="handleLogin">
-            <VTextField
-              v-model="credentials.username"
-              label="用户名"
-              placeholder="请输入用户名"
-              name="username"
-              autocomplete="username"
-              autocapitalize="none"
-              spellcheck="false"
-              enterkeyhint="next"
-              prepend-inner-icon="mdi-account-outline"
-              :rules="usernameRules"
-              :readonly="loading"
-              :mobile-layout="false"
-              class="mb-4"
-              autofocus
-            />
-            <VTextField
-              v-model="credentials.password"
-              label="密码"
-              placeholder="请输入密码"
-              name="password"
-              autocomplete="current-password"
-              :type="isPasswordVisible ? 'text' : 'password'"
-              prepend-inner-icon="mdi-lock-outline"
-              :readonly="loading"
-              :mobile-layout="false"
-              class="mb-5"
-            >
-              <template #append-inner>
-                <button type="button" class="password-toggle" :aria-label="isPasswordVisible ? '隐藏密码' : '显示密码'" @click="isPasswordVisible = !isPasswordVisible">
-                  <VIcon :icon="isPasswordVisible ? 'mdi-eye-off-outline' : 'mdi-eye-outline'" size="20" />
-                </button>
-              </template>
-            </VTextField>
+          <form ref="formRef" class="login-form" method="post" action="/api/auth/login" autocomplete="on" @submit.prevent="handleLogin">
+            <div class="native-login-field mb-4">
+              <VIcon icon="mdi-account-outline" aria-hidden="true" />
+              <input id="username" v-model="credentials.username" type="text" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" enterkeyhint="next" aria-label="用户名" placeholder="请输入用户名" :readonly="loading" required autofocus />
+            </div>
+            <div class="native-login-field mb-5">
+              <VIcon icon="mdi-lock-outline" aria-hidden="true" />
+              <input id="password" v-model="credentials.password" name="password" autocomplete="current-password" :type="isPasswordVisible ? 'text' : 'password'" aria-label="密码" placeholder="请输入密码" :readonly="loading" />
+              <button type="button" class="password-toggle" :aria-label="isPasswordVisible ? '隐藏密码' : '显示密码'" @click="isPasswordVisible = !isPasswordVisible">
+                <VIcon :icon="isPasswordVisible ? 'mdi-eye-off-outline' : 'mdi-eye-outline'" size="20" />
+              </button>
+            </div>
             <div class="d-flex align-center justify-space-between flex-wrap mb-6">
               <label class="native-login-checkbox login-checkbox">
                 <input v-model="remember" class="native-login-checkbox__input" type="checkbox" name="remember" :disabled="loading" />
@@ -66,7 +43,7 @@
             <div class="footer-links">
               <VBtn variant="text" size="small" @click="showRecoveryModal = true">无法登录？重置连接配置</VBtn>
             </div>
-          </VForm>
+          </form>
         </VCardText>
         <div class="login-foot">Emby Toolkit · 媒体处理与管理</div>
       </VCard>
@@ -119,17 +96,20 @@ const showRecoveryModal = ref(false);
 const tokenSent = ref(false);
 const recoveryToken = ref('');
 const recoveryLoading = ref(false);
-const usernameRules = [value => !!String(value || '').trim() || '请输入用户名'];
 let isPageActive = true;
 onBeforeUnmount(() => { isPageActive = false; });
 
 async function handleLogin() {
   if (!isPageActive || loading.value) return;
+  // 与 MP 一致：密码管理器可能只写入 DOM，提交时同步自动填充值。
+  for (const key of ['username', 'password']) {
+    const input = formRef.value?.querySelector(`input[name="${key}"]`);
+    if (input) credentials.value[key] = input.value;
+  }
+  if (!credentials.value.username.trim() || !formRef.value?.reportValidity()) return;
   loading.value = true;
   errorMessage.value = '';
   try {
-    const validation = await formRef.value?.validate();
-    if (!isPageActive || !validation?.valid) return;
     const applied = await authStore.login({ ...credentials.value, remember: remember.value });
     if (!isPageActive || !applied) return;
     message.success('登录成功');
@@ -199,6 +179,10 @@ async function verifyToken() {
 .login-logo { height:64px; width:64px; object-fit:contain; margin-bottom:16px; }
 .login-title { font-size:1.85rem; font-weight:600; margin:0 0 8px; }
 .login-subtitle { margin:0; color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity,.6)); font-size:.875rem; }
+.native-login-field { display:flex; align-items:center; gap:12px; min-height:52px; padding:8px 12px; border:1px solid rgba(var(--v-theme-on-surface),.38); border-radius:8px; background:rgba(var(--v-theme-surface),.7); }
+.native-login-field:focus-within { border-color:rgb(var(--v-theme-primary)); outline:1px solid rgb(var(--v-theme-primary)); }
+.native-login-field input { flex:1; width:100%; min-width:0; color:rgb(var(--v-theme-on-surface)); font:inherit; outline:none; background:transparent; }
+.native-login-field input::placeholder { color:rgba(var(--v-theme-on-surface),.65); opacity:1; }
 .password-toggle { display:flex; align-items:center; color:inherit; padding:4px; border-radius:50%; cursor:pointer; }
 .password-toggle:focus-visible { outline:2px solid rgb(var(--v-theme-primary)); outline-offset:2px; }
 /* 原生保持登录复选框，避免使用全局 VCheckbox 小屏适配布局。 */
