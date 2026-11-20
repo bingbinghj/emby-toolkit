@@ -1,5 +1,7 @@
 export const musicSources = [{ title: 'MusicBrainz', value: 'musicbrainz' }, { title: 'TheAudioDB', value: 'theaudiodb' }, { title: '豆瓣音乐', value: 'doubanmusic' }];
-export const sourceLabel = source => musicSources.find(item => item.value === source)?.title || '本地音乐';
+export const streamingSources = [{title:'网易云音乐',value:'netease'},{title:'QQ 音乐',value:'qqmusic'},{title:'Apple Music',value:'apple'},{title:'酷狗音乐',value:'kugou'},{title:'酷我音乐',value:'kuwo'}];
+export const lyricSources = [{title:'网易云音乐 · GD 音乐台',value:'netease'},{title:'LRCLIB',value:'lrclib'},{title:'JOOX · GD 音乐台',value:'joox'},{title:'Bilibili · GD 音乐台',value:'bilibili'}];
+export const sourceLabel = source => [...musicSources,...streamingSources,...lyricSources].find(item => item.value === source)?.title || '本地音乐';
 export function formatMusicDuration(seconds) {
   if (!Number.isFinite(Number(seconds)) || Number(seconds) <= 0) return '';
   const total = Math.round(Number(seconds));

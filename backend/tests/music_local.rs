@@ -86,6 +86,58 @@ async fn local_music_scan_preview_write_and_cleanup_preserve_seed() {
         docker: Arc::default(),
     };
     let app = emby_toolkit::music::router().with_state(state.clone());
+    // 试听为只读，支持 Range/HEAD；不能读取库外文件或非音频旁挂文件。
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/music/audio?path=song.wav")
+                .header("range", "bytes=4-15")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 206);
+    assert_eq!(
+        response.headers()["content-range"],
+        format!("bytes 4-15/{}", original.len())
+    );
+    assert_eq!(
+        to_bytes(response.into_body(), 100).await.unwrap().as_ref(),
+        &original[4..16]
+    );
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("HEAD")
+                .uri("/api/music/audio?path=song.wav")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+    assert_eq!(
+        response.headers()["content-length"],
+        original.len().to_string()
+    );
+    assert!(to_bytes(response.into_body(), 1).await.unwrap().is_empty());
+    for path in ["../seed/source.wav", "/etc/passwd", "song.txt"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/music/audio?path={path}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status().as_u16(), 400);
+    }
+    assert_eq!(std::fs::read(seed.join("source.wav")).unwrap(), original);
     let (status, initial) = request(&app, "GET", "/api/music/library", json!({})).await;
     assert_eq!(status, 200, "{initial}");
     assert_eq!(initial["total"], 0);

@@ -4,7 +4,7 @@ import { computed, ref, watch } from 'vue';
 import { useDisplay } from 'vuetify';
 const props = defineProps({ items: Array, directory: String, loading: Boolean, busy: Boolean, searching: Boolean });
 const selected = defineModel('selected', { default: () => [] });
-const emit = defineEmits(['navigate', 'edit', 'rescrape', 'refresh']);
+const emit = defineEmits(['navigate', 'edit', 'rescrape', 'refresh', 'preview']);
 const { smAndDown } = useDisplay();
 const selectMode = ref(false), sort = ref('name'), descending = ref(false);
 const name = item => item.name || item.path.split('/').pop();
@@ -47,7 +47,7 @@ watch(() => props.directory, () => { selectMode.value = false; selected.value = 
           <div class="file-row__label"><span class="file-row__filename" :title="name(item)">{{ name(item) }}</span><small v-if="searching" class="text-medium-emphasis file-row__path">{{ item.path }}</small><small v-if="smAndDown" class="text-medium-emphasis">{{ [bytes(item.size),date(item)].filter(Boolean).join(' · ') }}</small></div>
         </div>
         <span class="file-row__size">{{ bytes(item.size) }}</span><span class="file-row__time">{{ date(item) }}</span>
-        <template #append><VMenu v-if="!selectMode && selectable(item)"><template #activator="{ props: menuProps }"><VBtn v-bind="menuProps" icon="mdi-dots-horizontal" variant="text" :aria-label="`操作 ${name(item)}`" @click.stop @keydown.stop /></template><VList><VListItem v-if="item.type!=='dir'" title="编辑标签" prepend-icon="mdi-pencil-outline" @click="emit('edit',item)" /><VListItem title="重新刮削" prepend-icon="mdi-music-box-outline" :disabled="busy" @click="emit('rescrape',[item.path])" /></VList></VMenu></template>
+        <template #append><VBtn v-if="!selectMode && item.type!=='dir' && item.is_audio!==false" icon="mdi-play-circle-outline" variant="text" :aria-label="`预览 ${name(item)}`" @click.stop="emit('preview',item)" @keydown.stop /><VMenu v-if="!selectMode && selectable(item)"><template #activator="{ props: menuProps }"><VBtn v-bind="menuProps" icon="mdi-dots-horizontal" variant="text" :aria-label="`操作 ${name(item)}`" @click.stop @keydown.stop /></template><VList><VListItem v-if="item.type!=='dir'" title="歌曲预览" prepend-icon="mdi-play-circle-outline" @click="emit('preview',item)" /><VListItem v-if="item.type!=='dir'" title="编辑标签" prepend-icon="mdi-pencil-outline" @click="emit('edit',item)" /><VListItem title="重新刮削" prepend-icon="mdi-music-box-outline" :disabled="busy" @click="emit('rescrape',[item.path])" /></VList></VMenu></template>
       </VListItem>
     </template></VVirtualScroll>
     <div v-else class="text-center pa-8 text-medium-emphasis">{{ searching ? '没有匹配的音乐，请先扫描音乐库更新搜索索引' : '此目录为空' }}</div>
@@ -60,12 +60,12 @@ watch(() => props.directory, () => { selectMode.value = false; selected.value = 
 .file-list__selection>.v-input{flex:0 1 auto;min-inline-size:12rem;}
 .file-breadcrumbs{display:flex;align-items:center;flex:1 1 12rem;min-inline-size:0;flex-wrap:wrap;}
 .file-breadcrumbs :deep(.v-btn){max-inline-size:100%;height:auto;min-height:36px;}.file-breadcrumbs :deep(.v-btn__content){white-space:normal;overflow-wrap:anywhere;}
-.file-list__columns{display:grid;grid-template-columns:minmax(0,1fr) 6rem 10rem 2.75rem;gap:1rem;padding:1rem;font-size:.875rem;border-block:1px solid rgba(var(--v-border-color),var(--v-border-opacity));}
+.file-list__columns{display:grid;grid-template-columns:minmax(0,1fr) 6rem 10rem 5.5rem;gap:1rem;padding:1rem;font-size:.875rem;border-block:1px solid rgba(var(--v-border-color),var(--v-border-opacity));}
 .file-list__columns>button{text-align:start;}
 .file-list-container{padding:0;max-block-size:65vh;overflow:auto;}
 .file-row{min-block-size:3.625rem;padding-inline:1rem .5rem;border-block-end:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:0;cursor:pointer;}
 .file-row :deep(.v-list-item__content){display:grid;grid-template-columns:minmax(0,1fr) 6rem 10rem;align-items:center;gap:1rem;}
-.file-row :deep(.v-list-item__append){inline-size:2.75rem;margin-inline-start:1rem;justify-content:center;}
+.file-row :deep(.v-list-item__append){inline-size:5.5rem;margin-inline-start:1rem;justify-content:flex-end;}
 .file-row--active{background:rgba(var(--v-theme-primary),.1);border-radius:12px;}
 .file-row__name{display:flex;align-items:center;gap:.75rem;min-inline-size:0;}
 .file-row__label{display:flex;flex-direction:column;min-inline-size:0;}

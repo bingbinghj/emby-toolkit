@@ -11,10 +11,18 @@ def dispatch(request):
     config, body = request.get("config", {}), request.get("body", {})
     configure(config, request["cache_dir"])
     action = request["action"]
-    if action in {"library", "selection", "scope", "scan", "scan_batch", "scan_finish", "inspect", "image", "preview_groups"}:
+    if action in {"library", "selection", "scope", "scan", "scan_batch", "scan_finish", "inspect", "image", "preview_groups", "audio_path"}:
         from etk_music import library
     elif action in {"preview", "execute", "cleanup"}:
         from etk_music import operations
+    elif action in {"lyrics_search", "lyrics_detail"}:
+        from etk_music import lyrics_search
+        from etk_music.runtime import request_budget
+        with request_budget(25):
+            return (lyrics_search.search if action == "lyrics_search" else lyrics_search.detail)(body)
+    elif action == "explore" and body.get("source") in {"netease", "qqmusic", "apple", "kugou", "kuwo"}:
+        from etk_music import streaming
+        return streaming.explore(body)
     else:
         from etk_music import catalog
     if action=="library":
@@ -47,6 +55,8 @@ def dispatch(request):
         return library.inspect(config, body["path"])
     if action=="image":
         return library.image(config, body["path"])
+    if action=="audio_path":
+        return {"path": str(library.target(config, body["path"]).resolve(strict=True))}
     if action=="search":
         sources = body.get("sources") or config.get("music_sources") or ["musicbrainz"]
         if not isinstance(sources,list) or not 1<=len(sources)<=3 or any(source not in {"musicbrainz","theaudiodb","doubanmusic"} for source in sources):

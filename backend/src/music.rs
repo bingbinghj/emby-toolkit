@@ -6,7 +6,7 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, Query, Request, State},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -69,6 +69,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/music/library", get(library))
         .route("/api/music/image", get(image))
+        .route("/api/music/audio", get(audio))
         .route("/api/music/query/{action}", post(query))
         .route("/api/music/jobs/{action}", post(submit))
 }
@@ -299,11 +300,37 @@ async fn query(
             | "cache"
             | "selection"
             | "edit_metadata"
+            | "lyrics_search"
+            | "lyrics_detail"
     ) {
         return Err(ApiError::bad("未知音乐查询"));
     }
     let config = state.config.read().await.clone();
     Ok(Json(engine(&state, &action, body, &config, None).await?))
+}
+
+async fn audio(
+    State(state): State<AppState>,
+    Query(query): Query<HashMap<String, String>>,
+    request: Request,
+) -> Result<Response> {
+    let path = query
+        .get("path")
+        .ok_or_else(|| ApiError::bad("请选择本地音乐"))?;
+    let config = state.config.read().await.clone();
+    let value = engine(&state, "audio_path", json!({"path":path}), &config, None).await?;
+    let path = value["path"]
+        .as_str()
+        .ok_or_else(|| ApiError::bad("音乐路径无效"))?;
+    // 复用静态文件服务的 Range/HEAD 实现，拖动试听无需将整首歌曲读入内存。
+    let response = tower_http::services::ServeFile::new(path)
+        .try_call(request)
+        .await?;
+    let mut response = response.into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "private, no-store".parse().unwrap());
+    Ok(response)
 }
 
 async fn submit(

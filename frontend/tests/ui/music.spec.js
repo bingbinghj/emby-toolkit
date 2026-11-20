@@ -108,6 +108,110 @@ test('音乐库按真实目录浏览歌手、专辑、歌曲，目录选择仅�
   await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/library').at(-1)?.query.directory).toBe('歌手');
 });
 
+for(const width of [390,1440]) test(`歌曲预览和歌词替换在 ${width}px 可用且应用前不写入`,async({page,api},testInfo)=>{
+  music(api);
+  api.respond('POST','/api/music/query/lyrics_search',{items:[{id:'lyric-live',source:'netease',title:'测试歌曲（现场版）',artists:['测试歌手'],album:'现场演唱会'}],has_more:false});
+  api.respond('POST','/api/music/query/lyrics_detail',{variants:[{value:'original',title:'原文',text:'[00:10.00]新的现场歌词'},{value:'translation',title:'译文',text:'[00:10.00]翻译后的歌词'}]});
+  await page.setViewportSize({width,height:900});
+  await page.goto('/music');
+  await page.getByRole('button',{name:`预览 ${track.name}`,exact:true}).click();
+  await expect(page.getByRole('dialog')).toContainText('歌曲预览');
+  await expect(page.locator('audio')).toHaveAttribute('preload','none');
+  await expect(page.locator('audio')).toHaveAttribute('src',`/api/music/audio?path=${encodeURIComponent(track.path)}`);
+  await page.getByRole('button',{name:'编辑歌词',exact:true}).click();
+  await expect(page.getByRole('dialog')).toContainText('编辑音乐标签');
+  await page.getByRole('button',{name:'搜索替换歌词'}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(1);
+  await expect(page.getByRole('dialog')).toContainText('搜索并替换歌词');
+  await page.getByText('测试歌曲（现场版）',{exact:true}).click();
+  await expect(page.getByLabel('歌词内容',{exact:true})).toHaveValue('[00:10.00]新的现场歌词');
+  await page.screenshot({path:testInfo.outputPath('music-lyrics-search.png')});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBeTruthy();
+  expect(api.requests.filter(row=>row.path.startsWith('/api/music/jobs/'))).toHaveLength(0);
+  await page.getByRole('button',{name:'应用歌词',exact:true}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(1);
+  await expect(page.getByRole('dialog')).toContainText('编辑音乐标签');
+  await expect(page.getByLabel('旁挂歌词（LRC / 纯文本）',{exact:true})).toHaveValue('[00:10.00]新的现场歌词');
+  expect(api.requests.filter(row=>row.path.startsWith('/api/music/jobs/'))).toHaveLength(0);
+  await page.getByRole('button',{name:'预览修改',exact:true}).click();
+  const request=api.requests.find(row=>row.path==='/api/music/jobs/preview');
+  expect(request.body.metadata.lyrics).toBe('[00:10.00]新的现场歌词');
+  expect(request.body.paths).toEqual([track.path]);
+});
+
+test('五个流媒体来源沿用探索卡片，榜单切换重置分页，详情不混用资料源',async({page,api},testInfo)=>{
+  music(api);
+  api.respond('POST','/api/music/query/explore',request=>({items:[{media_source:request.body.source,media_id:'123',music_type:'recording',title:'榜单歌曲',artists:['榜单歌手'],album:'榜单专辑',detail_link:'https://music.apple.com/cn/album/test/123'}],charts:[{title:'热门歌曲',value:'hot'},{title:'新歌榜',value:'new'}],chart:request.body.chart || 'hot',total:60,has_more:request.body.page<2}));
+  await page.goto('/music');
+  await page.getByRole('tab',{name:'探索',exact:true}).click();
+  for(const [label,source] of [['网易云音乐','netease'],['QQ 音乐','qqmusic'],['Apple Music','apple'],['酷狗音乐','kugou'],['酷我音乐','kuwo']]) {
+    await page.locator('.music-filter-row .v-chip').filter({hasText:label}).click();
+    await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/query/explore').at(-1)?.body.source).toBe(source);
+    await expect(page.locator('.music-card')).toContainText('榜单歌曲');
+    await expect(page.locator('.music-card')).toContainText(label);
+  }
+  await page.getByRole('button',{name:'下一页',exact:true}).click();
+  await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/query/explore').at(-1)?.body.page).toBe(2);
+  await page.getByRole('combobox').filter({has:page.getByLabel('音乐榜单',{exact:true})}).click();
+  await page.getByRole('option',{name:'新歌榜',exact:true}).click();
+  await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/query/explore').at(-1)?.body).toMatchObject({page:1,chart:'new'});
+  await page.setViewportSize({width:390,height:900});
+  await page.screenshot({path:testInfo.outputPath('music-streaming-mobile.png')});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBeTruthy();
+  await page.locator('.music-card').click();
+  await expect(page.getByRole('dialog')).toContainText('榜单歌曲');
+  expect(api.requests.filter(row=>row.path==='/api/music/query/detail')).toHaveLength(0);
+});
+
+test('取消歌词搜索不改变编辑中的歌词，来源错误可读',async({page,api})=>{
+  music(api);
+  api.respond('POST','/api/music/query/lyrics_search',{message:'GD 音乐台暂时无法连接，请稍后重试'},400);
+  await page.goto('/music');
+  await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await page.getByRole('button',{name:'搜索替换歌词'}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(1);
+  await expect(page.getByRole('dialog')).toContainText('GD 音乐台暂时无法连接');
+  await page.getByRole('button',{name:'取消',exact:true}).click();
+  await expect(page.getByLabel('旁挂歌词（LRC / 纯文本）',{exact:true})).toHaveValue('[00:01.00]测试歌词');
+  expect(api.requests.filter(row=>row.path.startsWith('/api/music/jobs/'))).toHaveLength(0);
+});
+
+test('试听按需读取音频，可跳转歌词且关闭后停止',async({page,api})=>{
+  music(api);
+  const wave=Buffer.alloc(44+8000*2*6);
+  wave.write('RIFF');wave.writeUInt32LE(wave.length-8,4);wave.write('WAVEfmt ',8);wave.writeUInt32LE(16,16);wave.writeUInt16LE(1,20);wave.writeUInt16LE(1,22);wave.writeUInt32LE(8000,24);wave.writeUInt32LE(16000,28);wave.writeUInt16LE(2,32);wave.writeUInt16LE(16,34);wave.write('data',36);wave.writeUInt32LE(wave.length-44,40);
+  let reads=0;
+  await page.route('**/api/music/audio?*',route=>{reads++;return route.fulfill({status:200,contentType:'audio/wav',body:wave,headers:{'Accept-Ranges':'bytes'}});});
+  await page.goto('/music');
+  await page.getByRole('button',{name:`预览 ${track.name}`,exact:true}).click();
+  const audio=page.locator('audio');
+  await expect(audio).toBeVisible();expect(reads).toBe(0);
+  await audio.evaluate(async node=>{window.__testAudio=node;await node.play();});
+  await expect.poll(()=>audio.evaluate(node=>node.currentTime)).toBeGreaterThan(0);
+  await page.getByRole('button',{name:'跳至 1.00 秒：测试歌词'}).click();
+  await expect.poll(()=>audio.evaluate(node=>node.currentTime)).toBeGreaterThanOrEqual(1);
+  await page.getByRole('button',{name:'关闭',exact:true}).last().click();
+  await expect.poll(()=>page.evaluate(()=>window.__testAudio.paused)).toBe(true);
+});
+
+test('切换歌词候选后忽略前一首的延迟响应',async({page,api})=>{
+  music(api);
+  api.respond('POST','/api/music/query/lyrics_search',{items:[{id:'one',source:'netease',title:'版本一'},{id:'two',source:'netease',title:'版本二'}]});
+  const pending=api.defer('POST','/api/music/query/lyrics_detail');
+  await page.goto('/music');
+  await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await page.getByRole('button',{name:'搜索替换歌词'}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(1);
+  await page.getByText('版本一',{exact:true}).click();await pending.started;
+  api.respond('POST','/api/music/query/lyrics_detail',{variants:[{value:'original',title:'原文',text:'[00:02.00]版本二歌词'}]});
+  await page.getByText('版本二',{exact:true}).click();
+  await expect(page.getByLabel('歌词内容',{exact:true})).toHaveValue('[00:02.00]版本二歌词');
+  pending.release({variants:[{value:'original',title:'原文',text:'[00:01.00]过期歌词'}]});
+  await page.getByRole('button',{name:'应用歌词',exact:true}).click();
+  await expect(page.getByRole('dialog')).toHaveCount(1);
+  await expect(page.getByLabel('旁挂歌词（LRC / 纯文本）',{exact:true})).toHaveValue('[00:02.00]版本二歌词');
+});
+
 test('标签编辑内搜索填入资料，歌词偏移进入同一次预览', async({page,api})=>{
   music(api);
   api.respond('POST','/api/music/query/edit_metadata',{title:'填入的曲名',album:'所选专辑'});

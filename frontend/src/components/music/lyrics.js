@@ -14,3 +14,14 @@ export function shiftLyrics(text, seconds) {
   if (!count) throw new Error('当前歌词没有 LRC 时间标签');
   return output;
 }
+
+export function parseLyrics(text = '') {
+  const offset = Number(text.match(/\[offset:([+-]?\d+)\]/i)?.[1] || 0) / 1000;
+  const rows = [];
+  for (const line of text.split(/\r?\n/)) {
+    const stamps = [...line.matchAll(/\[(\d+):(\d{2})(?:[.:](\d+))?\]/g)];
+    const content = line.replace(/\[\d+:\d{2}(?:[.:]\d+)?\]|<\d+:\d{2}(?:[.:]\d+)?>/g, '').trim();
+    for (const stamp of stamps) rows.push({time: Math.max(0, Number(stamp[1])*60 + Number(stamp[2]) + Number(`0.${stamp[3] || 0}`) - offset), text:content});
+  }
+  return rows.sort((a,b)=>a.time-b.time);
+}
