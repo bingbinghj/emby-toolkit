@@ -291,6 +291,33 @@ pub(crate) async fn resume_cleanup(state: &AppState, context: &JobContext) -> Re
         } else if tokio::fs::try_exists(&directory).await? {
             if !tokio::fs::try_exists(directory.join("original-settings.json")).await? {
                 tokio::fs::remove_dir_all(&directory).await?;
+            } else if !tokio::fs::try_exists(directory.join("media-reload.json")).await?
+                && !tokio::fs::try_exists(directory.join("pending-scan.json")).await?
+            {
+                // The settings lease precedes read-only resource capture. A
+                // capture fallback can leave settings without a media journal.
+                let original = crate::media_recovery::read_json(
+                    &directory.join("original-settings.json"),
+                ).await?;
+                let applied = crate::strm::recovery_applied_settings(&directory, &original).await?;
+                crate::strm::finish_media_recovery(
+                    state, &original, applied.as_ref(), || async { Ok(()) },
+                ).await?;
+                // Only the pre-publish capture directory is read-only. An
+                // unknown journal must remain available for recovery.
+                let mut entries = tokio::fs::read_dir(&directory).await?;
+                while let Some(entry) = entries.next_entry().await? {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    let kind = entry.file_type().await?;
+                    let settings = kind.is_file() && matches!(name.as_ref(), "original-settings.json" | "applied-settings.json");
+                    let capture = kind.is_dir() && name.strip_prefix("ingest-refresh-")
+                        .is_some_and(|suffix| uuid::Uuid::parse_str(suffix).is_ok());
+                    if !settings && !capture {
+                        return Err(ApiError::bad("媒体恢复目录存在未确认记录，设置已还原，保留记录供恢复"));
+                    }
+                }
+                tokio::fs::remove_dir_all(&directory).await?;
             } else {
                 crate::media_reload::ingest_preservation::finish_saved_guard(
                     state, &directory, context,

@@ -1555,6 +1555,13 @@ async fn moviepilot_legacy_fuse_event_checks_current_cloud_content_without_manif
     let mut event = json!({"source":"moviepilot","files":fixture.files,"tmdb_id":"101","batch_key":"legacy-initial"});
     let first = fixture.run_moviepilot_event(event.clone()).await;
     assert_eq!(first["result"]["updated"], 1, "{first}");
+    // Old Python/sync records already describe this exact file but have no new
+    // workflow receipts. A broad series notification must not re-import it.
+    sqlx::query("UPDATE media_metadata SET asset_details_json=(SELECT jsonb_agg(a - 'moviepilot_ingest_identity' - 'moviepilot_media_identity' - 'moviepilot_media_pending') FROM jsonb_array_elements(asset_details_json) a) WHERE item_type IN ('Movie','Episode')")
+        .execute(&fixture.state.db).await.unwrap();
+    event["batch_key"] = json!("legacy-existing-file");
+    let legacy = fixture.run_moviepilot_event(event.clone()).await;
+    assert_eq!(legacy["result"]["updated"], 0, "{legacy}");
     fixture
         .cloud_version("10002", &"B".repeat(40), "hevc")
         .await;

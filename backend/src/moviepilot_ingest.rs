@@ -159,12 +159,34 @@ pub(crate) async fn completed(state: &AppState, identity: &Identity) -> Result<b
     let marked = slot(state, &identity.id)
         .await?
         .is_some_and(|(row, index)| {
+            let asset = &row["asset_details_json"][index];
             row["in_library"] == true
-                && row["asset_details_json"][index]["moviepilot_ingest_identity"]
-                    == identity.revision()
+                && (asset["moviepilot_ingest_identity"] == identity.revision()
+                    || legacy_file_matches(&row, index, identity))
         });
     // This marks completion of the ingestion workflow, not a media-edit audit.
     Ok(marked)
+}
+
+fn legacy_file_matches(row: &Value, index: usize, identity: &Identity) -> bool {
+    let asset = &row["asset_details_json"][index];
+    let Some(cloud) = &identity.cloud else { return false; };
+    // Older Python/sync admissions have no workflow receipt. Reuse their
+    // verified file identity; a partially executed new workflow still retries.
+    asset["moviepilot_ingest_identity"].is_null()
+        && asset["moviepilot_media_identity"].is_null()
+        && asset["moviepilot_media_pending"] != true
+        && asset["fingerprint_pending"] != true
+        && asset["path"] == identity.path
+        && row["emby_item_ids_json"][index] == identity.id
+        && string(cloud, "sha1").len() == 40
+        && row["file_sha1_json"][index].as_str().is_some_and(|sha| {
+            sha.eq_ignore_ascii_case(&string(cloud, "sha1"))
+        })
+        && row["file_pickcode_json"][index] == cloud["pick_code"]
+        && crate::identity::size(&asset["size_bytes"]).is_some_and(|size| {
+            Some(size) == crate::identity::size(&cloud["size"])
+        })
 }
 
 async fn write_identity(
@@ -274,4 +296,30 @@ pub(crate) async fn clear_pending(state: &AppState, item: &Value) -> Result<()> 
         .bind(string(&row, "tmdb_id")).bind(string(&row, "item_type"))
         .bind(index as i32).bind(string(item, "Path")).bind(string(item, "Id")).execute(&state.db).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn legacy_admission_reuses_only_the_same_verified_cloud_file() {
+        let cloud = json!({"sha1":"A".repeat(40),"pick_code":"pc","size":123});
+        let identity = Identity { id:"old".into(), path:"/library/old.strm".into(), source:None,
+            entity:cloud.clone(), cloud:Some(cloud), relative:None };
+        let row = json!({"emby_item_ids_json":["old"],"file_sha1_json":["a".repeat(40)],
+            "file_pickcode_json":["pc"],"asset_details_json":[{"path":identity.path,"size_bytes":123}]});
+        assert!(legacy_file_matches(&row, 0, &identity));
+        for (key, value) in [("moviepilot_media_pending", json!(true)), ("fingerprint_pending",json!(true)),
+            ("moviepilot_media_identity",json!({})), ("moviepilot_ingest_identity",json!({})),
+            ("size_bytes",json!(124)), ("path",json!("/other.strm"))] {
+            let mut changed = row.clone(); changed["asset_details_json"][0][key] = value;
+            assert!(!legacy_file_matches(&changed, 0, &identity), "{key}");
+        }
+        for key in ["file_sha1_json", "file_pickcode_json", "emby_item_ids_json"] {
+            let mut changed=row.clone(); changed[key][0]=json!("replacement");
+            assert!(!legacy_file_matches(&changed, 0, &identity), "{key}");
+        }
+        let mut unknown = identity; unknown.cloud=None;
+        assert!(!legacy_file_matches(&row, 0, &unknown));
+    }
 }

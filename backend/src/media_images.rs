@@ -437,7 +437,11 @@ pub(crate) async fn sync_local_images(
             .map_err(|_| ApiError::bad("原图片定点更新记录无效，未覆盖当前图片"))?;
         let already_matches = native.as_deref() == Some(bytes.as_slice())
             || native.as_deref().and_then(|data| image::load_from_memory(data).ok())
-                .is_some_and(|native_image| visible_pixels(native_image) == visible_pixels(local_image));
+                // Ingest imports MP's existing sidecar; Emby may have already
+                // stored a JPEG recompression of it. Explicit image replacement
+                // still uses verify_image's stricter stale-image check.
+                .is_some_and(|native_image| pixel_difference(&visible_pixels(native_image), &visible_pixels(local_image))
+                    .is_some_and(|difference| difference <= 3.0));
         let imported = if already_matches {
             true
         } else if native != previous {
@@ -773,6 +777,22 @@ pub(crate) async fn resume_cleanup(state: &AppState, context: &crate::jobs::JobC
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ingest_tolerance_accepts_jpeg_recompression_but_not_another_cover() {
+        let image = image::RgbImage::from_fn(64, 64, |x,y| image::Rgb([(x*3) as u8,(y*3) as u8,80]));
+        let encode = |quality| {
+            let mut bytes=vec![];
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes,quality).encode_image(&image).unwrap();
+            visible_pixels(image::load_from_memory(&bytes).unwrap())
+        };
+        let original=encode(95);
+        let recompressed=encode(80);
+        assert_ne!(original,recompressed);
+        assert!(pixel_difference(&original,&recompressed).unwrap() <= 3.0);
+        let wrong=image::RgbaImage::from_pixel(64,64,image::Rgba([255,0,0,255]));
+        assert!(pixel_difference(&original,&wrong).unwrap() > 3.0);
+    }
+
     #[test]
     fn invisible_png_rgb_is_ignored_but_visible_color_and_alpha_are_verified() {
         let pixels = |rgb: u8, alpha: u8| visible_pixels(image::DynamicImage::ImageRgba8(

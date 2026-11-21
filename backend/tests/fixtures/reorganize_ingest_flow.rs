@@ -1132,6 +1132,18 @@ async fn reorganize_restart_reuses_verified_stages_and_cleans_uuid_recovery_with
             "a successful guard must already have cleaned its resources: {path}"
         );
     }
+    // A failed read-only capture on older releases leaves settings and partial
+    // snapshots, but never publishes media-reload.json. This must not block
+    // startup recovery or the next unrelated (e.g. music) job.
+    let settings_only = std::path::Path::new(paths[0].as_str().unwrap());
+    std::fs::create_dir_all(settings_only.join(format!("ingest-refresh-{}", uuid::Uuid::new_v4().simple()))).unwrap();
+    let settings = fixture.host.configuration.lock().await.clone();
+    std::fs::write(settings_only.join("original-settings.json"), serde_json::to_vec(&json!({"ExclusiveControlFeatures":settings["ExclusiveControlFeatures"]})).unwrap()).unwrap();
+    let applied_features = settings["ExclusiveControlFeatures"].as_str().unwrap().split(',')
+        .filter(|value| !value.is_empty() && !["CatchAllAllow", "ExtractOnFileChange", "IgnoreFileChange"].contains(value))
+        .chain(std::iter::once("IgnoreFileChange")).collect::<Vec<_>>().join(",");
+    std::fs::write(settings_only.join("applied-settings.json"), serde_json::to_vec(&json!({"ExclusiveControlFeatures":applied_features})).unwrap()).unwrap();
+    fixture.host.configuration.lock().await["ExclusiveControlFeatures"] = json!(applied_features);
     // 模拟收尾已持久登记、但进程尚未来得及登记任务终态的中断。
     sqlx::query(
         "DELETE FROM durable_job_steps WHERE job_id=$1 AND step_key='completed:__job_result__'",
@@ -1164,6 +1176,8 @@ async fn reorganize_restart_reuses_verified_stages_and_cleans_uuid_recovery_with
             .fetch_one(&fixture.state.db)
             .await
             .unwrap();
+    assert!(!settings_only.exists(), "verified settings-only capture must be cleaned");
+    assert_eq!(*fixture.host.configuration.lock().await, settings);
     assert_eq!(resumed["status"], "completed", "{resumed}");
     assert_eq!(resumed["task_id"], row["task_id"], "{resumed}");
     assert_eq!(fixture.host.items.lock().await["101"], original_native);

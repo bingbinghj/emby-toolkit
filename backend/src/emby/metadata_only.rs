@@ -507,6 +507,18 @@ pub(crate) async fn apply(
     {
         return Err(ApiError::bad("元数据目标身份或路径已变化，未提交更新"));
     }
+    // Emby writes the NFO back after Items/{id}. A later image retry must
+    // resume after this completed step, not reinterpret that native write.
+    if let Some(done) = context.completed("done").await? {
+        let intent = context
+            .plan("intent")
+            .await?
+            .ok_or_else(|| ApiError::bad("已完成元数据更新缺少原目标记录"))?;
+        if MEDIA.iter().any(|field| before[*field] != intent["original"][*field]) {
+            return Err(ApiError::bad("已完成元数据更新的媒体身份或资源已变化"));
+        }
+        return Ok(done);
+    }
     let path = string(&before, "Path");
     if !Path::new(&path).is_absolute()
         || crate::media_save::protected(&*state.config.read().await, &path)
@@ -642,6 +654,46 @@ pub(crate) async fn apply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn completed_metadata_replay_ignores_rewritten_nfo_but_checks_media_identity() {
+        use std::sync::Arc;
+        let directory = tempfile::tempdir().unwrap();
+        let target = json!({"Id":"episode","Type":"Episode","Path":directory.path().join("episode.strm"),"Size":123});
+        let live = Arc::new(tokio::sync::RwLock::new(target.clone()));
+        let app = axum::Router::new().route("/Users/user/Items/episode", axum::routing::get({
+            let live=live.clone(); move || {let live=live.clone(); async move {axum::Json(live.read().await.clone())}}
+        }));
+        let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url=format!("http://{}",listener.local_addr().unwrap());
+        let server=tokio::spawn(async move {axum::serve(listener,app).await.unwrap()});
+        let db=sqlx::PgPool::connect_lazy("postgres://localhost/unused").unwrap(); db.close().await;
+        let state=AppState {
+            db, config:Arc::new(tokio::sync::RwLock::new(json!({"emby_server_url":url,"emby_api_key":"mock","emby_user_id":"user"}))),
+            http:reqwest::Client::new(), sessions:Arc::new(crate::auth::SessionSigner::load(directory.path()).unwrap()),
+            recovery_tokens:Arc::default(), data_dir:directory.path().into(), notifications:Arc::default(),webhooks:Arc::default(),
+            ai:Arc::default(),jobs:Arc::default(),logs:crate::logs::LogStore::open(&directory.path().join("logs")).unwrap(),
+            p115:Arc::default(),strm:Arc::default(),douban:Arc::default(),docker:Arc::default(),
+        };
+        let work=state.clone();
+        let task=state.jobs.submit("元数据完成后重试",move |context| async move {
+            let scope=context.scoped("metadata-only:episode");
+            let report=json!({"completed":true,"item_id":"episode"});
+            scope.save_plan("intent",&json!({"original":target,"nfo":"original NFO"})).await?;
+            scope.complete("done",&report).await?;
+            // The native NFO need not even remain readable after completion.
+            assert_eq!(apply(&work,&target,&context,&[]).await?,report);
+            live.write().await["Size"]=json!(456);
+            assert!(apply(&work,&target,&context,&[]).await.is_err());
+            Ok(json!({"verified":true}))
+        }).await.unwrap();
+        let result=tokio::time::timeout(std::time::Duration::from_secs(5),async {
+            loop {let result=state.jobs.result(&task).await.unwrap(); if result["is_running"]==false {break result;}
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;}
+        }).await.unwrap();
+        assert_eq!(result["state"],"completed","{result}");
+        server.abort();
+    }
+
     #[tokio::test]
     async fn selected_season_nfos_must_agree_across_all_confirmed_directories() {
         let directory = tempfile::tempdir().unwrap();
