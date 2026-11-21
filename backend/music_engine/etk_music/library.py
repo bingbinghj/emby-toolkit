@@ -160,7 +160,7 @@ def inspect(config, relative):
     from .lyrics import read_lyrics
     # 文件身份经过浏览器回传；纳秒时间和 inode 不得被 JavaScript Number 舍入。
     identity = {key: str(value) for key, value in signature(path).items()}
-    return {"path": relative, **info, "signature": identity, **read_lyrics(path), "write_mode": "isolate" if path.is_symlink() or path.stat().st_nlink > 1 else "independent"}
+    return {"path": relative, **info, "signature": identity, **read_lyrics(path), "music_cue_enable": config.get("music_cue_enable", True), "write_mode": "isolate" if path.is_symlink() or path.stat().st_nlink > 1 else "independent"}
 
 
 def directory(config, relative=""):

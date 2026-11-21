@@ -117,7 +117,7 @@ def _explore(body):
             "errors": {body.get("source") or "musicbrainz": observed.message} if observed.failed else {}}
 
 
-def recognize(path, sources, selected=None):
+def recognize(path, sources, selected=None, track_match="strict"):
     """保留原始标签证据，指纹只确认录音，不伪造发行版本。"""
     path = Path(path)
     meta, tags, filename = AudioMetadataHelper.read_evidence(path)
@@ -132,7 +132,7 @@ def recognize(path, sources, selected=None):
         if selected.get("music_type") == "album":
             from .matching import expand_music_tracks
             tracks, _ = expand_music_tracks([meta])
-            aligned = align_music_tracks(tracks, info.tracks, allow_title_override=True)
+            aligned = align_music_tracks(tracks, info.tracks, allow_title_override=True, track_match=track_match)
             if len(aligned) != len(tracks):
                 raise ValueError("所选发行版本与当前曲目无法唯一对位，请纠正专辑或曲序")
             if meta.music_layout == "image_cue":

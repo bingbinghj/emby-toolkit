@@ -3,6 +3,7 @@
 from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
+import re
 from typing import Optional, Literal
 from .audio import AudioMetadataHelper
 from .models import MusicAlbumInfo, MusicInfo
@@ -170,6 +171,10 @@ class SourceAlbums:
 
 def recognize_group(files, metas, sources, selected=None, directory=None, track_match="strict"):
     from .catalog import provider, detail
+    if selected and track_match == "sequential" and files:
+        # MP 按完整路径自然排序；保持路径与本地证据同步，避免 10 排在 2 前。
+        ordered = sorted(zip(files, metas), key=lambda row: [int(part) if part.isdigit() else part.casefold() for part in re.split(r"(\d+)", str(row[0]))])
+        files, metas = map(list, zip(*ordered))
     if selected:
         album = detail(selected["media_source"], selected["media_id"], "album", selected.get("musicbrainz_release_id"))
         if not album or not album.tracks:

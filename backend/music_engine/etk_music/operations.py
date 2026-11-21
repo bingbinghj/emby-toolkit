@@ -137,6 +137,9 @@ def preview(config, body):
                 raise ValueError(errors[relative])
             path, identity, meta = evidence[relative]
             if operation == "edit":
+                # 手选专辑沿用读取时的对齐策略；纯手改标签无需在线识别。
+                if selected:
+                    catalog.recognize(path, sources, selected, track_match)
                 # Manual edits start with stored tags; filename/folder guesses
                 # must not rewrite audio when only sidecar lyrics are changed.
                 info = MusicInfo.from_meta(AudioMetadataHelper.read_tags(path) or MetaMusic())

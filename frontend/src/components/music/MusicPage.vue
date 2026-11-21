@@ -1,6 +1,7 @@
 <!-- Music layouts and controls adapted from MoviePilot-Frontend v3 db17d9c (MIT). -->
 <script setup>
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue';
+import { useElementBounding, useWindowSize } from '@vueuse/core';
 import axios from 'axios';
 import { useDisplay } from 'vuetify';
 import { useRouter } from 'vue-router';
@@ -22,10 +23,20 @@ import MusicIdSelector from './MusicIdSelector.vue';
 import MusicExploreFilters from './MusicExploreFilters.vue';
 import MusicRecognitionCachePanel from './MusicRecognitionCachePanel.vue';
 import MusicReleaseSelect from './MusicReleaseSelect.vue';
+import MusicProcessingOptions from './MusicProcessingOptions.vue';
 import { groupMusicPreview } from './previewState';
 import { musicSources, streamingSources, sourceLabel, formatMusicDuration, musicReleaseError } from './utils';
 
 const router = useRouter(), { smAndDown } = useDisplay();
+// 沿用媒体整理的可视高度计算，列表滚动时分页保留在内容区底部。
+const pageElement=ref(null), contentBottomInset=ref(24);
+const {top:pageTop}=useElementBounding(pageElement);
+const {width:viewportWidth,height:viewportHeight}=useWindowSize();
+const libraryHeight=computed(()=>Math.max(0,viewportHeight.value-Math.max(0,pageTop.value)-contentBottomInset.value));
+watch([pageElement,viewportWidth,viewportHeight],()=>{
+  const layout=pageElement.value?.closest('.layout-page-content');
+  if(layout)contentBottomInset.value=parseFloat(getComputedStyle(layout).paddingBottom) || 0;
+},{flush:'post'});
 const { backgroundTaskStatus, refreshTaskStatus } = useTaskStatus();
 const directory = ref(''), exploreMore = ref(false), folderTracks = ref([]);
 const tab = ref('library'), query = ref(''), items = ref([]), total = ref(0), page = ref(1), pageSize = ref(50);
@@ -170,7 +181,7 @@ async function poll() {
   if (active && taskId.value) polling = setTimeout(poll, 1500);
 }
 function previewAction() { if(selectedReleaseError.value){taskError.value=selectedReleaseError.value;return;} if(selection.value?.musicbrainz_release_id)selection.value.musicbrainz_release_id=selection.value.musicbrainz_release_id.trim().toLowerCase(); submit('preview', { operation: action.value, paths: actionPaths.value, selection: selection.value, selections:corrections.value, music_type:musicType.value, music_track_match:trackMatch.value, music_cue_enable:cueEnable.value, collection_root:collectionRoot.value }); }
-function saveEditor(metadata) { action.value = 'edit'; submit('preview', { operation: 'edit', paths: [metadata.path], metadata }); }
+function saveEditor(metadata, options) { action.value = 'edit'; submit('preview', { operation: 'edit', paths: [metadata.path], metadata, ...options }); }
 async function clearSelectedCache() {try{await api('cache',{keys:selectedCache.value});selectedCache.value=[];load();}catch(cause){error.value=failure(cause);}}
 async function clearCache(key) {
   try { await api('cache', key ? { key } : { clear: true }); cacheConfirm.value = false; load(); }
@@ -187,7 +198,7 @@ onBeforeUnmount(() => { active = false; request++; detailRequest++; editorReques
 </script>
 
 <template>
-  <div class="mp-page music-page-shell">
+  <div ref="pageElement" class="mp-page music-page-shell" :class="{'music-page-shell--library':tab==='library'}" :style="tab==='library' ? {blockSize:`${libraryHeight}px`} : undefined">
     <div class="music-toolbar"><VTabs v-model="tab" color="primary" show-arrows><VTab value="library">音乐库</VTab><VTab value="explore">探索</VTab><VTab value="cache">识别缓存</VTab></VTabs><VSpacer /><VBtn icon="mdi-cog-outline" variant="text" aria-label="音乐设置" @click="router.push('/settings/general?tab=music')" /></div>
     <div v-if="tab !== 'explore'" class="music-toolbar my-4">
       <VTextField :mobile-layout="false" v-if="tab !== 'cache'" v-model="query" :label="tab === 'library' ? '搜索音乐库' : '搜索音乐资料'" :placeholder="tab === 'library' ? '歌名、艺术家、专辑或文件名' : '单曲、专辑、艺术家'" prepend-inner-icon="mdi-magnify" variant="solo" flat rounded="pill" clearable hide-details @keyup.enter="search" @click:clear="query = ''; search()"><template #append-inner><VBtn icon="mdi-magnify" variant="text" aria-label="搜索音乐" :loading="loading" @click="search" /></template></VTextField>
@@ -218,13 +229,11 @@ onBeforeUnmount(() => { active = false; request++; detailRequest++; editorReques
         </div>
         <MusicFolderTracks :searching="!!query" :items="folderTracks" :directory="directory" :loading="loading" :busy="busy" @edit="openEditor" @preview="songPreview=$event" />
       </div>
-      <Teleport to="body">
-        <VFooter app role="contentinfo" height="auto" color="surface" class="music-library-footer" aria-label="音乐库分页">
+        <footer role="contentinfo" class="music-library-footer" aria-label="音乐库分页">
           <VSelect :mobile-layout="false" v-model="pageSize" :items="[25,50,100,500,1000]" density="compact" variant="solo" flat rounded="pill" hide-details aria-label="每页条数" title="每页条数" class="music-page-size" @update:model-value="search" />
           <span class="music-pagination-info text-medium-emphasis">{{ total ? (page-1)*pageSize+1 : 0 }} - {{ Math.min(page*pageSize,total) }} / {{ total }}</span>
           <VPagination v-model="page" class="mp-pagination" :length="pages" :total-visible="smAndDown ? 3 : 7" show-first-last-page @update:model-value="load" />
-        </VFooter>
-      </Teleport>
+        </footer>
     </template>
     <MusicRecognitionCachePanel v-else-if="tab==='cache'" v-model:selected-items="selectedCache" :items="items.filter(item=>[item.title,item.album,(item.artists||[]).join(' '),item.key].join(' ').toLowerCase().includes((query||'').toLowerCase()))" :loading="loading" @delete="clearCache" />
     <template v-else><VProgressLinear v-if="loading" indeterminate color="primary" /><VRow class="mt-2"><VCol v-for="item in items" :key="`${item.media_source}:${item.music_type}:${item.media_id}`" cols="12" md="6" lg="4"><MusicCard :music="item" @open="openDetail" @artist="openDetail" @album="openDetail" /></VCol></VRow><div v-if="!loading && !items.length" class="text-center pa-8 text-medium-emphasis">暂无音乐结果</div><div v-if="tab === 'explore'" class="music-pagination"><VBtn variant="text" :disabled="page <= 1 || loading" @click="page--; load()">上一页</VBtn><span>{{ page }}</span><VBtn variant="text" :disabled="!exploreMore || loading" @click="page++; load()">下一页</VBtn></div></template>
@@ -245,9 +254,7 @@ onBeforeUnmount(() => { active = false; request++; detailRequest++; editorReques
             <VTextField class="mb-4" :model-value="selection ? `${sourceLabel(selection.media_source)} · ${selection.media_id}` : ''" label="指定音乐或专辑" placeholder="留空自动识别" readonly clearable @click:clear="selection = null"><template #append-inner><VBtn icon="mdi-magnify" variant="text" aria-label="选择音乐资料" @click="selectorOpen = true" /></template></VTextField>
             <MusicReleaseSelect v-if="selection?.media_source === 'musicbrainz' && selection?.music_type === 'album'" v-model="selection.musicbrainz_release_id" :album-id="selection.media_id" :disabled="busy" @loading="releaseLoading=$event" @error="releaseLoadError=$event" />
           </template>
-          <VSwitch v-model="cueEnable" label="识别 CUE" color="primary" hint="仅应用于本次刮削" persistent-hint class="mb-4" />
-          <VSelect v-if="musicType==='album'" v-model="trackMatch" label="曲目对齐方式" prepend-inner-icon="mdi-playlist-check" :items="[{title:'严格校验',value:'strict'},{title:'忽略时长',value:'ignore_duration'},{title:'跳过对齐验证',value:'sequential'}]" hint="指定专辑时使用所选方式核对曲目" persistent-hint />
-          <VAlert v-if="musicType==='album' && trackMatch==='sequential'" type="warning" variant="tonal" class="mt-3">按文件顺序匹配专辑曲目，请先核对文件顺序和曲目数量。</VAlert>
+          <MusicProcessingOptions v-model:cue-enable="cueEnable" v-model:track-match="trackMatch" :entity="musicType" :disabled="busy" />
         </VCardText><VDivider /><VCardActions class="app-dialog-actions"><VSpacer /><VBtn color="default" variant="text" @click="actionOpen = false">取消</VBtn><VBtn color="primary" variant="flat" :disabled="busy || releaseLoading || !actionPaths.length || !!selectedReleaseError" @click="previewAction">预览</VBtn></VCardActions>
       </VCard>
     </VDialog>
@@ -266,13 +273,15 @@ onBeforeUnmount(() => { active = false; request++; detailRequest++; editorReques
 .music-workbench{display:grid;grid-template-columns:minmax(15rem,19rem) minmax(0,1fr);gap:1.25rem;align-items:start;}.music-workbench-files{min-inline-size:0;}.streaming-chart-chips{min-inline-size:0;}
 @media(max-width:960px){.music-workbench{grid-template-columns:minmax(0,1fr);}}
 
-.music-library-footer{position:fixed!important;display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-start;background:rgb(var(--v-theme-surface))!important;gap:.75rem;padding:.75rem 1rem;border-block-start:1px solid rgba(var(--v-border-color),var(--v-border-opacity));box-shadow:0 -3px 14px rgba(0,0,0,.06);}.music-library-footer :deep(.v-pagination){max-inline-size:100%;margin-inline-start:auto;}
+.music-page-shell--library{display:flex;flex-direction:column;min-block-size:0;overflow:hidden;}
+.music-page-shell--library>*{flex-shrink:0;}
+.music-page-shell--library .music-workbench{flex:1 1 auto;min-block-size:0;overflow:auto;overscroll-behavior:contain;}
+.music-library-footer{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding-block-start:12px;}.music-library-footer :deep(.v-pagination){max-inline-size:100%;margin-inline-start:auto;}
 .music-page-size{flex:0 0 100px;}.music-pagination-info{font-size:.8rem;}
 .music-page-size :deep(.v-field){border:0!important;border-radius:var(--app-vuetify-rounded-pill);background:rgba(var(--v-theme-surface-variant),.04)!important;box-shadow:none!important;min-block-size:42px;}
 .music-page-size :deep(.v-field__outline),.music-page-size :deep(.v-field__overlay){display:none;}
 .music-library-footer :deep(:is(.v-pagination__item,.v-pagination__first,.v-pagination__prev,.v-pagination__next,.v-pagination__last)){margin-block:0;}
 @media(max-width:540px){.music-library-footer :deep(.v-pagination){inline-size:100%;}.music-library-footer :deep(.v-pagination__list){justify-content:flex-end;}}
-@media(max-width:1279px){.music-library-footer{padding-block-end:calc(80px + env(safe-area-inset-bottom));}}
 .music-page-shell { min-inline-size: 0; }
 .music-toolbar,.music-selection,.music-pagination,.music-filter-row,.music-preview-header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
 .music-toolbar > .v-input { flex:1 1 220px; min-inline-size:0; }

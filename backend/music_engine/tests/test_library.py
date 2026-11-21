@@ -832,3 +832,73 @@ def test_single_preview_can_be_corrected_to_a_selected_album(fixture, monkeypatc
     assert preview['items'][0]['success'], preview
     assert preview['items'][0]['metadata']['title'] == '纠正曲名'
     assert preview['items'][0]['music']['group_directory'] == 'song.wav'
+
+
+def test_editor_album_alignment_reaches_read_preview_and_seed_safe_save(fixture, tmp_path, monkeypatch):
+    """时长冲突仅可显式忽略，预览重新核验；写入仍隔离做种硬链接。"""
+    from worker import dispatch
+    from etk_music.models import MusicAlbumInfo, MusicInfo
+    config, source, root = fixture
+    os.link(source, root/'song.wav')
+    before = source.read_bytes()
+    album = MusicAlbumInfo(title='专辑', media_source='musicbrainz', media_id='album', tracks=[
+        MusicInfo(title='所选曲名', artists=['歌手'], track_number=1, duration=200, media_source='musicbrainz', media_id='11111111-1111-1111-1111-111111111111')])
+    monkeypatch.setattr(operations.catalog, 'detail', lambda *_: album)
+    selection = {'media_source':'musicbrainz','media_id':'album','music_type':'album'}
+    body = {'path':'song.wav','paths':['song.wav'],'operation':'edit','selection':selection,'music_type':'album','music_cue_enable':False}
+    def run(action):
+        return dispatch({'action':action,'config':config,'body':body,'cache_dir':str(tmp_path/'cache')})
+    with pytest.raises(ValueError, match='唯一对位'):
+        run('edit_metadata')
+    body['music_track_match'] = 'ignore_duration'
+    identified = run('edit_metadata')
+    assert identified['title'] == '所选曲名'
+    body['metadata'] = {**library.inspect(config,'song.wav'), **{key:identified[key] for key in ('title','artists','media_source','media_id')}}
+    body['metadata']['title'] = '用户核对后手改'
+    preview = run('preview')['items'][0]
+    assert preview['success'] and preview['music_cue_enable'] is False, preview
+    assert preview['metadata']['title'] == '用户核对后手改'
+    assert source.samefile(root/'song.wav') and source.read_bytes() == before
+    body['music_track_match'] = 'strict'
+    assert run('preview')['items'][0]['success'] is False
+    result = dispatch({'action':'execute','config':config,'body':{'item':preview,'operation':'edit','execution_id':'cafe-90'},'cache_dir':str(tmp_path/'cache')})
+    assert result['success']
+    assert AudioMetadataHelper.read(root/'song.wav').title == '用户核对后手改'
+    assert not source.samefile(root/'song.wav') and source.read_bytes() == before
+
+
+def test_editor_cue_override_applies_to_read_and_preview_without_changing_setting(fixture, tmp_path, monkeypatch):
+    from worker import dispatch
+    from etk_music.audio import music_cue_enabled
+    from etk_music.models import MusicInfo
+    config, source, root = fixture
+    os.link(source, root/'song.wav')
+    (root/'song.cue').write_text('FILE "song.wav" WAVE\n TRACK 01 AUDIO\n TITLE "损坏 CUE"\n',encoding='utf8')
+    monkeypatch.setattr(operations.catalog,'detail',lambda *_:MusicInfo(title='读取的曲名'))
+    body = {'path':'song.wav','paths':['song.wav'],'operation':'edit','metadata':{'title':'手改曲名'},'selection':{'media_source':'musicbrainz','media_id':'song','music_type':'recording'}}
+    def run(action):
+        return dispatch({'action':action,'config':config,'body':body,'cache_dir':str(tmp_path/'cache')})
+    with pytest.raises(ValueError,match='CUE'):
+        run('edit_metadata')
+    assert run('preview')['items'][0]['success'] is False
+    body['music_cue_enable'] = False
+    assert run('edit_metadata')['title'] == '读取的曲名'
+    assert run('preview')['items'][0]['success']
+    assert music_cue_enabled() is True
+
+
+def test_sequential_album_uses_natural_paths_and_requires_equal_count(fixture, tmp_path, monkeypatch):
+    from worker import dispatch
+    from etk_music.models import MusicAlbumInfo, MusicInfo
+    config, source, root = fixture
+    for name in ['10.wav','2.wav']: os.link(source,root/name)
+    album = MusicAlbumInfo(title='专辑', media_source='musicbrainz', media_id='album', tracks=[
+        MusicInfo(title='第一曲',track_number=1,media_source='musicbrainz',media_id='one'),
+        MusicInfo(title='第二曲',track_number=2,media_source='musicbrainz',media_id='two')])
+    monkeypatch.setattr(operations.catalog,'detail',lambda *_:album)
+    selection={'media_source':'musicbrainz','media_id':'album','music_type':'album'}
+    rows=operations.preview(config,{'paths':['10.wav','2.wav'],'selection':selection,'music_track_match':'sequential'})['items']
+    assert all(row['success'] for row in rows), rows
+    assert {row['path']:row['metadata']['title'] for row in rows} == {'2.wav':'第一曲','10.wav':'第二曲'}
+    with pytest.raises(ValueError,match='唯一对位'):
+        dispatch({'action':'edit_metadata','config':config,'cache_dir':str(tmp_path/'cache'),'body':{'path':'2.wav','selection':selection,'music_track_match':'sequential'}})

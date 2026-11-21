@@ -4,8 +4,9 @@ import { measureReadingContrast } from './reading-contrast.js';
 const track = {name:'01 - 测试歌曲.flac',type:'file',is_audio:true,path:'专辑/01 - 测试歌曲.flac',title:'测试歌曲',artists:['测试歌手'],album:'测试专辑',audio_specs:'FLAC / 24bit / 96kHz',signature:{mtime:1}};
 const previewItem = {...track,source:track.path,source_storage:'local',source_item:{storage:'local',path:track.path,type:'file'},target:track.path,success:true,metadata:{title:'新曲名'},before:{title:track.title},music:{title:'新曲名',album:'测试专辑',artists:track.artists,group_id:'group',group_directory:'专辑',file_role:'audio',status:'matched',online_confirmed:true,read_status:'tags',field_sources:{title:'remote'},media_source:'musicbrainz',media_id:'song'}};
 
-for(const width of [390,1440]) test(`备注描述编辑预览及清空保持可读 ${width}px`,async({page,api},testInfo)=>{
+for(const theme of ['light','dark'])for(const width of [390,1440]) test(`备注描述编辑预览及清空保持可读 ${theme} ${width}px`,async({page,api},testInfo)=>{
   music(api); await page.setViewportSize({width,height:1000});
+  await page.addInitScript(theme=>localStorage.setItem('moviepilot-theme-customizer',JSON.stringify({theme,glassEnabled:true,glassAppearance:'frosted',glassQuality:'css'})),theme);
   const comment='Ripped by test', description='现场演唱会简介\n保留原有时间与版本信息';
   api.respond('POST','/api/music/query/inspect',{...track,comment,description});
   api.respond('GET','/api/tasks/result/music-preview',{task_id:'music-preview',is_running:false,state:'completed',result_status:200,result:{preview:{operation:'edit',items:[{...previewItem,before:{comment,description},metadata:{comment:'修改后的备注\n第二行',description:''},tag_updates:{comment:['修改后的备注\n第二行'],description:[]}}]}}});
@@ -19,14 +20,24 @@ for(const width of [390,1440]) test(`备注描述编辑预览及清空保持可�
   await expect(page.getByRole('button',{name:'保存修改',exact:true})).toBeEnabled();
   const dialog=page.locator('.v-dialog.v-overlay--active').filter({hasText:'音乐修改预览'});
   await expect(dialog).toContainText(comment);await expect(dialog).toContainText('修改后的备注');await expect(dialog).toContainText('已清空');
+  await expect(dialog.locator('article.v-card')).toHaveCount(1);
+  const changed=dialog.getByRole('region',{name:'备注',exact:true});
+  await expect(changed).toContainText('当前值');await expect(changed).toContainText('修改后');
+  const before=changed.locator('.music-field-value').first().locator('p'),after=changed.locator('.music-field-value--after p');
+  await expect(before).toHaveText(comment);await expect(after).toHaveText('修改后的备注\n第二行');
+  for(const probe of [{role:'当前备注',locator:before},{role:'修改后备注',locator:after}]){
+    await probe.locator.scrollIntoViewIfNeeded();
+    for(const reading of await measureReadingContrast(page,[probe]))expect(reading.contrast).toBeGreaterThanOrEqual(4.5);
+    const size=await probe.locator.evaluate(node=>({width:node.clientWidth,scrollWidth:node.scrollWidth}));expect(size.scrollWidth).toBeLessThanOrEqual(size.width+1);
+  }
   const request=api.requests.find(row=>row.path==='/api/music/jobs/preview');
   expect(request.body.metadata.comment).toBe('修改后的备注\n第二行');expect(request.body.metadata.description).toBe('');
   expect(api.requests.filter(row=>row.path==='/api/music/jobs/execute')).toHaveLength(0);
   expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBeTruthy();
   await page.screenshot({path:testInfo.outputPath('comment-preview.png')});
   await page.getByRole('button',{name:'返回编辑',exact:true}).click();
-  await expect(page.getByLabel('备注',{exact:true})).toHaveValue('修改后的备注\n第二行');
-  await expect(page.getByLabel('简介 / 描述',{exact:true})).toHaveValue('');
+  await expect(page.getByLabel('备注',{exact:true}).and(page.locator('textarea'))).toHaveValue('修改后的备注\n第二行');
+  await expect(page.getByLabel('简介 / 描述',{exact:true}).and(page.locator('textarea'))).toHaveValue('');
 });
 
 test('歌曲资料、封面及歌词默认只搜索曲名，关闭后重置关键词',async({page,api})=>{
@@ -69,7 +80,7 @@ for(const theme of ['light','dark']) for(const width of [390,1440]) test(`歌曲
     const box=await element.evaluate(node=>({width:node.clientWidth,scrollWidth:node.scrollWidth,height:node.clientHeight,scrollHeight:node.scrollHeight}));
     expect(box.scrollWidth).toBeLessThanOrEqual(box.width+1);expect(box.scrollHeight).toBeLessThanOrEqual(box.height+1);
   }
-  const current=page.locator('.music-library-footer .v-pagination__item--is-active .v-btn');
+  const current=page.locator('.music-library-footer .v-pagination__item--is-active .v-btn__content');
   await current.scrollIntoViewIfNeeded();
   const pageReadings=await measureReadingContrast(page,[{role:'当前页',locator:current}]);
   expect(pageReadings[0].contrast).toBeGreaterThanOrEqual(4.5);
@@ -755,7 +766,7 @@ for(const width of [390,1440]) test(`音乐分页按 MP 左右排列且固定可
   await page.goto('/music');
   const footer=page.getByRole('contentinfo',{name:'音乐库分页'});
   await expect(footer).toBeVisible();
-  expect(await footer.evaluate(node=>getComputedStyle(node).backgroundColor)).toMatch(/^rgb\(/);
+  expect(await footer.evaluate(node=>getComputedStyle(node).backgroundColor)).toBe('rgba(0, 0, 0, 0)');
   const start=await footer.boundingBox();expect(start.y+start.height).toBeLessThanOrEqual(1001);expect(start.y).toBeGreaterThan(0);
   expect(await page.getByTestId('music-library').locator('nav[aria-label="音乐目录"]').count()).toBe(0);
   await expect(page.getByTestId('music-library-path')).not.toContainText('/media/Media/Link/Music');
@@ -814,7 +825,7 @@ for(const theme of ['light','dark'])for(const width of [390,1440])test(`音乐�
   api.respond('POST','/api/music/query/lyrics_translate',{translation:'[00:01]再次重逢的世界 — 检查歌词显示及按钮是否完整可读',bilingual:'[00:01]Into The New World\n[00:01]再次重逢的世界',provider:'youdao'});
   await page.goto('/music');
   const footer=page.getByRole('contentinfo',{name:'音乐库分页'});
-  const current=footer.locator('.v-pagination__item--is-active .v-btn');
+  const current=footer.locator('.v-pagination__item--is-active .v-btn__content');
   await expect(current).toBeVisible();
   for(const reading of await measureReadingContrast(page,[{role:'当前页码',locator:current}]))expect(reading.contrast).toBeGreaterThanOrEqual(4.5);
   await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();await page.getByRole('button',{name:'机器翻译',exact:true}).click();await page.getByRole('button',{name:'开始翻译',exact:true}).click();
@@ -857,6 +868,42 @@ test('艺术家合集隐藏统一专辑选择并保留目录范围',async({page,
   await page.getByRole('button',{name:'预览',exact:true}).click();
   const body=api.requests.find(row=>row.path==='/api/music/jobs/preview').body;
   expect(body.music_type).toBe('artist_collection');expect(body.collection_root).toBe('歌手');expect(body.selection).toBeNull();
+});
+
+for(const width of [390,1440]) test(`标签编辑的对齐与 CUE 贯穿读取预览保存 ${width}px`,async({page,api},testInfo)=>{
+  music(api);await page.setViewportSize({width,height:1000});
+  const group='11111111-1111-1111-1111-111111111111';
+  api.respond('POST','/api/music/query/inspect',{...track,music_cue_enable:false});
+  api.respond('POST','/api/music/query/detail',{media_source:'musicbrainz',media_id:group,title:'专辑',musicbrainz_release_id:'22222222-2222-2222-2222-222222222222',releases:[{media_id:'22222222-2222-2222-2222-222222222222',title:'发行版'}]});
+  api.respond('POST','/api/music/query/edit_metadata',{title:'识别曲名'});
+  api.respond('GET','/api/tasks/result/music-preview',{state:'completed',result:{preview:{operation:'edit',items:[previewItem]}}});
+  await page.goto('/music');await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await expect(page.getByRole('checkbox',{name:'识别 CUE',exact:true})).not.toBeChecked();
+  await page.getByRole('combobox').filter({has:page.getByLabel('音乐类型',{exact:true})}).click();
+  await expect(page.getByRole('option',{name:'艺术家合集',exact:true})).toHaveCount(0);
+  await page.getByRole('option',{name:'专辑',exact:true}).click();
+  await page.getByRole('combobox').filter({has:page.getByLabel('曲目对齐方式',{exact:true})}).click();
+  for(const name of ['严格校验','忽略时长','跳过对齐验证'])await expect(page.getByRole('option',{name,exact:true})).toBeVisible();
+  await page.getByRole('option',{name:'忽略时长',exact:true}).click();
+  await page.getByLabel('MusicBrainz ID',{exact:true}).fill(group);
+  await page.getByRole('button',{name:'读取资料',exact:true}).click();
+  await expect(page.getByLabel('标题',{exact:true})).toHaveValue('识别曲名');
+  const read=api.requests.find(row=>row.path==='/api/music/query/edit_metadata').body;
+  expect(read.music_track_match).toBe('ignore_duration');expect(read.music_cue_enable).toBe(false);
+  await page.getByLabel('备注',{exact:true}).fill('核对后修改');
+  await page.getByRole('button',{name:'预览修改',exact:true}).click();
+  await expect(page.getByRole('button',{name:'保存修改',exact:true})).toBeEnabled();
+  const body=api.requests.filter(row=>row.path==='/api/music/jobs/preview').at(-1).body;
+  expect(body.selection).toEqual(read.selection);expect(body.music_track_match).toBe('ignore_duration');expect(body.music_cue_enable).toBe(false);expect(body.metadata.title).toBe('识别曲名');expect(body.metadata.comment).toBe('核对后修改');
+  expect(api.requests.filter(row=>row.path==='/api/music/jobs/execute')).toHaveLength(0);
+  await page.getByRole('button',{name:'返回编辑',exact:true}).click();
+  await expect(page.getByRole('combobox').filter({has:page.getByLabel('曲目对齐方式',{exact:true})})).toContainText('忽略时长');
+  await expect(page.getByRole('checkbox',{name:'识别 CUE',exact:true})).not.toBeChecked();
+  await page.getByRole('checkbox',{name:'识别 CUE',exact:true}).scrollIntoViewIfNeeded();
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBeTruthy();
+  await page.screenshot({path:testInfo.outputPath('editor-processing-options.png')});
+  await page.getByRole('button',{name:'预览修改',exact:true}).click();await page.getByRole('button',{name:'保存修改',exact:true}).click();
+  expect(api.requests.find(row=>row.path==='/api/music/jobs/execute').body).toEqual({preview_task_id:'music-preview'});
 });
 
 

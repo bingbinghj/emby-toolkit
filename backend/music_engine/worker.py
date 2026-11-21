@@ -10,6 +10,21 @@ from etk_music.runtime import configure
 def dispatch(request):
     config, body = request.get("config", {}), request.get("body", {})
     configure(config, request["cache_dir"])
+    if request["action"] in {"edit_metadata", "preview"}:
+        from etk_music.audio import use_music_cue
+        enabled, track_match = body.get("music_cue_enable"), body.get("music_track_match") or "strict"
+        if enabled is not None and not isinstance(enabled, bool):
+            raise ValueError("识别 CUE 设置无效")
+        if track_match not in {"strict", "ignore_duration", "sequential"}:
+            raise ValueError("曲目对齐方式无效")
+        with use_music_cue(enabled):
+            return _dispatch(request)
+    return _dispatch(request)
+
+
+def _dispatch(request):
+    """资料读取与预览共用本次识别策略，确认写入沿用已保存的预览。"""
+    config, body = request.get("config", {}), request.get("body", {})
     action = request["action"]
     streaming_sources = {"netease", "qqmusic", "apple", "kugou", "kuwo"}
     manual_source = body.get("source")
@@ -28,7 +43,11 @@ def dispatch(request):
                 return streaming_metadata.search(manual_source, body.get("query"), body.get("kind") or "recording", body.get("page",1), body.get("count",20))
             if action == "edit_metadata":
                 from etk_music import library
-                library.target(config, body["path"])
+                from etk_music.audio import AudioMetadataHelper
+                path = library.target(config, body["path"])
+                meta = AudioMetadataHelper.read(path)
+                if meta.organization_error:
+                    raise ValueError(meta.organization_error)
                 selected = body["selection"]
                 if selected.get("music_type") == "album":
                     raise ValueError("请在专辑中选择对应歌曲")
@@ -100,17 +119,12 @@ def dispatch(request):
     if action=="edit_metadata":
         from etk_music import library
         path = library.target(config, body["path"])
-        _, info = catalog.recognize(path, config.get("music_sources") or ["musicbrainz"], body["selection"])
+        _, info = catalog.recognize(path, config.get("music_sources") or ["musicbrainz"], body["selection"], body.get("music_track_match") or "strict")
         return catalog.serialize(info)
     if action=="related":
         return {"items": catalog.related(body["source"], body["id"], body["kind"], int(body.get("page",1)), body.get("album_type"))}
     if action=="preview":
-        from etk_music.audio import use_music_cue
-        enabled = body.get("music_cue_enable")
-        if enabled is not None and not isinstance(enabled, bool):
-            raise ValueError("识别 CUE 设置无效")
-        with use_music_cue(enabled):
-            return operations.preview(config, body)
+        return operations.preview(config, body)
     if action=="clear_comments_preview":
         return operations.clear_comments_preview(config)
     if action=="cleanup":
