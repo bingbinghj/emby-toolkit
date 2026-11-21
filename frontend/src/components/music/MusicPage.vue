@@ -284,6 +284,7 @@ onBeforeUnmount(() => { active = false; request++; detailRequest++; editorReques
 
 .music-page-shell--library{display:flex;flex-direction:column;min-block-size:0;overflow:hidden;}
 .music-page-shell--library>*{flex-shrink:0;}
+.music-page-shell--library>.v-alert{flex:0 0 auto;min-inline-size:0;overflow-wrap:anywhere;}
 .music-page-shell--library .music-workbench{flex:1 1 auto;min-block-size:0;overflow:auto;overscroll-behavior:contain;}
 .music-library-footer{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding-block-start:12px;}.music-library-footer :deep(.v-pagination){max-inline-size:100%;margin-inline-start:auto;}
 .music-page-size{flex:0 0 100px;}.music-pagination-info{font-size:.8rem;}

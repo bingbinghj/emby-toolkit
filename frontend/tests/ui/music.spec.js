@@ -4,6 +4,37 @@ import { measureReadingContrast } from './reading-contrast.js';
 const track = {name:'01 - 测试歌曲.flac',type:'file',is_audio:true,path:'专辑/01 - 测试歌曲.flac',title:'测试歌曲',artists:['测试歌手'],album:'测试专辑',audio_specs:'FLAC / 24bit / 96kHz',signature:{mtime:1}};
 const previewItem = {...track,source:track.path,source_storage:'local',source_item:{storage:'local',path:track.path,type:'file'},target:track.path,success:true,metadata:{title:'新曲名'},before:{title:track.title},music:{title:'新曲名',album:'测试专辑',artists:track.artists,group_id:'group',group_directory:'专辑',file_role:'audio',status:'matched',online_confirmed:true,read_status:'tags',field_sources:{title:'remote'},media_source:'musicbrainz',media_id:'song'}};
 
+for(const width of [390,1440]) test(`音乐任务提示完整显示且不被路径卡片遮挡 ${width}px`,async({page,api},testInfo)=>{
+  music(api);await page.setViewportSize({width,height:800});
+  api.respond('GET','/api/music/library',{items:[track],tracks:Array.from({length:50},(_,i)=>({...track,path:`album/${i}.flac`,title:`歌曲 ${i}`})),total:1000});
+  api.respond('POST','/api/music/jobs/scan',{task_id:'music-layout'});
+  let status={state:'running',current_action:'处理所选音乐',message:'Girls’ Generation/Girls’ Generation (2007)/01 - Girls’ Generation.flac',progress_known:true,progress:50};
+  api.respond('GET','/api/tasks/result/music-layout',()=>status);
+  await page.goto('/music');await page.getByRole('button',{name:'扫描音乐库',exact:true}).click();
+  await expect(page.getByText(status.current_action+' · '+status.message,{exact:true})).toBeVisible();
+  await page.clock.install();await page.clock.pauseAt(new Date(Date.now()+100));
+  for(const state of ['running','completed']){
+    if(state==='completed'){
+      status={state:'completed',result:{message:'音乐任务完成，共 1 项，失败 0 项',items:[{path:track.path,success:true}]}};
+      await page.clock.runFor(1500);await expect(page.getByText(status.result.message,{exact:true})).toBeVisible();
+    }
+    const alert=page.locator('.music-page-shell > .v-alert');
+    const dimensions=await alert.evaluate(node=>{const bounds=node.getBoundingClientRect(),content=node.querySelector('.v-alert__content');return {top:bounds.top,bottom:bounds.bottom,height:node.clientHeight,scrollHeight:node.scrollHeight,contentBottom:content.getBoundingClientRect().bottom,contentHeight:content.clientHeight,contentScrollHeight:content.scrollHeight,contentWidth:content.clientWidth,contentScrollWidth:content.scrollWidth};});
+    expect(dimensions.scrollHeight).toBeLessThanOrEqual(dimensions.height+1);
+    expect(dimensions.contentBottom).toBeLessThanOrEqual(dimensions.bottom);
+    expect(dimensions.contentScrollHeight).toBeLessThanOrEqual(dimensions.contentHeight+1);
+    expect(dimensions.contentScrollWidth).toBeLessThanOrEqual(dimensions.contentWidth+1);
+    const path=await page.getByTestId('music-library-path').boundingBox();
+    expect(path.y).toBeGreaterThanOrEqual(dimensions.bottom);
+    const button=alert.getByRole('button',{name:state==='running'?'查看日志':'查看详情',exact:true});
+    await button.click({trial:true});
+    await page.screenshot({path:testInfo.outputPath(`music-status-${state}.png`)});
+    const footer=await page.getByRole('contentinfo',{name:'音乐库分页'}).boundingBox();
+    expect(footer.y+footer.height).toBeLessThanOrEqual(801);
+  }
+  await page.clock.runFor(5000);await expect(page.getByText(status.result.message,{exact:true})).toHaveCount(0);
+});
+
 for(const theme of ['light','dark'])for(const width of [390,1440]) test(`备注描述编辑预览及清空保持可读 ${theme} ${width}px`,async({page,api},testInfo)=>{
   music(api); await page.setViewportSize({width,height:1000});
   await page.addInitScript(theme=>localStorage.setItem('moviepilot-theme-customizer',JSON.stringify({theme,glassEnabled:true,glassAppearance:'frosted',glassQuality:'css'})),theme);
@@ -377,6 +408,24 @@ for(const width of [390,1440]) test(`来源译文制作双语歌词保留当前�
   await page.screenshot({path:testInfo.outputPath('source-bilingual-preview.png')});
   await page.getByRole('button',{name:'应用双语歌词',exact:true}).click();
   await expect(page.getByLabel('旁挂歌词（LRC / 纯文本）',{exact:true})).toHaveValue(expected);
+  expect(api.requests.filter(row=>row.path.startsWith('/api/music/jobs/'))).toHaveLength(0);
+});
+
+for(const width of [390,1440]) test(`双语歌词支持跨行句段和演唱者标注 ${width}px`,async({page,api},testInfo)=>{
+  music(api);await page.setViewportSize({width,height:1000});
+  const original='[00:33.25]어느 샌가 나는 숙녀처럼\n[00:36.63]내 입술은 사근사근 그대 이름 부르죠';
+  const translated='（泰妍）不知不觉我像淑女一样 我的嘴唇温柔的叫着你的名字';
+  api.respond('POST','/api/music/query/inspect',{...track,lyrics:original});
+  api.respond('POST','/api/music/query/lyrics_search',{items:[{id:'22735075',source:'netease',title:'Kissing You'}]});
+  api.respond('POST','/api/music/query/lyrics_detail',{variants:[{value:'original',title:'原文',text:'[00:33.350]（태연） 어느샌가 나는 숙녀처럼 내 입술은 사근사근 그대 이름 부르죠'},{value:'translation',title:'译文',text:'[00:33.350]'+translated}]});
+  await page.goto('/music');await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await page.getByRole('button',{name:'搜索替换歌词',exact:true}).click();await page.getByText('Kissing You',{exact:true}).click();
+  await page.getByRole('checkbox',{name:'使用译文制作双语歌词',exact:true}).check();
+  await expect(page.getByLabel('歌词内容',{exact:true})).toHaveValue(`[00:33.25]어느 샌가 나는 숙녀처럼\n[00:33.25]${translated}\n[00:36.63]내 입술은 사근사근 그대 이름 부르죠`);
+  await expect(page.getByText('保留当前原文和时间轴，已匹配 2/2 句；未匹配的句子保留原样。',{exact:true})).toBeVisible();
+  await page.screenshot({path:testInfo.outputPath('bilingual-segments.png')});
+  await page.getByRole('button',{name:'应用双语歌词',exact:true}).click();
+  await expect(page.getByLabel('旁挂歌词（LRC / 纯文本）',{exact:true})).toHaveValue(`[00:33.25]어느 샌가 나는 숙녀처럼\n[00:33.25]${translated}\n[00:36.63]내 입술은 사근사근 그대 이름 부르죠`);
   expect(api.requests.filter(row=>row.path.startsWith('/api/music/jobs/'))).toHaveLength(0);
 });
 

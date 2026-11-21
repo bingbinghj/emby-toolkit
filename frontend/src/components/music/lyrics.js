@@ -70,10 +70,28 @@ export function serializeTimeline(rows) {
   }).join('\n');
 }
 
-// 用来源原文核对译文对应关系，沿用本地原文的时间标签；不按行号强行对齐不同版本。
+// 按正文顺序对齐字符，允许两个版本的分行位置不同；限制矩阵大小，避免长歌词阻塞页面。
+function alignLyricText(source, local) {
+  const width=local.length+1;
+  if(!source || !local || (source.length+1)*width>8_000_000)return new Map();
+  const lengths=new Uint16Array((source.length+1)*width);
+  for(let i=source.length-1;i>=0;i--)for(let j=local.length-1;j>=0;j--){
+    lengths[i*width+j]=source[i]===local[j] ? lengths[(i+1)*width+j+1]+1 : Math.max(lengths[(i+1)*width+j],lengths[i*width+j+1]);
+  }
+  const positions=new Map();
+  let i=0,j=0;
+  while(i<source.length && j<local.length){
+    if(source[i]===local[j])positions.set(i++,j++);
+    else if(lengths[(i+1)*width+j]>lengths[i*width+j+1])i++;
+    else j++;
+  }
+  return positions;
+}
+
+// 用来源原文核对译文对应关系，沿用本地原文的时间标签；跨行整句的译文放在句段起点。
 export function mergeLyricsTranslation(original, sourceOriginal, translation) {
   const clean=text=>text.replace(/\[\d+:\d{2}(?:[.:]\d+)?\]|<\d+:\d{2}(?:[.:]\d+)?>/g,'').trim();
-  const key=text=>clean(text).normalize('NFKC').toLocaleLowerCase().replace(/[\p{P}\p{Z}\s]/gu,'');
+  const key=text=>clean(text).normalize('NFKC').replace(/^\([^()\r\n]{1,30}\)\s*(?=\S)/,'').toLowerCase().replace(/[^\p{L}\p{M}\p{N}]/gu,'');
   const translated=parseLyrics(translation), source=parseLyrics(sourceOriginal), matches=new Map(), byTime=new Map();
   for(const row of translated){const stamp=Math.round(row.time*1000),lines=byTime.get(stamp) || [];if(row.text)lines.push(row.text);byTime.set(stamp,lines);}
   const add=(text,value)=>{if(!key(text) || !value || key(text)===key(value))return;const values=matches.get(key(text)) || new Set();values.add(value);matches.set(key(text),values);};
@@ -83,18 +101,51 @@ export function mergeLyricsTranslation(original, sourceOriginal, translation) {
   }
   const plain=text=>text.split(/\r?\n/).filter(line=>line.trim() && !/^\[[a-z]+:/i.test(line));
   if(!source.length && !translated.length){const left=plain(sourceOriginal),right=plain(translation);if(left.length===right.length)left.forEach((text,index)=>add(text,right[index].trim()));}
-  let matched=0,total=0;
   const lines=original.split(/\r?\n/), output=[];
+  const sourceRows=source.filter(row=>key(row.text)).map(row=>({...row,key:key(row.text)}));
+  const sourceText=sourceRows.length ? sourceRows.map(row=>row.key).join('') : plain(sourceOriginal).map(key).join('');
+  const translationKeys=new Set(translated.length ? translated.map(row=>key(row.text)) : plain(translation).map(key));
+  const localRows=[];
+  let offset=0;
+  lines.forEach((line,index)=>{
+    const value=key(line);
+    if(!value || /^\[[a-z]+:/i.test(line) || translationKeys.has(value) && !sourceText.includes(value))return;
+    localRows.push({index,key:value,start:offset,end:offset+value.length});offset+=value.length;
+  });
+  const positions=alignLyricText(sourceText,localRows.map(row=>row.key).join(''));
+  const additions=new Map(),covered=new Set();
+  const append=(index,text)=>{const values=additions.get(index) || new Set();text.split('\n').forEach(line=>values.add(line));additions.set(index,values);};
+  offset=0;
+  for(const row of sourceRows){
+    let aligned=Array.from({length:row.key.length},(_,index)=>positions.get(offset+index)).filter(value=>value!==undefined);
+    offset+=row.key.length;
+    const value=[...new Set(byTime.get(Math.round(row.time*1000)) || [])].join('\n');
+    // 重复副歌可能夹着和声；优先采用与当前对齐位置重合的完整原文行。
+    const exact=localRows.find(local=>local.key===row.key && aligned.filter(position=>position>=local.start && position<local.end).length>=row.key.length*.6);
+    if(exact)aligned=Array.from({length:row.key.length},(_,index)=>exact.start+index);
+    // 原文与本地句段均需足够一致；少于六字只接受完整匹配，不能只靠时间或行号猜测。
+    if(!value || key(value)===row.key || aligned.length/row.key.length<(row.key.length<6 ? 1 : .8) || aligned.length/(aligned.at(-1)-aligned[0]+1)<.8)continue;
+    const first=localRows.find(local=>local.end>aligned[0]);
+    if(!first)continue;
+    append(first.index,value);aligned.forEach(position=>covered.add(position));
+  }
+  let matched=0;
+  for(const row of localRows){
+    const values=matches.get(row.key);
+    let coveredCount=0;
+    for(let i=row.start;i<row.end;i++)if(covered.has(i))coveredCount++;
+    if(!additions.has(row.index) && coveredCount<row.key.length*.6 && values?.size===1){
+      append(row.index,[...values][0]);coveredCount=row.key.length;
+    }
+    if(coveredCount>=row.key.length*.6)matched++;
+  }
   for(let index=0;index<lines.length;index++){
     const line=lines[index];output.push(line);
-    if(!clean(line) || /^\[[a-z]+:/i.test(line))continue;
-    total++;
-    const values=matches.get(key(line));
-    if(values?.size!==1)continue;
+    const values=additions.get(index);
+    if(!values)continue;
     const stamps=[...line.matchAll(/\[\d+:\d{2}(?:[.:]\d+)?\]/g)].map(match=>match[0]).join('');
-    const additions=[...values][0].split('\n').map(text=>stamps+text);
-    if(!additions.every((text,offset)=>lines[index+1+offset]===text))output.push(...additions);
-    matched++;
+    const next=localRows.find(row=>row.index>index)?.index ?? lines.length;
+    for(const value of values){const addition=stamps+value;if(!lines.slice(index+1,next).includes(addition))output.push(addition);}
   }
-  return {text:output.join('\n'),matched,total};
+  return {text:output.join('\n'),matched,total:localRows.length};
 }

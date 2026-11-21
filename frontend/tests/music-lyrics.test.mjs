@@ -23,6 +23,39 @@ test('来源译文按原文匹配，保留本地时间轴、元数据与未匹�
   assert.equal(mergeLyricsTranslation(result.text,'[00:01]Hello','[00:01]你好').text,result.text);
   assert.equal(mergeLyricsTranslation('[00:01]Different','[00:01]Hello','[00:01]你好').matched,0);
   assert.equal(mergeLyricsTranslation('Hello\nWorld','Hello\nWorld','你好\n世界').text,'Hello\n你好\nWorld\n世界');
+  assert.equal(mergeLyricsTranslation('Hello\n你好\nWorld\n世界','Hello\nWorld','你好\n世界').text,'Hello\n你好\nWorld\n世界');
+});
+
+test('来源演唱者标注和跨行句段不会阻止译文合并，重复应用不重复插入',()=>{
+  const original='[ar:原歌手]\n[00:33.25]어느 샌가 나는 숙녀처럼\n[00:36.63]내 입술은 사근사근 그대 이름 부르죠';
+  const source='[00:33.350]（태연） 어느샌가 나는 숙녀처럼 내 입술은 사근사근 그대 이름 부르죠';
+  const translation='[00:33.350]（泰妍）不知不觉我像淑女一样 我的嘴唇温柔的叫着你的名字';
+  const merged=mergeLyricsTranslation(original,source,translation);
+  assert.equal(merged.matched,2);assert.equal(merged.total,2);
+  assert.equal(merged.text,'[ar:原歌手]\n[00:33.25]어느 샌가 나는 숙녀처럼\n[00:33.25]（泰妍）不知不觉我像淑女一样 我的嘴唇温柔的叫着你的名字\n[00:36.63]내 입술은 사근사근 그대 이름 부르죠');
+  assert.deepEqual(mergeLyricsTranslation(merged.text,source,translation),merged);
+});
+
+test('重复副歌按出现顺序保留各次译文，不因译文不同而整句丢弃',()=>{
+  const original='[00:10]어리다고 놀리지 말아요\n[00:20]어리다고 놀리지 말아요\n[00:30]어리다고 놀리지 말아요';
+  const source='[00:01]어리다고 놀리지말아요\n[00:02]어리다고 놀리지말아요\n[00:03]어리다고 놀리지말아요';
+  const translation='[00:01]不要捉弄幼小的我\n[00:02]不要捉弄幼小的我(不要捉弄)\n[00:03]不要捉弄幼小的我(我不知道)';
+  const merged=mergeLyricsTranslation(original,source,translation);
+  assert.equal(merged.matched,3);
+  assert.equal(merged.text,'[00:10]어리다고 놀리지 말아요\n[00:10]不要捉弄幼小的我\n[00:20]어리다고 놀리지 말아요\n[00:20]不要捉弄幼小的我(不要捉弄)\n[00:30]어리다고 놀리지 말아요\n[00:30]不要捉弄幼小的我(我不知道)');
+  const chorus=mergeLyricsTranslation(original.replace('[00:20]','[00:15]놀리지 말아요\n[00:20]'),source,translation);
+  assert.match(chorus.text,/\[00:10\]不要捉弄幼小的我\n\[00:15\]놀리지 말아요/);
+  assert.match(chorus.text,/\[00:20\]不要捉弄幼小的我\(不要捉弄\)/);
+});
+
+test('分行位置交错及轻微拼写差异按句段对齐，原文逐字时间保持不变',()=>{
+  const original='[00:10]<00:10.00>오늘은 웬일인지\n[00:15]사랑해 하며 키스해 주었네\n[00:20]너만 들리게 말해줄 게';
+  const source='[00:01]오늘은 왠일인지 사랑해하며\n[00:02]키스해주었네 너만 들리게 말해줄게';
+  const translation='[00:01]今天是怎么回事 说着爱你\n[00:02]亲吻你 只告诉你';
+  const result=mergeLyricsTranslation(original,source,translation);
+  assert.equal(result.matched,3);
+  assert.equal(result.text,'[00:10]<00:10.00>오늘은 웬일인지\n[00:10]今天是怎么回事 说着爱你\n[00:15]사랑해 하며 키스해 주었네\n[00:15]亲吻你 只告诉你\n[00:20]너만 들리게 말해줄 게');
+  assert.equal(mergeLyricsTranslation('[00:10]Nothing matches here','[00:01]Completely different words','[00:01]另一版歌词').matched,0);
 });
 
 test('发行选项包含版本信息，标签候选只采用接口已返回的字段',()=>{
