@@ -1,6 +1,6 @@
 <!-- Music layouts and controls adapted from MoviePilot-Frontend v3 db17d9c (MIT). -->
 <script setup>
-import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, inject, onMounted, onBeforeUnmount, ref, watch } from 'vue';
 import { useElementBounding, useTimeoutFn, useWindowSize } from '@vueuse/core';
 import axios from 'axios';
 import { useDisplay } from 'vuetify';
@@ -28,6 +28,7 @@ import { groupMusicPreview } from './previewState';
 import { musicSources, streamingSources, sourceLabel, formatMusicDuration, musicReleaseError } from './utils';
 
 const router = useRouter(), { smAndDown } = useDisplay();
+const openRealtimeLogs = inject('openRealtimeLogs');
 // 沿用媒体整理的可视高度计算，列表滚动时分页保留在内容区底部。
 const pageElement=ref(null), contentBottomInset=ref(24);
 const {top:pageTop}=useElementBounding(pageElement);
@@ -169,6 +170,7 @@ async function submit(operation, body) {
   } catch (cause) { taskError.value = failure(cause); }
   finally { submitting.value = false; }
 }
+function viewLogs() { resultOpen.value = false; openRealtimeLogs(); }
 async function poll() {
   clearTimeout(polling);
   if (!active || !taskId.value) return;
@@ -225,7 +227,7 @@ onBeforeUnmount(() => { active = false; request++; detailRequest++; editorReques
       </template>
     </VCardText></VCard>
     <VAlert v-if="error || taskError" type="error" variant="tonal" class="my-3">{{ error || taskError }}</VAlert>
-    <VAlert v-if="taskId" type="info" variant="tonal" class="my-3"><div class="music-toolbar"><span>{{ taskState?.current_action }} · {{ taskState?.message }}</span><VSpacer /><VBtn variant="text" to="/logs">查看日志</VBtn></div><VProgressLinear class="mt-2" :model-value="taskState?.progress" :indeterminate="!taskState?.progress_known" /></VAlert>
+    <VAlert v-if="taskId" type="info" variant="tonal" class="my-3"><div class="music-toolbar"><span>{{ taskState?.current_action }} · {{ taskState?.message }}</span><VSpacer /><VBtn variant="text" @click="viewLogs">查看日志</VBtn></div><VProgressLinear class="mt-2" :model-value="taskState?.progress" :indeterminate="!taskState?.progress_known" /></VAlert>
     <VAlert v-if="resultVisible && resultData && !busy" :type="resultData.failed || resultData.warning_details?.length ? 'warning' : 'success'" variant="tonal" class="my-3"><div class="music-toolbar"><span>{{ resultData.message }}</span><VSpacer /><VBtn variant="text" @click="resultOpen=true">查看详情</VBtn></div></VAlert>
     <template v-if="tab === 'library'">
       <MusicLibraryPath :directory="directory" :loading="loading" @navigate="navigateDirectory" />
@@ -269,7 +271,7 @@ onBeforeUnmount(() => { active = false; request++; detailRequest++; editorReques
     <VDialog v-model="selectorOpen" max-width="700" :fullscreen="smAndDown" scrollable><VCard><VCardText><VSelect v-model="selectorSource" :items="musicSources" label="音乐数据源" /><MusicIdSelector :key="selectorSource" :type="selectorSource" :music-types="[musicType]" @select="chooseMusic" @close="selectorOpen = false" /></VCardText></VCard></VDialog>
 
     <VDialog :model-value="previewOpen && !correctionGroup" @update:model-value="previewOpen = $event" max-width="64rem" :fullscreen="smAndDown" scrollable><VCard><VCardItem :title="preview?.operation === 'edit' ? '音乐修改预览' : '音乐刮削预览'" :subtitle="`共 ${preview?.items?.length || 0} 项`" class="pe-16" /><DialogCloseBtn @click="previewOpen = false" /><VDivider /><VCardText><VAlert v-if="taskError" type="error" variant="tonal" class="mb-3">{{ taskError }}</VAlert><MusicPreview :groups="previewGroups" :disabled="busy || preview?.operation === 'edit'" :scope-complete="true" :corrected="Object.keys(corrections).length > 0" @correct="correctionGroup = $event" /></VCardText><VDivider /><VCardActions class="app-dialog-actions"><VSpacer /><VBtn color="default" variant="text" @click="previewOpen = false">{{ editorOpen ? '返回编辑' : '取消' }}</VBtn><VBtn color="primary" variant="flat" :disabled="!canExecute" @click="submit('execute', {preview_task_id: previewTask})">{{ preview?.operation === 'edit' ? '保存修改' : '确认' }}</VBtn></VCardActions></VCard></VDialog>
-    <VDialog v-model="resultOpen" max-width="48rem" scrollable><VCard><VCardItem title="音乐任务结果" class="pe-16" /><DialogCloseBtn @click="resultOpen=false" /><VCardText><VAlert v-for="warning in resultData?.warning_details || []" :key="warning" type="warning" variant="tonal" class="mb-3">{{ warning }}</VAlert><VList><VListItem v-for="item in resultData?.items || []" :key="item.path" :title="item.path" :subtitle="item.message || '已扫描'"><template #prepend><VIcon :icon="item.success===false ? 'mdi-alert-circle-outline' : 'mdi-check-circle-outline'" :color="item.success===false ? 'error' : 'success'" /></template></VListItem></VList></VCardText><VCardActions class="app-dialog-actions"><VSpacer /><VBtn variant="text" to="/logs">查看日志</VBtn><VBtn variant="flat" @click="resultOpen=false">关闭</VBtn></VCardActions></VCard></VDialog>
+    <VDialog v-model="resultOpen" max-width="48rem" scrollable><VCard><VCardItem title="音乐任务结果" class="pe-16" /><DialogCloseBtn @click="resultOpen=false" /><VCardText><VAlert v-for="warning in resultData?.warning_details || []" :key="warning" type="warning" variant="tonal" class="mb-3">{{ warning }}</VAlert><VList><VListItem v-for="item in resultData?.items || []" :key="item.path" :title="item.path" :subtitle="item.message || '已扫描'"><template #prepend><VIcon :icon="item.success===false ? 'mdi-alert-circle-outline' : 'mdi-check-circle-outline'" :color="item.success===false ? 'error' : 'success'" /></template></VListItem></VList></VCardText><VCardActions class="app-dialog-actions"><VSpacer /><VBtn variant="text" @click="viewLogs">查看日志</VBtn><VBtn variant="flat" @click="resultOpen=false">关闭</VBtn></VCardActions></VCard></VDialog>
     <VDialog v-model="cacheConfirm" max-width="28rem"><VCard title="确认清空音乐识别缓存？"><VCardText>识别结果及音乐资料请求缓存将清空，本地音乐文件保持不变。</VCardText><VCardActions class="app-dialog-actions"><VSpacer /><VBtn color="default" variant="text" @click="cacheConfirm = false">取消</VBtn><VBtn color="error" variant="flat" @click="clearCache()">清空</VBtn></VCardActions></VCard></VDialog>
   </div>
 </template>

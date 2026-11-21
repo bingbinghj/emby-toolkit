@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, unref } from 'vue';
+import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, unref, provide } from 'vue';
 import { useRouter, useRoute } from 'vue-router';
 import { useDisplay } from 'vuetify';
 import { useElementBounding, useMutationObserver } from '@vueuse/core';
@@ -33,6 +33,7 @@ const appearance = useThemeCustomizer();
 const { mdAndDown, mdAndUp } = useDisplay();
 const isMobile = computed(() => mdAndDown.value);
 const notificationOpen = ref(false), themeCustomizerOpen = ref(false), avatarLoadFailed = ref(false);
+provide('openRealtimeLogs', () => { if (authStore.isAdmin) notificationOpen.value = true; });
 const searchOpen = ref(false), desktopSearchInput = ref(null), mobileSearchInput = ref(null);
 const fallbackSearch = ref(''), searchComposing = ref(false);
 let searchRequestSequence = 0, searchWindowSession = 0;
