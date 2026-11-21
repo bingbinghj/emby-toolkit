@@ -1,7 +1,7 @@
 <!-- Music layouts and controls adapted from MoviePilot-Frontend v3 db17d9c (MIT). -->
 <script setup>
 import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue';
-import { useElementBounding, useWindowSize } from '@vueuse/core';
+import { useElementBounding, useTimeoutFn, useWindowSize } from '@vueuse/core';
 import axios from 'axios';
 import { useDisplay } from 'vuetify';
 import { useRouter } from 'vue-router';
@@ -50,6 +50,13 @@ const editorOpen = ref(false), editor = ref(null), editorError = ref('');
 const actionOpen = ref(false), action = ref('rescrape'), actionPaths = ref([]), selection = ref(null), selectorOpen = ref(false);
 const musicType=ref('album'), trackMatch=ref('strict'), cueEnable=ref(true), collectionRoot=ref(null);
 const resultOpen=ref(false), resultData=ref(null);
+const resultVisible=ref(false);
+const resultTimeout=useTimeoutFn(()=>{resultVisible.value=false;},5000,{immediate:false});
+watch(resultData,result=>{
+  resultTimeout.stop();
+  resultVisible.value=Boolean(result);
+  if(result)resultTimeout.start();
+});
 const previewOpen = ref(false), preview = ref(null), previewTask = ref(''), taskId = ref(''), taskState = ref(null), taskError = ref('');
 const exploreParams=ref({mode:'chart',entity:'album',range_name:'this_month'}), artistType=ref('album'), relatedPage=ref(1), relatedBusy=ref(false), relatedArtists=ref([]), relatedLabel=ref('相关专辑');
 const selectedCache=ref([]);
@@ -219,7 +226,7 @@ onBeforeUnmount(() => { active = false; request++; detailRequest++; editorReques
     </VCardText></VCard>
     <VAlert v-if="error || taskError" type="error" variant="tonal" class="my-3">{{ error || taskError }}</VAlert>
     <VAlert v-if="taskId" type="info" variant="tonal" class="my-3"><div class="music-toolbar"><span>{{ taskState?.current_action }} · {{ taskState?.message }}</span><VSpacer /><VBtn variant="text" to="/logs">查看日志</VBtn></div><VProgressLinear class="mt-2" :model-value="taskState?.progress" :indeterminate="!taskState?.progress_known" /></VAlert>
-    <VAlert v-if="resultData && !busy" :type="resultData.failed || resultData.warning_details?.length ? 'warning' : 'success'" variant="tonal" class="my-3"><div class="music-toolbar"><span>{{ resultData.message }}</span><VSpacer /><VBtn variant="text" @click="resultOpen=true">查看详情</VBtn></div></VAlert>
+    <VAlert v-if="resultVisible && resultData && !busy" :type="resultData.failed || resultData.warning_details?.length ? 'warning' : 'success'" variant="tonal" class="my-3"><div class="music-toolbar"><span>{{ resultData.message }}</span><VSpacer /><VBtn variant="text" @click="resultOpen=true">查看详情</VBtn></div></VAlert>
     <template v-if="tab === 'library'">
       <MusicLibraryPath :directory="directory" :loading="loading" @navigate="navigateDirectory" />
       <div class="music-workbench">
