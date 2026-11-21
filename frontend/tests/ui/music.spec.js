@@ -173,6 +173,63 @@ test('歌词可搜索专辑并浏览曲目，应用前不写入',async({page,api
   expect(api.requests.filter(row=>row.path.startsWith('/api/music/jobs/'))).toHaveLength(0);
 });
 
+for(const width of [390,1440]) test(`歌词通过专辑 ID 和链接浏览分页并预览 ${width}px`,async({page,api},testInfo)=>{
+  music(api);await page.setViewportSize({width,height:1000});
+  api.respond('POST','/api/music/query/lyrics_search',request=>{
+    if(!request.body.album_id)return {items:[],has_more:false};
+    const qq=request.body.album_id.includes('002Fp2lJ1sw4bF'),source=qq?'qqmusic':'netease';
+    return {source,album:{id:qq?'002Fp2lJ1sw4bF':'2087510',title:'Girls’ Generation — The First Asia Tour Concert Into The New World (Live Album)'},items:[{source,id:`song-${request.body.page}`,title:`专辑曲目 ${request.body.page}`}],has_more:request.body.page===1};
+  });
+  api.respond('POST','/api/music/query/lyrics_detail',{variants:[{value:'original',title:'原文',text:'[00:02]所选专辑歌词'}]});
+  await page.goto('/music');await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await page.getByRole('button',{name:'搜索替换歌词',exact:true}).click();
+  await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/query/lyrics_search').length).toBe(1);
+  await page.getByText('专辑 ID / 链接',{exact:true}).click();
+  const input=page.getByLabel('专辑 ID 或链接',{exact:true});
+  await expect(input).toHaveValue('');
+  await page.getByRole('button',{name:'搜索歌词',exact:true}).click();
+  expect(api.requests.filter(row=>row.path==='/api/music/query/lyrics_search')).toHaveLength(1);
+  for(const reference of ['2087510','https://music.163.com/#/album?id=2087510','https://y.qq.com/n/ryqq_v2/albumDetail/002Fp2lJ1sw4bF']){
+    await input.fill(reference);await input.press('Enter');
+    await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/query/lyrics_search').at(-1)?.body.album_id).toBe(reference);
+    await expect(page.getByText('专辑曲目 1',{exact:true})).toBeVisible();
+  }
+  await expect(page.getByRole('combobox').filter({has:page.getByLabel('歌词来源',{exact:true})})).toContainText('QQ 音乐');
+  expect(api.requests.filter(row=>row.path==='/api/music/query/lyrics_search')).toHaveLength(4);
+  await page.getByRole('button',{name:'歌词下一页',exact:true}).click();
+  await expect(page.getByText('专辑曲目 2',{exact:true})).toBeVisible();
+  expect(api.requests.filter(row=>row.path==='/api/music/query/lyrics_search').at(-1).body).toMatchObject({source:'qqmusic',album_id:'002Fp2lJ1sw4bF',page:2});
+  await page.getByText('专辑曲目 2',{exact:true}).click();
+  await expect(page.getByLabel('歌词内容',{exact:true})).toHaveValue('[00:02]所选专辑歌词');
+  expect(api.requests.find(row=>row.path==='/api/music/query/lyrics_detail').body).toEqual({source:'qqmusic',id:'song-2'});
+  const dialog=page.locator('.v-dialog.v-overlay--active').filter({hasText:'搜索并替换歌词'});
+  expect(await dialog.locator('.v-card-text').evaluate(node=>node.scrollWidth<=node.clientWidth+1)).toBeTruthy();
+  await page.screenshot({path:testInfo.outputPath('lyrics-album-id.png')});
+  await page.getByRole('button',{name:'应用歌词',exact:true}).click();
+  await expect(page.getByLabel('旁挂歌词（LRC / 纯文本）',{exact:true})).toHaveValue('[00:02]所选专辑歌词');
+  expect(api.requests.filter(row=>row.path.startsWith('/api/music/jobs/'))).toHaveLength(0);
+  await page.getByRole('button',{name:'搜索替换歌词',exact:true}).click();
+  await expect(page.getByLabel('搜索歌曲或歌手',{exact:true})).toHaveValue(track.title);
+});
+
+test('专辑 ID 查询切换来源清理旧结果，GD 保留名称搜索',async({page,api})=>{
+  music(api);
+  api.respond('POST','/api/music/query/lyrics_search',request=>({items:request.body.album_id ? [{id:'song',source:request.body.source,title:'旧专辑曲目'}] : [],has_more:false}));
+  await page.goto('/music');await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await page.getByRole('button',{name:'搜索替换歌词',exact:true}).click();await page.getByText('专辑 ID / 链接',{exact:true}).click();
+  await page.getByLabel('专辑 ID 或链接',{exact:true}).fill('2087510');await page.getByLabel('专辑 ID 或链接',{exact:true}).press('Enter');
+  await expect(page.getByText('旧专辑曲目',{exact:true})).toBeVisible();
+  await page.getByRole('combobox').filter({has:page.getByLabel('歌词来源',{exact:true})}).click();
+  await page.getByRole('option',{name:'QQ 音乐',exact:true}).click();
+  await expect(page.getByLabel('专辑 ID 或链接',{exact:true})).toHaveValue('');
+  await expect(page.getByText('旧专辑曲目',{exact:true})).toHaveCount(0);
+  await page.getByRole('combobox').filter({has:page.getByLabel('歌词来源',{exact:true})}).click();
+  await page.getByRole('option',{name:'网易云音乐 · GD 音乐台',exact:true}).click();
+  await expect(page.getByText('专辑 ID / 链接',{exact:true})).toHaveCount(0);
+  await expect(page.getByLabel('搜索专辑或歌手',{exact:true})).toHaveValue(track.album);
+  await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/query/lyrics_search').at(-1)?.body).toMatchObject({source:'gd_netease',kind:'album',query:track.album});
+});
+
 test('资料选择器再次打开可按新的专辑 ID 浏览歌曲',async({page,api})=>{
   music(api);
   api.respond('POST','/api/music/query/detail',request=>({title:`专辑 ${request.body.id}`,tracks:[{media_id:'track1',title:`歌曲 ${request.body.id}`}]}));

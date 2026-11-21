@@ -102,3 +102,50 @@ def test_lrclib_album_search_groups_without_mixing_artists(monkeypatch):
     assert len(albums)==2
     songs=lyrics_search.search({'source':'lrclib','query':'Live','album_id':albums[0]['id']})['items']
     assert [row['id'] for row in songs]==['1']
+
+
+@pytest.mark.parametrize('source,reference,resolved,identity', [
+    ('netease', ' 2087510 ', 'netease', '2087510'),
+    ('qqmusic', '002Fp2lJ1sw4bF', 'qqmusic', '002Fp2lJ1sw4bF'),
+    ('qqmusic', 'https://music.163.com/#/album?id=2087510', 'netease', '2087510'),
+    ('netease', 'https://music.163.com/album?id=2087510', 'netease', '2087510'),
+    ('netease', 'https://y.qq.com/n/ryqq_v2/albumDetail/002Fp2lJ1sw4bF', 'qqmusic', '002Fp2lJ1sw4bF'),
+    ('qqmusic', 'https://y.qq.com/n/ryqq/albumDetail/002Fp2lJ1sw4bF?from=share', 'qqmusic', '002Fp2lJ1sw4bF'),
+    ('kugou', '12345', 'kugou', '12345'),
+    ('kuwo', '67890', 'kuwo', '67890'),
+])
+def test_album_id_or_link_browses_tracks_without_keyword(monkeypatch, source, reference, resolved, identity):
+    from etk_music import streaming_metadata
+    calls = []
+    def album_detail(*args):
+        calls.append(args)
+        return {'media_id': identity, 'title': '指定专辑', 'tracks': [
+            {'media_id': str(i), 'title': f'歌曲 {i}', 'music_type': 'recording'} for i in range(23)]}
+    monkeypatch.setattr(streaming_metadata, 'detail', album_detail)
+    monkeypatch.setattr(streaming_metadata, 'search', lambda *args: pytest.fail('专辑 ID 不应进行关键词搜索'))
+    first = lyrics_search.search({'source': source, 'kind': 'album_id', 'album_id': reference})
+    assert first['source'] == resolved
+    assert first['album'] == {'id': identity, 'title': '指定专辑'}
+    assert len(first['items']) == 20 and first['has_more']
+    second = lyrics_search.search({'source': resolved, 'album_id': identity, 'page': 2, 'query': None})
+    assert [row['id'] for row in second['items']] == ['20', '21', '22']
+    assert all(row['source'] == resolved for row in second['items'])
+    assert not second['has_more'] and second['page'] == 2
+    assert calls == [(resolved, identity, 'album')] * 2
+
+
+@pytest.mark.parametrize('reference', [
+    None, '', ' ', 2087510, {}, '../2087510', 'not-an-id',
+    'https://music.163.com/#/song?id=2087510',
+    'https://music.163.com/#/album',
+    'https://music.163.com.evil.test/album?id=2087510',
+    'https://music.163.com@evil.test/album?id=2087510',
+    'https://y.qq.com/n/ryqq_v2/songDetail/002Fp2lJ1sw4bF',
+    'https://y.qq.com/n/ryqq_v2/albumDetail/../../file',
+    'file:///album?id=2087510', '1' * 1001,
+])
+def test_invalid_album_reference_fails_before_request(monkeypatch, reference):
+    from etk_music import streaming_metadata
+    monkeypatch.setattr(streaming_metadata, 'get', lambda *args: pytest.fail('无效专辑 ID 不应请求上游'))
+    with pytest.raises(ValueError, match='专辑'):
+        lyrics_search.search({'source': 'netease', 'kind': 'album_id', 'album_id': reference})

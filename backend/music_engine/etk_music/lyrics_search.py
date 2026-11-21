@@ -3,6 +3,7 @@ import base64
 import html
 import re
 import time
+from urllib.parse import parse_qs, urlsplit
 from .cache import cached, connection
 from .lrclib import LrclibModule
 from .streaming import read_json
@@ -46,18 +47,44 @@ def _source(body):
     return source
 
 
+def _album_reference(source, value):
+    if not isinstance(value, str) or not value.strip() or len(value) > 1000:
+        raise ValueError("请输入有效的专辑 ID 或网易云、QQ 音乐专辑链接")
+    identity = value.strip()
+    if identity.startswith(('http://', 'https://')):
+        url = urlsplit(identity)
+        identity = ''
+        if url.hostname == 'music.163.com':
+            route = urlsplit(url.fragment) if url.fragment.startswith('/') else url
+            if route.path.rstrip('/') == '/album':
+                identity = parse_qs(route.query).get('id', [''])[0]
+            source = 'netease'
+        elif url.hostname == 'y.qq.com':
+            match = re.fullmatch(r'/n/ryqq(?:_v2)?/albumDetail/([A-Za-z0-9]+)/?', url.path)
+            identity = match[1] if match else ''
+            source = 'qqmusic'
+    pattern = r'[A-Za-z0-9]{1,100}' if source == 'qqmusic' else r'[0-9]{1,100}'
+    if source not in DIRECT_SOURCES or not re.fullmatch(pattern, identity):
+        raise ValueError("专辑 ID 或链接无效，请选择对应的官方来源，或粘贴网易云、QQ 音乐专辑链接")
+    return source, identity
+
+
 def search(body):
     source = _source(body)
+    album_id = body.get('album_id')
+    if body.get('kind') == 'album_id' or source in DIRECT_SOURCES and album_id:
+        source, album_id = _album_reference(source, album_id)
     query = body.get("query")
-    if not isinstance(query, str) or not query.strip() or len(query) > 200:
-        raise ValueError("请输入不超过 200 字的歌曲或歌手名称")
+    if not album_id and (not isinstance(query, str) or not query.strip() or len(query) > 200):
+        raise ValueError("请输入不超过 200 字的歌曲、专辑或歌手名称")
     page = max(1, min(int(body.get("page", 1)), 100))
     if source in DIRECT_SOURCES:
         from . import streaming_metadata
-        if body.get("album_id"):
-            album = streaming_metadata.detail(source, str(body["album_id"]), "album")
+        if album_id:
+            album = streaming_metadata.detail(source, album_id, "album")
             rows = album["tracks"]
-            result = {"items":rows[(page-1)*20:page*20],"has_more":page*20<len(rows),"page":page}
+            result = {"items":rows[(page-1)*20:page*20],"has_more":page*20<len(rows),"page":page,
+                      "album":{"id":album_id,"title":album["title"]},"source":source}
         else:
             result = streaming_metadata.search(source, query, body.get("kind") or "recording", page)
         result["items"] = [{**row,"id":row["media_id"],"source":source} for row in result["items"]]
