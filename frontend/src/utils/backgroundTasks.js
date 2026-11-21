@@ -4,7 +4,8 @@ import { refreshTaskStatus } from '../composables/useTaskStatus';
 // Preserve each operation's final JSON response while long work runs outside its HTTP request.
 export function installBackgroundTaskInterceptor() {
   axios.interceptors.response.use(async response => {
-    if (response.status !== 202 || !response.data?.task_id) return response;
+    // 自行展示进度并轮询结果的页面需要保留原始任务编号。
+    if (response.config?.backgroundTaskPolling === false || response.status !== 202 || !response.data?.task_id) return response;
     const id = response.data.task_id;
     refreshTaskStatus(true);
     let readFailures = 0;

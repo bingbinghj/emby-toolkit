@@ -63,3 +63,18 @@ def test_apple_does_not_return_preview_audio_or_confuse_album_track_ids(monkeypa
     album=metadata.detail('apple','1','album')
     assert album['media_id']=='1' and album['tracks'][0]['media_id']=='2'
     assert 'previewUrl' not in album['tracks'][0]
+
+
+def test_kugou_album_search_drills_down_to_original_lyric_hash(monkeypatch):
+    calls=[]
+    def read(url,params,label):
+        calls.append(url)
+        if 'search/album' in url:
+            return {'status':1,'data':{'total':1,'info':[{'albumid':12,'albumname':'专辑','singername':'歌手','songcount':1}]}}
+        return {'status':1,'data':{'total':1,'info':[{'hash':'A'*32,'filename':'歌手 - 单曲','duration':200}]}}
+    monkeypatch.setattr(metadata,'read_json',read)
+    albums=lyrics_search.search({'source':'kugou','query':'专辑','kind':'album'})['items']
+    songs=lyrics_search.search({'source':'kugou','query':'专辑','album_id':albums[0]['id']})['items']
+    assert songs[0]['id']=='A'*32 and songs[0]['title']=='单曲'
+    assert metadata.detail('kugou','A'*32)['album']=='专辑'
+    assert len(calls)==2

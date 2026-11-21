@@ -36,7 +36,7 @@ def dispatch(request):
             return streaming_metadata.detail(manual_source, body["id"], body.get("kind") or "recording")
     if action in {"library", "selection", "scope", "scan", "scan_batch", "scan_finish", "inspect", "image", "preview_groups", "audio_path"}:
         from etk_music import library
-    elif action in {"preview", "execute", "cleanup"}:
+    elif action in {"preview", "execute", "cleanup", "clear_comments_preview"}:
         from etk_music import operations
     elif action == "lyrics_translate":
         from etk_music.lyrics_translate import translate
@@ -106,6 +106,8 @@ def dispatch(request):
         return {"items": catalog.related(body["source"], body["id"], body["kind"], int(body.get("page",1)), body.get("album_type"))}
     if action=="preview":
         return operations.preview(config, body)
+    if action=="clear_comments_preview":
+        return operations.clear_comments_preview(config)
     if action=="cleanup":
         return operations.cleanup(config, body)
     if action=="execute":

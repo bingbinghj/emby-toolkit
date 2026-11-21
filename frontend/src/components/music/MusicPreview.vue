@@ -31,7 +31,7 @@ function color(info) {
   if (["local_tags", "local_cue", "manual"].includes(info?.status ?? "")) return "info";
   return "warning";
 }
-const tagFields=[['title','曲名'],['artists','艺人'],['album','专辑'],['album_artist','专辑艺人'],['track_number','曲序'],['total_tracks','总曲数'],['disc_number','碟号'],['total_discs','总碟数'],['release_year','发行年份'],['original_year','原始年份'],['isrc','ISRC'],['composers','作曲'],['conductors','指挥'],['orchestras','乐团'],['performers','演奏者'],['media_id','MusicBrainz 录音 ID'],['musicbrainz_release_id','MusicBrainz 发行 ID'],['musicbrainz_release_group_id','MusicBrainz 专辑组 ID'],['musicbrainz_release_track_id','MusicBrainz 发行曲目 ID']];
+const tagFields=[['comment','备注'],['description','简介 / 描述'],['title','曲名'],['artists','艺人'],['album','专辑'],['album_artist','专辑艺人'],['track_number','曲序'],['total_tracks','总曲数'],['disc_number','碟号'],['total_discs','总碟数'],['release_year','发行年份'],['original_year','原始年份'],['isrc','ISRC'],['composers','作曲'],['conductors','指挥'],['orchestras','乐团'],['performers','演奏者'],['media_id','MusicBrainz 录音 ID'],['musicbrainz_release_id','MusicBrainz 发行 ID'],['musicbrainz_release_group_id','MusicBrainz 专辑组 ID'],['musicbrainz_release_track_id','MusicBrainz 发行曲目 ID']];
 const tagKeys={artists:'artist',album_artist:'albumartist',track_number:'tracknumber',total_tracks:'tracknumber',disc_number:'discnumber',total_discs:'discnumber',release_year:'date',original_year:'originaldate',composers:'composer',conductors:'conductor',orchestras:'orchestra',performers:'performer',media_id:'musicbrainz_trackid',musicbrainz_release_id:'musicbrainz_albumid',musicbrainz_release_group_id:'musicbrainz_releasegroupid',musicbrainz_release_track_id:'musicbrainz_releasetrackid'};
 const after=(item,field)=>item.tag_updates && !Object.hasOwn(item.tag_updates,tagKeys[field] || field) ? item.before?.[field] : item.metadata?.[field];
 const fieldText=value=>Array.isArray(value) ? value.join(' / ') : value && typeof value==='object' ? Object.entries(value).map(([role,names])=>`${role}: ${names.join(' / ')}`).join('；') : value ?? '—';
@@ -112,7 +112,7 @@ function evidence(item) {
           </div>
           <div v-if="item.cover_upload" class="my-3"><p class="mb-2">替换内嵌封面</p><VImg :src="item.cover_upload" width="160" height="160" contain rounded /></div>
           <VAlert v-if="item.cover_edit" type="info" variant="tonal" class="my-2">替换内嵌封面：{{ item.cover_edit }}</VAlert>
-          <details v-if="item.lyrics_edit" class="my-2"><summary>更新旁挂歌词（替换现有版本）</summary><pre class="lyrics-preview">{{ item.lyrics_edit.text }}</pre></details>
+          <details v-if="item.lyrics_edit" open class="my-2"><summary>更新旁挂歌词（替换现有版本）</summary><pre class="lyrics-preview">{{ item.lyrics_edit.text }}</pre></details>
           <p v-if="item.music?.artists?.length" class="text-caption mt-1">{{ item.music.artists.join(' / ') }}</p>
           <p v-if="evidence(item)" class="text-caption text-medium-emphasis mt-1">{{ evidence(item) }}</p>
           <div class="music-preview-file__paths mt-2">
@@ -122,7 +122,7 @@ function evidence(item) {
             </div>
             <div>
               <span class="text-caption text-medium-emphasis">{{ t('dialog.reorganize.previewAfterColumn') }}</span>
-              <p>{{ item.target || '-' }}</p><dl v-for="[field,label] in tagFields.filter(([field])=>item.before?.[field] || item.metadata?.[field])" :key="field" class="mt-1"><dt class="text-medium-emphasis">{{ label }}</dt><dd>{{ fieldText(after(item,field)) }}</dd></dl>
+              <p>{{ item.target || '-' }}</p><dl v-for="[field,label] in tagFields.filter(([field])=>item.before?.[field] || item.metadata?.[field])" :key="field" class="mt-1"><dt class="text-medium-emphasis">{{ label }}</dt><dd>{{ after(item,field)==='' ? '已清空' : fieldText(after(item,field)) }}</dd></dl>
             </div>
           </div>
           <p v-if="item.success === false || item.message" class="text-caption text-error mt-2">{{ item.message }}</p>
@@ -151,6 +151,7 @@ function evidence(item) {
 </template>
 
 <style scoped>
+.music-preview-file dd{white-space:pre-wrap;overflow-wrap:anywhere;}
 .lyrics-preview{white-space:pre-wrap;overflow-wrap:anywhere;max-height:20rem;overflow:auto;padding:1rem;}
 .music-preview-group {
   margin-bottom: 12px;

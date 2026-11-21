@@ -10,12 +10,16 @@ const {smAndDown}=useDisplay();
 const rows=ref([]), error=ref(''), time=ref(0), player=ref(null);
 try{rows.value=timelineRows(props.lyrics || '');}catch(cause){error.value=cause.message;}
 const result=computed(()=>{try{return {text:serializeTimeline(rows.value)};}catch(cause){return {error:cause.message};}});
-function seek(row){const [minutes,seconds]=row.time.split(':').map(Number);if(Number.isFinite(seconds))player.value?.seek(minutes*60+seconds);}
+function seek(row){
+  const seconds=value=>{const [minutes,second]=value.split(':').map(Number);return minutes*60+second;};
+  const start=seconds(row.time), next=rows.value.map(item=>seconds(item.time)).filter(time=>time>start);
+  player.value?.seek(start,next.length ? Math.min(...next) : null);
+}
 </script>
 <template>
   <VDialog :model-value="true" @update:model-value="!$event && emit('close')" max-width="60rem" :fullscreen="smAndDown" scrollable>
     <VCard class="lyrics-timeline"><VCardItem title="歌词时间轴编辑器" class="pe-16" /><DialogCloseBtn @click="emit('close')" /><VDivider />
-      <VCardText><MusicAudioPlayer ref="player" :path="path" @timeupdate="time=$event" /><p class="mt-3 mb-4">当前播放位置 {{ formatLyricTime(time) }}。可以逐行修改时间和歌词，或用当前播放位置给该行打点。</p>
+      <VCardText><MusicAudioPlayer ref="player" :path="path" @timeupdate="time=$event" /><p class="mt-3 mb-4">当前播放位置 {{ formatLyricTime(time) }}。单句试听在下一句开始时暂停，最后一句播放到歌曲结束。可以逐行修改时间和歌词，或用当前播放位置给该行打点。</p>
         <VAlert v-if="error || result.error" type="error" variant="tonal" class="mb-4">{{ error || result.error }}</VAlert>
         <div v-for="(row,index) in rows" :key="index" class="timeline-row">
           <VTextField v-model="row.time" :label="`第 ${index+1} 行时间`" placeholder="00:00.000" hide-details :mobile-layout="false" />

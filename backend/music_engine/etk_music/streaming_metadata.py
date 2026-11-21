@@ -7,13 +7,13 @@ import time
 from .cache import Cache, cached
 from .streaming import SOURCES, read_json, track, _url, _date
 
-ALBUM_SOURCES = {"netease", "qqmusic", "apple", "kuwo"}
+ALBUM_SOURCES = {"netease", "qqmusic", "apple", "kuwo", "kugou"}
 
 
 @cached(maxsize=256, ttl=1800, region="streaming-metadata")
 def get(url, params=None):
     data = read_json(url, params, "音乐资料源")
-    if not isinstance(data, dict) or data.get("code") not in (None, 0, 200) or data.get("subcode", 0) != 0 or data.get("error_code", 0) != 0:
+    if not isinstance(data, dict) or data.get("code") not in (None, 0, 200) or data.get("subcode", 0) != 0 or data.get("error_code", 0) != 0 or data.get("errcode", 0) != 0:
         raise ValueError("音乐资料源暂时不可用，请稍后重试")
     if isinstance(data.get("req_1"), dict) and data["req_1"].get("code") != 0:
         raise ValueError("QQ 音乐资料暂时不可用，请稍后重试")
@@ -25,6 +25,7 @@ def get(url, params=None):
         ("y.qq.com", ("data",)), ("complexsearch.kugou.com", ("data",)),
         ("search.kuwo.cn", ("abslist", "albumlist", "musiclist")),
         ("getSongInfo.php", ("songName",)),
+        ("mobilecdn.kugou.com", ("data",)),
     ]
     for segment, keys in shapes:
         if segment in url:
@@ -113,6 +114,10 @@ def search(source, query, kind="recording", page=1, count=20):
         rows = result.get("albumlist" if kind=="album" else "abslist", [])
         items = [album_item(source,row) if kind=="album" else kuwo_track(row) for row in rows]
         total = int(result.get("TOTAL") or result.get("total") or offset+len(rows)+(1 if len(rows)==count else 0))
+    elif kind == "album":
+        result = get("http://mobilecdn.kugou.com/api/v3/search/album", {"keyword":query,"page":page,"pagesize":count})["data"]
+        rows, total = result.get("info", []), result.get("total", 0)
+        items = [album_item(source, row) for row in rows]
     else:
         result = kugou_search(query, page, count)
         rows, total = result.get("lists", []), result.get("total", 0)
@@ -141,6 +146,8 @@ def album_item(source, row):
         item.update(media_id=str(mid),title=row.get("albumName") or row["name"],artists=[row.get("singerName") or row.get("singername") or ""],cover_url=f"https://y.gtimg.cn/music/photo_new/T002R500x500M000{mid}.jpg",release_date=row.get("publicTime") or row.get("aDate"))
     elif source=="apple":
         item.update(media_id=str(row["collectionId"]),title=row["collectionName"],artists=[row["artistName"]],cover_url=_url(row.get("artworkUrl100")).replace("100x100bb","600x600bb"),release_date=row.get("releaseDate"),total_tracks=row.get("trackCount"))
+    elif source=="kugou":
+        item.update(media_id=str(row["albumid"]),title=clean(row["albumname"]),artists=[clean(name) for name in (row.get("singername") or "").split("、")],cover_url=_url(row.get("imgurl")),release_date=row.get("publishtime"),total_tracks=row.get("songcount"))
     else:
         item.update(media_id=str(row["albumid"]),title=clean(row["name"]),artists=[clean(row.get("artist"))],cover_url=_url(row.get("hts_img") or row.get("img")),release_date=row.get("pub"),total_tracks=int(row.get("musiccnt") or row.get("songnum") or 0))
     item["album"] = item["title"]
@@ -164,6 +171,17 @@ def detail(source, identity, kind="recording"):
         elif source=="kuwo":
             row=get("https://search.kuwo.cn/r.s",{"stype":"albuminfo","albumid":identity,"alflac":1,"pn":0,"rn":1000,"rformat":"json","encoding":"utf8","mobi":1})
             item=album_item(source,row); tracks=[kuwo_track(song) for song in row.get("musiclist",[])]
+        elif source=="kugou":
+            item = cached_item or album_item(source, get("http://mobilecdn.kugou.com/api/v3/album/info", {"albumid":identity})["data"])
+            tracks = []
+            for page in range(1, 11):
+                data = get("http://mobilecdn.kugou.com/api/v3/album/song", {"albumid":identity,"page":page,"pagesize":100})["data"]
+                for row in data.get("info", []):
+                    artist, separator, title = clean(row.get("filename")).partition(" - ")
+                    tracks.append({"media_source":source,"media_id":row["hash"],"music_type":"recording", "title":title if separator else artist,
+                        "artists":artist.split("、") if separator else item["artists"],"album":item["title"],"album_id":identity,"duration":row.get("duration")})
+                if page*100 >= int(data.get("total") or 0) or not data.get("info"):
+                    break
         else: raise ValueError("此来源仅支持歌曲资料搜索")
         for song in tracks:
             song["cover_url"]=song.get("cover_url") or item.get("cover_url")

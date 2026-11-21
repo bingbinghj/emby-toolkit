@@ -69,3 +69,32 @@ export function serializeTimeline(rows) {
     return `[${formatLyricTime(seconds)}]${content}`;
   }).join('\n');
 }
+
+// 用来源原文核对译文对应关系，沿用本地原文的时间标签；不按行号强行对齐不同版本。
+export function mergeLyricsTranslation(original, sourceOriginal, translation) {
+  const clean=text=>text.replace(/\[\d+:\d{2}(?:[.:]\d+)?\]|<\d+:\d{2}(?:[.:]\d+)?>/g,'').trim();
+  const key=text=>clean(text).normalize('NFKC').toLocaleLowerCase().replace(/[\p{P}\p{Z}\s]/gu,'');
+  const translated=parseLyrics(translation), source=parseLyrics(sourceOriginal), matches=new Map(), byTime=new Map();
+  for(const row of translated){const stamp=Math.round(row.time*1000),lines=byTime.get(stamp) || [];if(row.text)lines.push(row.text);byTime.set(stamp,lines);}
+  const add=(text,value)=>{if(!key(text) || !value || key(text)===key(value))return;const values=matches.get(key(text)) || new Set();values.add(value);matches.set(key(text),values);};
+  for(const row of source){
+    const lines=byTime.get(Math.round(row.time*1000)) || [];
+    if(lines.length)add(row.text,[...new Set(lines)].join('\n'));
+  }
+  const plain=text=>text.split(/\r?\n/).filter(line=>line.trim() && !/^\[[a-z]+:/i.test(line));
+  if(!source.length && !translated.length){const left=plain(sourceOriginal),right=plain(translation);if(left.length===right.length)left.forEach((text,index)=>add(text,right[index].trim()));}
+  let matched=0,total=0;
+  const lines=original.split(/\r?\n/), output=[];
+  for(let index=0;index<lines.length;index++){
+    const line=lines[index];output.push(line);
+    if(!clean(line) || /^\[[a-z]+:/i.test(line))continue;
+    total++;
+    const values=matches.get(key(line));
+    if(values?.size!==1)continue;
+    const stamps=[...line.matchAll(/\[\d+:\d{2}(?:[.:]\d+)?\]/g)].map(match=>match[0]).join('');
+    const additions=[...values][0].split('\n').map(text=>stamps+text);
+    if(!additions.every((text,offset)=>lines[index+1+offset]===text))output.push(...additions);
+    matched++;
+  }
+  return {text:output.join('\n'),matched,total};
+}

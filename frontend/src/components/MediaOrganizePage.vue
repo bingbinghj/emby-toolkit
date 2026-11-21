@@ -117,7 +117,7 @@
       <footer v-if="!smAndDown" ref="paginationElement" class="organize-pagination" data-testid="organize-footer">
         <VSelect :model-value="pageSize" :items="pageSizeOptions" density="compact" variant="solo" flat rounded="pill" hide-details aria-label="每页条数" title="每页条数" class="organize-page-size" :disabled="processing" data-testid="organize-page-size" @update:model-value="changePageSize" />
         <span class="organize-pagination-info text-medium-emphasis" :aria-label="total === null ? '总数未确认' : `第 ${pageTip.begin} 至 ${pageTip.end} 条，共 ${total} 条记录`" data-testid="organize-page-info">{{ total === null ? '总数未确认' : `${pageTip.begin} - ${pageTip.end} / ${total}` }}</span>
-        <VPagination v-model="page" show-first-last-page :length="pages" :total-visible="smAndDown ? 3 : 7" :disabled="loadingItems || processing" data-testid="organize-pagination" @update:model-value="loadItems" />
+        <VPagination v-model="page" class="mp-pagination" show-first-last-page :length="pages" :total-visible="7" :disabled="loadingItems || processing" data-testid="organize-pagination" @update:model-value="loadItems" />
       </footer>
     </div>
 

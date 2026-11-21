@@ -24,6 +24,7 @@ from .text import convert
 from . import lyrics as local_lyrics
 
 EDIT_FIELDS = {"title", "artists", "album", "album_artist", "track_number", "total_tracks", "disc_number", "total_discs", "year", "release_year", "original_year", "composers", "conductors", "orchestras", "performers", "isrc", "media_source", "media_id", "music_type", "musicbrainz_release_id", "musicbrainz_release_group_id", "musicbrainz_release_track_id"}
+EDIT_FIELDS.update({"comment", "description"})
 
 def uploaded_cover(value):
     if not isinstance(value, str) or len(value) > 1_400_000:
@@ -36,6 +37,28 @@ def uploaded_cover(value):
     if not valid or len(data) > 1024 * 1024:
         raise ValueError("上传封面内容无效或超过 1 MiB")
     return data, match[1]
+
+
+def clear_comments_preview(config):
+    """仅计划清空本地标签，不识别、刮削或改写其他字段。"""
+    rows = []
+    for relative in library.walk(config):
+        try:
+            path = library.target(config, relative)
+            identity = library.signature(path)
+            audio = AudioMetadataHelper._open_audio(path)
+            if audio is None:
+                raise ValueError("音频内容无法读取")
+            info = MusicInfo(comment="", description="")
+            updates = AudioMetadataHelper._tag_updates(audio, info, True)
+            if library.signature(path) != identity:
+                raise ValueError("音乐文件在读取时已变化")
+            rows.append({"path": relative, "target": relative, "signature": identity,
+                         "metadata": {"comment": "", "description": ""}, "success": True,
+                         "skip": not updates})
+        except Exception as error:
+            rows.append({"path": relative, "success": False, "message": str(error)})
+    return rows
 
 
 def write_json(path, data):
@@ -105,7 +128,11 @@ def preview(config, body):
             if operation == "edit":
                 info = MusicInfo.from_meta(meta)
                 values = body.get("metadata") or {}
-                if values.get("signature") is not None and values["signature"] != identity:
+                for key in ("comment", "description"):
+                    value = values.get(key)
+                    if value is not None and (not isinstance(value, str) or len(value) > 65536 or "\0" in value):
+                        raise ValueError("备注和简介必须为不含空字符且不超过 65536 字符的文本")
+                if values.get("signature") is not None and values["signature"] != identity and values["signature"] != {key: str(value) for key, value in identity.items()}:
                     raise ValueError("音乐文件在打开编辑器后已变化，请重新打开")
                 identity_keys = ["musicbrainz_release_id", "musicbrainz_release_group_id", "musicbrainz_release_track_id"]
                 if values.get("media_source", info.media_source) == "musicbrainz":
@@ -328,6 +355,10 @@ def execute(config, body):
                     temporary.chmod(path.stat().st_mode | 0o600)
                     if not AudioMetadataHelper.write(temporary, info, cover_data=cover_data, cover_mime=cover_mime, write_tags=write_tags, overwrite=overwrite, cover_overwrite=operation=="edit" or policies.get("cover")=="overwrite"):
                         raise ValueError("音乐标签或封面写入失败")
+                    if write_tags and operation == "edit" and any(getattr(info, key) is not None for key in ("comment", "description")):
+                        remaining = AudioMetadataHelper._tag_updates(AudioMetadataHelper._open_audio(temporary), info, True)
+                        if remaining.keys() & {"comment", "description"}:
+                            raise ValueError("备注或描述未正确写入，保留原音乐文件")
                     with temporary.open("rb") as stream: os.fsync(stream.fileno())
                     saved["prepared"] = library.signature(temporary)
                 else:

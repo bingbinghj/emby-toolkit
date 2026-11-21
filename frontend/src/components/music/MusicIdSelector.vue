@@ -118,6 +118,7 @@ onBeforeUnmount(() => {
       />
     </VCardTitle>
     <VCardText class="media-id-selector__search">
+      <p v-if="type?.startsWith('gd_') && musicTypes?.includes('album')" class="text-caption mb-3">按此来源搜索返回的歌曲归并专辑，仅展示已返回的曲目。</p>
       <VTextField
         ref="inputKeyword"
         v-model="keyword"

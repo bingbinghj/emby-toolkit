@@ -10,7 +10,6 @@ from .streaming import read_json
 GD_API = "https://music-api.gdstudio.xyz/api.php"
 GD_SOURCES = {"gd_netease": "netease", "gd_joox": "joox", "gd_bilibili": "bilibili"}
 DIRECT_SOURCES = {"netease", "qqmusic", "kugou", "kuwo"}
-ALBUM_SOURCES = {"netease", "qqmusic", "kuwo"}
 
 
 def _reserve_gd():
@@ -53,12 +52,8 @@ def search(body):
     if not isinstance(query, str) or not query.strip() or len(query) > 200:
         raise ValueError("请输入不超过 200 字的歌曲或歌手名称")
     page = max(1, min(int(body.get("page", 1)), 100))
-    if (body.get("kind") == "album" or body.get("album_id")) and source not in ALBUM_SOURCES:
-        raise ValueError("当前渠道不提供专辑浏览，请使用歌曲搜索或切换到直连资料源")
     if source in DIRECT_SOURCES:
         from . import streaming_metadata
-        if body.get("kind") == "album" and source not in ALBUM_SOURCES:
-            raise ValueError("当前来源不提供专辑搜索，请选择网易云音乐、QQ 音乐或酷我音乐")
         if body.get("album_id"):
             album = streaming_metadata.detail(source, str(body["album_id"]), "album")
             rows = album["tracks"]
@@ -68,23 +63,28 @@ def search(body):
         result["items"] = [{**row,"id":row["media_id"],"source":source} for row in result["items"]]
         return result
     if source == "lrclib":
+        from . import search_albums
+        if body.get("album_id"):
+            rows = search_albums.detail(source, str(body["album_id"]))["tracks"]
+            return {"items":rows[(page-1)*20:page*20], "page":page, "has_more":page*20<len(rows), "track_scope":"search_results"}
         rows = LrclibModule()._request_json("/api/search", params={"q": query.strip()})
         if not isinstance(rows, list):
             raise ValueError("LRCLIB 暂时不可用，请稍后再试")
         available = [row for row in rows if row.get("syncedLyrics") or row.get("plainLyrics")]
         items = [{"id": str(row["id"]), "source": source, "title": row.get("trackName"), "artists": [row.get("artistName", "")],
                   "album": row.get("albumName"), "duration": row.get("duration"), "synced": bool(row.get("syncedLyrics"))}
-                 for row in available[(page-1)*20:page*20]]
-        return {"items": items, "page": page, "has_more": page*20 < len(available)}
-    channel = GD_SOURCES[source]
-    rows = _gd({"types": "search", "source": channel, "name": query.strip(), "count": 20, "pages": page})
-    if not isinstance(rows, list):
-        raise ValueError("GD 音乐台暂时未返回搜索结果，请稍后再试或选择其他来源")
-    items = [{"id": str(row.get("lyric_id") or row["id"]), "source": source, "title": row.get("name"),
-              "artists": row.get("artist") if isinstance(row.get("artist"), list) else [str(row.get("artist") or "")],
-              "album": row.get("album"), "duration": row.get("duration")}
-             for row in rows if row.get("id") is not None and row.get("source", channel) == channel]
-    return {"items": items, "page": page, "has_more": len(rows) >= 20}
+                 for row in available]
+        if body.get("kind") == "album":
+            items = search_albums.group(source, items)
+        return {"items": items[(page-1)*20:page*20], "page": page, "has_more": page*20 < len(items)}
+    from . import gd_metadata
+    if body.get("album_id"):
+        rows = gd_metadata.detail(source, str(body["album_id"]), "album")["tracks"]
+        result = {"items":rows[(page-1)*20:page*20], "page":page, "has_more":page*20<len(rows), "track_scope":"search_results"}
+    else:
+        result = gd_metadata.search(source, query, body.get("kind") or "recording", page)
+    result["items"] = [{**row,"id":row.get("lyric_id") or row["media_id"],"source":source} for row in result["items"]]
+    return result
 
 
 def detail(body):

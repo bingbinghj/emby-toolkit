@@ -1,15 +1,36 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { shiftLyrics, parseLyrics, formatLyrics, timelineRows, serializeTimeline } from '../src/components/music/lyrics.js';
-import { musicSearchTerm, musicReleaseError, metadataSources, lyricSources } from '../src/components/music/utils.js';
+import { shiftLyrics, parseLyrics, formatLyrics, timelineRows, serializeTimeline, mergeLyricsTranslation } from '../src/components/music/lyrics.js';
+import { musicSearchTerm, musicReleaseError, musicReleaseOptions, musicFieldOptions, metadataSources, lyricSources } from '../src/components/music/utils.js';
 
 test('歌曲、歌手、专辑搜索默认使用当前歌曲的对应信息',()=>{
   const item={title:'Oh!',artists:['少女时代'],album:'The Second Album'};
-  assert.equal(musicSearchTerm(item),'Oh! 少女时代');
-  assert.equal(musicSearchTerm(item,'recording','musicbrainz'),'少女时代 - Oh!');
+  assert.equal(musicSearchTerm(item),'Oh!');
+  assert.equal(musicSearchTerm(item,'recording','musicbrainz'),'Oh!');
   assert.equal(musicSearchTerm(item,'artist'),'少女时代');
   assert.equal(musicSearchTerm(item,'album'),item.album);
   assert.equal(musicSearchTerm({title:'曲名'}),'曲名');
+});
+
+test('来源译文按原文匹配，保留本地时间轴、元数据与未匹配句子',()=>{
+  const original='[ar:原歌手]\n[offset:200]\n[00:10.00][00:50.00]Hello!\n[00:20.00]Unknown line';
+  const result=mergeLyricsTranslation(original,'[00:01.00]Hello\n[00:02.00]Other','[00:01.00]你好\n[00:02.00]另一句');
+  assert.equal(result.text,'[ar:原歌手]\n[offset:200]\n[00:10.00][00:50.00]Hello!\n[00:10.00][00:50.00]你好\n[00:20.00]Unknown line');
+  assert.equal(result.matched,1);assert.equal(result.total,2);
+  assert.equal(mergeLyricsTranslation(result.text,'[00:01]Hello','[00:01]你好').text,result.text);
+  assert.equal(mergeLyricsTranslation('[00:01]Different','[00:01]Hello','[00:01]你好').matched,0);
+  assert.equal(mergeLyricsTranslation('Hello\nWorld','Hello\nWorld','你好\n世界').text,'Hello\n你好\nWorld\n世界');
+});
+
+test('发行选项包含版本信息，标签候选只采用接口已返回的字段',()=>{
+  const album={title:'专辑',musicbrainz_release_id:'edition',releases:[{media_id:'edition',title:'日版',country:'JP',formats:['CD'],track_count:12}],total_tracks:12,tracks:[{title:'歌曲一',track_number:1},{title:'歌曲二',track_number:2}]};
+  assert.deepEqual(musicReleaseOptions(album),[{value:'edition',title:'日版 · JP · CD · 12 首曲目'}]);
+  const metadata={artists:['歌手'],isrc:'USABC2400001',raw_data:{isrcs:['USABC2400001','USABC2400002']},performers:{guitar:['演奏者']}};
+  assert.deepEqual(musicFieldOptions('isrc',metadata,album),['USABC2400001','USABC2400002']);
+  assert.deepEqual(musicFieldOptions('title',metadata,album),['歌曲一','歌曲二']);
+  assert.deepEqual(musicFieldOptions('total_tracks',metadata,album),[12]);
+  assert.deepEqual(musicFieldOptions('performer_role',metadata),['guitar']);
+  assert.deepEqual(musicFieldOptions('original_year',metadata,album),[]);
 });
 
 test('歌词平移同时处理重复段和逐字时间，不改变歌词正文',()=>{

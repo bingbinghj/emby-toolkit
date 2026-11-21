@@ -53,7 +53,7 @@ async fn local_music_scan_preview_write_and_cleanup_preserve_seed() {
     std::fs::create_dir_all(&seed).unwrap();
     std::fs::create_dir_all(&library).unwrap();
     let python = std::env::var("ETK_MUSIC_PYTHON").unwrap_or("python3".into());
-    let output=std::process::Command::new(python).args(["-B","-c", "import sys,wave; p=wave.open(sys.argv[1],'wb'); p.setnchannels(2); p.setsampwidth(2); p.setframerate(44100); p.writeframes(bytes(176400)); p.close()"])
+    let output=std::process::Command::new(python).args(["-B","-c", "import sys,wave; from mutagen.wave import WAVE; from mutagen.id3 import COMM,TXXX; p=wave.open(sys.argv[1],'wb'); p.setnchannels(2); p.setsampwidth(2); p.setframerate(44100); p.writeframes(bytes(176400)); p.close(); a=WAVE(sys.argv[1]); a.add_tags(); a.tags.add(COMM(encoding=3,lang='eng',desc='',text=['Original comment'])); a.tags.add(TXXX(encoding=3,desc='DESCRIPTION',text=['Original description'])); a.save()"])
         .arg(seed.join("source.wav")).output().unwrap();
     assert!(
         output.status.success(),
@@ -85,7 +85,9 @@ async fn local_music_scan_preview_write_and_cleanup_preserve_seed() {
         douban: Arc::default(),
         docker: Arc::default(),
     };
-    let app = emby_toolkit::music::router().with_state(state.clone());
+    let app = emby_toolkit::music::router()
+        .merge(emby_toolkit::tasks::router())
+        .with_state(state.clone());
     // 试听为只读，支持 Range/HEAD；不能读取库外文件或非音频旁挂文件。
     let response = app
         .clone()
@@ -189,4 +191,56 @@ async fn local_music_scan_preview_write_and_cleanup_preserve_seed() {
     )
     .await;
     assert_eq!(status, 400);
+    // 任务中心批量清空复用音乐持久任务，做种内容和其它标签必须保持不变。
+    std::fs::hard_link(seed.join("source.wav"), library.join("linked.wav")).unwrap();
+    for context in ["manual", "all"] {
+        let (_, catalog) = request(
+            &app,
+            "GET",
+            &format!("/api/tasks/available?context={context}"),
+            json!({}),
+        )
+        .await;
+        assert!(
+            catalog
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|task| task["key"] == "clear-music-comments")
+        );
+    }
+    for repeat in 0..2 {
+        let (status, job) = request(
+            &app,
+            "POST",
+            "/api/tasks/run",
+            json!({"task_name":"clear-music-comments"}),
+        )
+        .await;
+        assert_eq!(status, 202, "{job}");
+        let result = finished(&state, job["task_id"].as_str().unwrap()).await;
+        assert_eq!(result["result"]["failed"], 0, "{result}");
+        assert_eq!(result["result"]["items"].as_array().unwrap().len(), 2);
+        assert_eq!(result["result"]["skipped"], if repeat == 0 { 0 } else { 2 });
+        assert_eq!(std::fs::read(seed.join("source.wav")).unwrap(), original);
+        let (_, song) = request(
+            &app,
+            "POST",
+            "/api/music/query/inspect",
+            json!({"path":"song.wav"}),
+        )
+        .await;
+        assert!(song["comment"].is_null() && song["description"].is_null());
+        assert_eq!(song["title"], "测试曲名");
+        assert_eq!(song["artists"], json!(["测试歌手"]));
+        let (_, linked) = request(
+            &app,
+            "POST",
+            "/api/music/query/inspect",
+            json!({"path":"linked.wav"}),
+        )
+        .await;
+        assert!(linked["comment"].is_null() && linked["description"].is_null());
+        assert_eq!(linked["link_count"], 1);
+    }
 }

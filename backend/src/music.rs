@@ -372,7 +372,10 @@ async fn submit(
     Path(action): Path<String>,
     Json(body): Json<Value>,
 ) -> Result<(StatusCode, Json<Value>)> {
-    if !matches!(action.as_str(), "scan" | "preview" | "execute") {
+    if !matches!(
+        action.as_str(),
+        "scan" | "preview" | "execute" | "clear-comments"
+    ) {
         return Err(ApiError::bad("未知音乐任务"));
     }
     if action == "preview" {
@@ -423,6 +426,7 @@ async fn submit(
     let name = match action.as_str() {
         "scan" => "扫描本地音乐库",
         "preview" => "音乐刮削预览",
+        "clear-comments" => "清空音乐备注/描述",
         _ => "处理所选音乐",
     };
     let task_id = state
@@ -437,13 +441,28 @@ async fn submit(
     ))
 }
 
+pub(crate) async fn submit_clear_comments(state: &AppState) -> Result<Value> {
+    Ok(submit(
+        State(state.clone()),
+        Path("clear-comments".into()),
+        Json(json!({})),
+    )
+    .await?
+    .1
+    .0)
+}
+
 pub(crate) async fn execute_persisted(
     state: &AppState,
     payload: &Value,
     context: &JobContext,
 ) -> Result<(u16, Value)> {
     let mut result = execute_inner(state, payload, context).await;
-    if payload["action"] == "execute" && !context.is_interrupted() {
+    if matches!(
+        payload["action"].as_str(),
+        Some("execute" | "clear-comments")
+    ) && !context.is_interrupted()
+    {
         if let Err(error) = engine(
             state,
             "cleanup",
@@ -474,7 +493,10 @@ async fn execute_inner(
     context: &JobContext,
 ) -> Result<(u16, Value)> {
     let config = &payload["config"];
-    if payload["action"] == "execute" {
+    if matches!(
+        payload["action"].as_str(),
+        Some("execute" | "clear-comments")
+    ) {
         context.save_plan("music-cleanup-config", config).await?;
     }
     // 恢复任务不借用后来更改的目录；必须仍与当前配置一致。
@@ -586,6 +608,19 @@ async fn execute_inner(
     } else {
         let items = if action == "scan" {
             engine(state, "scope", json!({}), config, Some(context)).await?["paths"].clone()
+        } else if action == "clear-comments" {
+            context
+                .update(0, "清空音乐备注/描述", "读取本地音乐标签")
+                .await;
+            context.save_plan("music-operation", &json!("edit")).await?;
+            engine(
+                state,
+                "clear_comments_preview",
+                json!({}),
+                config,
+                Some(context),
+            )
+            .await?
         } else {
             let task = payload["body"]["preview_task_id"]
                 .as_str()
@@ -704,6 +739,8 @@ async fn execute_inner(
         let body = json!({"item":item,"operation":operation,"execution_id":format!("{}-{:x}",context.id,index),"lyrics_budget":(config["lyrics_batch_timeout"].as_f64().unwrap_or(120.0)-lyrics_used).max(0.0)});
         let result = if item["success"] != true {
             item.clone()
+        } else if action == "clear-comments" && item["skip"] == true {
+            json!({"path":item["path"],"success":true,"skipped":true,"message":"没有备注或描述，已跳过"})
         } else {
             match engine(state, "execute", body, config, Some(context)).await {
                 Ok(value) => value,
@@ -721,9 +758,19 @@ async fn execute_inner(
         results.push(result);
     }
     let failed = results.iter().filter(|row| row["success"] == false).count();
+    let skipped = results.iter().filter(|row| row["skipped"] == true).count();
+    let message = if action == "clear-comments" {
+        format!(
+            "音乐备注/描述清理完成，共 {} 项，清空 {} 项，跳过 {skipped} 项，失败 {failed} 项",
+            items.len(),
+            items.len() - skipped - failed
+        )
+    } else {
+        format!("音乐任务完成，共 {} 项，失败 {} 项", items.len(), failed)
+    };
     Ok((
         200,
-        json!({"items":results,"failed":failed,"warnings":failed,"message":format!("音乐任务完成，共 {} 项，失败 {} 项",items.len(),failed)}),
+        json!({"items":results,"failed":failed,"warnings":failed,"skipped":skipped,"message":message}),
     ))
 }
 

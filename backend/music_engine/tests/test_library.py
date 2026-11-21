@@ -1,5 +1,8 @@
 """真实音频验证做种保护、选中范围、无变化跳过及重启边界。"""
 import os
+import json
+import subprocess
+import shutil
 import wave
 import pytest
 from etk_music import library, operations
@@ -53,6 +56,135 @@ def test_unchanged_metadata_keeps_hardlink(fixture):
     operations.execute(config,{"item":row,"operation":"edit","execution_id":"abcd-3"})
     assert source.samefile(root/"song.wav")
     assert not list(root.glob(".*etk-music*"))
+
+
+@pytest.mark.parametrize("container", ["mp3", "flac", "wav", "m4a", "alac", "wma", "ogg", "opus", "aiff", "wv", "tta", "aac", "dsf", "dff", "ape", "mpc"])
+@pytest.mark.skipif(shutil.which('ffmpeg') is None, reason='扩展格式及音频流哈希验证需要 ffmpeg')
+def test_comment_description_preview_edit_clear_preserves_seed(fixture, container):
+    from mutagen import File
+    from mutagen.id3 import COMM
+    config, original, root = fixture
+    source = original.with_suffix('.' + container)
+    structural = {'dsf', 'dff', 'ape', 'mpc'}
+    if container in structural:
+        from test_audio_containers import _write_dsf, _write_dff, _write_ape, _write_mpc
+        {'dsf':_write_dsf, 'dff':_write_dff, 'ape':_write_ape, 'mpc':_write_mpc}[container](source)
+    elif container == 'alac':
+        subprocess.run(['ffmpeg', '-v', 'error', '-i', str(original), '-c:a', 'alac', '-f', 'ipod', str(source)], check=True)
+    elif container != 'wav':
+        subprocess.run(['ffmpeg', '-v', 'error', '-i', str(original), str(source)], check=True)
+    assert AudioMetadataHelper.write(source, MetaMusic(comment='Ripped by test', description='现场版\n专辑说明'))
+    if container == 'wav':
+        audio = File(source)
+        audio.tags.add(COMM(encoding=3, lang='eng', desc='iTunNORM', text=['keep normalization']))
+        audio.save()
+    target = root / ('song.' + container)
+    os.link(source, target)
+    original_bytes = source.read_bytes()
+    def audio_hash(path):
+        return subprocess.check_output(['ffmpeg','-v','error','-i',str(path),'-map','0:a:0','-c:a','copy','-f','hash','-'])
+    original_audio = audio_hash(source) if container not in structural else None
+    inspected = library.inspect(config, target.name)
+    assert inspected['comment'] == 'Ripped by test'
+    assert inspected['description'] == '现场版\n专辑说明'
+    for index, text in enumerate(['新的备注\n第二行', '']):
+        row = operations.preview(config, {'operation': 'edit', 'paths': [target.name], 'metadata': {
+            'signature': library.inspect(config, target.name)['signature'], 'comment': text, 'description': text,
+        }})['items'][0]
+        assert row['success'], row
+        assert row['before']['comment'] == ('Ripped by test' if index == 0 else '新的备注\n第二行')
+        assert row['metadata']['comment'] == text
+        assert 'comment' in row['tag_updates'] and 'description' in row['tag_updates']
+        assert library.inspect(config, target.name)['comment'] == row['before']['comment']
+        assert operations.execute(config, {'item': row, 'operation': 'edit', 'execution_id': f'cafe-{index}'})['success']
+        result = library.inspect(config, target.name)
+        assert (result['comment'] or '') == (result['description'] or '') == text
+        assert source.read_bytes() == original_bytes
+        if original_audio:
+            assert audio_hash(target) == original_audio
+        if container == 'wav':
+            assert File(target).tags.getall('COMM:iTunNORM')[0].text == ['keep normalization']
+
+
+@pytest.mark.parametrize('kind', ['hardlink', 'symlink', 'copy'])
+def test_clear_comments_task_scope_noop_replay_and_seed_protection(fixture, kind):
+    config, source, root = fixture
+    assert AudioMetadataHelper.write(source, MetaMusic(comment='抓轨备注', description='简介'))
+    target = root / 'song.wav'
+    if kind == 'hardlink': os.link(source, target)
+    elif kind == 'symlink': target.symlink_to(source)
+    else: target.write_bytes(source.read_bytes())
+    before = source.read_bytes()
+    untouched = root / 'untouched.wav'
+    untouched.write_bytes(before)
+    assert AudioMetadataHelper.write(untouched, MetaMusic(comment='', description=''))
+    untouched_identity = library.signature(untouched)
+    (root / 'broken.flac').write_bytes(b'broken audio')
+    (root / 'escape').symlink_to(source.parent, target_is_directory=True)
+    (root / 'cover.jpg').write_bytes(b'not a song')
+    rows = {row['path']: row for row in operations.clear_comments_preview(config)}
+    assert set(rows) == {'song.wav', 'untouched.wav', 'broken.flac'}
+    assert not rows['broken.flac']['success']
+    assert rows['untouched.wav']['skip']
+    assert rows['song.wav']['metadata'] == {'comment': '', 'description': ''}
+    assert target.read_bytes() == source.read_bytes() == before
+    body = {'item': rows['song.wav'], 'operation': 'edit', 'execution_id': 'cafe-3'}
+    assert operations.execute(config, body)['success']
+    saved_identity = library.signature(target)
+    assert operations.execute(config, body)['success']
+    assert library.signature(target) == saved_identity
+    assert library.signature(untouched) == untouched_identity
+    meta = AudioMetadataHelper.read(target)
+    assert not meta.comment and not meta.description
+    assert (meta.title, meta.artists, meta.album) == ('原曲名', ['歌手'], '专辑')
+    assert source.read_bytes() == before and not target.samefile(source)
+
+
+def test_unchanged_multiple_comments_do_not_rewrite_hardlink(fixture):
+    from mutagen.wave import WAVE
+    from mutagen.id3 import COMM
+    config, source, root = fixture
+    audio = WAVE(source)
+    audio.tags.add(COMM(encoding=3, lang='eng', desc='', text=['First', 'Second']))
+    audio.save()
+    os.link(source, root/'song.wav')
+    data = library.inspect(config, 'song.wav')
+    assert data['comment'] == 'First\nSecond'
+    row = operations.preview(config, {'operation':'edit','paths':['song.wav'],'metadata':data})['items'][0]
+    assert row['success'] and not row['tag_updates'], row
+    assert operations.execute(config, {'item':row,'operation':'edit','execution_id':'cafe-4'})['success']
+    assert source.samefile(root/'song.wav')
+
+
+def test_clear_legacy_id3_comment_alias(fixture):
+    from mutagen.wave import WAVE
+    from mutagen.id3 import TXXX
+    config, source, root = fixture
+    audio = WAVE(source)
+    audio.tags.add(TXXX(encoding=3, desc='COMMENT', text=['legacy comment']))
+    audio.save()
+    os.link(source, root/'song.wav')
+    before = source.read_bytes()
+    assert library.inspect(config, 'song.wav')['comment'] == 'legacy comment'
+    row = operations.clear_comments_preview(config)[0]
+    assert not row['skip']
+    assert operations.execute(config, {'item':row,'operation':'edit','execution_id':'cafe-5'})['success']
+    assert not library.inspect(config, 'song.wav')['comment']
+    assert source.read_bytes() == before
+
+
+def test_clear_comments_refuses_silent_tag_write_failure(fixture, monkeypatch):
+    config, source, root = fixture
+    assert AudioMetadataHelper.write(source, MetaMusic(comment='保留原备注'))
+    os.link(source, root/'song.wav')
+    original = source.read_bytes()
+    row = operations.clear_comments_preview(config)[0]
+    monkeypatch.setattr(AudioMetadataHelper, 'write', lambda *_args, **_kwargs: True)
+    with pytest.raises(ValueError, match='未正确写入'):
+        operations.execute(config, {'item':row,'operation':'edit','execution_id':'cafe-6'})
+    assert (root/'song.wav').samefile(source)
+    assert source.read_bytes() == original
+    assert not list(root.glob('.*etk-music*'))
 
 
 def test_uploaded_cover_uses_existing_atomic_write_without_touching_seed(fixture):
@@ -207,6 +339,31 @@ def test_manual_lyrics_changed_after_preview_rejects_before_audio_changes(fixtur
         operations.execute(config, {'item':row,'operation':'edit','execution_id':'aacd-2'})
     assert source.samefile(root/'song.wav')
     assert (root/'song.lrc').read_text() == '[00:02.00]外部修改'
+
+
+def test_editor_signature_survives_browser_json_and_still_detects_file_changes(fixture):
+    config, source, root = fixture
+    target = root/'song.wav'
+    os.link(source, target)
+    os.utime(target, ns=(1794406299898650601, 1794406299898650601))
+    before = source.read_bytes()
+    inspected = library.inspect(config, 'song.wav')
+    # 实际经过 JavaScript JSON.parse/stringify，覆盖超过 2^53 的纳秒时间。
+    editor = json.loads(subprocess.run(
+        ['node', '-e', 'process.stdout.write(JSON.stringify(JSON.parse(require("fs").readFileSync(0,"utf8"))))'],
+        input=json.dumps(inspected), text=True, capture_output=True, check=True,
+    ).stdout)
+    editor['lyrics'] = '[00:03.50]浏览器修改后的歌词'
+    row = operations.preview(config, {'operation':'edit','paths':['song.wav'],'metadata':editor})['items'][0]
+    assert row['success'], row
+    assert not target.with_suffix('.lrc').exists()
+    assert source.read_bytes() == before
+    operations.execute(config, {'item':row,'operation':'edit','execution_id':'aacd-b0'})
+    assert target.with_suffix('.lrc').read_text().rstrip() == editor['lyrics'].rstrip()
+    assert source.read_bytes() == before
+    os.utime(target, ns=(1794406299898650602, 1794406299898650602))
+    rejected = operations.preview(config, {'operation':'edit','paths':['song.wav'],'metadata':editor})['items'][0]
+    assert not rejected['success'] and '已变化' in rejected['message']
 
 
 def test_manual_edit_all_mp_identity_and_credit_tags(fixture):

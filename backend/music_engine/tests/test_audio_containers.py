@@ -43,6 +43,22 @@ def _write_dsf(path: Path) -> Path:
     return path
 
 
+def _write_ape(path: Path) -> Path:
+    """合法 APE 流信息头，用于 APEv2 标签读写；不作为可解码音频样本。"""
+    header = bytearray(76)
+    header[:4] = b'MAC '
+    struct.pack_into('<H', header, 4, 3990)
+    struct.pack_into('<IIIHHI', header, 56, 73728, 44100, 1, 16, 2, 44100)
+    path.write_bytes(header)
+    return path
+
+
+def _write_mpc(path: Path) -> Path:
+    """Musepack SV7 流信息头，验证 APEv2 标签及无后缀暂存副本。"""
+    path.write_bytes(b'MP+\x07' + struct.pack('<IIHHHH', 40, 0, 0, 0, 0, 0) + bytes(108))
+    return path
+
+
 def _write_aiff(path: Path) -> Path:
     """
     标准FORM/COMM/SSND块生成三秒44.1kHz PCM，采样率使用AIFF扩展浮点格式。

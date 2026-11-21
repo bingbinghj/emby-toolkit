@@ -10,7 +10,7 @@ from .audio import AudioMetadataHelper
 from .models import MusicInfo
 from .runtime import get_runtime_setting
 
-AUDIO_EXTENSIONS = {".flac", ".mp3", ".m4a", ".mp4", ".aac", ".ape", ".wav", ".wave", ".aif", ".aiff", ".ogg", ".opus", ".wma", ".wv", ".tta", ".mpc", ".dsf", ".dff"}
+AUDIO_EXTENSIONS = {".flac", ".mp3", ".mp2", ".mp1", ".m4a", ".m4b", ".m4p", ".mp4", ".alac", ".aac", ".adts", ".adif", ".ape", ".wav", ".wave", ".aif", ".aiff", ".aifc", ".ogg", ".oga", ".opus", ".spx", ".wma", ".wv", ".tta", ".mpc", ".tak", ".dsf", ".dff"}
 
 
 def album_directory(relative):
@@ -147,7 +147,9 @@ def inspect(config, relative):
     path = target(config, relative)
     info = metadata(path)
     from .lyrics import read_lyrics
-    return {"path": relative, **info, "signature": signature(path), **read_lyrics(path), "write_mode": "isolate" if path.is_symlink() or path.stat().st_nlink > 1 else "independent"}
+    # 文件身份经过浏览器回传；纳秒时间和 inode 不得被 JavaScript Number 舍入。
+    identity = {key: str(value) for key, value in signature(path).items()}
+    return {"path": relative, **info, "signature": identity, **read_lyrics(path), "write_mode": "isolate" if path.is_symlink() or path.stat().st_nlink > 1 else "independent"}
 
 
 def directory(config, relative=""):

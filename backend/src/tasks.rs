@@ -76,6 +76,9 @@ async fn submit_with_batch(
     batch_size: Value,
     unsupported: Vec<String>,
 ) -> Result<Value> {
+    if task == "clear-music-comments" && unsupported.is_empty() {
+        return crate::music::submit_clear_comments(state).await;
+    }
     if ![
         "populate-metadata",
         "clear-mediainfo",

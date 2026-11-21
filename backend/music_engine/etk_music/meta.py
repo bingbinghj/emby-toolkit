@@ -975,6 +975,8 @@ class MetaMusic(MetaBase):
         media_id: Optional[str] = None,
         parse_title: bool = False,
         *,
+        comment: Optional[str] = None,
+        description: Optional[str] = None,
         musicbrainz_release_id: Optional[str] = None,
         musicbrainz_release_group_id: Optional[str] = None,
         musicbrainz_release_track_id: Optional[str] = None,
@@ -1036,6 +1038,8 @@ class MetaMusic(MetaBase):
         self.bitrate = bitrate
         self.duration = duration
         self.isrc = isrc
+        self.comment = comment
+        self.description = description
         self.media_source, self.media_id = resolve_media_identity(
             media_source=media_source,
             media_id=media_id,
@@ -1051,7 +1055,7 @@ class MetaMusic(MetaBase):
         self.__dict__.update(state)
         self.__dict__.update(music_credit_values(state))
         for key in ("musicbrainz_release_id", "musicbrainz_release_group_id", "musicbrainz_release_track_id",
-                    "original_year", "release_year"):
+                    "original_year", "release_year", "comment", "description"):
             self.__dict__.setdefault(key, None)
         self.field_sources = dict(state.get("field_sources") or {})
         self.music_type = state.get("music_type")
@@ -1357,6 +1361,8 @@ class MetaMusic(MetaBase):
             bitrate=info.bitrate,
             duration=info.duration,
             isrc=info.isrc,
+            comment=getattr(info, "comment", None),
+            description=getattr(info, "description", None),
             media_source=info.media_source,
             media_id=info.media_id,
             music_type=getattr(info, "music_type", None),
@@ -2526,6 +2532,8 @@ class MetaMusic(MetaBase):
             "bitrate": self.bitrate,
             "duration": self.duration,
             "isrc": self.isrc,
+            "comment": self.comment,
+            "description": self.description,
             "media_source": self.media_source,
             "media_id": self.media_id,
             "musicbrainz_release_id": self.musicbrainz_release_id,
@@ -2572,6 +2580,8 @@ class MetaMusic(MetaBase):
             bitrate=_optional_int(data.get("bitrate")),
             duration=_optional_int(data.get("duration")),
             isrc=data.get("isrc"),
+            comment=data.get("comment"),
+            description=data.get("description"),
             media_source=data.get("media_source"),
             media_id=data.get("media_id"),
             musicbrainz_release_id=data.get("musicbrainz_release_id"),

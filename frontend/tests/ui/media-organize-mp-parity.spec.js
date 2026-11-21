@@ -1,4 +1,5 @@
 import { test, expect } from './fixtures.js';
+import { measureReadingContrast } from './reading-contrast.js';
 
 const historyPath = '/api/media_organize/history';
 const actionPath = '/api/actions/reorganize';
@@ -10,6 +11,24 @@ const rows = page => page.getByTestId('organize-items').locator('.organize-recor
 const receipt = request => ({ mode: request.body.mode, queued_count: request.body.item_ids.length, duplicate_count: 0,
   queue_ids: request.body.item_ids.map(id => `queue-${id}`),
   items: request.body.item_ids.map(item_id => ({ id: `queue-${item_id}`, item_id, mode: request.body.mode, status: 'queued' })),
+});
+
+for (const theme of ['light','dark']) test(`媒体整理页码按 MP 显示并可切换 ${theme}`,async({page,api},testInfo)=>{
+  api.respond('GET',historyPath,{items:records,total:1000});
+  await page.setViewportSize({width:1440,height:900});
+  await page.addInitScript(theme=>localStorage.setItem('moviepilot-theme-customizer',JSON.stringify({theme,glassEnabled:false})),theme);
+  await page.goto('/media-organize');
+  const pagination=page.getByTestId('organize-pagination');
+  await expect(pagination.locator('.v-pagination__item')).toHaveText(['1','2','3','4','5','6','...','20']);
+  const current=pagination.locator('.v-pagination__item--is-active .v-btn');
+  await current.scrollIntoViewIfNeeded();
+  await expect(current).toHaveCSS('font-weight','400');
+  await expect(current).toHaveCSS('background-color','rgba(0, 0, 0, 0)');
+  for(const reading of await measureReadingContrast(page,[{role:'当前页码',locator:current.locator('.v-btn__content')},{role:'其他页码',locator:pagination.locator('.v-pagination__item').nth(1).locator('.v-btn__content')}])) expect(reading.contrast).toBeGreaterThanOrEqual(4.5);
+  await pagination.getByRole('button',{name:'下一页',exact:true}).click();
+  await expect.poll(()=>api.requests.filter(row=>row.path===historyPath).at(-1)?.query.page).toBe('2');
+  await expect(pagination.locator('.v-pagination__item--is-active')).toHaveText('2');
+  await page.screenshot({path:testInfo.outputPath(`pagination-${theme}.png`)});
 });
 
 test('MP header, virtual record cards, compact selection and single-page pagination remain separate', async ({ page, api }, testInfo) => {

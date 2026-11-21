@@ -23,7 +23,7 @@ function fixture(replies, submission = { status: 202, data: { task_id: 'save-tas
   const context = vm.createContext({ axios: client, AxiosError, refreshTaskStatus() {},
     setTimeout: (done, delay) => { waits.push(delay); done(); } });
   vm.runInContext(`${source}\ninstallBackgroundTaskInterceptor();`, context);
-  return { run: () => client.post('/api/media_info/edit/101', { mediainfo: [] }), requests, waits };
+  return { run: config => client.post('/api/media_info/edit/101', { mediainfo: [] }, config), requests, waits };
 }
 
 const completed = { data: { state: 'completed', result_status: 200, result: { metadata_refresh: { state: 'verified' } } } };
@@ -31,6 +31,14 @@ const completed = { data: { state: 'completed', result_status: 200, result: { me
 test('a synchronous response is returned without task polling', async () => {
   const f = fixture([], { status: 200, data: { message: '即时结果' } });
   assert.equal((await f.run()).data.message, '即时结果');
+  assert.equal(f.requests.length, 1);
+});
+
+test('pages that poll their own jobs retain the accepted task ID', async () => {
+  const f = fixture([]);
+  const response = await f.run({backgroundTaskPolling:false});
+  assert.equal(response.status, 202);
+  assert.equal(response.data.task_id, 'save-task');
   assert.equal(f.requests.length, 1);
 });
 

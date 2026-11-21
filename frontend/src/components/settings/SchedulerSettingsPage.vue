@@ -206,7 +206,7 @@ const taskResultFeedback = computed(() => {
   const details = [...new Set([
     ...(Array.isArray(result.failures) ? result.failures : []),
     ...(Array.isArray(result.warning_details) ? result.warning_details : []),
-    ...(Array.isArray(result.items) ? result.items.filter(item => item.status === 'skipped' && !item.chapter && item.error) : []),
+    ...(Array.isArray(result.items) ? result.items.filter(item => item.success === false || item.status === 'skipped' && !item.chapter && item.error) : []),
   ].map(value => typeof value === 'string' ? value : value == null ? ''
     : [value.item_id || value.path, value.reason || value.error || value.message].filter(Boolean).join('：') || JSON.stringify(value)).filter(Boolean))];
   const failed = task.state === 'failed' || task.result_status >= 400 || result.success === false || Boolean(result.error)
@@ -333,7 +333,7 @@ const getTaskRowColor = (task) => {
 };
 const getTaskIcon = (task) => ({
   'media-data': 'mdi-database-sync-outline', 'media-info': 'mdi-file-document-outline',
-  'p115-cache': 'mdi-cloud-outline', 'audio-maintenance': 'mdi-volume-high',
+  'p115-cache': 'mdi-cloud-outline', 'audio-maintenance': 'mdi-volume-high', 'music-maintenance': 'mdi-music-note-outline',
 }[task.category] || 'mdi-cog-outline');
 
 const getTaskHelp = (task) => {
@@ -368,7 +368,7 @@ const showTaskRunResult = (response) => {
   const details = [...new Set([
     ...(Array.isArray(result.failures) ? result.failures : []),
     ...(Array.isArray(result.warning_details) ? result.warning_details : []),
-    ...(Array.isArray(result.items) ? result.items.filter(item => item.status === 'skipped' && !item.chapter && item.error) : []),
+    ...(Array.isArray(result.items) ? result.items.filter(item => item.success === false || item.status === 'skipped' && !item.chapter && item.error) : []),
   ].map(value => typeof value === 'string' ? value : [value?.item_id || value?.path, value?.reason || value?.error || value?.message].filter(Boolean).join('：')).filter(Boolean))];
   const hasWarnings = response.status === 207 || Number(result.warnings) > 0 || Number(result.failed) > 0 || details.length > 0;
   const summary = result.message || (hasWarnings ? '任务处理有提醒，请检查结果。' : '任务已完成。');

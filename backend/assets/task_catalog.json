@@ -217,6 +217,14 @@
       "category": "system-maintenance",
       "category_name": "系统维护",
       "description": "删除没有有效关联作品的幽灵演员，清理人物库冗余数据。"
+    },
+    {
+      "key": "clear-music-comments",
+      "name": "清空音乐备注/描述",
+      "help": "清空本地音乐库内歌曲的备注和描述；有内容才处理，先隔离写入再替换音乐库文件，保留做种文件。",
+      "category": "music-maintenance",
+      "category_name": "音乐维护",
+      "description": "仅处理设置中配置的本地音乐库，保留其他标签、封面和歌词。支持断点恢复。"
     }
   ],
   "all": [
@@ -363,6 +371,14 @@
       "category_name": "系统维护",
       "description": "删除没有有效关联作品的幽灵演员，清理人物库冗余数据。",
       "processor_type": "media"
+    },
+    {
+      "key": "clear-music-comments",
+      "name": "清空音乐备注/描述",
+      "help": "清空本地音乐库内歌曲的备注和描述；有内容才处理，先隔离写入再替换音乐库文件，保留做种文件。",
+      "category": "music-maintenance",
+      "category_name": "音乐维护",
+      "description": "仅处理设置中配置的本地音乐库，保留其他标签、封面和歌词。支持断点恢复。"
     }
   ]
 }

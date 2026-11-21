@@ -23,16 +23,18 @@ import chardet
 from mutagen import File as MutagenFile
 from mutagen import MutagenError
 from mutagen.aiff import AIFF
+from mutagen.aac import AAC
 from mutagen.apev2 import APEBinaryValue, APETextValue, APEv2
 from mutagen.asf import ASF, ASFBoolAttribute, ASFByteArrayAttribute, ASFTags
 from mutagen.dsdiff import DSDIFF
 from mutagen.dsf import DSF
 from mutagen.flac import FLAC, Picture
-from mutagen.id3 import APIC, ID3, SYLT, TMCL, TXXX, UFID, USLT, Frames
+from mutagen.id3 import APIC, COMM, ID3, ID3NoHeaderError, SYLT, TMCL, TXXX, UFID, USLT, Frames
 from mutagen.monkeysaudio import MonkeysAudio
 from mutagen.mp3 import MP3
 from mutagen.mp4 import MP4, MP4Cover, MP4Tags
 from mutagen.wave import WAVE
+from mutagen.trueaudio import TrueAudio
 
 from etk_music.models import MusicInfo, MusicLyrics
 from etk_music.meta import MUSIC_CREDIT_FIELDS, MetaMusic, music_credit_values, parse_music_release_types
@@ -50,6 +52,7 @@ _ASF_FIELDS = {
     "originaldate": ("WM/OriginalReleaseTime", "WM/OriginalReleaseYear", "originalyear"),
     "tracknumber": ("WM/TrackNumber", "track"), "discnumber": ("WM/PartOfSet", "disc"),
     "isrc": ("WM/ISRC",), "subtitle": ("WM/SubTitle",),
+    "comment": ("Description", "comment"), "description": ("WM/Description",),
     "composer": ("WM/Composer",), "conductor": ("WM/Conductor",),
     "orchestra": ("WM/Orchestra", "WM/Ensemble", "ensemble"), "performer": ("WM/Performer",),
     "compilation": ("WM/IsCompilation",), "lyrics": ("WM/Lyrics",),
@@ -401,7 +404,8 @@ def _read_mp4_tags(tags: MP4Tags) -> dict[str, list[str]]:
     读取标准 MP4 atom 与明确的文本 freeform，覆盖 EasyMP4 未注册的发行 ID。
     """
     atoms = {"title": "\xa9nam", "artist": "\xa9ART", "album": "\xa9alb",
-             "albumartist": "aART", "date": "\xa9day", "genre": "\xa9gen", "composer": "\xa9wrt"}
+             "albumartist": "aART", "date": "\xa9day", "genre": "\xa9gen", "composer": "\xa9wrt",
+             "comment": "\xa9cmt", "description": "desc"}
     values = {key: [str(value) for value in tags.get(atom, [])] for key, atom in atoms.items()}
     for key, atom in (("tracknumber", "trkn"), ("discnumber", "disk")):
         positions = tags.get(atom) or []
@@ -436,7 +440,7 @@ def _read_asf_tags(tags: ASFTags) -> dict[str, list[str]]:
     """
     values = {key.casefold(): _asf_text_values(items) for key, items in tags.items()}
     for key, aliases in _ASF_FIELDS.items():
-        values[key] = next((items for alias in (*aliases, key)
+        values[key] = next((items for alias in (aliases if key == "description" else (*aliases, key))
                             if (items := _asf_text_values(tags.get(alias)) or values.get(alias.casefold()))), [])
     current = next(iter(values.get("tracknumber", [])), "").split("/", 1)[0]
     if not current.isdecimal() or int(current) < 1:
@@ -452,7 +456,7 @@ def _write_asf_tags(tags: ASFTags, values: dict[str, list[str]]) -> bool:
     """
     for key, value in values.items():
         names = _ASF_FIELDS.get(key, (key,))
-        aliases = {name.casefold() for name in (*names, key)}
+        aliases = {name.casefold() for name in (names if key == "description" else (*names, key))}
         if key == "tracknumber":
             aliases.add("wm/track")
         if key in {"tracknumber", "discnumber"} and "/" in value[0]:
@@ -460,7 +464,8 @@ def _write_asf_tags(tags: ASFTags, values: dict[str, list[str]]) -> bool:
         for existing in list(tags.keys()):
             if existing.casefold() in aliases or (key == "performer" and existing.casefold().startswith("performer:")):
                 del tags[existing]
-        tags[names[0]] = value
+        if value:
+            tags[names[0]] = value
     return bool(values)
 
 
@@ -589,7 +594,7 @@ def _mark_audio_evidence(meta: MetaMusic, audio: Any) -> MetaMusic:
     """
     tag_fields = (
         "title", "artists", "album", "album_artist", "year", "original_year", "release_year",
-        "disc_number", "track_number", "total_discs", "total_tracks", "version", "isrc",
+        "disc_number", "track_number", "total_discs", "total_tracks", "version", "isrc", "comment", "description",
         "media_source", "media_id", "musicbrainz_release_id", "musicbrainz_release_group_id",
         "musicbrainz_release_track_id", "album_type", "secondary_types", *MUSIC_CREDIT_FIELDS,
     )
@@ -737,6 +742,8 @@ class AudioMetadataHelper:
             bitrate=cls._optional_int(getattr(info, "bitrate", None)),
             duration=round(info.length) if info and getattr(info, "length", None) else None,
             isrc=cls._first(tags, "isrc"),
+            comment="\n".join(cls._values(tags, "comment")) or None,
+            description="\n".join(cls._values(tags, "description")) or None,
             media_source=MediaSource.MusicBrainz if musicbrainz_id else None,
             media_id=musicbrainz_id,
             music_type=MUSIC_ENTITY_RECORDING,
@@ -754,11 +761,26 @@ class AudioMetadataHelper:
         """
         读取实际容器；错误扩展名重试不带后缀提示，保存时必须明确传入目标路径。
         """
-        try:
-            return MutagenFile(path, easy=False)
-        except MutagenError:
-            with path.open("rb") as stream:
-                return MutagenFile(fileobj=stream, filename="audio", easy=False)
+        audio = None
+        with path.open("rb") as stream:
+            # 暂存副本没有原扩展名；ID3 包裹的 TTA/AAC 可能被通用探测误当作 MP3。
+            for loader in (lambda: MutagenFile(fileobj=stream, filename=str(path), easy=False),
+                           lambda: MutagenFile(fileobj=stream, filename="audio", easy=False),
+                           lambda: TrueAudio(stream), lambda: AAC(stream)):
+                stream.seek(0)
+                try:
+                    audio = loader()
+                    if audio is not None:
+                        break
+                except MutagenError:
+                    continue
+        if isinstance(audio, AAC):
+            # Mutagen 的 AAC 仅提供流信息；按其建议复用 ID3 类读写标签，不转码。
+            try:
+                audio.tags = ID3(path)
+            except ID3NoHeaderError:
+                audio.tags = ID3()
+        return audio
 
     @staticmethod
     def _readable_tags(tags: Any) -> Any:
@@ -788,6 +810,8 @@ class AudioMetadataHelper:
             key: [str(value) for frame in tags.getall(frame_id) for value in frame.text]
             for key, frame_id in fields.items()
         }
+        # 有描述名的 COMM 可能保存音量归一化等播放器数据，不作为普通备注编辑。
+        values["comment"] = [str(value) for frame in tags.getall("COMM") if not frame.desc for value in frame.text]
         for frame in tags.getall("TXXX"):
             key = str(frame.desc).casefold().replace(" ", "_")
             if not values.get(key):
@@ -979,6 +1003,11 @@ class AudioMetadataHelper:
         totals = {"tracknumber": ("tracktotal", "totaltracks"), "discnumber": ("disctotal", "totaldiscs")}
         updates = {}
         for key, value in cls._tag_values(music).items():
+            if key in {"comment", "description"} and value is not None:
+                current = cls._values(tags, key)
+                if "\n".join(current) != value and (overwrite or not current):
+                    updates[key] = [value] if value else []
+                continue
             if value in (None, "", []):
                 continue
             current = next((items for alias in aliases.get(key, (key,)) if (items := cls._values(tags, alias))), [])
@@ -1052,6 +1081,11 @@ class AudioMetadataHelper:
                     changed = True
         for name, value in values.items():
             key = ape_fields.get(name, name) if isinstance(audio.tags, APEv2) else name
+            if not value and overwrite:
+                if key in audio.tags:
+                    del audio.tags[key]
+                    changed = True
+                continue
             if cls._values(audio.tags, key) == value or (not overwrite and audio.tags.get(key)):
                 continue
             try:
@@ -1077,7 +1111,20 @@ class AudioMetadataHelper:
             for key in values.keys() & {"composer", "conductor", "orchestra", "performer"}:
                 changed = _remove_id3_credit_aliases(tags, key) or changed
         for key, value in values.items():
-            if key == "musicbrainz_trackid":
+            if key in {"comment", "description"}:
+                comments = [item for item in tags.getall("COMM") if not item.desc] if key == "comment" else []
+                frames = comments + [item for item in tags.getall("TXXX") if item.desc.casefold() == key]
+                if frames and not overwrite:
+                    continue
+                for item in frames:
+                    del tags[item.HashKey]
+                if value:
+                    frame = (COMM(encoding=3, lang=comments[0].lang if comments else "eng", desc="", text=value)
+                             if key == "comment" else TXXX(encoding=3, desc="DESCRIPTION", text=value))
+                    tags.add(frame)
+                changed = bool(frames or value) or changed
+                continue
+            elif key == "musicbrainz_trackid":
                 frame = UFID(owner="http://musicbrainz.org", data=value[0].encode("ascii"))
             elif key == "performer":
                 frame = TMCL(encoding=3, people=[list(_performer_pair(item)) for item in value])
@@ -1097,7 +1144,8 @@ class AudioMetadataHelper:
         """
         写入MP4标准atom和文本freeform，保留曲序/总数及各类发行身份。
         """
-        atoms = {"title": "\xa9nam", "artist": "\xa9ART", "album": "\xa9alb", "albumartist": "aART", "date": "\xa9day", "composer": "\xa9wrt"}
+        atoms = {"title": "\xa9nam", "artist": "\xa9ART", "album": "\xa9alb", "albumartist": "aART", "date": "\xa9day", "composer": "\xa9wrt",
+                 "comment": "\xa9cmt", "description": "desc"}
         custom = {"musicbrainz_trackid": "MusicBrainz Track Id", "musicbrainz_albumid": "MusicBrainz Album Id",
                   "musicbrainz_releasegroupid": "MusicBrainz Release Group Id", "musicbrainz_releasetrackid": "MusicBrainz Release Track Id",
                   "musicbrainz_albumtype": "MusicBrainz Album Type", "originaldate": "ORIGINALDATE", "isrc": "ISRC",
@@ -1115,7 +1163,11 @@ class AudioMetadataHelper:
                 encoded = [item.encode("utf-8") for item in value]
             else:
                 continue
-            if tags.get(atom) != encoded and (overwrite or not tags.get(atom)):
+            if not encoded and overwrite:
+                if atom in tags:
+                    del tags[atom]
+                    changed = True
+            elif tags.get(atom) != encoded and (overwrite or not tags.get(atom)):
                 tags[atom] = encoded
                 changed = True
         return changed
@@ -1150,6 +1202,8 @@ class AudioMetadataHelper:
             "tracknumber": track_number,
             "discnumber": disc_number,
             "isrc": getattr(music, "isrc", None),
+            "comment": getattr(music, "comment", None),
+            "description": getattr(music, "description", None),
             "musicbrainz_trackid": cls._musicbrainz_recording_id(music),
             "musicbrainz_albumid": cls._normalize_musicbrainz_id(getattr(music, "musicbrainz_release_id", None)),
             "musicbrainz_releasegroupid": cls._normalize_musicbrainz_id(getattr(music, "musicbrainz_release_group_id", None)),

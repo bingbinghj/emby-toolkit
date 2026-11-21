@@ -635,6 +635,8 @@ class MusicInfo:
     total_discs: int | None = field(default=None, kw_only=True)
     duration: int | None = None
     isrc: str | None = None
+    comment: str | None = field(default=None, kw_only=True)
+    description: str | None = field(default=None, kw_only=True)
     cover_url: str | None = None
     lyrics: str | None = None
     version: str | None = None
@@ -967,6 +969,8 @@ class MusicInfo:
             total_discs=meta.total_discs,
             duration=meta.duration,
             isrc=meta.isrc,
+            comment=meta.comment,
+            description=meta.description,
             version=meta.version,
             audio_format=meta.audio_format,
             audio_lossless=meta.audio_lossless,

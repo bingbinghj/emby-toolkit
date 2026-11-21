@@ -1880,7 +1880,7 @@ html[data-theme='plain'][data-glass-color-scheme='light'] .plugin-card__banner {
 
 // Pagination needs a visible selected surface, including inside glass dialogs.
 // Keep the theme's contrasting on-primary text for custom light/dark accents.
-html body .v-pagination .v-pagination__item--is-active > .v-btn:not(.v-btn--disabled) {
+html body .v-pagination:not(.mp-pagination) .v-pagination__item--is-active > .v-btn:not(.v-btn--disabled) {
   background: rgb(var(--v-theme-primary)) !important;
   color: rgb(var(--v-theme-on-primary)) !important;
   font-weight: 600;
@@ -1889,4 +1889,12 @@ html body .v-pagination .v-pagination__item--is-active > .v-btn:not(.v-btn--disa
   .v-btn__underlay { opacity: 0; }
   .v-btn__overlay { opacity: 0 !important; }
   &:focus-visible { outline: 2px solid rgb(var(--v-theme-on-surface)); outline-offset: 2px; }
+}
+
+// 音乐库与媒体整理沿用 MP 的原生页码：常规字重、主色当前页和轻背景。
+.mp-pagination .v-btn .v-btn__content { color: inherit !important; }
+.mp-pagination .v-pagination__item--is-active .v-btn,
+.mp-pagination .v-pagination__item--is-active .v-btn__content { opacity: 1 !important; }
+.mp-pagination .v-pagination__item--is-active .v-btn {
+  color: color-mix(in srgb, rgb(var(--v-theme-primary)) 75%, rgb(var(--v-theme-on-surface)) 25%) !important;
 }

@@ -1,4 +1,22 @@
 import { test, expect } from './fixtures.js';
+import { readFileSync } from 'node:fs';
+
+for (const width of [390,1440]) test(`清空音乐备注任务的执行入口与范围说明 ${width}px`, async ({page,api}) => {
+  await page.setViewportSize({width,height:950});
+  const catalog=JSON.parse(readFileSync(new URL('../../../backend/assets/task_catalog.json',import.meta.url),'utf8'));
+  const task=catalog.manual.find(item=>item.key==='clear-music-comments');
+  api.respond('GET','/api/tasks/available',[task]);
+  api.respond('POST','/api/tasks/run',{message:'音乐备注/描述清理完成，共 2 项，清空 1 项，跳过 1 项，失败 0 项'});
+  await page.goto('/settings/scheduler');
+  const card=page.locator('[data-task-key="clear-music-comments"]');
+  await expect(card).toContainText('本地音乐库');await expect(card).toContainText('保留做种文件');
+  await card.scrollIntoViewIfNeeded();
+  const bounds=await card.locator('.temp-task-name').evaluate(node=>({width:node.clientWidth,scrollWidth:node.scrollWidth,height:node.clientHeight,scrollHeight:node.scrollHeight}));
+  expect(bounds.scrollWidth).toBeLessThanOrEqual(bounds.width+1);expect(bounds.scrollHeight).toBeLessThanOrEqual(bounds.height+1);
+  await card.getByRole('button',{name:'执行',exact:true}).click();
+  await expect.poll(()=>api.requests.filter(row=>row.path==='/api/tasks/run').map(row=>row.body)).toEqual([{task_name:task.key}]);
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBeTruthy();
+});
 
 const tasks = [
   { key: 'extract-episode-credits', name: '提取片尾', category: 'media-info', category_name: '媒体信息', help: '仅处理电视剧分集，保留片头、章节图片和音轨' },

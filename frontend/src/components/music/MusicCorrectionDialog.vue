@@ -5,7 +5,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useMusicI18n as useI18n } from "./i18n";
 import axios from "axios";
 const getApiBusinessErrorMessage = (cause) => cause.response?.data?.message || cause.message;
-import { musicSources } from "./utils";
+import { musicSources, musicReleaseOptions } from "./utils";
 const isMusicMediaSource = (source2) => musicSources.some((item) => item.value === source2);
 const props = defineProps({ group: Object, busy: Boolean });
 const emit = defineEmits(["close", "apply"]);
@@ -32,25 +32,7 @@ const keyword = computed(
 const candidates = computed(
   () => props.group.items.flatMap((item) => item.music?.candidates ?? []).filter((item, index, all) => all.findIndex((other) => JSON.stringify(other) === JSON.stringify(item)) === index).slice(0, 5)
 );
-const editions = computed(() => {
-  const items = (album.value?.releases ?? []).filter((item) => item.media_id).map((item) => ({
-    value: item.media_id,
-    title: [
-      item.title,
-      item.date,
-      item.country,
-      item.formats?.join("/"),
-      item.track_count ? t(prefix + "trackCount", { count: item.track_count }) : ""
-    ].filter(Boolean).join(" \xB7 ")
-  }));
-  if (releaseId.value && !items.some((item) => item.value === releaseId.value)) {
-    items.unshift({
-      value: releaseId.value,
-      title: [album.value?.title, album.value?.release_date, releaseId.value].filter(Boolean).join(" \xB7 ")
-    });
-  }
-  return items;
-});
+const editions = computed(() => musicReleaseOptions(album.value || {}));
 const ready = computed(
   () => Boolean(
     album.value?.tracks?.length && album.value.media_id === albumId.value && album.value.media_source === source.value && (source.value !== "musicbrainz" || releaseId.value && releaseDraft.value.trim().toLowerCase() === releaseId.value)
@@ -183,7 +165,7 @@ onUnmounted(() => {
               </li>
             </ol>
           </template>
-          <details v-if="source === 'musicbrainz'" class="mt-4">
+          <details v-if="source === 'musicbrainz' && !editions.length" class="mt-4">
             <summary>{{ t(prefix + 'otherEdition') }}</summary>
             <p class="text-caption my-2">{{ t(prefix + 'releaseIdHint') }}</p>
             <VTextField v-model="releaseDraft" :label="t(prefix + 'releaseId')" :disabled="busy || loading" />
