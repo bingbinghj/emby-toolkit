@@ -946,6 +946,7 @@ pub async fn collect_files(
     state: &AppState,
     root: &str,
     provided: &[Value],
+    full_scan: bool,
 ) -> Result<Vec<String>> {
     let config = state.config.read().await.clone();
     let allowed = list(&config["monitor_paths"])
@@ -967,7 +968,8 @@ pub async fn collect_files(
         .filter_map(Value::as_str)
         .map(PathBuf::from)
         .collect::<Vec<_>>();
-    if candidates.is_empty() {
+    // An explicitly empty/invalid file list must never become a directory scan.
+    if provided.is_empty() && full_scan {
         if root.is_file() {
             candidates.push(root.clone());
         } else {
@@ -1055,7 +1057,7 @@ async fn moviepilot(
         string(&body, "media_type"),
         list(&body["file_list"]).len()
     );
-    let files = collect_files(&state, &root, &list(&body["file_list"])).await?;
+    let files = collect_files(&state, &root, &list(&body["file_list"]), body["full_scan"] != false).await?;
     if files.is_empty() {
         return Ok((
             StatusCode::OK,
@@ -1248,7 +1250,7 @@ pub async fn process_emby(
     let mut result = if let Some(report) = context.completed("emby_feedback").await? {
         report
     } else {
-        let report = match crate::ingest::feedback(state, &id, &episodes, false, context).await {
+        let report = match crate::ingest::feedback(state, &id, &episodes, enhanced, context).await {
             Ok(result) => Ok(result),
             Err(error) => {
                 if enhanced {
@@ -2328,7 +2330,7 @@ async fn process_moviepilot_inner(
         let item = details(
             state,
             &id,
-            "Id,Type,Name,Path,People,Genres,ProviderIds,MediaSources,DateCreated",
+            "Id,Type,Name,OriginalTitle,Overview,Taglines,PremiereDate,Path,People,Genres,ProviderIds,MediaSources,DateCreated",
         )
         .await?;
         let media_name = string(&item, "Name");
@@ -2345,6 +2347,11 @@ async fn process_moviepilot_inner(
         let preparation = async {
             let key = format!("moviepilot_prepared:{id}");
             if let Some(report) = context.completed(&key).await? {
+                return Ok(report);
+            }
+            if !reorganize && event["success"] == true && event["event"] == "metadata.scrape.complete" {
+                let report = crate::metadata_reuse::prepare(state, &item, &episodes, event["episode_group"].as_str(), context).await?;
+                context.complete(&key, &report).await?;
                 return Ok(report);
             }
             let prepared = if reorganize {

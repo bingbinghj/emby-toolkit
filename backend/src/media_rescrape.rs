@@ -17,13 +17,14 @@ use std::{
 pub(crate) async fn run(state: &AppState, id: &str, context: &JobContext) -> Result<Value> {
     context.checkpoint().await?;
     Box::pin(recover_previous(state, id, context)).await?;
-    let target = details(state, id, "Id,Type,Name,Path,People,ProviderIds,Genres,MediaSources,SeriesId,ParentId,ParentIndexNumber,IndexNumber").await?;
-    if target["Id"] != id || !matches!(target["Type"].as_str(), Some("Movie" | "Episode")) {
-        return Err(ApiError::bad("重新刮削仅支持明确的电影或分集目标"));
+    let target = details(state, id, "Id,Type,Name,OriginalTitle,Overview,Taglines,Path,People,ProviderIds,Genres,MediaSources,SeriesId,ParentId,ParentIndexNumber,IndexNumber").await?;
+    if target["Id"] != id || !matches!(target["Type"].as_str(), Some("Movie" | "Series" | "Season" | "Episode")) {
+        return Err(ApiError::bad("重新刮削仅支持电影、剧、季或分集"));
     }
-    let binding = crate::media_edit::repair_target(state, id).await?;
+    let parent_only = matches!(target["Type"].as_str(), Some("Series" | "Season"));
     let path = string(&target, "Path");
-    if binding.path != path || !Path::new(&path).is_absolute() {
+    if !Path::new(&path).is_absolute()
+        || !parent_only && crate::media_edit::repair_target(state, id).await?.path != path {
         return Err(ApiError::bad("重新刮削目标的原生路径未确认"));
     }
     if crate::media_save::protected(&*state.config.read().await, &path) {
@@ -38,12 +39,12 @@ pub(crate) async fn run(state: &AppState, id: &str, context: &JobContext) -> Res
             "存在相关媒体或原配置尚未恢复的记录，请先完成恢复或重新整理入库".into(),
         ));
     }
-    let item = if target["Type"] == "Episode" {
-        let series = string(&target, "SeriesId");
+    let item = if matches!(target["Type"].as_str(), Some("Episode" | "Season")) {
+        let series = if target["Type"] == "Season" && string(&target,"SeriesId").is_empty() { string(&target,"ParentId") } else { string(&target, "SeriesId") };
         let item = details(
             state,
             &series,
-            "Id,Type,Name,Path,People,ProviderIds,Genres,MediaSources",
+            "Id,Type,Name,OriginalTitle,Overview,Taglines,Path,People,ProviderIds,Genres,MediaSources",
         )
         .await?;
         if series.is_empty() || item["Id"] != series || item["Type"] != "Series" {
@@ -66,6 +67,19 @@ pub(crate) async fn run(state: &AppState, id: &str, context: &JobContext) -> Res
     } else {
         String::new()
     };
+    if parent_only {
+        let key = format!("parent-rescrape:{id}");
+        let mut report = if let Some(report) = context.completed(&key).await? { report } else {
+            let report = crate::ingest::rescrape_metadata(state, &item, &target, Some(&group), context).await?;
+            context.complete(&key, &report).await?;
+            report
+        };
+        crate::emby::refresh_parent_metadata_only(state, &target, context).await?;
+        report.as_object_mut().unwrap().remove("_rescrape_expected");
+        report["media_preserved"] = json!(true);
+        report["message"] = json!("当前层级重新刮削完成，已保留现有翻译，未处理分集");
+        return Ok(report);
+    }
     let recovery = state
         .data_dir
         .join("backups/media-info-reload")
@@ -159,7 +173,7 @@ pub(crate) async fn run(state: &AppState, id: &str, context: &JobContext) -> Res
                 ));
             }
             report["media_preserved"] = json!(true);
-            report["message"] = json!("重新刮削完成，原媒体信息、音轨、章节及预览资源已验收保留");
+            report["message"] = json!("重新刮削完成，已有翻译及原媒体信息、音轨、章节和预览资源已保留");
             Ok(report)
         },
         &confirmed,

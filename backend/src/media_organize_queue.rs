@@ -329,7 +329,8 @@ async fn execute(state: &AppState, queued: &Value, context: &JobContext) -> Resu
                 context.checkpoint().await?;
                 let current = details(state, &id, "Id,Type,Name,Path,ProviderIds,SeriesId").await?;
                 if current["Id"] != id
-                    || !matches!(current["Type"].as_str(), Some("Movie" | "Episode"))
+                    || !(matches!(current["Type"].as_str(), Some("Movie" | "Episode"))
+                        || entry["mode"] == "rescrape" && matches!(current["Type"].as_str(), Some("Series" | "Season")))
                 {
                     return Err(ApiError::bad(
                         "整理目标的原生媒体身份已变化，请重新选择媒体",

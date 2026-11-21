@@ -11,6 +11,29 @@ fn package() -> Value {
 }
 
 #[tokio::test]
+async fn automatic_ingest_keeps_translated_nfo_and_only_creates_missing_selected_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("Series");
+    let season = root.join("Season 01");
+    std::fs::create_dir_all(&season).unwrap();
+    let target = season.join("S01E01.strm");
+    let other = season.join("S01E02.strm");
+    for path in [&target,&other] { std::fs::write(path,"/cloud/media.mkv").unwrap(); }
+    let preserved = "<tvshow><title>现有译名</title><plot>用户已翻译简介</plot></tvshow>";
+    std::fs::write(root.join("tvshow.nfo"),preserved).unwrap();
+    let original_time = std::fs::metadata(root.join("tvshow.nfo")).unwrap().modified().unwrap();
+    let item = json!({"Type":"Series","Path":root});
+    let config = json!({});
+    let paths = [target.clone()];
+    let options = nfo_files::Options { force:true,missing_only:true,media_paths:&paths,episodes:&[(1,1)],config:&config,..Default::default() };
+    assert_eq!(nfo_files::sync("Series",&item,&package(),&[],&options).await.unwrap(),2);
+    assert_eq!(std::fs::read_to_string(root.join("tvshow.nfo")).unwrap(),preserved);
+    assert_eq!(std::fs::metadata(root.join("tvshow.nfo")).unwrap().modified().unwrap(),original_time);
+    assert!(!other.with_extension("nfo").exists());
+    assert_eq!(nfo_files::sync("Series",&item,&package(),&[],&options).await.unwrap(),0);
+}
+
+#[tokio::test]
 async fn dotted_series_directory_never_writes_library_root_or_another_series() {
     let dir = tempfile::tempdir().unwrap();
     let target = dir.path().join("Series.Name.2020");

@@ -14,6 +14,16 @@ use std::{
 mod metadata_guard;
 mod metadata_only;
 
+pub(crate) fn scrape_metadata_from_nfo(xml: &str, kind: &str) -> Result<Value> {
+    metadata_only::scrape_metadata(xml, kind)
+}
+
+pub(crate) async fn refresh_parent_metadata_only(state: &AppState, item: &Value, context: &JobContext) -> Result<()> {
+    metadata_only::apply(state, item, context, &[]).await?;
+    Box::pin(crate::media_images::sync_local_images(state, item, context)).await?;
+    Ok(())
+}
+
 pub(crate) fn requires_metadata_only(error: &ApiError) -> bool {
     error.0 == reqwest::StatusCode::CONFLICT
         && error.1 == "神医未导入编辑值，关联清理范围不是唯一当前媒体，未清理任何项目"

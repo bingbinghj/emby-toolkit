@@ -355,8 +355,11 @@ async fn process(
         );
         return Err(ApiError::bad("完整处理仅支持有 TMDb ID 的电影或剧集"));
     }
-    let children = if kind == "Series" {
-        emby::items(state,&string(item,"Id"),"Id,Type,Name,Path,Size,MediaSources,MediaStreams,ProviderIds,DateCreated,PremiereDate,Container,RunTimeTicks,ParentId,SeriesId,ParentIndexNumber,IndexNumber",context).await?
+    let parent_only = metadata_target.is_some_and(|target| matches!(target["Type"].as_str(), Some("Series" | "Season")));
+    let children = if parent_only {
+        metadata_target.filter(|target|target["Type"] == "Season").cloned().into_iter().collect()
+    } else if kind == "Series" {
+        emby::items(state,&string(item,"Id"),"Id,Type,Name,Overview,Taglines,People,Path,Size,MediaSources,MediaStreams,ProviderIds,DateCreated,PremiereDate,Container,RunTimeTicks,ParentId,SeriesId,ParentIndexNumber,IndexNumber",context).await?
     } else {
         vec![]
     };
@@ -370,13 +373,16 @@ async fn process(
         .filter(|e| e["Type"] == "Season")
         .cloned()
         .collect::<Vec<_>>();
-    let target_numbers = episodes
+    let mut target_numbers = episodes
         .iter()
         .filter(|e| episode_ids.is_empty() || episode_ids.contains(&string(e, "Id")))
         .filter_map(|e| e["ParentIndexNumber"].as_i64())
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
+    if let Some(target) = metadata_target.filter(|target| target["Type"] == "Season") {
+        target_numbers = vec![target["IndexNumber"].as_i64().ok_or_else(||ApiError::bad("当前季缺少季号"))?];
+    }
     let target_scope = episodes
         .iter()
         .filter(|episode| episode_ids.is_empty() || episode_ids.contains(&string(episode, "Id")))
@@ -466,13 +472,21 @@ async fn process(
         "刮削范围确认：《{media_name}》，TMDb {tmdb}，类型 {type_label}，目标季 {target_seasons}，剧集组 {}",
         group.filter(|g| !g.is_empty()).unwrap_or("官方季")
     );
-    let mut data = if kind == "Movie" {
+    let mut data = if metadata_target.is_some_and(|target|target["Type"] == "Series") {
+        json!({"series_details":crate::tmdb::details(state, "Series", &tmdb).await?,"seasons_details":[],"episodes_details":{}})
+    } else if kind == "Movie" {
         crate::tmdb::details(state, "Movie", &tmdb).await?
     } else if let Some(group) = group.filter(|s| !s.is_empty()) {
         crate::tmdb::aggregate_group(state, &tmdb, group, &target_numbers).await?
     } else {
         crate::tmdb::aggregate(state, &tmdb, &target_numbers).await?
     };
+    if parent_only {
+        data["episodes_details"] = json!({});
+        for season in data["seasons_details"].as_array_mut().into_iter().flatten() {
+            season.as_object_mut().unwrap().remove("episodes");
+        }
+    }
     if kind == "Series" && !episode_ids.is_empty() {
         let keys = target_scope
             .iter()
@@ -503,6 +517,10 @@ async fn process(
     } else {
         crate::douban::premerge_in_job_report(state, item, &mut data, context).await?
     };
+    let translation_targets = children.iter().filter(|child| {
+        child["Type"] != "Episode" || episode_ids.is_empty() || episode_ids.contains(&string(child,"Id"))
+    }).cloned().collect::<Vec<_>>();
+    crate::metadata_reuse::preserve_tree(state, item, &translation_targets, &mut data).await?;
     let translation_report =
         crate::translation::metadata_tree_report(state, &kind, &mut data, &string(item, "Name"))
             .await?;
@@ -562,7 +580,14 @@ async fn process(
     let mut cast_item = item.clone();
     cast_item["People"] =
         json!(crate::persons::enrich_provider_ids(state, &list(&item["People"]), context).await?);
-    let cast = crate::persons::process(state, &raw, &cast_item).await?;
+    let mut cast = crate::persons::process(state, &raw, &cast_item).await?;
+    let mut preserved = json!({"credits":{"cast":cast.clone()}});
+    crate::metadata_reuse::preserve_translations(&mut preserved, source);
+    let preserved = list(&preserved["credits"]["cast"]);
+    for (_, person) in cast.iter().zip(&preserved).filter(|(old, person)| old["name"] != person["name"]) {
+        crate::persons::upsert(state, person).await?;
+    }
+    cast = preserved;
     for director in crate::nfo::directors(source) {
         if let Err(error) = crate::persons::upsert(state, &director).await {
             tracing::warn!("同步导演信息至数据库时失败：{}", error.1);
@@ -606,6 +631,7 @@ async fn process(
         });
     let options = crate::nfo_files::Options {
         force: true,
+        missing_only: metadata_target.is_none() && !refresh_metadata,
         seasons: &target_numbers,
         episodes: &target_scope,
         movie_paths: &movie_paths,
@@ -616,7 +642,14 @@ async fn process(
         keyword_mapping: &keywords,
         ..Default::default()
     };
-    let written = crate::nfo_files::sync(&kind, item, &payload, &cast, &options).await?;
+    let written = if let Some(target) = metadata_target.filter(|_|parent_only) {
+        let season = list(&payload["seasons_details"]).into_iter().find(|node|node["season_number"] == target["IndexNumber"]);
+        let data = if target["Type"] == "Season" { season.as_ref().ok_or_else(||ApiError::bad("资料源未返回当前季元数据"))? } else { &payload };
+        let options = crate::nfo_files::Options { skip_parents:false, ..options };
+        crate::nfo_files::sync(&string(target,"Type"), target, data, &cast, &options).await?
+    } else {
+        crate::nfo_files::sync(&kind, item, &payload, &cast, &options).await?
+    };
     let image_report = if let Some(target) = file_target {
         crate::images::download_target_report(state, &kind, &tmdb, item, &payload, context, target)
             .await?
@@ -1062,7 +1095,12 @@ pub async fn prepare_cached_report(
         vec![]
     };
     context.checkpoint().await?;
+    let translation_targets = children.iter().filter(|child| {
+        child["Type"] != "Episode" || episode_ids.is_empty() || episode_ids.contains(&string(child,"Id"))
+    }).cloned().collect::<Vec<_>>();
+    crate::metadata_reuse::preserve_tree(state, item, &translation_targets, &mut payload).await?;
     let options = crate::nfo_files::Options {
+        missing_only: true,
         seasons: &seasons,
         episodes: &scope,
         movie_paths: &movie_paths,

@@ -378,7 +378,7 @@ async fn download_scoped_report(
         files.extend_from_slice(paths);
     } else if let Some(target) = target.filter(|target| target["Type"] == "Episode") {
         files.push(PathBuf::from(string(target, "Path")));
-    } else if kind == "Series" {
+    } else if kind == "Series" && target.is_none() {
         while let Some(directory) = pending.pop() {
             let mut entries = tokio::fs::read_dir(directory).await?;
             while let Some(entry) = entries.next_entry().await? {
@@ -393,6 +393,14 @@ async fn download_scoped_report(
     }
     let mut count = 0;
     let mut plan = plan(kind, root, &data, aggregate, &files);
+    if let Some(target) = target.filter(|target| matches!(target["Type"].as_str(), Some("Series" | "Season"))) {
+        plan.retain(|path, _| {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            if target["Type"] == "Season" {
+                name == format!("season{:02}-poster.jpg",target["IndexNumber"].as_i64().unwrap_or(0))
+            } else { !name.starts_with("season") }
+        });
+    }
     if let Some(target) = target.filter(|target| target["Type"] == "Episode") {
         let path = PathBuf::from(string(target, "Path"));
         let thumbnail = path.with_file_name(format!(

@@ -41,6 +41,7 @@ function fixture(post = async () => ({ data: {} })) {
   const requestStarted = deferred();
   let timerId = 0;
   const context = vm.createContext({
+    rescrapeQueue: { stop() {} },
     mediaRecoverySession: 0, mediaRecoveryDialog: null,
     actorSaveSession: 1, actorSaveNavigationTimer: null,
     route: { name: 'MediaEditPage', params: { itemId: '101' }, fullPath: '/edit-media/101' },

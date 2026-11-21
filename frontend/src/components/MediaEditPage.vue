@@ -52,6 +52,7 @@
           </VList>
           <VCardText class="d-flex flex-column ga-3">
             <VBtn block variant="tonal" prepend-icon="mdi-image-multiple-outline" @click="showImageEditor = true">编辑图像</VBtn>
+            <VBtn v-if="['Movie', 'Series', 'Season', 'Episode'].includes(itemDetails.item_type)" block variant="tonal" prepend-icon="mdi-movie-search-outline" :loading="isSubmittingRescrape" :disabled="isSaving" data-testid="rescrape-current-media" @click="confirmCurrentRescrape">重新刮削当前{{ itemTypeInChinese }}</VBtn>
             <VBtn block color="info" variant="tonal" prepend-icon="mdi-file-document-outline" data-testid="media-info-open" @click="handleMediaInfoButtonClick">编辑媒体信息 (音轨/字幕)</VBtn>
             <VBtn block variant="tonal" prepend-icon="mdi-shield-check-outline" :loading="isRevalidatingFingerprints" @click="revalidateFingerprints(itemDetails.item_id || itemId)">重新校验指纹（{{ fingerprintScopeLabel }}）</VBtn>
             <VBtn v-if="['Series', 'Season', 'Episode'].includes(itemDetails.item_type)" block color="warning" variant="tonal" prepend-icon="mdi-image-refresh-outline" :loading="isReplacingEpisodeImages" @click="confirmEpisodeImageReplacement">替换剧集图</VBtn>
@@ -316,6 +317,7 @@
       </VCard>
     </VDialog>
 
+    <MediaOrganizeQueueDialog v-model="rescrapeQueueOpen" :queue="rescrapeQueue" />
     <VDialog :model-value="Boolean(imagePreview)" max-width="1200" @update:model-value="value => { if (!value) imagePreview = null; }">
       <VCard v-if="imagePreview"><VCardTitle class="d-flex align-center"><span class="flex-grow-1 text-wrap">{{ imagePreview.title || '图像预览' }}</span><VBtn icon="mdi-close" variant="text" color="default" aria-label="关闭图像预览" @click="imagePreview = null" /></VCardTitle><VCardText><VImg :src="imagePreview.url" max-height="80vh" /></VCardText></VCard>
     </VDialog>
@@ -333,6 +335,8 @@ import { textColorForBackground } from '../theme.js';
 import { useTheme } from 'vuetify';
 import { useTaskStatus } from '../composables/useTaskStatus.js';
 import { useConfig } from '../composables/useConfig.js';
+import MediaOrganizeQueueDialog from './MediaOrganizeQueueDialog.vue';
+import { useMediaOrganizeQueue, queueReceiptMatches } from '../composables/useMediaOrganizeQueue.js';
 import {
   buildMediaInfoLanguageOptions,
   filterMediaInfoLanguageOption,
@@ -360,6 +364,25 @@ const previewMediaImage = (url, title) => {
 const confirmMediaAction = (title, content, action) => dialog.warning({
   title, content, positiveText: '确认', negativeText: '取消', onPositiveClick: action,
 });
+const isSubmittingRescrape = ref(false);
+const rescrapeQueueOpen = ref(false);
+const rescrapeQueue = useMediaOrganizeQueue();
+watch(rescrapeQueueOpen, open => open ? rescrapeQueue.start() : rescrapeQueue.stop());
+const confirmCurrentRescrape = () => {
+  const id = String(itemDetails.value?.item_id || itemId.value || '');
+  if (!id || isSubmittingRescrape.value) return;
+  confirmMediaAction(`重新刮削当前${itemTypeInChinese.value}`, '更新当前媒体的资料，保留已有中文翻译、媒体信息和章节。剧和季仅更新本身，不连带刮削分集。', () => { void submitCurrentRescrape(id); });
+};
+const submitCurrentRescrape = async id => {
+  isSubmittingRescrape.value = true;
+  try {
+    const { data, status } = await axios.post('/api/actions/reorganize', { item_ids: [id], mode: 'rescrape' });
+    if (status !== 202 || !queueReceiptMatches(data, [id], 'rescrape')) throw new Error('刮削队列提交结果尚未确认，请查看队列');
+    rescrapeQueueOpen.value = true;
+    void rescrapeQueue.refresh();
+  } catch (error) { message.error(error.response?.data?.error || error.message || '提交重新刮削失败'); }
+  finally { isSubmittingRescrape.value = false; }
+};
 const confirmEpisodeImageReplacement = () => {
   const scope = itemDetails.value?.item_type === 'Episode' ? '单集'
     : itemDetails.value?.item_type === 'Season' ? '季所有分集' : '电视剧所有分集';
@@ -2251,6 +2274,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  rescrapeQueue.stop();
   invalidateActorSaveSession();
   ++mediaRecoverySession;
   mediaRecoveryDialog?.destroy();

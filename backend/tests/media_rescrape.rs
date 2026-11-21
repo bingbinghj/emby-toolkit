@@ -135,6 +135,12 @@ async fn forbidden_write(State(host): State<Host>, uri: axum::http::Uri) -> Stat
     StatusCode::BAD_REQUEST
 }
 
+async fn metadata_update(State(host): State<Host>, Path(id): Path<String>, Json(body): Json<Value>) -> StatusCode {
+    host.writes.lock().await.push((format!("metadata:{id}"),HashMap::new()));
+    host.items.lock().await.insert(id,body);
+    StatusCode::NO_CONTENT
+}
+
 async fn tmdb(State(host): State<Host>, Path(path): Path<String>) -> Response {
     host.tmdb_reads.lock().await.push(path.clone());
     if *host.fault.lock().await == "tmdb" {
@@ -363,6 +369,7 @@ impl Fixture {
             .route("/Users/user/Items/{id}",get(details))
             .route("/Items",get(items))
             .route("/Items/{id}/Refresh",post(refresh))
+            .route("/Items/{id}",post(metadata_update))
             .route("/Items/{id}/ClearMediaInfo",post(forbidden_write))
             .route("/Items/{id}/SyncMediaInfo",post(forbidden_write))
             .route("/ScheduledTasks/Running/{id}",post(forbidden_write))
@@ -482,8 +489,8 @@ async fn movie_rescrape_updates_metadata_without_rebuilding_any_media_resource()
     let row = f.run().await;
     assert_eq!(row["status"], "completed", "{row}");
     let after = f.host.items.lock().await["101"].clone();
-    assert_eq!(after["Name"], "新电影标题");
-    assert_eq!(after["Overview"], "新的简介");
+    assert_eq!(after["Name"], "旧标题");
+    assert_eq!(after["Overview"], "旧简介");
     for field in ["MediaStreams", "MediaSources", "Chapters"] {
         assert_eq!(after[field], before[field], "{field}");
     }
@@ -530,10 +537,45 @@ async fn movie_rescrape_updates_metadata_without_rebuilding_any_media_resource()
     .fetch_one(&f.state.db)
     .await
     .unwrap();
-    assert_eq!(cached["title"], "新电影标题");
+    assert_eq!(cached["title"], "旧标题");
+    assert_eq!(cached["original_title"], "Original Movie", "refresh still retrieves fields other than retained translations");
     assert_eq!(cached["file_sha1_json"], json!(["a".repeat(40)]));
     assert_eq!(cached["file_pickcode_json"], json!(["pc101"]));
     f.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL; all upstreams are localhost"]
+async fn parent_rescrape_updates_only_current_series_or_season_and_preserves_translations() {
+    for id in ["301","302"] {
+        let mut f = Fixture::new("Episode").await;
+        let (path,xml) = {
+            let mut items = f.host.items.lock().await;
+            let target = items.get_mut(id).unwrap();
+            target["LockData"] = json!(false);
+            target["DisplayOrder"] = json!("Aired");
+            target["Overview"] = json!("现有中文翻译简介");
+            let path = PathBuf::from(target["Path"].as_str().unwrap()).join(if id == "301" {"tvshow.nfo"} else {"season.nfo"});
+            let tag=if id == "301" {"tvshow"} else {"season"};
+            (path,format!("<{tag}><title>现有中文译名</title><plot>现有中文翻译简介</plot></{tag}>"))
+        };
+        std::fs::write(&path,&xml).unwrap();
+        f.protected_files.retain(|(old,_)|old != &path);
+        let first = f.host.items.lock().await["101"].clone();
+        let second = f.host.items.lock().await["102"].clone();
+        let result=f.run_scope(id,"rescrape").await;
+        assert_eq!(result["status"],"completed","{result}");
+        assert_eq!(f.host.items.lock().await[id]["Name"],"现有中文译名");
+        assert_eq!(f.host.items.lock().await[id]["Overview"],"现有中文翻译简介");
+        assert_eq!(f.host.items.lock().await["101"],first);
+        assert_eq!(f.host.items.lock().await["102"],second);
+        f.unchanged_resources().await;
+        let writes=f.host.writes.lock().await.clone();
+        assert!(writes.iter().all(|(action,_)|action == &format!("metadata:{id}")),"{writes:?}");
+        assert_eq!(f.host.configuration.lock().await["ExclusiveControlFeatures"],"ExtractOnFileChange");
+        if id == "301" { assert!(!f.host.tmdb_reads.lock().await.iter().any(|path|path.contains("/season/"))); }
+        f.close().await;
+    }
 }
 
 #[tokio::test]
@@ -548,11 +590,11 @@ async fn episode_rescrape_leaves_parent_and_other_episode_metadata_and_files_unc
     .unwrap();
     let row = f.run().await;
     assert_eq!(row["status"], "completed", "{row}");
-    assert_eq!(f.host.items.lock().await["101"]["Name"], "新分集标题");
+    assert_eq!(f.host.items.lock().await["101"]["Name"], "旧标题");
     assert!(
         std::fs::read_to_string(f.target_path.with_extension("nfo"))
             .unwrap()
-            .contains("新分集标题")
+            .contains("旧标题")
     );
     f.unchanged_resources().await;
     let after: Vec<Value> = sqlx::query_scalar(
@@ -586,7 +628,7 @@ async fn wash_pending_does_not_block_a_metadata_only_rescrape_or_mark_media_inge
     let row = f.run().await;
     assert_eq!(row["status"], "completed", "{row}");
     assert!(f.target_path.with_extension("nfo").is_file());
-    assert_eq!(f.host.items.lock().await["101"]["Name"], "新电影标题");
+    assert_eq!(f.host.items.lock().await["101"]["Name"], "旧标题");
     let pending: bool = sqlx::query_scalar("SELECT (asset_details_json->0->>'moviepilot_media_pending')::boolean FROM media_metadata WHERE tmdb_id='500' AND item_type='Movie'")
         .fetch_one(&f.state.db).await.unwrap();
     assert!(
@@ -1350,23 +1392,23 @@ async fn single_episode_reprocess_preserves_other_episode_and_other_version() {
         Vec::<String>::new(),
         "the normal native extraction stage needs no additional media-edit import"
     );
-    assert_eq!(f.host.items.lock().await["101"]["Name"], "新分集标题");
+    assert_eq!(f.host.items.lock().await["101"]["Name"], "旧标题");
     assert_eq!(f.host.items.lock().await["101"]["MediaStreams"], selected_streams);
     assert!(
         std::fs::read_to_string(f.target_path.with_extension("nfo"))
             .unwrap()
-            .contains("新分集标题")
+            .contains("旧标题")
     );
     let series_path = f.target_path.parent().unwrap().parent().unwrap();
     assert!(
         std::fs::read_to_string(series_path.join("tvshow.nfo"))
             .unwrap()
-            .contains("新电视剧标题")
+            .contains("旧电视剧")
     );
     assert!(
         std::fs::read_to_string(f.target_path.parent().unwrap().join("season.nfo"))
             .unwrap()
-            .contains("新季标题")
+            .contains("旧季")
     );
     for (id, before) in ["102", "103"].into_iter().zip(other_native) {
         assert_eq!(
@@ -1692,7 +1734,7 @@ async fn explicit_season_and_series_scrape_keep_the_two_episode_scope() {
         .unwrap();
         assert_eq!(result["state"], "completed", "target {target}: {result}");
         assert!(proxy.imports.lock().await.is_empty());
-        for (id, title) in [("101", "新分集标题"), ("102", "不应修改的第二集")] {
+        for (id, title) in [("101", "旧标题"), ("102", "旧标题")] {
             let item = f.host.items.lock().await[id].clone();
             let nfo = PathBuf::from(item["Path"].as_str().unwrap()).with_extension("nfo");
             assert!(
@@ -1706,7 +1748,7 @@ async fn explicit_season_and_series_scrape_keep_the_two_episode_scope() {
         }
         let row: Value = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m WHERE tmdb_id='50012' AND item_type='Episode'")
             .fetch_one(&f.state.db).await.unwrap();
-        assert_eq!(row["title"], "不应修改的第二集", "target {target}");
+        assert_eq!(row["title"], "旧标题", "target {target}");
         assert_eq!(
             f.host.configuration.lock().await["PersistMediaInfoMode"],
             "Default"

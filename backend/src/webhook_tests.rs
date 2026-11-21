@@ -1,5 +1,98 @@
 use super::*;
 
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL in DATABASE_URL"]
+async fn moviepilot_file_scope_never_expands_an_empty_precise_batch() {
+    let fixture = Fixture::new().await;
+    let root = fixture._directory.path().join("Series");
+    let first = root.join("Season 01");
+    let second = root.join("Season 02");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    let old = first.join("S01E200.strm");
+    let new = first.join("S01E201.strm");
+    let other = second.join("S02E01.strm");
+    for path in [&old,&new,&other] { std::fs::write(path,"/cloud/media.mkv").unwrap(); }
+    fixture.state.save_config(&json!({"monitor_paths":[root],"monitor_extensions":["strm"]})).await.unwrap();
+    let collect = |path: &std::path::Path, files: Vec<Value>, full| {
+        let state = fixture.state.clone();
+        let path = path.to_string_lossy().to_string();
+        async move { collect_files(&state,&path,&files,full).await.unwrap() }
+    };
+    assert_eq!(collect(&root,vec![json!(new),json!(new)],false).await, vec![new.to_string_lossy()]);
+    assert!(collect(&root,vec![],false).await.is_empty());
+    assert!(collect(&root,vec![json!(null)],true).await.is_empty());
+    assert!(collect(&root,vec![json!(root.join("deleted.strm"))],false).await.is_empty());
+    assert_eq!(collect(&first,vec![],true).await.len(),2);
+    assert_eq!(collect(&root,vec![],true).await.len(),3);
+    fixture.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL in DATABASE_URL; services are localhost"]
+async fn moviepilot_reuses_translated_nfos_without_remote_scraping_or_old_episodes() {
+    let fixture = Fixture::new().await;
+    let root = fixture._directory.path().join("Series");
+    let season = root.join("Season 01");
+    std::fs::create_dir_all(&season).unwrap();
+    let series = json!({"Id":"series","Type":"Series","Name":"凡人修仙传","Path":root,"ProviderIds":{"Tmdb":"106449"}});
+    let children = json!([
+        {"Id":"season","Type":"Season","Name":"第一季","Path":season,"ParentId":"series","IndexNumber":1,"ProviderIds":{"Tmdb":"123"}},
+        {"Id":"old","Type":"Episode","Name":"第200集","Path":season.join("S01E200.strm"),"SeriesId":"series","ParentId":"season","ParentIndexNumber":1,"IndexNumber":200,"ProviderIds":{"Tmdb":"200"}},
+        {"Id":"new","Type":"Episode","Name":"第201集","Path":season.join("S01E201.strm"),"SeriesId":"series","ParentId":"season","ParentIndexNumber":1,"IndexNumber":201,"ProviderIds":{"Tmdb":"201"}}
+    ]);
+    let files = [
+        (root.join("tvshow.nfo"), "<tvshow><title>已翻译剧名</title><plot>已翻译剧简介</plot><tmdbid>106449</tmdbid></tvshow>"),
+        (season.join("season.nfo"), "<season><title>已翻译季名</title><plot>已翻译季简介</plot><tmdbid>123</tmdbid></season>"),
+        (season.join("S01E200.nfo"), "<episodedetails><title>旧集译名</title></episodedetails>"),
+        (season.join("S01E201.nfo"), "<episodedetails><title>已翻译分集名</title><plot>已翻译分集简介</plot><tmdbid>201</tmdbid></episodedetails>"),
+        (season.join("S01E201-mediainfo.json"), "preserve original media JSON bytes"),
+    ];
+    for (path, bytes) in &files { std::fs::write(path,bytes).unwrap(); }
+    for child in list(&children).iter().filter(|child|child["Type"] == "Episode") { std::fs::write(string(child,"Path"),"https://example.invalid/video.mkv").unwrap(); }
+    let unchanged = files.iter().map(|(path,_)|std::fs::metadata(path).unwrap().modified().unwrap()).collect::<Vec<_>>();
+    let response_series = series.clone();
+    let fake = Router::new()
+        .route("/Items",axum::routing::get(move || { let children=children.clone(); async move { Json(json!({"Items":children,"TotalRecordCount":3})) } }))
+        .route("/Users/user/Items/series",axum::routing::get(move || { let item=response_series.clone();async move {Json(item)} }))
+        .route("/Items/series/Ancestors",axum::routing::get(||async {Json(json!([]))}))
+        .route("/Library/VirtualFolders",axum::routing::get(||async {Json(json!([]))}));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}",listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener,fake).await.unwrap(); });
+    fixture.state.save_config(&json!({"emby_server_url":base,"emby_api_key":"fixture","emby_user_id":"user","tmdb_api_base_url":base,"tmdb_api_key":"fixture","ai_api_key":"fixture","ai_translate_title":true,"ai_translate_overview":true})).await.unwrap();
+    sqlx::query("INSERT INTO media_metadata(tmdb_id,item_type,title,overview,tagline) VALUES('106449','Series','缓存旧译名','Old source overview','保留缓存标语')")
+        .execute(&fixture.state.db).await.unwrap();
+    let work = fixture.state.clone();
+    let task = fixture.state.jobs.submit("复用MP资料",move |context|async move {
+        let report = crate::metadata_reuse::prepare(&work,&series,&["new".into()],Some(""),&context).await?;
+        assert_eq!(report["nfo_written"],0);
+        crate::ingest::feedback(&work,"series",&["new".into()],true,&context).await
+    }).await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(20),async { loop {
+        let result=fixture.state.jobs.result(&task).await.unwrap();
+        if result["is_running"] == false { break result; }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }}).await.unwrap();
+    assert_eq!(result["state"],"completed","{result}");
+    let rows:Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(m) FROM media_metadata m ORDER BY item_type").fetch_all(&fixture.state.db).await.unwrap();
+    let episodes=rows.iter().filter(|row|row["item_type"] == "Episode").collect::<Vec<_>>();
+    let series=rows.iter().find(|row|row["item_type"] == "Series").unwrap();
+    assert_eq!(series["title"],"已翻译剧名");
+    assert_eq!(series["overview"],"已翻译剧简介");
+    assert_eq!(series["tagline"],"保留缓存标语");
+    assert_eq!(episodes.len(),1,"{rows:?}");
+    assert_eq!(episodes[0]["emby_item_ids_json"],json!(["new"]));
+    assert_eq!(episodes[0]["title"],"已翻译分集名");
+    assert_eq!(episodes[0]["overview"],"已翻译分集简介");
+    for ((path,bytes),time) in files.iter().zip(unchanged) {
+        assert_eq!(std::fs::read_to_string(path).unwrap(),*bytes);
+        assert_eq!(std::fs::metadata(path).unwrap().modified().unwrap(),time);
+    }
+    server.abort();
+    fixture.close().await;
+}
+
 #[path = "webhook_metadata_control_tests.rs"]
 mod metadata_control;
 

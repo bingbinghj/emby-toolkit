@@ -15,6 +15,7 @@ use std::{
 #[derive(Default)]
 pub struct Options<'a> {
     pub force: bool,
+    pub missing_only: bool,
     pub series_refresh: bool,
     pub seasons: &'a [i64],
     pub episodes: &'a [(i64, i64)],
@@ -32,10 +33,22 @@ fn element(xml: &str, tag: &str) -> String {
         .map(|c| c[1].trim().to_string())
         .unwrap_or_default()
 }
-async fn write(path: &Path, content: &str, force: bool) -> Result<bool> {
+async fn write(path: &Path, content: &str, options: &Options<'_>) -> Result<bool> {
+    if options.missing_only && let Ok(existing) = tokio::fs::read_to_string(path).await {
+        let kind = [("<movie>","Movie"),("<tvshow>","Series"),("<season>","Season"),("<episodedetails>","Episode")]
+            .into_iter().find(|(tag,_)|content.contains(tag)).map(|(_,kind)|kind);
+        if kind.is_some_and(|kind| {
+            crate::emby::scrape_metadata_from_nfo(&existing,kind).is_ok_and(|old| {
+                let next=crate::emby::scrape_metadata_from_nfo(content,kind).unwrap_or_default();
+                old["id"].is_null() || next["id"].is_null() || old["id"] == next["id"]
+            })
+        }) {
+            return Ok(false);
+        }
+    }
     if let Ok(old) = tokio::fs::read_to_string(path).await
         && (old == content
-            || (!force
+            || (!options.force
                 && ["title", "plot"]
                     .iter()
                     .all(|tag| element(&old, tag) == element(content, tag))))
@@ -374,7 +387,7 @@ pub async fn sync(
             let xml = nfo::build("Movie", &data, cast);
             for movie in movies {
                 written +=
-                    usize::from(write(&movie.with_extension("nfo"), &xml, options.force).await?);
+                    usize::from(write(&movie.with_extension("nfo"), &xml, options).await?);
             }
         }
         "Series" => {
@@ -410,7 +423,7 @@ pub async fn sync(
                 }
             }
             if !options.skip_parents {
-                written += usize::from(write(&top, &nfo::build("Series", &data, &cast), options.force).await?);
+                written += usize::from(write(&top, &nfo::build("Series", &data, &cast), options).await?);
             }
             let episodes = if let Some(map) = data["episodes_details"].as_object() {
                 map.values().cloned().collect::<Vec<_>>()
@@ -470,7 +483,7 @@ pub async fn sync(
                         write(
                             &directory.join("season.nfo"),
                             &nfo::build("Season", season, &[]),
-                            options.force,
+                            options,
                         )
                         .await?,
                     );
@@ -520,7 +533,7 @@ pub async fn sync(
                     write(
                         &file.with_extension("nfo"),
                         &nfo::build("Episode", &episode, &actors),
-                        options.force,
+                        options,
                     )
                     .await?,
                 );
@@ -531,7 +544,7 @@ pub async fn sync(
                 write(
                     &directory.join("season.nfo"),
                     &nfo::build("Season", &data, cast),
-                    options.force,
+                    options,
                 )
                 .await?,
             )
@@ -541,7 +554,7 @@ pub async fn sync(
                 write(
                     &path.with_extension("nfo"),
                     &nfo::build("Episode", &data, cast),
-                    options.force,
+                    options,
                 )
                 .await?,
             )

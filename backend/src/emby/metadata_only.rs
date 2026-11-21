@@ -171,6 +171,43 @@ fn parse(xml: &str) -> Result<Element> {
     root.ok_or_else(|| ApiError::bad("NFO 没有根节点"))
 }
 
+/// Reuse the existing XML reader for ingestion and translation preservation.
+pub(super) fn scrape_metadata(xml: &str, kind: &str) -> Result<Value> {
+    let root = parse(xml)?;
+    let expected = match kind {
+        "Movie" => "movie", "Series" => "tvshow", "Season" => "season", "Episode" => "episodedetails",
+        _ => return Err(ApiError::bad("不支持的 NFO 类型")),
+    };
+    if root.name != expected { return Err(ApiError::bad("NFO 类型与当前媒体不一致")); }
+    let mut data = json!({});
+    for (tag, key) in [("title", "name"), ("originaltitle", "original_name"), ("plot", "overview"), ("tagline", "tagline"), ("premiered", "air_date"), ("mpaa", "mpaa")] {
+        if let Some(value) = root.first(tag) { data[key] = json!(value); }
+    }
+    let id = root.all("uniqueid").into_iter().find(|node| node.attributes.get("type").is_some_and(|kind| kind.eq_ignore_ascii_case("tmdb")))
+        .map(|node| node.text.trim()).or_else(|| root.first("tmdbid"));
+    if let Some(id) = id.and_then(|id| id.parse::<u64>().ok()).filter(|id| *id > 0) { data["id"] = json!(id); }
+    for (tag, key) in [("season", "season_number"), ("episode", "episode_number"), ("runtime", "runtime")] {
+        if let Some(number) = root.first(tag).and_then(|value| value.parse::<u64>().ok()) { data[key] = json!(number); }
+    }
+    let cast = root.all("actor").into_iter().filter_map(|actor| {
+        if actor.first("type").is_some_and(|kind|kind.eq_ignore_ascii_case("director")) { return None; }
+        let id = actor.first("tmdbid").and_then(|id| id.parse::<u64>().ok())?;
+        Some(json!({"id":id,"name":actor.first("name"),"character":actor.first("role"),
+            "order":actor.first("order").and_then(|order|order.parse::<i64>().ok()).unwrap_or(999),"profile_path":actor.first("thumb")}))
+    }).collect::<Vec<_>>();
+    if !cast.is_empty() { data["credits"]["cast"] = json!(cast); }
+    let directors = root.all("director").into_iter().filter_map(|director| {
+        let id = director.attributes.get("tmdbid")?.parse::<u64>().ok()?;
+        Some(json!({"id":id,"name":director.text.trim(),"job":"Director"}))
+    }).collect::<Vec<_>>();
+    if !directors.is_empty() { data["credits"]["crew"] = json!(directors); }
+    for (tag, key) in [("genre", "genres"), ("studio", "production_companies")] {
+        let values = root.all(tag).into_iter().map(|value|json!({"id":0,"name":value.text.trim()})).collect::<Vec<_>>();
+        if !values.is_empty() { data[key] = json!(values); }
+    }
+    Ok(data)
+}
+
 fn date(value: &str) -> Result<Value> {
     if value.is_empty() {
         return Ok(Value::Null);

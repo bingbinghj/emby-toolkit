@@ -46,6 +46,7 @@ mod media_order;
 pub mod media_organize_history;
 pub mod media_organize_queue;
 pub(crate) mod media_rescrape;
+pub(crate) mod metadata_reuse;
 pub mod media_paths;
 pub mod media_preflight;
 pub mod media_recovery;
