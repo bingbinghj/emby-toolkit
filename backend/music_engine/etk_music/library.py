@@ -19,10 +19,21 @@ def album_directory(relative):
     return str(directory.parent if MetaMusic.parse_disc_dir(directory.name) is not None else directory)
 
 
-def preview_groups(paths):
+def collection_single(relative, collection_root):
+    parts = Path(relative).relative_to(collection_root).parts
+    import re
+    return len(parts) == 1 or bool(re.fullmatch(r"单曲|單曲|singles?|single[\s_-]*tracks?", parts[0], re.I))
+
+
+def preview_groups(paths, music_type=None, collection_root=None):
+    if music_type not in {None, "recording", "album", "artist_collection"}:
+        raise ValueError("音乐实体无效")
+    if music_type == "artist_collection" and not collection_root:
+        raise ValueError("艺术家合集需要选择一个艺术家目录")
     groups = {}
     for relative in paths:
-        groups.setdefault(album_directory(relative), []).append(relative)
+        single = music_type == "recording" or (music_type == "artist_collection" and collection_single(relative, collection_root))
+        groups.setdefault(relative if single else album_directory(relative), []).append(relative)
     return groups
 
 
@@ -229,7 +240,7 @@ def selection(config, paths):
             selected.add(relative)
     if not selected or len(selected)>1000:
         raise ValueError("请选择 1 至 1000 个音乐文件")
-    return {"paths": sorted(selected)}
+    return {"paths": sorted(selected), "cue_enable": config.get("music_cue_enable", True), "collection_root": paths[0] if len(paths) == 1 and (root / paths[0]).is_dir() else None}
 
 
 def image(config, relative):

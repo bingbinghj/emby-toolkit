@@ -73,3 +73,18 @@ def test_terminating_worker_also_stops_fingerprint_process(tmp_path):
         try: os.killpg(process.pid,signal.SIGKILL)
         except ProcessLookupError: pass
         process.wait(timeout=5)
+
+
+def test_per_operation_cue_override_does_not_change_default(tmp_path, monkeypatch):
+    import worker
+    from etk_music import operations
+    from etk_music.audio import music_cue_enabled
+    def preview(config, body):
+        assert music_cue_enabled() is body['music_cue_enable']
+        return {'ok': True}
+    monkeypatch.setattr(operations, 'preview', preview)
+    for enabled in (False, True):
+        result = worker.dispatch({'action':'preview','config':{'music_cue_enable':True},
+            'body':{'music_cue_enable':enabled},'cache_dir':str(tmp_path/'cache')})
+        assert result == {'ok':True}
+        assert music_cue_enabled() is True

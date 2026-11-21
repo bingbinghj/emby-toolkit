@@ -5,7 +5,11 @@ export const metadataSources = [...musicSources, ...streamingSources, ...gdSourc
 export const lyricSources = [{title:'网易云音乐',value:'netease'},{title:'QQ 音乐',value:'qqmusic'},{title:'酷狗音乐',value:'kugou'},{title:'酷我音乐',value:'kuwo'},...gdSources,{title:'LRCLIB',value:'lrclib'}];
 export const sourceLabel = source => [...musicSources,...streamingSources,...lyricSources].find(item => item.value === source)?.title || '本地音乐';
 export function musicSearchTerm(item = {}, kind = 'recording') {
-  if (kind === 'album') return item.album || '';
+  if (kind === 'album') {
+    const album = item.album || '';
+    const year = String(item.release_year || item.year || item.release_date || '').match(/^\d{4}/)?.[0];
+    return album && year && !new RegExp(`[（(]${year}[）)]\\s*$`).test(album) ? `${album} (${year})` : album;
+  }
   const artist = item.artists?.filter(Boolean).join(' / ') || item.album_artist || '';
   if (kind === 'artist') return artist;
   return item.title || '';
@@ -32,7 +36,6 @@ export function musicFieldOptions(field, metadata = {}, album = null) {
     if(field==='album')values.push(album.title);
     else if(field==='album_artist')values.push(album.album_artist || album.artist);
     else if(['total_tracks','total_discs','release_year','original_year'].includes(field))values.push(album[field]);
-    if(['title','track_number','disc_number'].includes(field))values.push(...(album.tracks || []).map(track=>track[field]));
   }
   return [...new Set(values.flat().filter(value=>value!==undefined && value!==null && value!=='' && (typeof value==='string' || typeof value==='number')))];
 }

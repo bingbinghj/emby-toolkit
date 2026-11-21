@@ -769,3 +769,66 @@ def test_douban_explore_uses_mp_tag_filters_and_sort(fixture, monkeypatch):
     monkeypatch.setattr(operations.catalog,'DoubanMusic',Douban)
     operations.catalog.explore({'source':'doubanmusic','tags':'爵士,美国','douban_sort':'S','page':2})
     assert captured['mode']=='tag' and captured['tags']=='爵士,美国' and captured['sort']=='S' and captured['page']==2
+
+
+@pytest.mark.parametrize("kind", ["hardlink", "copy"])
+def test_absent_lyrics_can_be_previewed_saved_and_replayed(fixture, kind):
+    config, source, root = fixture
+    folder = root / "Girls’ Generation" / "GIRLS’ GENERATION II ～Girls & Peace～ (2012)"
+    folder.mkdir(parents=True)
+    target = folder / "01 - FLOWER POWER.wav"
+    if kind == "hardlink": os.link(source, target)
+    else: shutil.copyfile(source, target)
+    before = target.read_bytes()
+    relative = str(target.relative_to(root))
+    metadata = library.inspect(config, relative)
+    assert not metadata['lyrics']
+    metadata['lyrics'] = '[00:01.00]FLOWER POWER\n'
+    row = operations.preview(config, {'operation':'edit','paths':[relative],'metadata':{'lyrics':metadata['lyrics'],'lyrics_revision':metadata['lyrics_revision'],'signature':metadata['signature']}})['items'][0]
+    assert row['success'], row
+    assert not target.with_suffix('.lrc').exists()
+    body = {'item':row,'operation':'edit','execution_id':'cafe-81'}
+    for _ in range(2):
+        assert operations.execute(config, body)['success']
+        assert library.inspect(config, relative)['lyrics'] == metadata['lyrics']
+        assert source.read_bytes() == target.read_bytes() == before
+    assert target.samefile(source) == (kind == "hardlink")
+
+
+def test_artist_collection_groups_albums_discs_and_standalone_singles():
+    paths = ['Artist/Album/CD1/01.flac','Artist/Album/CD2/01.flac','Artist/Singles/Sub/one.flac','Artist/Singles/two.flac','Artist/loose.flac']
+    groups = library.preview_groups(paths, 'artist_collection', 'Artist')
+    assert groups['Artist/Album'] == paths[:2]
+    assert all(groups[path] == [path] for path in paths[2:])
+    assert all(group == [path] for path, group in library.preview_groups(paths, 'recording').items())
+    with pytest.raises(ValueError): library.preview_groups(paths, 'artist_collection', None)
+    with pytest.raises(ValueError): library.preview_groups(['Other/song.flac'], 'artist_collection', 'Artist')
+
+
+@pytest.mark.parametrize('mode', ['strict', 'ignore_duration', 'sequential'])
+def test_rescrape_passes_matching_mode_to_existing_album_matcher(fixture, monkeypatch, mode):
+    config, source, root = fixture
+    os.link(source, root/'song.wav')
+    from etk_music.models import MusicInfo
+    def recognize(files, metas, sources, choice, directory, track_match):
+        assert track_match == mode
+        return {str(files[0].resolve()): MusicInfo(title='匹配曲名')}, {}
+    monkeypatch.setattr(operations, 'recognize_group', recognize)
+    row = operations.preview(config, {'paths':['song.wav'],'music_track_match':mode})['items'][0]
+    assert row['success'] and row['metadata']['title'] == '匹配曲名'
+
+
+def test_single_preview_can_be_corrected_to_a_selected_album(fixture, monkeypatch):
+    config, source, root = fixture
+    os.link(source, root/'song.wav')
+    from etk_music.models import MusicInfo
+    def recognize(files, metas, sources, choice, directory, track_match):
+        assert choice['media_id'] == 'selected-album'
+        assert directory == root
+        return {str(files[0].resolve()): MusicInfo(title='纠正曲名')}, {}
+    monkeypatch.setattr(operations, 'recognize_group', recognize)
+    preview = operations.preview(config, {'paths':['song.wav'],'music_type':'recording',
+        'selections':{'song.wav':{'music_type':'album','media_id':'selected-album'}}})
+    assert preview['items'][0]['success'], preview
+    assert preview['items'][0]['metadata']['title'] == '纠正曲名'
+    assert preview['items'][0]['music']['group_directory'] == 'song.wav'

@@ -1897,4 +1897,5 @@ html body .v-pagination:not(.mp-pagination) .v-pagination__item--is-active > .v-
 .mp-pagination .v-pagination__item--is-active .v-btn__content { opacity: 1 !important; }
 .mp-pagination .v-pagination__item--is-active .v-btn {
   color: color-mix(in srgb, rgb(var(--v-theme-primary)) 75%, rgb(var(--v-theme-on-surface)) 25%) !important;
+  background: rgba(var(--v-theme-primary), 0.12) !important;
 }

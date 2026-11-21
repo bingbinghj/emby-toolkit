@@ -176,6 +176,22 @@ async fn local_music_scan_preview_write_and_cleanup_preserve_seed() {
     .await;
     assert_eq!(data["title"], "测试曲名", "{data}");
     assert_eq!(std::fs::read_dir(&library).unwrap().count(), 1);
+    // No existing sidecar: apply lyrics, inspect preview, then explicitly save.
+    let mut lyrics_metadata=data.clone();
+    lyrics_metadata["lyrics"]=json!("[00:01.00]新增歌词\n");
+    let (status,job)=request(&app,"POST","/api/music/jobs/preview",json!({"operation":"edit","paths":["song.wav"],"metadata":lyrics_metadata})).await;
+    assert_eq!(status,202,"{job}");
+    let preview_id=job["task_id"].as_str().unwrap();
+    let preview=finished(&state,preview_id).await;
+    assert_eq!(preview["result"]["preview"]["items"][0]["success"],true,"{preview}");
+    assert!(!library.join("song.lrc").exists());
+    let (status,job)=request(&app,"POST","/api/music/jobs/execute",json!({"preview_task_id":preview_id})).await;
+    assert_eq!(status,202,"{job}");
+    let result=finished(&state,job["task_id"].as_str().unwrap()).await;
+    assert_eq!(result["result"]["failed"],0,"{result}");
+    assert_eq!(std::fs::read_to_string(library.join("song.lrc")).unwrap(),"[00:01.00]新增歌词\n");
+    assert_eq!(std::fs::read(seed.join("source.wav")).unwrap(),original);
+
     let receipts = state.data_dir.join("music/operations");
     assert!(std::fs::read_dir(receipts).unwrap().all(|item| {
         item.unwrap()

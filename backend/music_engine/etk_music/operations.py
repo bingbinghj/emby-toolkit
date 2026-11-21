@@ -79,6 +79,14 @@ def preview(config, body):
     if operation not in {"rescrape", "edit"}:
         raise ValueError("未知音乐操作")
     selected = body.get("selection")
+    track_match = body.get("music_track_match") or "strict"
+    if track_match not in {"strict", "ignore_duration", "sequential"}:
+        raise ValueError("曲目对齐方式无效")
+    music_type = body.get("music_type")
+    if music_type not in {None, "recording", "album", "artist_collection"}:
+        raise ValueError("音乐实体无效")
+    if music_type == "artist_collection" and selected:
+        raise ValueError("艺术家合集按各专辑和单曲分别识别，不能统一指定一份资料")
     rows = []
     paths = list(dict.fromkeys(body.get("paths") or []))
     if (body.get("metadata") or {}).get("cover_upload") and len(paths) != 1:
@@ -86,6 +94,7 @@ def preview(config, body):
     overrides = body.get("selections") or {}
     if selected and selected.get("music_type", "recording")=="recording" and len(paths)!=1:
         raise ValueError("单曲资料只能用于一个所选音频，请选择专辑")
+    group_keys = {name: group for group, names in library.preview_groups(paths, music_type, body.get("collection_root")).items() for name in names}
     evidence, errors, groups, recognized, cue_digests = {}, {}, defaultdict(list), {}, {}
     for relative in paths:
         try:
@@ -100,17 +109,19 @@ def preview(config, body):
                 cue = path.parent / Path(meta.cue_filename).name
                 cue_digests[relative] = hashlib.sha256(cue.read_bytes()).hexdigest()
             evidence[relative] = (path, identity, meta)
-            groups[library.album_directory(relative)].append(relative)
+            groups[group_keys[relative]].append(relative)
         except Exception as error:
             errors[relative] = str(error)
     if operation!="edit":
         for directory, group in groups.items():
             choice = overrides.get(directory) or selected
+            if not choice and (music_type == "recording" or music_type == "artist_collection" and library.collection_single(group[0], body.get("collection_root"))):
+                continue
             if choice and choice.get("music_type", "album")!="album":
                 continue
             try:
                 files = [evidence[name][0] for name in group]
-                matches, diagnostic = recognize_group(files, [evidence[name][2] for name in group], sources, choice, root/directory)
+                matches, diagnostic = recognize_group(files, [evidence[name][2] for name in group], sources, choice, root/library.album_directory(group[0]), track_match)
                 for name in group:
                     info = matches.get(str(evidence[name][0].resolve()))
                     if info:
@@ -126,7 +137,9 @@ def preview(config, body):
                 raise ValueError(errors[relative])
             path, identity, meta = evidence[relative]
             if operation == "edit":
-                info = MusicInfo.from_meta(meta)
+                # Manual edits start with stored tags; filename/folder guesses
+                # must not rewrite audio when only sidecar lyrics are changed.
+                info = MusicInfo.from_meta(AudioMetadataHelper.read_tags(path) or MetaMusic())
                 values = body.get("metadata") or {}
                 for key in ("comment", "description"):
                     value = values.get(key)
@@ -179,11 +192,12 @@ def preview(config, body):
             rows.append({"path": relative, "success": False, "message": str(error)})
     for row in rows:
         relative = row["path"]
-        group = library.album_directory(relative)
+        group = group_keys[relative]
         meta = evidence.get(relative, (None, None, None))[2]
         info = row.get("metadata") or (MusicInfo.from_meta(meta).to_dict() if meta else {})
         diagnostic = info.get("raw_data", {}).get("recognition", {})
         status = "manual" if operation=="edit" else diagnostic.get("status", "metadata")
+        row["music_cue_enable"] = body.get("music_cue_enable", config.get("music_cue_enable", True))
         row.update(source=relative, source_storage="local", source_item={"storage":"local", "path":relative, "type":"file"})
         row["music"] = {**info, "group_id":hashlib.sha256((str(root)+"/"+group).encode()).hexdigest(), "group_directory":group,
             "file_role":"audio", "status":status, "online_confirmed":bool(status=="matched" and info.get("media_id")),

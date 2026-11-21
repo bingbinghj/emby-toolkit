@@ -37,6 +37,7 @@ const detailAlbum=ref(null);
 const detailOpen = ref(false), detail = ref(null), detailKind = ref('recording'), detailError = ref(''), detailBusy = ref(false), related = ref([]), editions = ref([]), release = ref('');
 const editorOpen = ref(false), editor = ref(null), editorError = ref('');
 const actionOpen = ref(false), action = ref('rescrape'), actionPaths = ref([]), selection = ref(null), selectorOpen = ref(false);
+const musicType=ref('album'), trackMatch=ref('strict'), cueEnable=ref(true), collectionRoot=ref(null);
 const resultOpen=ref(false), resultData=ref(null);
 const previewOpen = ref(false), preview = ref(null), previewTask = ref(''), taskId = ref(''), taskState = ref(null), taskError = ref('');
 const exploreParams=ref({mode:'chart',entity:'album',range_name:'this_month'}), artistType=ref('album'), relatedPage=ref(1), relatedBusy=ref(false), relatedArtists=ref([]), relatedLabel=ref('相关专辑');
@@ -81,6 +82,8 @@ async function openAction(operation, paths = selected.value) {
   try {
     const result = await api('selection',{paths});
     if (!active) return;
+    musicType.value='album'; trackMatch.value='strict'; collectionRoot.value=result.collection_root || null; cueEnable.value=result.cue_enable !== false;
+    releaseLoadError.value=''; releaseLoading.value=false;
     action.value = operation; actionPaths.value = result.paths; selection.value = null; corrections.value = {}; actionOpen.value = true;
   } catch(cause) { if(active) taskError.value=failure(cause); }
   finally { if(active) submitting.value=false; }
@@ -127,12 +130,12 @@ async function loadArtistAlbums(reset=false) {
   catch(cause){if(active && version===detailRequest && requestId===relatedRequest) detailError.value=failure(cause);}
   finally{if(version===detailRequest && requestId===relatedRequest)relatedBusy.value=false;}
 }
-function chooseMusic(item) { selection.value = {media_source: selectorSource.value, media_id:item.id, music_type:item.music_type || 'album'}; selectorOpen.value = false; }
+function chooseMusic(item) { selection.value = {media_source: selectorSource.value, media_id:item.id, music_type:item.music_type || musicType.value}; selectorOpen.value = false; }
 function correctGroup(chosen) {
   const directory = correctionGroup.value.items[0].music.group_directory;
   corrections.value = {...corrections.value, [directory]: {...chosen, music_type:'album'}};
   correctionGroup.value = null;
-  submit('preview', {operation:preview.value.operation, paths:preview.value.items.map(row=>row.path), selection:selection.value, selections:corrections.value, previous_preview_task_id:previewTask.value});
+  submit('preview', {operation:preview.value.operation, paths:preview.value.items.map(row=>row.path), selection:selection.value, selections:corrections.value, previous_preview_task_id:previewTask.value, music_type:preview.value.music_type, music_track_match:preview.value.music_track_match, music_cue_enable:preview.value.music_cue_enable, collection_root:preview.value.collection_root});
 }
 async function submit(operation, body) {
   if (busy.value) return;
@@ -166,13 +169,14 @@ async function poll() {
   } catch (cause) { if (active && id === taskId.value) { if(cause.response?.status===404){taskId.value='';sessionStorage.removeItem('etk.music.task');taskError.value=editorOpen.value ? '预览任务已失效，请重新预览后保存' : '';}else taskError.value = failure(cause); } }
   if (active && taskId.value) polling = setTimeout(poll, 1500);
 }
-function previewAction() { if(selectedReleaseError.value){taskError.value=selectedReleaseError.value;return;} if(selection.value?.musicbrainz_release_id)selection.value.musicbrainz_release_id=selection.value.musicbrainz_release_id.trim().toLowerCase(); submit('preview', { operation: action.value, paths: actionPaths.value, selection: selection.value, selections:corrections.value }); }
+function previewAction() { if(selectedReleaseError.value){taskError.value=selectedReleaseError.value;return;} if(selection.value?.musicbrainz_release_id)selection.value.musicbrainz_release_id=selection.value.musicbrainz_release_id.trim().toLowerCase(); submit('preview', { operation: action.value, paths: actionPaths.value, selection: selection.value, selections:corrections.value, music_type:musicType.value, music_track_match:trackMatch.value, music_cue_enable:cueEnable.value, collection_root:collectionRoot.value }); }
 function saveEditor(metadata) { action.value = 'edit'; submit('preview', { operation: 'edit', paths: [metadata.path], metadata }); }
 async function clearSelectedCache() {try{await api('cache',{keys:selectedCache.value});selectedCache.value=[];load();}catch(cause){error.value=failure(cause);}}
 async function clearCache(key) {
   try { await api('cache', key ? { key } : { clear: true }); cacheConfirm.value = false; load(); }
   catch (cause) { error.value = failure(cause); }
 }
+watch(musicType, () => {selection.value=null; trackMatch.value='strict'; releaseLoadError.value=''; releaseLoading.value=false;});
 watch(exploreSource, () => {exploreParams.value={mode:'chart',entity:'album',range_name:'this_month'};doubanParams.value={tags:'流行',douban_sort:'U',with_cover:false};streamParams.value={chart:'',region:'cn'};charts.value=[]; if(tab.value==='explore')search();});
 watch(tab, () => { query.value = ''; page.value = 1; selected.value = []; selectedCache.value=[]; load(); });
 watch(backgroundTaskStatus, status => {
@@ -231,9 +235,24 @@ onBeforeUnmount(() => { active = false; request++; detailRequest++; editorReques
     <MusicCorrectionDialog v-if="correctionGroup" :group="correctionGroup" :busy="busy" @close="correctionGroup = null" @apply="correctGroup" />
     <MusicTagEditor v-if="editorOpen" :key="editor?.path || 'loading'" :visible="!previewOpen" :item="editor" :focus-field="editorFocus" :error="editorError || taskError" :busy="busy" @close="editorOpen=false; editorRequest++" @save="saveEditor" />
 
-    <VDialog :model-value="actionOpen && !selectorOpen" @update:model-value="actionOpen = $event" max-width="42rem" :fullscreen="smAndDown" scrollable><VCard><VCardItem :title="actionLabel" :subtitle="`共 ${actionPaths.length} 项`" class="pe-16" /><DialogCloseBtn @click="actionOpen = false" /><VDivider /><VCardText><VAlert v-if="taskError" type="error" variant="tonal" class="mb-3">{{ taskError }}</VAlert><p class="mb-4">按音乐刮削设置更新所选文件的标签、封面和歌词，保留当前文件名和位置。</p><VTextField :model-value="selection ? `${sourceLabel(selection.media_source)} · ${selection.media_id}` : ''" label="指定音乐或专辑" placeholder="留空自动识别" readonly clearable @click:clear="selection = null"><template #append-inner><VBtn icon="mdi-magnify" variant="text" aria-label="选择音乐资料" @click="selectorOpen = true" /></template></VTextField><MusicReleaseSelect v-if="selection?.media_source === 'musicbrainz' && selection?.music_type === 'album'" v-model="selection.musicbrainz_release_id" :album-id="selection.media_id" :disabled="busy" @loading="releaseLoading=$event" @error="releaseLoadError=$event" /></VCardText><VDivider /><VCardActions class="app-dialog-actions"><VSpacer /><VBtn color="default" variant="text" @click="actionOpen = false">取消</VBtn><VBtn color="primary" variant="flat" :disabled="busy || releaseLoading || !actionPaths.length || !!selectedReleaseError" @click="previewAction">预览</VBtn></VCardActions></VCard></VDialog>
+    <VDialog :model-value="actionOpen && !selectorOpen" @update:model-value="actionOpen = $event" max-width="42rem" :fullscreen="smAndDown" scrollable>
+      <VCard><VCardItem :title="actionLabel" :subtitle="`共 ${actionPaths.length} 项`" class="pe-16" /><DialogCloseBtn @click="actionOpen = false" /><VDivider />
+        <VCardText><VAlert v-if="taskError" type="error" variant="tonal" class="mb-3">{{ taskError }}</VAlert>
+          <p class="mb-4">按音乐刮削设置更新所选文件的标签、封面和歌词，保留当前文件名和位置。</p>
+          <VSelect v-model="musicType" class="mb-4" label="音乐实体" prepend-inner-icon="mdi-music-box-multiple" :items="[{title:'单曲',value:'recording'},{title:'专辑',value:'album'},{title:'艺术家合集',value:'artist_collection',props:{disabled:!collectionRoot}}]" />
+          <VAlert v-if="musicType==='artist_collection'" type="info" variant="tonal" class="mb-4">按专辑目录分别识别；根目录和单曲目录中的歌曲按单曲识别。</VAlert>
+          <template v-else>
+            <VTextField class="mb-4" :model-value="selection ? `${sourceLabel(selection.media_source)} · ${selection.media_id}` : ''" label="指定音乐或专辑" placeholder="留空自动识别" readonly clearable @click:clear="selection = null"><template #append-inner><VBtn icon="mdi-magnify" variant="text" aria-label="选择音乐资料" @click="selectorOpen = true" /></template></VTextField>
+            <MusicReleaseSelect v-if="selection?.media_source === 'musicbrainz' && selection?.music_type === 'album'" v-model="selection.musicbrainz_release_id" :album-id="selection.media_id" :disabled="busy" @loading="releaseLoading=$event" @error="releaseLoadError=$event" />
+          </template>
+          <VSwitch v-model="cueEnable" label="识别 CUE" color="primary" hint="仅应用于本次刮削" persistent-hint class="mb-4" />
+          <VSelect v-if="musicType==='album'" v-model="trackMatch" label="曲目对齐方式" prepend-inner-icon="mdi-playlist-check" :items="[{title:'严格校验',value:'strict'},{title:'忽略时长',value:'ignore_duration'},{title:'跳过对齐验证',value:'sequential'}]" hint="指定专辑时使用所选方式核对曲目" persistent-hint />
+          <VAlert v-if="musicType==='album' && trackMatch==='sequential'" type="warning" variant="tonal" class="mt-3">按文件顺序匹配专辑曲目，请先核对文件顺序和曲目数量。</VAlert>
+        </VCardText><VDivider /><VCardActions class="app-dialog-actions"><VSpacer /><VBtn color="default" variant="text" @click="actionOpen = false">取消</VBtn><VBtn color="primary" variant="flat" :disabled="busy || releaseLoading || !actionPaths.length || !!selectedReleaseError" @click="previewAction">预览</VBtn></VCardActions>
+      </VCard>
+    </VDialog>
 
-    <VDialog v-model="selectorOpen" max-width="700" :fullscreen="smAndDown" scrollable><VCard><VCardText><VSelect v-model="selectorSource" :items="musicSources" label="音乐数据源" /><MusicIdSelector :key="selectorSource" :type="selectorSource" :music-types="actionPaths.length > 1 ? ['album'] : ['recording','album']" @select="chooseMusic" @close="selectorOpen = false" /></VCardText></VCard></VDialog>
+    <VDialog v-model="selectorOpen" max-width="700" :fullscreen="smAndDown" scrollable><VCard><VCardText><VSelect v-model="selectorSource" :items="musicSources" label="音乐数据源" /><MusicIdSelector :key="selectorSource" :type="selectorSource" :music-types="[musicType]" @select="chooseMusic" @close="selectorOpen = false" /></VCardText></VCard></VDialog>
 
     <VDialog :model-value="previewOpen && !correctionGroup" @update:model-value="previewOpen = $event" max-width="64rem" :fullscreen="smAndDown" scrollable><VCard><VCardItem :title="preview?.operation === 'edit' ? '音乐修改预览' : '音乐刮削预览'" :subtitle="`共 ${preview?.items?.length || 0} 项`" class="pe-16" /><DialogCloseBtn @click="previewOpen = false" /><VDivider /><VCardText><VAlert v-if="taskError" type="error" variant="tonal" class="mb-3">{{ taskError }}</VAlert><MusicPreview :groups="previewGroups" :disabled="busy || preview?.operation === 'edit'" :scope-complete="true" :corrected="Object.keys(corrections).length > 0" @correct="correctionGroup = $event" /></VCardText><VDivider /><VCardActions class="app-dialog-actions"><VSpacer /><VBtn color="default" variant="text" @click="previewOpen = false">{{ editorOpen ? '返回编辑' : '取消' }}</VBtn><VBtn color="primary" variant="flat" :disabled="!canExecute" @click="submit('execute', {preview_task_id: previewTask})">{{ preview?.operation === 'edit' ? '保存修改' : '确认' }}</VBtn></VCardActions></VCard></VDialog>
     <VDialog v-model="resultOpen" max-width="48rem" scrollable><VCard><VCardItem title="音乐任务结果" class="pe-16" /><DialogCloseBtn @click="resultOpen=false" /><VCardText><VAlert v-for="warning in resultData?.warning_details || []" :key="warning" type="warning" variant="tonal" class="mb-3">{{ warning }}</VAlert><VList><VListItem v-for="item in resultData?.items || []" :key="item.path" :title="item.path" :subtitle="item.message || '已扫描'"><template #prepend><VIcon :icon="item.success===false ? 'mdi-alert-circle-outline' : 'mdi-check-circle-outline'" :color="item.success===false ? 'error' : 'success'" /></template></VListItem></VList></VCardText><VCardActions class="app-dialog-actions"><VSpacer /><VBtn variant="text" to="/logs">查看日志</VBtn><VBtn variant="flat" @click="resultOpen=false">关闭</VBtn></VCardActions></VCard></VDialog>

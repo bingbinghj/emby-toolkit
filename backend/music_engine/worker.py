@@ -63,7 +63,7 @@ def dispatch(request):
     if action=="scope":
         return {"paths": library.walk(config)}
     if action=="preview_groups":
-        return library.preview_groups(body["paths"])
+        return library.preview_groups(body["paths"], body.get("music_type"), body.get("collection_root"))
     if action=="scan":
         return library.scan_one(config, body["path"], body["scan_id"])
     if action=="scan_batch":
@@ -105,13 +105,20 @@ def dispatch(request):
     if action=="related":
         return {"items": catalog.related(body["source"], body["id"], body["kind"], int(body.get("page",1)), body.get("album_type"))}
     if action=="preview":
-        return operations.preview(config, body)
+        from etk_music.audio import use_music_cue
+        enabled = body.get("music_cue_enable")
+        if enabled is not None and not isinstance(enabled, bool):
+            raise ValueError("识别 CUE 设置无效")
+        with use_music_cue(enabled):
+            return operations.preview(config, body)
     if action=="clear_comments_preview":
         return operations.clear_comments_preview(config)
     if action=="cleanup":
         return operations.cleanup(config, body)
     if action=="execute":
-        return operations.execute(config, body)
+        from etk_music.audio import use_music_cue
+        with use_music_cue(body.get("item", {}).get("music_cue_enable")):
+            return operations.execute(config, body)
     if action=="cache":
         module = catalog.provider("musicbrainz")
         if body.get("clear"):

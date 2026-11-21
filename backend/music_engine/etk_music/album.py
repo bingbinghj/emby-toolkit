@@ -168,13 +168,13 @@ class SourceAlbums:
         return self.module.music_album(self.source, identity)
 
 
-def recognize_group(files, metas, sources, selected=None, directory=None):
+def recognize_group(files, metas, sources, selected=None, directory=None, track_match="strict"):
     from .catalog import provider, detail
     if selected:
         album = detail(selected["media_source"], selected["media_id"], "album", selected.get("musicbrainz_release_id"))
         if not album or not album.tracks:
             raise ValueError("所选专辑或发行版本没有可用曲目")
-        result = album_track_map(files, metas, album, allow_title_override=True)
+        result = album_track_map(files, metas, album, allow_title_override=True, track_match=track_match)
         if len(result) != len(files):
             raise ValueError("所选发行与文件不能唯一对位，请核对专辑、曲序和时长")
         diagnostic = {"status": "manual", "message": "手动选择发行并核验曲目"}

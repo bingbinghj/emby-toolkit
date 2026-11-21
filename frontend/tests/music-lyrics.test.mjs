@@ -10,6 +10,9 @@ test('歌曲、歌手、专辑搜索默认使用当前歌曲的对应信息',()=
   assert.equal(musicSearchTerm(item,'artist'),'少女时代');
   assert.equal(musicSearchTerm(item,'album'),item.album);
   assert.equal(musicSearchTerm({title:'曲名'}),'曲名');
+  assert.equal(musicSearchTerm({album:'GIRLS’ GENERATION II ～Girls & Peace～',year:2012},'album'),'GIRLS’ GENERATION II ～Girls & Peace～ (2012)');
+  assert.equal(musicSearchTerm({album:'专辑 (2012)',year:2012},'album'),'专辑 (2012)');
+  assert.equal(musicSearchTerm({album:'专辑',release_date:'2012-11-28'},'album'),'专辑 (2012)');
 });
 
 test('来源译文按原文匹配，保留本地时间轴、元数据与未匹配句子',()=>{
@@ -27,7 +30,9 @@ test('发行选项包含版本信息，标签候选只采用接口已返回的�
   assert.deepEqual(musicReleaseOptions(album),[{value:'edition',title:'日版 · JP · CD · 12 首曲目'}]);
   const metadata={artists:['歌手'],isrc:'USABC2400001',raw_data:{isrcs:['USABC2400001','USABC2400002']},performers:{guitar:['演奏者']}};
   assert.deepEqual(musicFieldOptions('isrc',metadata,album),['USABC2400001','USABC2400002']);
-  assert.deepEqual(musicFieldOptions('title',metadata,album),['歌曲一','歌曲二']);
+  assert.deepEqual(musicFieldOptions('title',metadata,album),[]);
+  assert.deepEqual(musicFieldOptions('title',{title:'当前曲名'},album),['当前曲名']);
+  assert.deepEqual(musicFieldOptions('track_number',{track_number:3},album),[3]);
   assert.deepEqual(musicFieldOptions('total_tracks',metadata,album),[12]);
   assert.deepEqual(musicFieldOptions('performer_role',metadata),['guitar']);
   assert.deepEqual(musicFieldOptions('original_year',metadata,album),[]);

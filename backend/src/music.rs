@@ -516,7 +516,7 @@ async fn execute_inner(
             let value = engine(
                 state,
                 "preview_groups",
-                json!({"paths":body["paths"]}),
+                json!({"paths":body["paths"],"music_type":body["music_type"],"collection_root":body["collection_root"]}),
                 config,
                 Some(context),
             )
@@ -554,6 +554,7 @@ async fn execute_inner(
             actual.sort_by_key(Value::to_string);
             expected.sort_by_key(Value::to_string);
             if actual != expected
+                || ["music_type", "music_track_match", "music_cue_enable", "collection_root"].iter().any(|key| value[*key] != body[*key])
                 || value["operation"] != body["operation"]
                 || value["library_path"] != config["music_library_path"]
                 || value["seed_path"] != config["music_seed_path"]
@@ -599,7 +600,7 @@ async fn execute_inner(
                     .ok_or_else(|| ApiError::bad("音乐预览结果无效"))?,
             );
         }
-        let value = json!({"operation":body["operation"],"metadata":body["metadata"],"items":rows,"selection":body["selection"],"selections":body["selections"],"library_path":config["music_library_path"],"seed_path":config["music_seed_path"],"cue_enable":config["music_cue_enable"],"write_policy":config["music_scraping_policies"],"simplified":config["music_metadata_to_simplified"]});
+        let value = json!({"operation":body["operation"],"metadata":body["metadata"],"music_type":body["music_type"],"music_track_match":body["music_track_match"],"music_cue_enable":body["music_cue_enable"],"collection_root":body["collection_root"],"items":rows,"selection":body["selection"],"selections":body["selections"],"library_path":config["music_library_path"],"seed_path":config["music_seed_path"],"cue_enable":config["music_cue_enable"],"write_policy":config["music_scraping_policies"],"simplified":config["music_metadata_to_simplified"]});
         context.save_plan("music-preview", &value).await?;
         return Ok((200, json!({"preview":value,"message":"音乐预览已完成"})));
     }

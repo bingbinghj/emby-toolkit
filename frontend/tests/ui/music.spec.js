@@ -252,6 +252,7 @@ function music(api) {
 
 test('歌词修改保留草稿，等待预览后才允许确认保存',async({page,api})=>{
   music(api);
+  api.respond('POST','/api/music/query/inspect',{...track,lyrics:'',lyrics_revision:{'.lrc':null,'.txt':null,'.lyricsfile.yaml':null}});
   api.respond('GET','/api/tasks/result/music-preview',{state:'running'});
   const lyrics='[00:03.50]核对后才能保存的歌词';
   const completed={state:'completed',result:{preview:{operation:'edit',items:[{...previewItem,lyrics_edit:{text:lyrics},music:{...previewItem.music,status:'manual'}}]}}};
@@ -830,4 +831,43 @@ for(const theme of ['light','dark'])for(const width of [390,1440])test(`音乐�
     const box=await control.boundingBox();expect(box.x).toBeGreaterThanOrEqual(0);expect(box.x+box.width).toBeLessThanOrEqual(width+1);
   }
   await page.screenshot({path:testInfo.outputPath('timeline-readable.png')});
+});
+
+
+for(const width of [390,1440]) test(`重新刮削曲目选项与 CUE 可读且传入预览 ${width}px`,async({page,api},testInfo)=>{
+  music(api);await page.setViewportSize({width,height:1000});
+  api.respond('POST','/api/music/query/selection',{paths:[track.path],collection_root:'专辑'});
+  await page.goto('/music');await page.getByRole('button',{name:'选择',exact:true}).click();await page.getByRole('checkbox',{name:`选择 ${track.name}`}).check();await page.getByRole('button',{name:'批量重新刮削',exact:true}).click();
+  await page.getByRole('combobox').filter({has:page.getByLabel('曲目对齐方式',{exact:true})}).click();
+  for(const text of ['严格校验','忽略时长','跳过对齐验证'])await expect(page.getByRole('option',{name:text,exact:true})).toBeVisible();
+  await page.getByRole('option',{name:'忽略时长',exact:true}).click();
+  await page.getByRole('checkbox',{name:'识别 CUE',exact:true}).uncheck();
+  await page.screenshot({path:testInfo.outputPath('rescrape-options.png')});
+  await page.getByRole('button',{name:'预览',exact:true}).click();
+  const body=api.requests.find(row=>row.path==='/api/music/jobs/preview').body;
+  expect(body.music_type).toBe('album');expect(body.music_track_match).toBe('ignore_duration');expect(body.music_cue_enable).toBe(false);
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBeTruthy();
+});
+
+test('艺术家合集隐藏统一专辑选择并保留目录范围',async({page,api})=>{
+  music(api);api.respond('POST','/api/music/query/selection',{paths:[track.path],collection_root:'歌手'});
+  await page.goto('/music');await page.getByRole('button',{name:'选择',exact:true}).click();await page.getByRole('checkbox',{name:`选择 ${track.name}`}).check();await page.getByRole('button',{name:'批量重新刮削',exact:true}).click();
+  await page.getByRole('combobox').filter({has:page.getByLabel('音乐实体',{exact:true})}).click();await page.getByRole('option',{name:'艺术家合集',exact:true}).click();
+  await expect(page.getByRole('button',{name:'选择音乐资料',exact:true})).toHaveCount(0);
+  await page.getByRole('button',{name:'预览',exact:true}).click();
+  const body=api.requests.find(row=>row.path==='/api/music/jobs/preview').body;
+  expect(body.music_type).toBe('artist_collection');expect(body.collection_root).toBe('歌手');expect(body.selection).toBeNull();
+});
+
+
+test('专辑搜索默认携带当前歌曲发行年份并在重开后重置',async({page,api})=>{
+  music(api);api.respond('POST','/api/music/query/inspect',{...track,album:'GIRLS’ GENERATION II ～Girls & Peace～',release_year:2012});
+  await page.goto('/music');await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await page.getByRole('combobox').filter({has:page.getByLabel('音乐类型',{exact:true})}).click();await page.getByRole('option',{name:'专辑',exact:true}).click();
+  const query=page.getByLabel('按名称搜索音乐资料',{exact:true});
+  await expect(query).toHaveValue('GIRLS’ GENERATION II ～Girls & Peace～ (2012)');
+  await query.fill('修改的搜索词');await page.getByRole('button',{name:'取消',exact:true}).click();
+  await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await page.getByRole('combobox').filter({has:page.getByLabel('音乐类型',{exact:true})}).click();await page.getByRole('option',{name:'专辑',exact:true}).click();
+  await expect(page.getByLabel('按名称搜索音乐资料',{exact:true})).toHaveValue('GIRLS’ GENERATION II ～Girls & Peace～ (2012)');
 });
