@@ -36,6 +36,45 @@ test('来源演唱者标注和跨行句段不会阻止译文合并，重复应�
   assert.equal(mergeLyricsTranslation(merged.text,source,translation).text,merged.text);
 });
 
+test('The Boys 的同一句短译文合成一行，保留原文时间并可升级旧分段',()=>{
+  const original='[offset:150]\n[00:00.37]겁이 나서 시작조차 안 해 봤다면\n[00:17.78]Bring the boys out';
+  const source='[00:00.300]겁이 나서\n[00:01.640]시작조차\n[00:02.700]안 해 봤다면\n[00:17.950]Bring the boys out';
+  const translation='[00:00.300]如果因为\n[00:01.640]害怕\n[00:02.700]就什么都还没有开始的话\n[00:17.950]';
+  const expected=original.replace('\n[00:17.78]','\n[00:00.37]如果因为 害怕 就什么都还没有开始的话\n[00:17.78]');
+  const result=mergeLyricsTranslation(original,source,translation);
+  assert.equal(result.text,expected);
+  assert.equal(mergeLyricsTranslation(result.text,source,translation).text,expected);
+  assert.deepEqual(result.pendingLineIndices,[]);
+  const old=original.replace('\n[00:17.78]','\n[00:00.37]如果因为\n[00:00.37]害怕\n[00:00.37]就什么都还没有开始的话\n[00:17.78]');
+  assert.equal(mergeLyricsTranslation(old,source,translation).text,expected);
+  const custom=old.replace('\n[00:17.78]','\n[00:00.37]自己写的译文\n[00:17.78]');
+  assert.match(mergeLyricsTranslation(custom,source,translation).text,/自己写的译文/);
+  const parentheses='[00:00.300]鼓起\n[00:01.640]（你的）心\n[00:02.700]站出来吧!';
+  const withParentheses=mergeLyricsTranslation(original,source,parentheses);
+  assert.equal(mergeLyricsTranslation(withParentheses.text,source,parentheses).text,withParentheses.text);
+});
+
+test('短译文合并适用于多种语言，并保留重复词和原本不同的歌词行',()=>{
+  for(const [first,second] of [['Hold my hand','never let go'],['私の手を握って','離さないで'],['Возьми меня за руку','не отпускай']]){
+    const source=`[00:01]${first}\n[00:02]${second}`,translation='[00:01]握住我的手\n[00:02]不要放开';
+    const original=`[00:10]${first} ${second}`;
+    const result=mergeLyricsTranslation(original,source,translation);
+    assert.equal(result.text,`${original}\n[00:10]握住我的手 不要放开`);
+    assert.equal(mergeLyricsTranslation(result.text,source,translation).text,result.text);
+    assert.equal(mergeLyricsTranslation(`[00:10]${first}\n[00:20]${second}`,source,translation).text,`[00:10]${first}\n[00:10]握住我的手\n[00:20]${second}\n[00:20]不要放开`);
+  }
+  const repeated=mergeLyricsTranslation('[00:10]Go go','[00:01]Go\n[00:02]go','[00:01]走\n[00:02]走');
+  assert.equal(repeated.text,'[00:10]Go go\n[00:10]走 走');
+  assert.equal(mergeLyricsTranslation(repeated.text,'[00:01]Go\n[00:02]go','[00:01]走\n[00:02]走').text,repeated.text);
+});
+
+test('同时间多份译文和跨行未确认句段不合并为同一句',()=>{
+  const sameTime=mergeLyricsTranslation('[00:10]Hello world','[00:01]Hello world','[00:01]你好世界\n[00:01]另一个译文');
+  assert.equal(sameTime.text,'[00:10]Hello world\n[00:10]你好世界\n[00:10]另一个译文');
+  const crossed=mergeLyricsTranslation('[00:10]Hello world\n[00:20]and goodbye','[00:01]Hello\n[00:02]world and goodbye','[00:01]你好\n[00:02]世界就此告别');
+  assert.equal(crossed.text,'[00:10]Hello world\n[00:10]你好\n[00:10]世界就此告别\n[00:20]and goodbye');
+});
+
 test('网易云整句译文按 LRCLIB 原文分行，保留原时间且可升级已合并的整句',()=>{
   const original='[offset:200]\n[00:17.66][01:46.27] 날 아직 어리다고\n[00:22.71][01:50.25] 말하던 얄미운 욕심쟁이가';
   const source='[00:17.660]날 아직 어리다고 말하던 얄미운 욕심쟁이가~';

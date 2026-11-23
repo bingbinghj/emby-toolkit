@@ -135,11 +135,19 @@ def detail(body):
         if not candidates:
             raise ValueError("此歌曲没有可用歌词，请选择其他版本")
         selected = candidates[0]
-        data = read_json("https://lyrics.kugou.com/download", {"ver":1,"client":"pc","id":selected["id"],"accesskey":selected["accesskey"],"fmt":"lrc","charset":"utf8"}, "酷狗音乐")
-        content = data.get("content") or ""
-        if not isinstance(content, str) or len(content) > 1400000:
-            raise ValueError("酷狗音乐返回的歌词无效")
-        variants = [("original","原文",base64.b64decode(content, validate=True).decode("utf-8-sig"))]
+        from .kugou_lyrics import parse_krc
+        for fmt in ('krc', 'lrc'):
+            try:
+                data = read_json("https://lyrics.kugou.com/download", {"ver":1,"client":"pc","id":selected["id"],"accesskey":selected["accesskey"],"fmt":fmt,"charset":"utf8"}, "酷狗音乐")
+                content = data.get("content") if isinstance(data, dict) else None
+                if not isinstance(content, str) or not content or len(content) > 1400000:
+                    raise ValueError("酷狗音乐返回的歌词无效")
+                decoded = base64.b64decode(content, validate=True)
+                variants = parse_krc(decoded) if fmt == 'krc' else [("original", "原文", decoded.decode("utf-8-sig"))]
+                break
+            except ValueError:
+                if fmt == 'lrc':
+                    raise
     elif source == "qqmusic":
         from .streaming_metadata import get
         data = get("https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg", {"format":"json","songmid":identity,"nobase64":1})

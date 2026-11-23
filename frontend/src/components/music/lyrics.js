@@ -161,7 +161,8 @@ export function mergeLyricsTranslation(original, sourceOriginal, translation, re
   const sourceText=sourceRows.length ? sourceRows.map(row=>row.key).join('') : plain(sourceOriginal).map(key).join('');
   const translationTexts=translated.length ? translated.map(row=>row.text) : plain(translation);
   const translationKeys=new Set(translationTexts.flatMap(text=>[text,...translationPhrases(text)]).map(key));
-  const knownTranslation=value=>translationKeys.has(value) || /\p{Script=Han}/u.test(value) && value.length>=2 && [...translationKeys].some(text=>text.includes(value));
+  const translationText=translationTexts.join('').normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{M}\p{N}]/gu,'');
+  const knownTranslation=value=>translationKeys.has(value) || /\p{Script=Han}/u.test(value) && value.length>=2 && translationText.includes(value);
   const localRows=[];
   let offset=0;
   lines.forEach((line,index)=>{
@@ -174,9 +175,14 @@ export function mergeLyricsTranslation(original, sourceOriginal, translation, re
   const reference=new Map(referenceLines.map(row=>[row.index,row.text]));
   const pendingSegments=[], splits=[];
   const stamps=line=>[...line.matchAll(/\[\d+:\d{2}(?:[.:]\d+)?\]/g)].map(match=>match[0]).join('');
-  const append=(index,text)=>{const values=additions.get(index) || new Set();text.split('\n').forEach(line=>values.add(line));additions.set(index,values);};
+  const append=(index,text,fragment=null)=>{
+    const values=additions.get(index) || [], previous=values.at(-1);
+    if(fragment!==null && previous?.fragment===fragment-1){previous.parts.push(text);previous.fragment=fragment;}
+    else text.split('\n').forEach(line=>values.push({parts:[line],fragment}));
+    additions.set(index,values);
+  };
   offset=0;
-  for(const row of sourceRows){
+  for(const [sourceIndex,row] of sourceRows.entries()){
     let aligned=Array.from({length:row.key.length},(_,index)=>positions.get(offset+index)).filter(value=>value!==undefined);
     offset+=row.key.length;
     const value=[...new Set(byTime.get(Math.round(row.time*1000)) || [])].join('\n');
@@ -211,10 +217,26 @@ export function mergeLyricsTranslation(original, sourceOriginal, translation, re
         if(clean(lines[index])===value && stamps(lines[index])===stamps(lines[first.index]))replaced.add(index);
       }
     }else {
-      append(first.index,value);
+      // 仅合并连续来源片段，且每段都落在同一行本地原文；跨行和同时间多译文保持原样。
+      append(first.index,value,rows.length===1 && !value.includes('\n') ? sourceIndex : null);
       if(rows.length>1)pendingSegments.push({indices:rows.map(local=>local.index),translation:value,canCompare:comparableRows});
     }
     aligned.forEach(position=>covered.add(position));
+  }
+  // 升级旧的短译文堆叠，只替换同一时间点、内容完全相同的来源片段。
+  for(const [index,values] of additions){
+    const next=localRows.find(row=>row.index>index)?.index ?? lines.length;
+    for(const {parts} of values){
+      if(parts.length<2)continue;
+      let cursor=index+1;
+      const existing=[];
+      for(const part of parts){
+        while(cursor<next && (clean(lines[cursor])!==part || stamps(lines[cursor])!==stamps(lines[index])))cursor++;
+        if(cursor===next)break;
+        existing.push(cursor++);
+      }
+      if(existing.length===parts.length)existing.forEach(row=>replaced.add(row));
+    }
   }
   let matched=0;
   for(const row of localRows){
@@ -233,7 +255,7 @@ export function mergeLyricsTranslation(original, sourceOriginal, translation, re
     if(!values)continue;
     const stamps=[...line.matchAll(/\[\d+:\d{2}(?:[.:]\d+)?\]/g)].map(match=>match[0]).join('');
     const next=localRows.find(row=>row.index>index)?.index ?? lines.length;
-    for(const value of values){const addition=stamps+value;if(!lines.slice(index+1,next).includes(addition))output.push(addition);}
+    for(const value of new Set(values.map(value=>value.parts.join(' ')))){const addition=stamps+value;if(!lines.slice(index+1,next).includes(addition))output.push(addition);}
   }
   return {text:output.join('\n'),matched,total:localRows.length,splits,pendingSegments,
     pendingLineIndices:[...new Set(pendingSegments.filter(segment=>segment.canCompare).flatMap(segment=>segment.indices))]};

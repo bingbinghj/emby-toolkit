@@ -411,6 +411,39 @@ for(const width of [390,1440]) test(`来源译文制作双语歌词保留当前�
   expect(api.requests.filter(row=>row.path.startsWith('/api/music/jobs/'))).toHaveLength(0);
 });
 
+for(const theme of ['light','dark'])for(const width of [390,1440]) test(`酷狗译文和音译可选且短译文合并后可读 ${theme} ${width}px`,async({page,api},testInfo)=>{
+  music(api);await page.setViewportSize({width,height:1000});
+  await page.addInitScript(theme=>localStorage.setItem('moviepilot-theme-customizer',JSON.stringify({theme,glassEnabled:true,glassAppearance:'frosted',glassQuality:'css'})),theme);
+  const original='[00:00.37]겁이 나서 시작조차 안 해 봤다면\n[00:17.78]Bring the boys out';
+  api.respond('POST','/api/music/query/inspect',{...track,lyrics:original});
+  api.respond('POST','/api/music/query/lyrics_search',request=>({items:[{id:'krc-song',source:request.body.source,title:'The Boys'}]}));
+  api.respond('POST','/api/music/query/lyrics_detail',{variants:[
+    {value:'original',title:'原文',text:'[00:00.30]겁이 나서\n[00:01.64]시작조차\n[00:02.70]안 해 봤다면'},
+    {value:'translation',title:'译文',text:'[00:00.30]如果因为\n[00:01.64]害怕\n[00:02.70]就什么都还没有开始的话'},
+    {value:'romanized',title:'音译',text:'[00:00.30]勾比 那搜'},
+  ]});
+  await page.goto('/music');await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await page.getByRole('button',{name:'搜索替换歌词',exact:true}).click();
+  await page.getByRole('combobox').filter({has:page.getByLabel('歌词来源',{exact:true})}).click();
+  await page.getByRole('option',{name:'酷狗音乐',exact:true}).click();
+  await page.getByText('The Boys',{exact:true}).click();
+  await page.getByText('音译',{exact:true}).click();
+  await expect(page.getByLabel('歌词内容',{exact:true})).toHaveValue('[00:00.30]勾比 那搜');
+  await page.getByRole('checkbox',{name:'使用译文制作双语歌词',exact:true}).check();
+  const expected=original.replace('\n[00:17.78]','\n[00:00.37]如果因为 害怕 就什么都还没有开始的话\n[00:17.78]');
+  await expect(page.getByLabel('歌词内容',{exact:true})).toHaveValue(expected);
+  const line=page.locator('.lyric-line').filter({hasText:'如果因为'});
+  await line.scrollIntoViewIfNeeded();
+  const bounds=await line.evaluate(node=>({width:node.clientWidth,scrollWidth:node.scrollWidth,height:node.clientHeight,scrollHeight:node.scrollHeight}));
+  expect(bounds.scrollWidth).toBeLessThanOrEqual(bounds.width+1);expect(bounds.scrollHeight).toBeLessThanOrEqual(bounds.height+1);
+  for(const reading of await measureReadingContrast(page,[{role:'合并译文',locator:line}]))expect(reading.contrast).toBeGreaterThanOrEqual(4.5);
+  await page.screenshot({path:testInfo.outputPath('kugou-bilingual.png')});
+  await page.getByRole('button',{name:'应用双语歌词',exact:true}).click();
+  await expect(page.getByLabel('旁挂歌词（LRC / 纯文本）',{exact:true})).toHaveValue(expected);
+  expect(api.requests.filter(row=>row.path.startsWith('/api/music/jobs/'))).toHaveLength(0);
+  expect(api.requests.filter(row=>row.path.endsWith('/lyrics_translate'))).toHaveLength(0);
+});
+
 for(const width of [390,1440]) test(`双语歌词支持跨行句段和演唱者标注 ${width}px`,async({page,api},testInfo)=>{
   music(api);await page.setViewportSize({width,height:1000});
   const original='[00:33.25]어느 샌가 나는 숙녀처럼\n[00:36.63]내 입술은 사근사근 그대 이름 부르죠';
