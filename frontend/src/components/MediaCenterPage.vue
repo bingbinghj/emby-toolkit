@@ -48,7 +48,7 @@
                     <template #error><div class="poster-fallback"><VIcon :icon="libraryIcon(itemsByIndex[index - 1].Type)" size="36" /></div></template>
                     <div v-if="!itemImage(itemsByIndex[index - 1])" class="poster-fallback"><VIcon :icon="libraryIcon(itemsByIndex[index - 1].Type)" size="36" /></div>
                     <div v-if="isHovering" class="media-card-detail">
-                      <span class="media-detail-year">{{ itemsByIndex[index - 1].ProductionYear }}</span>
+                      <span class="media-detail-year num">{{ itemsByIndex[index - 1].ProductionYear }}</span>
                       <h2 class="media-detail-title my-2" :title="itemsByIndex[index - 1].Name">{{ itemsByIndex[index - 1].Name }}</h2>
                       <p v-if="itemsByIndex[index - 1].Overview" class="media-overview mb-3">{{ itemsByIndex[index - 1].Overview }}</p>
                       <span class="d-flex align-center ga-2 text-caption"><VIcon icon="mdi-pencil-outline" size="18" />打开媒体编辑</span>
@@ -56,7 +56,7 @@
                   </VImg>
                   <VCardText class="media-card-caption">
                     <div class="media-card-title" :title="itemsByIndex[index - 1].Name">{{ itemsByIndex[index - 1].Name }}</div>
-                    <div class="media-card-meta">
+                    <div class="media-card-meta num">
                       <span v-if="itemsByIndex[index - 1].ProductionYear">{{ itemsByIndex[index - 1].ProductionYear }}</span>
                       <span v-if="itemsByIndex[index - 1].Type === 'Series' && itemsByIndex[index - 1].ChildCount">{{ itemsByIndex[index - 1].ChildCount }} 季</span>
                     </div>
@@ -400,14 +400,15 @@ onBeforeUnmount(() => {
 .media-card-hover-area { min-width:0; height:100%; }
 .media-card { min-width:0; width:100%; height:100%; text-align:left; cursor:pointer; }
 .media-card-caption { padding:12px max(12px, var(--app-theme-surface-radius)) max(12px, var(--app-theme-surface-radius)); }
-.media-poster-wrap { position:relative; background:rgba(var(--v-theme-on-surface),.06); }
+.media-card--image-loaded { border:1px solid var(--mp-border); }
+.media-poster-wrap { position:relative; background:var(--mp-muted); }
 .media-card-placeholder::before { content:''; display:block; aspect-ratio:2/3; }
 .media-card-placeholder::after { content:''; display:block; height:calc(76px + max(12px, var(--app-theme-surface-radius))); }
 .poster-fallback { display:flex; align-items:center; justify-content:center; height:100%; width:100%; color:rgba(var(--v-theme-on-surface),.45); }
-.media-card-detail { position:absolute; inset:0; display:flex; flex-direction:column; justify-content:flex-end; padding:12px max(12px, var(--app-theme-surface-radius)); color:rgb(var(--v-theme-on-surface)); text-align:left; background:linear-gradient(rgba(var(--v-theme-surface),.96),rgba(var(--v-theme-surface),.98)); }
-.media-detail-year { font-size:14px; font-weight:600; line-height:20px; }
-.media-detail-title { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; overflow-wrap:anywhere; flex-shrink:0; color:rgb(var(--v-theme-on-surface)); font-size:18px; font-weight:700; line-height:20px; }
-.media-overview { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; font-size:14px; line-height:16px; }
+.media-card-detail { position:absolute; inset:0; display:flex; flex-direction:column; justify-content:flex-end; padding:12px max(12px, var(--app-theme-surface-radius)); color:var(--mp-on-media); text-align:left; background:linear-gradient(180deg,rgba(11,19,34,.36),rgba(11,19,34,.74) 50%,rgba(11,19,34,.94)); }
+.media-detail-year { color:var(--mp-on-media-muted); font-size:13px; font-weight:600; line-height:20px; }
+.media-detail-title { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden; overflow-wrap:anywhere; flex-shrink:0; color:var(--mp-on-media); font-size:17px; font-weight:600; line-height:1.3; }
+.media-overview { display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; color:var(--mp-on-media-muted); font-size:13px; line-height:1.35; }
 .media-card-title { display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; min-height:40px; overflow:hidden; overflow-wrap:anywhere; font-size:14px; font-weight:600; line-height:20px; text-align:center; }
 .media-card-meta { display:flex; min-height:18px; justify-content:center; gap:8px; margin-top:6px; color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity)); font-size:12px; line-height:18px; }
 .media-empty { margin:50px 0; }

@@ -113,11 +113,18 @@ async fn details_with_append(
             ("append_to_response", append.into()),
             (
                 "include_image_language",
-                "zh-CN,zh-TW,zh,en,null,ja,ko".into(),
+                "zh,en,null,ja,ko".into(),
             ),
         ],
     )
     .await?;
+    let image_config = state.config.read().await.clone();
+    let preferred = if image_config["tmdb_image_language_preference"].as_str().unwrap_or("zh") == "zh" {
+        "zh-CN".to_owned()
+    } else {
+        data["original_language"].as_str().unwrap_or("en").to_owned()
+    };
+    crate::images::prioritize_images(&mut data, &preferred);
     let title_field = if movie { "title" } else { "name" };
     let media_name = string(&data, title_field);
     let english = if movie {
@@ -217,17 +224,13 @@ pub async fn aggregate(state: &AppState, id: &str, numbers: &[i64]) -> Result<Va
     }
     let config = state.config.read().await.clone();
     let original = series["original_language"].as_str().unwrap_or("en");
-    let images = if config["tmdb_image_language_preference"]
-        .as_str()
-        .unwrap_or("zh")
-        == "zh"
-    {
-        "zh-CN,zh-TW,zh,en,null".into()
-    } else if original != "en" {
-        format!("{original},en,null,zh-CN,zh-TW,zh")
-    } else {
-        "en,null,zh-CN,zh-TW,zh".into()
-    };
+    let images = crate::images::strategies(
+        original,
+        config["tmdb_image_language_preference"]
+            .as_str()
+            .unwrap_or("zh") == "zh",
+    )
+    .join(",");
     let title = flag(&config["ai_translate_title"]);
     let overview = flag(&config["ai_translate_episode_overview"]);
     let mut seasons = vec![];
@@ -242,10 +245,16 @@ pub async fn aggregate(state: &AppState, id: &str, numbers: &[i64]) -> Result<Va
     numbers.sort_unstable();
     numbers.dedup();
     tracing::info!("TMDb 按季范围确认：《{media_name}》，TMDb {id}，本次季 {numbers:?}");
+    let preferred = if config["tmdb_image_language_preference"].as_str().unwrap_or("zh") == "zh" {
+        "zh-CN".to_owned()
+    } else {
+        original.to_owned()
+    };
     use futures_util::{FutureExt, StreamExt, stream};
     let limit = crate::strm::thread_limit(state, "secondary").await;
     let pending = stream::iter(numbers).map(|number| {
         let images = images.clone();
+        let preferred = preferred.clone();
         let media_name = media_name.clone();
         async move {
         let mut episodes = json!({});
@@ -269,6 +278,7 @@ pub async fn aggregate(state: &AppState, id: &str, numbers: &[i64]) -> Result<Va
                 return None;
             }
         };
+        crate::images::prioritize_images(&mut details, &preferred);
         if let Some(poster) = details["images"]["posters"][0]["file_path"].as_str() {
             details["poster_path"] = json!(poster);
         }

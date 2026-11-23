@@ -10,7 +10,8 @@ test('compiled wallpaper filters and visibility remain on the background layers'
   const rules = [...result.code.matchAll(/([^{}]+)\{([^{}]+)\}/g)]
     .map(([, selector, properties]) => ({ selector: selector.trim(), properties }))
     .filter(rule => rule.selector.includes('html['));
-  assert.equal(rules.length, 10);
+  assert.equal(rules.length, 12);
   for (const rule of rules) assert.match(rule.selector, /\.wallpaper-layer/, rule.selector);
-  assert.ok(rules.some(rule => rule.selector.includes("data-glass-color-scheme='light'") && rule.properties.includes('visibility: hidden')));
+  assert.ok(rules.some(rule => rule.selector.includes("data-theme='plain'") && rule.properties.includes('visibility: hidden')));
+  assert.ok(rules.some(rule => rule.selector.includes("data-theme='glass'") && rule.selector.includes("data-glass-color-scheme='light'") && rule.properties.includes('--glass-light-wallpaper-filter')));
 });

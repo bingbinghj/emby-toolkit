@@ -53,8 +53,8 @@ async fn image_language_preference_controls_tmdb_requests_with_filesystem_monito
     let context = JobContext::for_recovery(None).await;
     let item = json!({"Name":"测试电影","Path":directory.path().join("movie.mkv")});
     for (preference, expected) in [
-        ("zh", vec!["zh-CN", "zh-TW,zh,zh-HK,zh-SG", "en,null", "ja"]),
-        ("original", vec!["ja", "en,null", "zh-CN,zh-HK,zh-TW,zh"]),
+        ("zh", vec!["zh", "en,null", "ja"]),
+        ("original", vec!["ja", "en,null", "zh"]),
     ] {
         state.config.write().await["tmdb_image_language_preference"] = json!(preference);
         requests.write().await.clear();
@@ -68,6 +68,35 @@ async fn image_language_preference_controls_tmdb_requests_with_filesystem_monito
         assert_eq!(state.config.read().await["monitor_enabled"], false);
     }
     server.abort();
+}
+
+#[test]
+fn image_languages_use_base_codes_without_duplicate_chinese_fallbacks() {
+    use crate::images::strategies;
+    assert_eq!(strategies("zh-TW", true), vec!["zh", "en,null"]);
+    assert_eq!(strategies("zh_CN", false), vec!["zh", "en,null"]);
+    assert_eq!(strategies("JA-jp", false), vec!["ja", "en,null", "zh"]);
+    assert_eq!(strategies("", false), vec!["en,null", "zh"]);
+}
+
+#[test]
+fn image_candidates_prefer_locale_before_score_and_preserve_backdrops() {
+    let candidates = json!([
+        {"file_path":"/ja.png", "iso_639_1":"ja", "vote_average":10},
+        {"file_path":"/en.png", "iso_639_1":"en", "vote_average":9},
+        {"file_path":"/tw.png", "iso_639_1":"zh", "iso_3166_1":"TW", "vote_average":8},
+        {"file_path":"/cn.png", "iso_639_1":"zh", "iso_3166_1":"CN", "vote_average":5, "vote_count":1},
+        {"file_path":"/cn-rated.png", "iso_639_1":"zh", "iso_3166_1":"CN", "vote_average":5, "vote_count":2}
+    ]);
+    let mut data = json!({"images":{"posters":candidates,"logos":candidates,"backdrops":candidates}});
+    crate::images::prioritize_images(&mut data, "zh_CN");
+    for field in ["posters", "logos"] {
+        assert_eq!(data["images"][field][0]["file_path"], "/cn-rated.png");
+        assert_eq!(data["images"][field][1]["file_path"], "/cn.png");
+    }
+    assert_eq!(data["images"]["backdrops"], candidates);
+    crate::images::prioritize_images(&mut data, "ko");
+    assert_eq!(data["images"]["posters"][0]["file_path"], "/en.png");
 }
 
 async fn assert_image_query_cancels(block_initial: bool) {

@@ -71,7 +71,7 @@ async function initialize(page, options) {
   await page.bringToFront();
   await expect(page.locator('.setting-card').first()).toBeVisible();
   await expect(page.locator('html')).toHaveAttribute('data-glass-color-scheme', options.scheme === 'auto' ? 'dark' : options.scheme);
-  if (options.enabled && options.scheme !== 'light') {
+  if (options.enabled) {
     await expect(page.locator('.wallpaper-image').last()).toBeVisible();
   } else if (options.scheme === 'light') await expect(page.locator('.wallpaper-layer').last()).toBeHidden();
   await waitForRenderer(page, options);

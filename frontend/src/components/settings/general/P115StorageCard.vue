@@ -24,28 +24,25 @@ function edit() { if (!props.disabled) emit('edit'); }
 </script>
 
 <template>
-  <VCard variant="tonal" class="app-card-shell app-card-colorful p115-storage-card"
+  <VCard variant="flat" class="app-card-shell app-card-colorful mp-setting-card mp-setting-card--interactive p115-storage-card"
     style="--app-card-accent-rgb:255,180,0" role="button" tabindex="0"
     aria-label="编辑 115 存储" :aria-disabled="disabled" :disabled="disabled"
     @click="edit" @keydown.self.enter.prevent="edit" @keydown.self.space.prevent="edit">
-    <VIcon class="storage-edit" icon="mdi-pencil-outline" size="18" aria-hidden="true" />
-    <VCardText class="storage-summary d-flex justify-space-between align-center ga-3">
-      <div class="storage-summary-content align-self-start">
-        <h5 class="text-h6 mb-1">115 网盘</h5>
-        <div class="mb-3 text-sm storage-space">{{ space ? `${formatSpaceBytes(space.used, space.usedText)} / ${formatSpaceBytes(space.total, space.totalText)}` : '空间信息未知' }}</div>
+    <div class="mp-setting-card__header">
+      <div class="mp-setting-card__icon mp-setting-card__icon--logo" aria-hidden="true"><VImg :src="storageLogo" contain class="mp-setting-card__logo" /></div>
+      <div class="mp-setting-card__heading">
+        <div class="mp-setting-card__title-row"><span class="mp-setting-card__title">115 网盘</span></div>
+        <div class="mp-setting-card__subtitle"><span class="mp-setting-card__subtitle-text num">{{ space ? `${formatSpaceBytes(space.used, space.usedText)} / ${formatSpaceBytes(space.total, space.totalText)}` : '空间信息未知' }}</span></div>
       </div>
-      <VImg :src="storageLogo" cover class="storage-logo mt-8" max-width="3rem" min-width="3rem" aria-hidden="true" />
-    </VCardText>
-    <VProgressLinear v-if="space?.percent > 0" class="storage-progress"
-      :model-value="space.percent" :bg-color="progressColor" :color="progressColor" />
+      <div class="mp-setting-card__actions" aria-hidden="true"><VIcon icon="mdi-pencil-outline" size="18" /></div>
+    </div>
+    <div class="mp-setting-card__dock">
+      <div v-if="space?.percent != null" class="mp-setting-card__progress" :title="`已使用 ${space.percent}%`">
+        <div class="mp-setting-card__progress-track"><span class="mp-setting-card__progress-fill" :class="`mp-setting-card__progress-fill--${progressColor}`" :style="{inlineSize:`${Math.min(100, Math.max(0,space.percent))}%`}" /></div>
+        <span class="mp-setting-card__progress-pct num">{{ space.percent }}%</span>
+      </div>
+      <span v-else class="mp-setting-card__muted">空间信息未知</span>
+      <VIcon class="mp-setting-card__chevron" icon="mdi-chevron-right" size="16" />
+    </div>
   </VCard>
 </template>
-
-<style scoped>
-.p115-storage-card { cursor:pointer; min-width:0; }
-.storage-summary-content { flex:1; min-width:0; }
-.storage-space { overflow-wrap:anywhere; }
-.storage-edit { position:absolute; top:12px; right:12px; color:var(--ui-text-muted); }
-.storage-progress { position:absolute; bottom:0; left:0; width:100%; }
-html[data-theme='glass'][data-glass-color-scheme='dark'] .storage-summary { background-color:rgba(var(--v-theme-surface),0.2); }
-</style>

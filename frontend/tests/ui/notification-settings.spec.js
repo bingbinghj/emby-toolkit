@@ -178,7 +178,7 @@ for (const width of [390, 1440]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto('/settings/notifications');
     const card = page.getByRole('button', { name: '编辑 Telegram 通知渠道', exact: true });
-    await expect(card.locator('.app-card-summary__image img')).toBeVisible();
+    await expect(card.locator('.mp-setting-card__logo img')).toBeVisible();
     await card.click();
     const channel = page.locator('.v-overlay--active').filter({ has: page.getByRole('button', { name: '关闭通知渠道', exact: true }) });
     await expect(channel.getByText('配置', { exact: true })).toBeVisible();
@@ -188,7 +188,7 @@ for (const width of [390, 1440]) {
     await channel.getByLabel('管理员白名单', { exact: true }).fill('123');
     await channel.getByLabel('代理API地址', { exact: true }).fill('https://proxy.invalid/telegram');
     await channel.getByRole('button', { name: '确定', exact: true }).click();
-    await expect(card.locator('.app-card-summary__title')).toHaveText('媒体通知');
+    await expect(card.locator('.mp-setting-card__title')).toHaveText('媒体通知');
     expect(api.requests.filter(request => request.method === 'POST')).toEqual([]);
     await page.getByRole('button', { name: '保存通知渠道', exact: true }).click();
     await expect.poll(() => api.requests.some(request => request.method === 'POST' && request.path === '/api/config')).toBe(true);

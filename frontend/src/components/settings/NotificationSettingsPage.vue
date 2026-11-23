@@ -10,14 +10,18 @@
         <VProgressLinear v-if="loadingConfig" indeterminate />
         <VCardText v-if="configModel">
           <div class="grid gap-3 grid-app-card">
-          <VCard class="notification-channel app-card-shell app-card-colorful" style="--app-card-accent-rgb:36,169,224" data-field="notification_channel" data-settings-label="Telegram" variant="tonal" role="button" :tabindex="busy || !canSave ? -1 : 0" :aria-disabled="busy || !canSave" aria-label="编辑 Telegram 通知渠道" @click="editChannel" @keydown.enter.prevent="editChannel" @keydown.space.prevent="editChannel">
-            <VCardText class="app-card-summary app-card-summary--title-subtitle">
-              <div class="app-card-summary__content">
-                <div class="app-card-summary__title-row"><VBadge v-if="configModel.telegram_enabled" dot inline color="success" class="me-1" /><span class="app-card-summary__title text-h6">{{ configModel.telegram_channel_name || 'Telegram' }}</span></div>
-                <div class="app-card-summary__subtitle text-body-1">Telegram</div>
+          <VCard class="notification-channel app-card-shell app-card-colorful mp-setting-card mp-setting-card--interactive" :class="{'mp-setting-card--inactive':!configModel.telegram_enabled}" style="--app-card-accent-rgb:36,169,224" data-field="notification_channel" data-settings-label="Telegram" variant="flat" role="button" :tabindex="busy || !canSave ? -1 : 0" :aria-disabled="busy || !canSave" aria-label="编辑 Telegram 通知渠道" @click="editChannel" @keydown.self.enter.prevent="editChannel" @keydown.self.space.prevent="editChannel">
+            <div class="mp-setting-card__header">
+              <div class="mp-setting-card__icon mp-setting-card__icon--logo" aria-hidden="true"><VImg :src="telegramLogo" contain class="mp-setting-card__logo" /></div>
+              <div class="mp-setting-card__heading">
+                <div class="mp-setting-card__title-row"><span class="mp-setting-card__title" :title="configModel.telegram_channel_name || 'Telegram'">{{ configModel.telegram_channel_name || 'Telegram' }}</span></div>
+                <div class="mp-setting-card__subtitle"><span class="mp-setting-card__subtitle-text">Telegram</span></div>
               </div>
-              <div class="app-card-summary__media" aria-hidden="true"><VImg :src="telegramLogo" contain class="app-card-summary__image" /></div>
-            </VCardText>
+            </div>
+            <div class="mp-setting-card__dock">
+              <span class="mp-setting-card__status" :class="configModel.telegram_enabled ? 'mp-setting-card__status--active' : 'mp-setting-card__status--inactive'"><span class="mp-setting-card__status-dot" :class="configModel.telegram_enabled ? 'mp-setting-card__status-dot--active' : 'mp-setting-card__status-dot--inactive'" />{{ configModel.telegram_enabled ? '已启用' : '未启用' }}</span>
+              <VIcon class="mp-setting-card__chevron" icon="mdi-chevron-right" size="16" />
+            </div>
           </VCard>
           </div>
         </VCardText>

@@ -1,6 +1,6 @@
 <template>
   <article class="log-record" :data-level="records[0].level">
-    <time v-if="records[0].timestamp" class="log-record-time">{{ records[0].timestamp.replace(/[,\.]\d+$/, '').replaceAll('-', '/') }}</time>
+    <time v-if="records[0].timestamp" class="log-record-time num">{{ records[0].timestamp.replace(/[,\.]\d+$/, '').replaceAll('-', '/') }}</time>
     <span v-else aria-hidden="true" />
     <div class="log-record-panel" :class="`is-${stripe}`">
       <span class="log-record-accent" :class="{ 'is-burst': records.length > 1 }" aria-hidden="true" />
@@ -31,9 +31,8 @@ const records = computed(() => (props.lines.length ? props.lines : [props.line])
 .log-record-level { flex:0 0 4rem; min-width:4rem; font-weight:700; color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,var(--log-accent)); }
 .log-record-file, .log-record-module { min-width:0; max-width:100%; overflow-wrap:anywhere; }
 .log-record-inline-time { color:inherit; }
-.log-record-panel { display:flex; align-items:stretch; gap:12px; padding:8px; min-width:0; border:1px solid rgba(var(--v-theme-on-surface),0.04); border-radius:var(--app-surface-radius, 12px); background:var(--logging-record-bg-even,var(--ui-surface-muted)); }
-.is-dark-theme .log-record-panel { border-color:rgba(var(--v-theme-on-surface),0.08); }
-.log-record-panel.is-odd { background:var(--logging-record-bg-odd,var(--ui-surface-muted)); }
+.log-record-panel { display:flex; align-items:stretch; gap:12px; padding:8px; min-width:0; border:1px solid var(--mp-border-subtle); border-radius:var(--app-surface-radius, 12px); background:var(--logging-record-bg-even,var(--mp-list-group-bg)); }
+.log-record-panel.is-odd { background:var(--logging-record-bg-odd,transparent); }
 .log-record-accent { flex:0 0 8px; width:8px; height:8px; align-self:flex-start; margin-top:0.45rem; border-radius:999px; background:var(--log-accent); }
 .log-record-accent.is-burst { height:auto; align-self:stretch; margin-top:0; }
 .log-record-lines { display:flex; flex:1 1 auto; flex-direction:column; gap:2px; min-width:0; }

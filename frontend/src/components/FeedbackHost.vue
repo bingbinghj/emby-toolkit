@@ -1,17 +1,16 @@
 <template>
-  <VDialog v-if="current" :model-value="true" :persistent="current.busy" max-width="560"
-    :fullscreen="smAndDown" @update:model-value="value => !value && dismissDialog(current)">
+  <VDialog v-if="current" :model-value="true" :persistent="current.busy" max-width="28rem" max-height="90dvh"
+    scrollable @update:model-value="value => !value && dismissDialog(current)">
     <VCard @keydown.tab="keepDialogFocus">
       <VCardItem>
         <template #prepend><VIcon :icon="icons[current.type]" :color="current.type" /></template>
-        <VCardTitle>{{ current.options.title || '请确认' }}</VCardTitle>
+        <VCardTitle class="app-confirm-dialog-title">{{ current.options.title || '请确认' }}</VCardTitle>
         <template #append><VBtn icon="mdi-close" variant="text" color="default" :disabled="current.busy"
           aria-label="关闭确认" @click="dismissDialog(current)" /></template>
       </VCardItem>
-      <VCardText class="feedback-content"><DialogContent :content="current.options.content" /></VCardText>
-      <VCardActions>
-        <VSpacer />
-        <VBtn v-if="current.options.negativeText || current.options.onPositiveClick" variant="text" color="default"
+      <VCardText class="feedback-content app-confirm-dialog-content"><DialogContent :content="current.options.content" /></VCardText>
+      <VCardActions class="app-dialog-actions app-confirm-dialog-actions justify-center">
+        <VBtn v-if="current.options.negativeText || current.options.onPositiveClick" variant="tonal" color="secondary" class="px-5"
           :disabled="current.busy" @click="answerDialog(current, false)">{{ current.options.negativeText || '取消' }}</VBtn>
         <VBtn :color="current.type" :loading="current.busy" :disabled="current.busy" variant="flat" @click="answerDialog(current, true)">
           {{ current.options.positiveText || (current.options.onPositiveClick ? '确认' : '知道了') }}
@@ -23,10 +22,8 @@
 
 <script setup>
 import { computed, defineComponent, h, isVNode } from 'vue'
-import { useDisplay } from 'vuetify'
 import { feedbackDialogs, answerDialog, dismissDialog } from '../composables/useFeedback'
 
-const { smAndDown } = useDisplay()
 const current = computed(() => feedbackDialogs[0])
 const icons = { info: 'mdi-information-outline', success: 'mdi-check-circle-outline', warning: 'mdi-alert-outline', error: 'mdi-alert-circle-outline' }
 function keepDialogFocus(event) {
@@ -50,5 +47,6 @@ const DialogContent = defineComponent({
 </script>
 
 <style scoped>
-.feedback-content { white-space: pre-wrap; overflow-wrap: anywhere; }
+.app-confirm-dialog-title { white-space: normal; overflow-wrap: anywhere; color: var(--mp-fg); }
+.feedback-content { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--mp-muted-fg); }
 </style>

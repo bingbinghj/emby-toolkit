@@ -109,8 +109,9 @@ function toggleStream() {
 </script>
 
 <style scoped>
-.notification-center { --logging-shell-background:linear-gradient(180deg,var(--logging-shell-bg),rgba(var(--v-theme-surface),0.9)); --logging-shell-bg:rgba(var(--v-theme-surface),0.96); --logging-record-bg-even:rgba(var(--v-theme-surface-variant),0.01); --logging-record-bg-odd:rgba(var(--v-theme-surface-variant),0.005); --logging-border:rgba(var(--v-theme-on-surface),0.12); --logging-text:rgba(var(--v-theme-on-surface),0.88); display:flex; flex-direction:column; box-sizing:border-box; height:calc(100dvh - 48px); min-height:0; min-width:0; gap:16px; padding:24px; overflow:hidden; }
-.notification-center.is-dark-theme { --logging-shell-bg:rgba(var(--v-theme-surface),0.72); --logging-record-bg-even:rgba(var(--v-theme-on-surface),0.02); --logging-record-bg-odd:rgba(var(--v-theme-on-surface),0.008); --logging-shadow:inset 0 1px 0 rgba(255,255,255,0.04); }
+.notification-center { --logging-shell-background:var(--mp-card); --logging-record-bg-even:var(--mp-list-group-bg); --logging-record-bg-odd:transparent; --logging-border:var(--mp-border); --logging-text:var(--mp-fg); --logging-shadow:none; display:flex; flex-direction:column; box-sizing:border-box; height:calc(100dvh - 48px); min-height:0; min-width:0; gap:16px; padding:24px; overflow:hidden; }
+.notification-center.is-dark-theme { --logging-shell-background:rgba(var(--v-theme-surface),.72); }
+:global(html[data-theme='glass'] .notification-center) { --logging-shell-background:transparent; }
 .notification-center.is-standalone { height:100dvh; }
 .notification-heading { display:flex; align-items:center; gap:8px; flex-shrink:0; }
 .notification-heading :deep(.v-card-title) { white-space:normal; overflow-wrap:anywhere; }
@@ -125,13 +126,13 @@ function toggleStream() {
 .logging-search :deep(.v-field__outline), .logging-search :deep(.v-field__overlay), .logging-level-select :deep(.v-field__outline), .logging-level-select :deep(.v-field__overlay) { display:none; }
 .logging-search :deep(.v-field__input) { padding-inline-start:0; }
 .logging-level-select :deep(.v-field__input) { padding-inline:0; }
-.logging-level-toggle { flex:0 0 auto; overflow:hidden; border:1px solid rgba(var(--v-theme-on-surface),0.14); border-radius:var(--app-control-radius); background:transparent; block-size:2rem; box-shadow:none !important; }
+.logging-level-toggle { flex:0 0 auto; overflow:hidden; border:1px solid var(--mp-border); border-radius:var(--app-control-radius); background:transparent; block-size:2rem; box-shadow:none !important; }
 .logging-level-toggle :deep(.logging-level-toggle__button) { border-color:rgba(var(--v-theme-on-surface),0.1); border-radius:0; block-size:100%; color:var(--ui-text-muted); font-size:0.75rem; font-weight:600; letter-spacing:0; min-inline-size:auto; padding-inline:1.125rem; text-transform:none; }
 .logging-level-toggle :deep(.logging-level-toggle__button--debug) { color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,rgb(var(--v-theme-secondary))); }
 .logging-level-toggle :deep(.logging-level-toggle__button--info) { color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,rgb(var(--v-theme-success))); }
 .logging-level-toggle :deep(.logging-level-toggle__button--warning) { color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,rgb(var(--v-theme-warning))); }
 .logging-level-toggle :deep(.logging-level-toggle__button--error) { color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,rgb(var(--v-theme-error))); }
-.logging-level-toggle :deep(.logging-level-toggle__button--active) { background:rgba(var(--v-theme-primary),0.16); color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,rgb(var(--v-theme-primary))); }
+.logging-level-toggle :deep(.logging-level-toggle__button--active) { background:var(--mp-primary-soft); color:var(--mp-primary-fg); }
 .notification-log { position:relative; display:flex; flex-direction:column; gap:6px; flex:1 1 0; min-height:0; min-width:0; overflow:auto; overscroll-behavior:contain; padding:14px; border:1px solid var(--logging-border); background:var(--logging-shell-background); box-shadow:var(--logging-shadow); }
 .logging-empty { display:flex; align-items:center; justify-content:center; flex:1; gap:8px; color:var(--ui-text-muted); }
 .notification-footer { display:flex; align-items:center; flex-wrap:wrap; gap:8px; flex-shrink:0; }

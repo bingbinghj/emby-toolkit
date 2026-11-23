@@ -1,10 +1,10 @@
 import { writeFileSync } from 'node:fs';
 import { test, expect } from './fixtures.js';
 
-// Production MP v3, identical viewport and 16px root font; measured 2026-11-15.
+// MP v3.2.11 cf02b12 retains the grid; entity cards now use a compact header and information dock.
 const mp = {
-  1440: { outerWidth: 1164, gridWidth: 1122, cardWidth: 271.5 },
-  2194: { outerWidth: 1918, gridWidth: 1876, cardWidth: 257.703125 },
+  1440: { outerWidth: 1164, gridWidth: 1122, cardWidth: 366 },
+  2194: { outerWidth: 1918, gridWidth: 1876, cardWidth: 302.666667 },
 };
 
 for (const width of [390, 768, 1024, 1440, 1920, 2194, 3840]) {
@@ -42,7 +42,7 @@ for (const width of [390, 768, 1024, 1440, 1920, 2194, 3840]) {
         const grid = element.parentElement;
         return { outer: bounds(outer), summary: bounds(element), grid: bounds(grid), row: bounds(outer.parentElement.parentElement),
           headerPadding: padding(outer.querySelector('.v-card-item')), bodyPadding: padding(grid.parentElement),
-          summaryPadding: padding(element.querySelector('.v-card-text')), columns: getComputedStyle(grid).gridTemplateColumns.split(' ').length,
+          summaryPadding: padding(element.querySelector('.mp-setting-card__header')), columns: getComputedStyle(grid).gridTemplateColumns.split(' ').length,
           rootFont: parseFloat(getComputedStyle(document.documentElement).fontSize), overflow: document.documentElement.scrollWidth - innerWidth };
       });
       geometries.push({ tab, ...geometry });
@@ -50,14 +50,15 @@ for (const width of [390, 768, 1024, 1440, 1920, 2194, 3840]) {
       expect(geometry.overflow).toBeLessThanOrEqual(1);
       expect(geometry.headerPadding).toEqual([20, 20, 20, 20]);
       expect(geometry.bodyPadding).toEqual([0, 20, 20, 20]);
-      expect(geometry.summaryPadding).toEqual([20, 20, 20, 20]);
+      expect(geometry.summaryPadding).toEqual([14, 12, 12, 15]);
       expect(geometry.outer.width).toBeCloseTo(geometry.row.width - 24, 0);
       expect(geometry.grid.width).toBeCloseTo(geometry.outer.width - 42, 0);
-      const columns = Math.floor((geometry.grid.width + 12) / (16 * geometry.rootFont + 12));
+      const columns = Math.floor((geometry.grid.width + 12) / (17 * geometry.rootFont + 12));
       expect(geometry.columns).toBe(columns);
       expect(geometry.summary.width).toBeCloseTo((geometry.grid.width - 12 * (columns - 1)) / columns, 0);
-      expect(geometry.summary.height).toBeCloseTo(tab === 'system' ? 122 : 123.96875, 0);
-      expect(geometry.outer.height).toBeCloseTo(tab === 'system' ? 313.9375 : 315.90625, 0);
+      expect(geometry.summary.height).toBeGreaterThanOrEqual(104);
+      expect(geometry.summary.height).toBeLessThan(122);
+      await expect(summary.locator('.mp-setting-card__dock')).toBeVisible();
       if (mp[width]) {
         expect(geometry.outer.width).toBeCloseTo(mp[width].outerWidth, 0);
         expect(geometry.grid.width).toBeCloseTo(mp[width].gridWidth, 0);

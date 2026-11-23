@@ -59,7 +59,8 @@ async function openPage(page, options, path, scheme) {
   await expect(page.locator('html')).toHaveAttribute('data-glass-quality', options.quality);
   await expect(page.locator('html')).toHaveAttribute('data-glass-ui-style', options.style);
   if (options.enabled && scheme === 'dark') await expect(page.locator('.wallpaper-image').last()).toBeVisible();
-  if (scheme === 'light') await expect(page.locator('.wallpaper-layer').last()).toBeHidden();
+  if (scheme === 'light' && options.enabled) await expect(page.locator('.wallpaper-layer').last()).toBeVisible();
+  else if (scheme === 'light') await expect(page.locator('.wallpaper-layer').last()).toBeHidden();
   if (options.quality !== 'css') {
     await expect(page.locator('.etk-default-layout')).toHaveAttribute('data-shell-mode', 'desktop');
     await expect.poll(async () => {

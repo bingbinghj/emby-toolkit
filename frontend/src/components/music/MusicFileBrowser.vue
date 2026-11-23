@@ -44,7 +44,7 @@ watch(() => props.directory, () => { selectMode.value = false; selected.value = 
           <VIcon v-else :icon="item.type==='dir' ? 'mdi-folder' : item.is_audio!==false ? 'mdi-file-music-outline' : 'mdi-file-outline'" :color="item.type==='dir' ? 'primary' : undefined" size="24" />
           <div class="file-row__label"><span class="file-row__filename" :title="name(item)">{{ name(item) }}</span><small v-if="searching" class="text-medium-emphasis file-row__path">{{ item.path }}</small><small v-if="smAndDown" class="text-medium-emphasis">{{ [bytes(item.size),date(item)].filter(Boolean).join(' · ') }}</small></div>
         </div>
-        <span class="file-row__size">{{ bytes(item.size) }}</span><span class="file-row__time">{{ date(item) }}</span>
+        <span class="file-row__size num">{{ bytes(item.size) }}</span><span class="file-row__time num">{{ date(item) }}</span>
         <template #append><VBtn v-if="!selectMode && item.type!=='dir' && item.is_audio!==false" icon="mdi-play-circle-outline" variant="text" :aria-label="`预览 ${name(item)}`" @click.stop="emit('preview',item)" @keydown.stop /><VMenu v-if="!selectMode && selectable(item)"><template #activator="{ props: menuProps }"><VBtn v-bind="menuProps" icon="mdi-dots-horizontal" variant="text" :aria-label="`操作 ${name(item)}`" @click.stop @keydown.stop /></template><VList><VListItem v-if="item.type!=='dir'" title="歌曲预览" prepend-icon="mdi-play-circle-outline" @click="emit('preview',item)" /><VListItem v-if="item.type!=='dir'" title="编辑标签" prepend-icon="mdi-pencil-outline" @click="emit('edit',item)" /><VListItem title="重新刮削" prepend-icon="mdi-music-box-outline" :disabled="busy" @click="emit('rescrape',[item.path])" /></VList></VMenu></template>
       </VListItem>
     </template></VVirtualScroll>
@@ -56,18 +56,18 @@ watch(() => props.directory, () => { selectMode.value = false; selected.value = 
 .music-file-browser{min-inline-size:0;container-type:inline-size;}
 .file-list__toolbar,.file-list__selection{display:flex;align-items:center;gap:.5rem;padding:.5rem .75rem;flex-wrap:wrap;}
 .file-list__selection>.v-input{flex:0 1 auto;min-inline-size:12rem;}
-.file-list__columns{display:grid;grid-template-columns:minmax(0,1fr) 6rem 10rem 5.5rem;gap:1rem;padding:1rem;font-size:.875rem;border-block:1px solid rgba(var(--v-border-color),var(--v-border-opacity));}
+.file-list__columns{display:grid;grid-template-columns:minmax(0,1fr) 6rem 10rem 5.5rem;gap:1rem;padding:1rem;font-size:.875rem;border-block:1px solid var(--mp-list-row-divider);}
 .file-list__columns>button{text-align:start;}
 .file-list-container{padding:0;max-block-size:52vh;overflow:auto;}
-.file-row{min-block-size:3.625rem;padding-inline:1rem .5rem;border-block-end:1px solid rgba(var(--v-border-color),var(--v-border-opacity));border-radius:0;cursor:pointer;}
+.file-row{min-block-size:3.625rem;padding-inline:1rem .5rem;border-block-end:1px solid var(--mp-list-row-divider);border-radius:0;cursor:pointer;}
 .file-row :deep(.v-list-item__content){display:grid;grid-template-columns:minmax(0,1fr) 6rem 10rem;align-items:center;gap:1rem;}
 .file-row :deep(.v-list-item__append){inline-size:5.5rem;margin-inline-start:1rem;justify-content:flex-end;}
-.file-row--active{background:rgba(var(--v-theme-primary),.1);border-radius:12px;}
+.file-row--active{background:var(--mp-primary-soft);border-radius:12px;}
 .file-row__name{display:flex;align-items:center;gap:.75rem;min-inline-size:0;}
 .file-row__label{display:flex;flex-direction:column;min-inline-size:0;}
 .file-row__filename{font-size:.875rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .file-row__path{overflow-wrap:anywhere;}
-.file-row__size,.file-row__time{font-size:.875rem;color:rgba(var(--v-theme-on-surface),var(--v-medium-emphasis-opacity));}
+.file-row__size,.file-row__time{font-size:.875rem;color:var(--mp-muted-fg);}
 .file-row__name :deep(.v-input){flex:0 0 auto;}
 @container(max-width:600px){.file-list__columns{grid-template-columns:minmax(0,1fr) 5rem;}.file-list__columns>button:not(:first-child),.file-row__size,.file-row__time{display:none;}.file-row :deep(.v-list-item__content){grid-template-columns:minmax(0,1fr);}.file-row__filename{white-space:normal;overflow-wrap:anywhere;}.file-row{padding:.5rem .375rem .5rem .75rem;}.file-row :deep(.v-list-item__append){inline-size:5rem;margin-inline-start:.25rem;}.file-row :deep(.v-list-item__append .v-btn){width:36px;height:36px;}.file-row__name{gap:.5rem;}}
 </style>

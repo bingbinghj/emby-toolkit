@@ -872,7 +872,8 @@ for(const width of [390,1440]) test(`音乐分页按 MP 左右排列且固定可
   await page.goto('/music');
   const footer=page.getByRole('contentinfo',{name:'音乐库分页'});
   await expect(footer).toBeVisible();
-  expect(await footer.evaluate(node=>getComputedStyle(node).backgroundColor)).toBe('rgba(0, 0, 0, 0)');
+  expect(await footer.evaluate(node=>getComputedStyle(node).backgroundImage)).toBe('none');
+  expect(await footer.evaluate(node=>getComputedStyle(node).backdropFilter)).toBe('none');
   const start=await footer.boundingBox();expect(start.y+start.height).toBeLessThanOrEqual(1001);expect(start.y).toBeGreaterThan(0);
   expect(await page.getByTestId('music-library').locator('nav[aria-label="音乐目录"]').count()).toBe(0);
   await expect(page.getByTestId('music-library-path')).not.toContainText('/media/Media/Link/Music');

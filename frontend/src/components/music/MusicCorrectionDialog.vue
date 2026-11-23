@@ -201,7 +201,7 @@ onUnmounted(() => {
   flex-wrap: wrap;
   gap: 8px;
   padding: 6px 0;
-  border-bottom: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  border-bottom: 1px solid var(--mp-border);
 }
 .music-candidate {
   max-width: 100%;

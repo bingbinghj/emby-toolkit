@@ -1,4 +1,4 @@
-/* MoviePilot-Frontend v3 609ea05, MIT; see frontend/third-party/MoviePilot-LICENSE. */
+/* MoviePilot-Frontend v3 cf02b12, MIT; see frontend/third-party/MoviePilot-LICENSE. */
 import { preloadCorsImage } from '@/@core/utils/corsImage'
 
 /** DOM 背景与光学材质共用的壁纸亮度，保证采样和可见背景一致。 */
@@ -56,6 +56,13 @@ function readPercentile(sorted: number[], percentile: number) {
   if (!sorted.length) return 0
 
   return sorted[Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * percentile)))]
+}
+
+/** 浅色玻璃保留自然日光亮度，压制极亮雪景防过曝并微提暗景，避免把壁纸洗灰。 */
+export function getLightGlassWallpaperExposure(profile: GlassWallpaperToneProfile): number {
+  const highlightPenalty = Math.max(0, profile.highlightLuminance - 0.88) * 0.35
+
+  return clamp(1.01 + (0.48 - profile.medianLuminance) * 0.14 - highlightPenalty, 0.93, 1.06)
 }
 
 /**

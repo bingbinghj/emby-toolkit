@@ -1,4 +1,4 @@
-/* MoviePilot-Frontend v3 dbbad909, MIT; see frontend/third-party/MoviePilot-LICENSE. */
+/* MoviePilot-Frontend v3 cf02b12, MIT; see frontend/third-party/MoviePilot-LICENSE. */
 /* stylelint-disable no-descending-specificity */
 
 // 全局语义设计令牌定义页面画布、卡片层级、前景对比度、状态胶囊与几何间隙
@@ -13,9 +13,11 @@ html {
   --mp-warning-rgb: 217, 119, 6;
   --mp-info-rgb: 0, 122, 255;
   --mp-destructive-rgb: 220, 38, 38;
-  --mp-badge-soft-alpha: 0.12;
+  --mp-badge-soft-alpha: 0.13;
   --mp-badge-border-alpha: 0.26;
   --mp-warning-border-alpha: 0.28;
+  --mp-semantic-fg-mix: 54%;
+  --mp-semantic-fg-anchor: #111827;
 
   // 页面与表面颜色令牌（默认对应浅色平面）
   --mp-bg: rgb(var(--v-theme-background, var(--mp-bg-rgb)));
@@ -56,17 +58,45 @@ html {
   --mp-destructive-border: rgba(var(--v-theme-error, var(--mp-destructive-rgb)), var(--mp-badge-border-alpha));
   --mp-primary-soft: rgba(var(--v-theme-primary, var(--mp-primary-rgb)), var(--mp-badge-soft-alpha));
   --mp-primary-border: rgba(var(--v-theme-primary, var(--mp-primary-rgb)), var(--mp-badge-border-alpha));
+  // 明度自适应语义前景令牌（浅色下自动压深防发白，深色下自动提亮防暗紫与暗红糊底）
+  --mp-primary-fg: color-mix(
+    in oklab,
+    rgb(var(--v-theme-primary, var(--mp-primary-rgb))) var(--mp-semantic-fg-mix),
+    var(--mp-semantic-fg-anchor)
+  );
+  --mp-success-fg: color-mix(
+    in oklab,
+    rgb(var(--v-theme-success, var(--mp-success-rgb))) var(--mp-semantic-fg-mix),
+    var(--mp-semantic-fg-anchor)
+  );
+  --mp-warning-fg: color-mix(
+    in oklab,
+    rgb(var(--v-theme-warning, var(--mp-warning-rgb))) var(--mp-semantic-fg-mix),
+    var(--mp-semantic-fg-anchor)
+  );
+  --mp-info-fg: color-mix(
+    in oklab,
+    rgb(var(--v-theme-info, var(--mp-info-rgb))) var(--mp-semantic-fg-mix),
+    var(--mp-semantic-fg-anchor)
+  );
+  --mp-destructive-fg: color-mix(
+    in oklab,
+    rgb(var(--v-theme-error, var(--mp-destructive-rgb))) var(--mp-semantic-fg-mix),
+    var(--mp-semantic-fg-anchor)
+  );
 
-  // 品牌染色卡片底座与圆角、底部避让间隙别名
-  --mp-card-dock-bg: var(--mp-muted);
-  --mp-card-dock-border: var(--mp-border-subtle);
+  // 小卡片内部底栏默认保持透明整卡同材质，仅用极弱呼吸细线区分，避免贴灰胶带感
+  --mp-card-dock-bg: transparent;
+  --mp-card-dock-border: rgba(24, 24, 27, 0.045);
   --radius: var(--app-theme-surface-radius);
   --mp-bottom-clearance: var(--app-fab-clearance);
+  --mp-list-group-bg: rgba(24, 24, 27, 0.028);
+  --mp-list-row-divider: rgba(24, 24, 27, 0.075);
+  --mp-list-row-hover: rgba(24, 24, 27, 0.035);
 }
 
-// 深色配色切换表面明度阶梯、细线对比度与柔和胶囊透明度
-html[data-glass-color-scheme='dark'],
-html[data-theme='glass']:not([data-glass-color-scheme='light']) {
+// 零属性权重使后续玻璃材质可以覆盖深色平面底色。
+html:where([data-glass-color-scheme='dark'], [data-theme='glass']:not([data-glass-color-scheme='light'])) {
   --mp-bg-rgb: 11, 19, 34;
   --mp-surface-rgb: 24, 34, 53;
   --mp-popover-rgb: 32, 44, 66;
@@ -75,13 +105,19 @@ html[data-theme='glass']:not([data-glass-color-scheme='light']) {
   --mp-warning-rgb: 228, 184, 99;
   --mp-info-rgb: 124, 156, 196;
   --mp-destructive-rgb: 255, 123, 123;
-  --mp-badge-soft-alpha: 0.16;
-  --mp-badge-border-alpha: 0.32;
-  --mp-warning-border-alpha: 0.32;
+  --mp-badge-soft-alpha: 0.2;
+  --mp-badge-border-alpha: 0.36;
+  --mp-warning-border-alpha: 0.36;
+  --mp-semantic-fg-mix: 60%;
+  --mp-semantic-fg-anchor: #fff;
   --mp-muted: #131b2b;
   --mp-border: rgba(255, 255, 255, 0.08);
-  --mp-border-subtle: rgba(255, 255, 255, 0.05);
+  --mp-border-subtle: rgba(255, 255, 255, 0.055);
+  --mp-card-dock-border: rgba(255, 255, 255, 0.055);
   --mp-input: rgba(255, 255, 255, 0.14);
+  --mp-list-group-bg: rgba(255, 255, 255, 0.035);
+  --mp-list-row-divider: rgba(255, 255, 255, 0.08);
+  --mp-list-row-hover: rgba(255, 255, 255, 0.08);
 }
 
 // 玻璃材质透出底层壁纸，卡片与弹层改走共享玻璃透射表面，次级底座保持静态吸光
@@ -90,13 +126,20 @@ html[data-theme='glass'] {
   --mp-bg: transparent;
   --mp-surface: var(--glass-surface);
   --mp-card: var(--glass-surface);
-  --mp-muted: rgba(15, 19, 26, 0.18);
+  --mp-muted: rgba(255, 255, 255, 0.055);
   --mp-popover: var(--glass-popup-surface, var(--glass-overlay-surface));
   --mp-border: var(--glass-border);
+  --mp-list-group-bg: rgba(255, 255, 255, 0.035);
+  --mp-list-row-divider: rgba(255, 255, 255, 0.09);
+  --mp-list-row-hover: rgba(255, 255, 255, 0.085);
 }
 
 html[data-theme='glass'][data-glass-color-scheme='light'] {
-  --mp-muted: rgba(24, 24, 27, 0.045);
+  --mp-faint-alpha: 0.72;
+  --mp-muted: rgba(15, 23, 42, 0.055);
+  --mp-list-group-bg: rgba(15, 23, 42, 0.03);
+  --mp-list-row-divider: rgba(15, 23, 42, 0.09);
+  --mp-list-row-hover: rgba(15, 23, 42, 0.065);
 }
 
 // 在 Vuetify 实际挂载主题变量的节点重新求值依赖动态主色与强调度的语义令牌
@@ -115,6 +158,27 @@ html[data-theme='glass'][data-glass-color-scheme='light'] {
   --mp-destructive-border: rgba(var(--v-theme-error), var(--mp-badge-border-alpha));
   --mp-primary-soft: rgba(var(--v-theme-primary), var(--mp-badge-soft-alpha));
   --mp-primary-border: rgba(var(--v-theme-primary), var(--mp-badge-border-alpha));
+  --mp-primary-fg: color-mix(
+    in oklab,
+    rgb(var(--v-theme-primary)) var(--mp-semantic-fg-mix),
+    var(--mp-semantic-fg-anchor)
+  );
+  --mp-success-fg: color-mix(
+    in oklab,
+    rgb(var(--v-theme-success)) var(--mp-semantic-fg-mix),
+    var(--mp-semantic-fg-anchor)
+  );
+  --mp-warning-fg: color-mix(
+    in oklab,
+    rgb(var(--v-theme-warning)) var(--mp-semantic-fg-mix),
+    var(--mp-semantic-fg-anchor)
+  );
+  --mp-info-fg: color-mix(in oklab, rgb(var(--v-theme-info)) var(--mp-semantic-fg-mix), var(--mp-semantic-fg-anchor));
+  --mp-destructive-fg: color-mix(
+    in oklab,
+    rgb(var(--v-theme-error)) var(--mp-semantic-fg-mix),
+    var(--mp-semantic-fg-anchor)
+  );
 }
 
 :where(.v-theme--plain) {

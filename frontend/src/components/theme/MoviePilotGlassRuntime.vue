@@ -21,7 +21,7 @@ const wallpaper = useWallpaper()
 const motion = usePagePresentationMotion()
 const routeReady = ref(false)
 const enabled = computed(() => theme.global.name.value === 'glass')
-const backdropEnabled = computed(() => enabled.value && theme.global.current.value.dark)
+const backdropEnabled = computed(() => enabled.value)
 const optical = computed(() => {
   const settings = glass.value
   const preference = {
@@ -29,6 +29,7 @@ const optical = computed(() => {
     deformationStrength: settings.glassDeformationStrength,
     flowStrength: settings.glassFlowStrength,
     preset: settings.glassPreset,
+    quality: settings.glassQuality,
     reflectionStrength: settings.glassReflectionStrength,
     transmissionStrength: settings.glassTransmissionStrength,
     translationStrength: settings.glassTranslationStrength,
@@ -36,7 +37,7 @@ const optical = computed(() => {
   }
   return route.path === '/login'
     ? getLoginGlassOpticalSettings(preference)
-    : { ...preference, quality: settings.glassQuality }
+    : preference
 })
 const activeImage = computed(() => backdropEnabled.value ? wallpaper.activeImage.value : '')
 const previousImage = computed(() => backdropEnabled.value ? wallpaper.previousImage.value : '')
@@ -44,10 +45,10 @@ const shouldRender = computed(() => enabled.value && optical.value.quality !== '
 const tintColor = computed(() => normalizeThemeMaterialAccent(theme.global.current.value.colors.primary)?.hex ?? '#8D51F9')
 const layers = computed(() => activeImage.value ? [
   { key: 'front' as const, role: 'active' as const, url: activeImage.value, src: activeImage.value,
-    style: { '--glass-wallpaper-brightness': String((glass.value.glassAppearance === 'frosted' ? 0.82 : glass.value.glassAppearance === 'tinted' ? 0.85 : 0.86) * wallpaper.activeExposure.value) } },
+    style: { '--glass-wallpaper-brightness': String(theme.global.current.value.dark ? (glass.value.glassAppearance === 'frosted' ? 0.82 : glass.value.glassAppearance === 'tinted' ? 0.85 : 0.86) * wallpaper.activeExposure.value : wallpaper.activeLightExposure.value) } },
   { key: 'back' as const, role: previousImage.value ? 'previous' as const : 'standby' as const,
     url: previousImage.value, src: previousImage.value,
-    style: { '--glass-wallpaper-brightness': String((glass.value.glassAppearance === 'frosted' ? 0.82 : glass.value.glassAppearance === 'tinted' ? 0.85 : 0.86) * wallpaper.previousExposure.value) } },
+    style: { '--glass-wallpaper-brightness': String(theme.global.current.value.dark ? (glass.value.glassAppearance === 'frosted' ? 0.82 : glass.value.glassAppearance === 'tinted' ? 0.85 : 0.86) * wallpaper.previousExposure.value : wallpaper.previousLightExposure.value) } },
 ] : [])
 provideGlassFixedShellBackplate({ layers, transitionDurationMs: 900 })
 
@@ -67,6 +68,7 @@ onBeforeUnmount(() => motion.cancel())
     :appearance="optical.appearance"
     :deformation-strength="optical.deformationStrength"
     :flow-strength="optical.flowStrength"
+    :light-scheme="!theme.global.current.value.dark"
     :reflection-strength="optical.reflectionStrength"
     :transmission-strength="optical.transmissionStrength"
     :translation-strength="optical.translationStrength"

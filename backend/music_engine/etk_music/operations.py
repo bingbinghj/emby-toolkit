@@ -96,6 +96,7 @@ def preview(config, body):
         raise ValueError("单曲资料只能用于一个所选音频，请选择专辑")
     group_keys = {name: group for group, names in library.preview_groups(paths, music_type, body.get("collection_root")).items() for name in names}
     evidence, errors, groups, recognized, cue_digests = {}, {}, defaultdict(list), {}, {}
+    invalid_cue = set()
     for relative in paths:
         try:
             path = library.target(config, relative)
@@ -104,6 +105,8 @@ def preview(config, body):
             if AudioMetadataHelper._open_audio(path) is None:
                 raise ValueError("音频内容无法读取，请检查文件实际格式")
             if meta.organization_error:
+                if meta.music_layout == "cue_invalid":
+                    invalid_cue.add(relative)
                 raise ValueError(meta.organization_error)
             if meta.cue_filename:
                 cue = path.parent / Path(meta.cue_filename).name
@@ -195,6 +198,8 @@ def preview(config, body):
             rows.append({"path": relative, "success": False, "message": str(error)})
     for row in rows:
         relative = row["path"]
+        if not row["success"] and relative in invalid_cue:
+            row.update(failure_stage="recognition", recovery_action="检查 CUE 文件内容，或关闭「识别 CUE」后重试")
         group = group_keys[relative]
         meta = evidence.get(relative, (None, None, None))[2]
         info = row.get("metadata") or (MusicInfo.from_meta(meta).to_dict() if meta else {})

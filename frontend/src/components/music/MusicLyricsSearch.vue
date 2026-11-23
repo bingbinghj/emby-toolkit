@@ -61,7 +61,7 @@ onBeforeUnmount(()=>{version++;detailVersion++;searchController?.abort();detailC
   </VDialog>
 </template>
 <style scoped>
-:deep(.v-chip--selected){background:rgb(var(--v-theme-primary))!important;color:rgb(var(--v-theme-on-primary))!important;}:deep(.v-chip--selected :is(.v-chip__underlay, .v-chip__overlay)){opacity:0!important;}
+:deep(.v-chip--selected){background:var(--mp-primary-soft)!important;color:var(--mp-primary-fg)!important;}:deep(.v-chip--selected :is(.v-chip__underlay, .v-chip__overlay)){opacity:0!important;}
 
 .lyrics-search-controls{display:flex;gap:1rem;flex-wrap:wrap;}.lyrics-search-controls>.v-input:first-child{flex:1 1 14rem;}.lyrics-search-controls>.v-input:last-child{flex:2 1 18rem;}.lyrics-results{max-block-size:30rem;overflow:auto;}.lyrics-result-title{color:rgb(var(--v-theme-on-surface));}.lyrics-result-subtitle{color:rgba(var(--v-theme-on-surface),.8);}.lyrics-result-title,.lyrics-result-subtitle{white-space:normal;overflow-wrap:anywhere;-webkit-line-clamp:unset;line-height:1.6;}.lyrics-result-subtitle{margin-block-start:.35rem;}.lyrics-results :deep(.v-list-item){padding-block:.8rem;}a{color:rgb(var(--v-theme-primary));}
 </style>

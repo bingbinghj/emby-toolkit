@@ -1,4 +1,4 @@
-<!-- MoviePilot-Frontend v3 609ea05, MIT; see frontend/third-party/MoviePilot-LICENSE. -->
+<!-- MoviePilot-Frontend v3 cf02b12, MIT; see frontend/third-party/MoviePilot-LICENSE. -->
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onScopeDispose, ref, watch, watchEffect } from 'vue'
 
@@ -41,6 +41,8 @@ const props = withDefaults(
     translationStrength: number
     /** 路由变化标识，用于在页面内容稳定后重新发现高价值表面。 */
     routeKey: string
+    /** 浅色玻璃开关；启用时以 dynamics-only 亮色调模式叠加流体与水漾，静止帧由 CSS/SVG 材质持有。 */
+    lightScheme?: boolean
     /** 首路由就绪后才呈现光学材质；false 只阻止接管，不阻止资源预热，未传时直接呈现。 */
     presentationReady?: boolean
     /** 由用户主色派生的大面积玻璃材料色，用于同步色调材质的光学高光。 */
@@ -60,7 +62,7 @@ const props = withDefaults(
     /** 父层已完成可见图片预载，允许两个 context 在同一绘制帧提交该 revision。 */
     activateWallpaperRevision?: number
   }>(),
-  { presentationReady: true },
+  { lightScheme: false, presentationReady: true },
 )
 
 const timingWindow = window as typeof window & {
@@ -111,6 +113,7 @@ const fixedRenderer = useGlassOpticalRenderer({
   dynamicsMode: effectiveDynamicsMode,
   flowStrength: () => props.flowStrength,
   interactionSource,
+  lightScheme: () => props.lightScheme,
   quality: () => props.quality,
   reflectionStrength: () => props.reflectionStrength,
   transparencyStrength: () => props.transparencyStrength,
@@ -137,6 +140,7 @@ const scrollRenderer = useGlassOpticalRenderer({
   dynamicsMode: effectiveDynamicsMode,
   flowStrength: () => props.flowStrength,
   interactionSource,
+  lightScheme: () => props.lightScheme,
   pageMotion: pagePresentationMotion.reader,
   quality: () => props.quality,
   reflectionStrength: () => props.reflectionStrength,

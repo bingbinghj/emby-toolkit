@@ -216,14 +216,14 @@ onBeforeUnmount(() => { active = false; request++; detailRequest++; editorReques
       <VBtn v-if="tab === 'cache'" color="error" variant="tonal" prepend-icon="mdi-delete-outline" @click="cacheConfirm = true">清空识别缓存</VBtn>
       <VBtn v-if="preview && !busy" variant="tonal" @click="previewOpen = true">查看预览</VBtn><VBtn icon="mdi-refresh" variant="text" aria-label="刷新音乐" :loading="loading" @click="load" />
     </div>
-    <VCard v-if="tab === 'explore'" class="my-4"><VCardText>
-      <div class="music-filter-row"><VLabel>来源</VLabel><VChipGroup column color="primary" v-model="exploreSource" mandatory class="music-source-chips"><VChip value="musicbrainz" filter tile>MusicBrainz</VChip><VChip value="doubanmusic" filter tile>豆瓣音乐</VChip><VChip v-for="source in streamingSources" :key="source.value" :value="source.value" filter tile>{{ source.title }}</VChip></VChipGroup></div>
+    <VCard v-if="tab === 'explore'" class="my-4"><VCardText class="discover-filter-bar">
+      <div class="music-filter-row discover-filter-row"><VLabel class="discover-filter-label">来源</VLabel><VChipGroup column color="primary" v-model="exploreSource" mandatory class="music-source-chips discover-filter-chips"><VChip value="musicbrainz" filter tile>MusicBrainz</VChip><VChip value="doubanmusic" filter tile>豆瓣音乐</VChip><VChip v-for="source in streamingSources" :key="source.value" :value="source.value" filter tile>{{ source.title }}</VChip></VChipGroup></div>
       <div v-if="error" class="d-flex ga-2 mb-3"><VBtn variant="tonal" :loading="loading" @click="load">重试</VBtn><VBtn v-if="exploreSource==='musicbrainz'" variant="text" @click="exploreSource='doubanmusic'">豆瓣音乐</VBtn></div>
       <MusicExploreFilters v-if="exploreSource === 'musicbrainz'" @change="exploreChanged" />
       <MusicDoubanFilters v-else-if="exploreSource === 'doubanmusic'" @change="doubanChanged" />
       <template v-else>
-        <div class="music-filter-row"><VLabel>榜单</VLabel><VChipGroup column color="primary" v-model="streamParams.chart" mandatory class="streaming-chart-chips" @update:model-value="search"><VChip v-for="chart in charts" :key="chart.value" :value="chart.value" filter tile>{{ chart.title }}</VChip></VChipGroup></div>
-        <div v-if="exploreSource==='apple'" class="music-filter-row"><VLabel>地区</VLabel><VChipGroup column color="primary" v-model="streamParams.region" mandatory @update:model-value="search"><VChip v-for="region in [{title:'中国大陆',value:'cn'},{title:'中国香港',value:'hk'},{title:'中国台湾',value:'tw'},{title:'美国',value:'us'},{title:'日本',value:'jp'},{title:'韩国',value:'kr'},{title:'英国',value:'gb'}]" :key="region.value" :value="region.value" filter tile>{{ region.title }}</VChip></VChipGroup></div>
+        <div class="music-filter-row discover-filter-row"><VLabel class="discover-filter-label">榜单</VLabel><VChipGroup column color="primary" v-model="streamParams.chart" mandatory class="streaming-chart-chips discover-filter-chips" @update:model-value="search"><VChip v-for="chart in charts" :key="chart.value" :value="chart.value" filter tile>{{ chart.title }}</VChip></VChipGroup></div>
+        <div v-if="exploreSource==='apple'" class="music-filter-row discover-filter-row"><VLabel class="discover-filter-label">地区</VLabel><VChipGroup column color="primary" v-model="streamParams.region" mandatory @update:model-value="search"><VChip v-for="region in [{title:'中国大陆',value:'cn'},{title:'中国香港',value:'hk'},{title:'中国台湾',value:'tw'},{title:'美国',value:'us'},{title:'日本',value:'jp'},{title:'韩国',value:'kr'},{title:'英国',value:'gb'}]" :key="region.value" :value="region.value" filter tile>{{ region.title }}</VChip></VChipGroup></div>
       </template>
     </VCardText></VCard>
     <VAlert v-if="error || taskError" type="error" variant="tonal" class="my-3">{{ error || taskError }}</VAlert>
@@ -238,9 +238,9 @@ onBeforeUnmount(() => { active = false; request++; detailRequest++; editorReques
         </div>
         <MusicFolderTracks :searching="!!query" :items="folderTracks" :directory="directory" :loading="loading" :busy="busy" @edit="openEditor" @preview="songPreview=$event" />
       </div>
-        <footer role="contentinfo" class="music-library-footer" aria-label="音乐库分页">
+        <footer role="contentinfo" class="music-library-footer mp-workbench-pagination" aria-label="音乐库分页">
           <VSelect :mobile-layout="false" v-model="pageSize" :items="[25,50,100,500,1000]" density="compact" variant="solo" flat rounded="pill" hide-details aria-label="每页条数" title="每页条数" class="music-page-size" @update:model-value="search" />
-          <span class="music-pagination-info text-medium-emphasis">{{ total ? (page-1)*pageSize+1 : 0 }} - {{ Math.min(page*pageSize,total) }} / {{ total }}</span>
+          <span class="music-pagination-info text-medium-emphasis num">{{ total ? (page-1)*pageSize+1 : 0 }} - {{ Math.min(page*pageSize,total) }} / {{ total }}</span>
           <VPagination v-model="page" class="mp-pagination" :length="pages" :total-visible="smAndDown ? 3 : 7" show-first-last-page @update:model-value="load" />
         </footer>
     </template>
@@ -277,7 +277,7 @@ onBeforeUnmount(() => { active = false; request++; detailRequest++; editorReques
 </template>
 
 <style scoped>
-.music-filter-row :deep(.v-chip--selected){background:rgb(var(--v-theme-primary))!important;color:rgb(var(--v-theme-on-primary))!important;}.music-filter-row :deep(.v-chip--selected :is(.v-chip__underlay, .v-chip__overlay)){opacity:0!important;}.music-filter-row :deep(.v-chip--selected .v-chip__content){color:inherit!important;}
+.music-filter-row :deep(.v-chip--selected){background:var(--mp-primary-soft)!important;color:var(--mp-primary-fg)!important;}.music-filter-row :deep(.v-chip--selected :is(.v-chip__underlay, .v-chip__overlay)){opacity:0!important;}.music-filter-row :deep(.v-chip--selected .v-chip__content){color:inherit!important;}
 
 .music-workbench{display:grid;grid-template-columns:minmax(15rem,19rem) minmax(0,1fr);gap:1.25rem;align-items:start;}.music-workbench-files{min-inline-size:0;}.streaming-chart-chips{min-inline-size:0;}
 @media(max-width:960px){.music-workbench{grid-template-columns:minmax(0,1fr);}}

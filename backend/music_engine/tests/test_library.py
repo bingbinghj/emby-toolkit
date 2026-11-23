@@ -30,6 +30,27 @@ def plan(config,path,title="新曲名"):
     return result["items"][0]
 
 
+def test_invalid_cue_preview_explains_recovery_without_writes(fixture):
+    config, source, root = fixture
+    os.link(source, root / "song.wav")
+    (root / "song.cue").write_text('FILE "song.wav" WAVE\n TRACK 01 AUDIO\n TITLE "损坏 CUE"\n', encoding="utf8")
+    before = source.read_bytes()
+    row = operations.preview(config, {"operation": "edit", "paths": ["song.wav"], "metadata": {"title": "新标题"}})["items"][0]
+    assert row["success"] is False
+    assert "CUE" in row["message"]
+    assert row["failure_stage"] == "recognition"
+    assert row["recovery_action"] == "检查 CUE 文件内容，或关闭「识别 CUE」后重试"
+    assert (root / "song.wav").samefile(source)
+    assert source.read_bytes() == before
+
+
+def test_missing_path_is_not_misclassified_as_cue_error(fixture):
+    config, _, _ = fixture
+    row = operations.preview(config, {"operation": "edit", "paths": ["CUE/song.wav"]})["items"][0]
+    assert row["success"] is False
+    assert "recovery_action" not in row
+
+
 @pytest.mark.parametrize("kind",["hardlink","symlink","copy"])
 def test_write_preserves_seed_and_independent_copy_can_be_edited_again(fixture,kind):
     config,source,root=fixture

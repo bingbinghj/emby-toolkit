@@ -1,4 +1,4 @@
-<!-- Adapted from MoviePilot-Frontend v3 db17d9c (MIT); see ../../../third-party/MoviePilot-LICENSE. -->
+<!-- Adapted from MoviePilot-Frontend v3 cf02b12 (MIT); see ../../../third-party/MoviePilot-LICENSE. -->
 <script setup>
 import { computed } from 'vue';
 import { formatMusicDuration } from './utils';
@@ -43,7 +43,7 @@ const getTrackArtists=track=>(track.artists||[]).join(' / ');
 
 <style scoped>
 .music-track-disc {
-  font-weight: 700;
+  font-weight: 600;
   margin-block-start: 0.75rem;
   text-transform: uppercase;
 }
@@ -54,7 +54,7 @@ const getTrackArtists=track=>(track.artists||[]).join(' / ');
 }
 
 .music-track-item--active {
-  background: rgba(var(--v-theme-primary), 0.12);
+  background: var(--mp-primary-soft);
 }
 
 .music-track-number {

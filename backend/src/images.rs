@@ -16,25 +16,57 @@ use std::{
 mod independent_switch_tests;
 
 pub fn strategies(original: &str, chinese: bool) -> Vec<String> {
+    // TMDb 图片使用 ISO-639-1，区域语言（如 zh-CN）不能作为图片语言过滤值。
+    let original = original
+        .split(['-', '_'])
+        .next()
+        .unwrap_or("en")
+        .to_ascii_lowercase();
+    let original = if ["cn", "tw", "hk"].contains(&original.as_str()) {
+        "zh"
+    } else {
+        original.as_str()
+    };
     let mut result = vec![];
     if chinese {
-        result.extend(["zh-CN", "zh-TW,zh,zh-HK,zh-SG", "en,null"].map(str::to_string));
-        if !["zh", "cn", "tw", "hk", "en"].contains(&original) {
+        result.extend(["zh", "en,null"].map(str::to_string));
+        if !["zh", "en", ""].contains(&original) {
             result.push(original.into());
         }
     } else {
-        if ["zh", "cn", "tw", "hk"].contains(&original) {
-            result.push("zh-CN,zh-HK,zh-TW,zh,cn".into());
-        } else if original != "en" {
+        if !["en", ""].contains(&original) {
             result.push(original.into());
         }
         result.push("en,null".into());
-        if !["zh", "cn", "tw", "hk"].contains(&original) {
-            result.push("zh-CN,zh-HK,zh-TW,zh".into());
+        if original != "zh" {
+            result.push("zh".into());
         }
     }
     result
 }
+
+/// 沿用 MP：海报和标志先匹配语言、地区，再比较评分及票数；背景图保持原顺序。
+pub(crate) fn prioritize_images(data: &mut Value, preferred: &str) {
+    let locale = preferred.replace('_', "-");
+    let mut parts = locale.split('-');
+    let language = parts.next().unwrap_or("").to_ascii_lowercase();
+    let region = parts.next().unwrap_or("").to_ascii_uppercase();
+    let rank = |image: &Value| {
+        let candidate_language = string(image, "iso_639_1").to_ascii_lowercase();
+        let candidate_region = string(image, "iso_3166_1").to_ascii_uppercase();
+        if !language.is_empty() && candidate_language == language {
+            if !region.is_empty() && candidate_region == region { 3 } else { 2 }
+        } else if matches!(candidate_language.as_str(), "en" | "") { 1 } else { 0 }
+    };
+    for field in ["posters", "logos"] {
+        if let Some(images) = data["images"][field].as_array_mut() {
+            images.sort_by(|a, b| rank(b).cmp(&rank(a))
+                .then_with(|| b["vote_average"].as_f64().unwrap_or(0.0).total_cmp(&a["vote_average"].as_f64().unwrap_or(0.0)))
+                .then_with(|| b["vote_count"].as_u64().unwrap_or(0).cmp(&a["vote_count"].as_u64().unwrap_or(0))));
+        }
+    }
+}
+
 pub fn plan(
     kind: &str,
     root: &Path,
@@ -356,7 +388,7 @@ async fn download_scoped_report(
             Err(error) => query_errors.push(crate::logs::redact(&error.1)),
         }
     }
-    let Some(data) = data else {
+    let Some(mut data) = data else {
         if !query_succeeded && !query_errors.is_empty() {
             let reason = format!(
                 "《{media_name}》（TMDb {id}）图片查询失败：所有语言策略均未成功，{}",
@@ -372,6 +404,7 @@ async fn download_scoped_report(
             json!({"downloaded":0,"warnings":warning_details.len(),"warning_details":warning_details}),
         );
     };
+    prioritize_images(&mut data, if config["tmdb_image_language_preference"].as_str().unwrap_or("zh") == "zh" { "zh-CN" } else { original });
     let mut pending = vec![root.to_path_buf()];
     let mut files = vec![];
     if let Some(paths) = episode_paths {

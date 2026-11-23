@@ -1,4 +1,4 @@
-<!-- MoviePilot-Frontend v3 609ea05, MIT; see frontend/third-party/MoviePilot-LICENSE. -->
+<!-- MoviePilot-Frontend v3 cf02b12, MIT; see frontend/third-party/MoviePilot-LICENSE. -->
 <script lang="ts" setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
 import type { GlassFixedShellBackplateLayer } from '@/composables/useGlassFixedShellBackplate'
@@ -557,6 +557,29 @@ onBeforeUnmount(() => {
       rgba(var(--glass-material-rgb, 11, 19, 34), 8%);
     content: '';
     inset: 0;
+  }
+}
+
+// 浅色玻璃背板与主视口剧照壁纸共用同一滤镜与顶部阅读薄纱，确保固定壳无缝衔接
+html[data-glass-color-scheme='light'] .glass-fixed-shell-backplate {
+  background-color: #eef1f7;
+}
+
+html[data-glass-color-scheme='light'] .glass-fixed-shell-backplate__wallpaper {
+  background-color: #eef1f7;
+  filter: var(--glass-light-wallpaper-filter, saturate(1.05) brightness(var(--glass-wallpaper-brightness, 1.01)));
+
+  .glass-fixed-shell-backplate__source {
+    filter: none;
+    opacity: 1;
+    transform: none;
+  }
+
+  &::after {
+    background: var(
+      --glass-light-wallpaper-veil,
+      linear-gradient(180deg, rgba(255, 255, 255, 0.3) 0%, rgba(255, 255, 255, 0.1) 100px, rgba(255, 255, 255, 0) 210px)
+    );
   }
 }
 

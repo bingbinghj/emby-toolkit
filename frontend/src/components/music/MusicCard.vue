@@ -1,4 +1,4 @@
-<!-- Adapted from MoviePilot-Frontend v3 db17d9c (MIT); see ../../../third-party/MoviePilot-LICENSE. -->
+<!-- Adapted from MoviePilot-Frontend v3 cf02b12 (MIT); see ../../../third-party/MoviePilot-LICENSE. -->
 <script setup>
 import { computed, ref, watch } from 'vue';
 import { useMusicI18n as useI18n } from './i18n';
@@ -118,7 +118,7 @@ const goArtist=(id,name)=>emit('artist',{media_source:props.music.media_source,m
                     v-for="item in metaItems"
                     :key="`${item.icon}-${item.label}`"
                     :prepend-icon="item.icon"
-                    :class="{ 'music-card-meta-item--narrow-optional': item.hideOnNarrow }"
+                    :class="{ 'music-card-meta-item--narrow-optional': item.hideOnNarrow, num: item.icon !== 'mdi-label-outline' }"
                     size="x-small"
                     variant="tonal"
                   >
@@ -171,9 +171,9 @@ const goArtist=(id,name)=>emit('artist',{media_source:props.music.media_source,m
   align-self: start;
   justify-content: center;
   aspect-ratio: 1;
-  background: rgba(var(--v-theme-on-surface), 0.06);
-  border: 1px solid rgba(var(--v-theme-on-surface), 0.1);
-  border-radius: 8px;
+  background: var(--mp-muted);
+  border: 1px solid var(--mp-border);
+  border-radius: var(--app-control-radius, 8px);
   inline-size: 112px;
 }
 
@@ -190,8 +190,9 @@ const goArtist=(id,name)=>emit('artist',{media_source:props.music.media_source,m
 .music-card-entity {
   position: absolute;
   z-index: 1;
-  background: rgba(var(--v-theme-surface), 0.88) !important;
-  color: rgb(var(--v-theme-on-surface)) !important;
+  border: 1px solid var(--mp-border);
+  background: rgba(var(--mp-popover-rgb), 0.9) !important;
+  color: var(--mp-fg) !important;
   inset-block-end: 0.5rem;
   inset-inline-start: 0.5rem;
   max-inline-size: calc(100% - 1rem);
@@ -225,7 +226,7 @@ const goArtist=(id,name)=>emit('artist',{media_source:props.music.media_source,m
 .music-card-title {
   overflow: hidden;
   display: -webkit-box;
-  color: rgb(var(--v-theme-on-surface));
+  color: var(--mp-fg);
   font-size: 1rem;
   flex: 1 1 auto;
   font-weight: 600;
@@ -275,7 +276,7 @@ const goArtist=(id,name)=>emit('artist',{media_source:props.music.media_source,m
 }
 
 .music-card-link:hover {
-  color: rgb(var(--v-theme-primary));
+  color: var(--mp-primary-fg);
 }
 
 .music-card-footer {

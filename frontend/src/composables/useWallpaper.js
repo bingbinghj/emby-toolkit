@@ -87,8 +87,9 @@ function lastImage() {
 const activeImage = ref(lastImage()), previousImage = ref(''), crossfading = ref(false);
 // MP's tone helper uses 0.72 until a decoded image supplies its bounded exposure.
 const activeExposure = ref(0.72), previousExposure = ref(0.72);
+const activeLightExposure = ref(1.01), previousLightExposure = ref(1.01);
 const transitionStartedAt = ref(0), ready = ref(false);
-const presentation = { activeImage, previousImage, activeExposure, previousExposure, crossfading, transitionStartedAt, ready };
+const presentation = { activeImage, previousImage, activeExposure, previousExposure, activeLightExposure, previousLightExposure, crossfading, transitionStartedAt, ready };
 
 function updateSettings(patch) {
   const next = normalizeWallpaperSettings({ ...settings, ...patch });
@@ -186,6 +187,7 @@ export function useWallpaper() {
     updateSettings, setCustomImage, resetSettings: () => updateSettings(defaults),
     activeImage: readonly(activeImage), previousImage: readonly(previousImage),
     activeExposure: readonly(activeExposure), previousExposure: readonly(previousExposure),
+    activeLightExposure: readonly(activeLightExposure), previousLightExposure: readonly(previousLightExposure),
     crossfading: readonly(crossfading), transitionStartedAt: readonly(transitionStartedAt), ready: readonly(ready),
     setPresentation,
   };

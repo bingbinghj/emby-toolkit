@@ -37,34 +37,31 @@ function edit() { if (!props.disabled) emit('edit'); }
 </script>
 
 <template>
-  <VCard variant="tonal" class="app-card-shell app-card-colorful emby-media-server-card"
+  <VCard variant="flat" class="app-card-shell app-card-colorful mp-setting-card mp-setting-card--interactive emby-media-server-card"
+    :class="{ 'mp-setting-card--inactive': !ready }"
     style="--app-card-accent-rgb:var(--v-theme-success)" role="button" tabindex="0"
     aria-label="编辑 Emby 媒体服务器" :aria-disabled="disabled" :disabled="disabled"
     @click="edit" @keydown.self.enter.prevent="edit" @keydown.self.space.prevent="edit">
-    <VIcon class="media-server-edit" icon="mdi-pencil-outline" size="18" aria-hidden="true" />
-    <VCardText class="app-card-summary app-card-summary--single-action">
-      <div class="app-card-summary__content">
-        <div class="app-card-summary__title text-h6">Emby</div>
-        <div class="media-server-counts text-sm text-medium-emphasis" :title="error || '媒体统计'">
-          <span v-for="item in counts" :key="item.title" :aria-label="`${item.title}数量 ${item.value}`" :title="`${item.title} ${item.value}`">
-            <VIcon :icon="item.icon" size="24" class="me-1" />
-            <span class="media-server-count">{{ item.value }}</span>
+    <div class="mp-setting-card__header">
+      <div class="mp-setting-card__icon mp-setting-card__icon--logo" aria-hidden="true"><VImg :src="embyLogo" contain class="mp-setting-card__logo" /></div>
+      <div class="mp-setting-card__heading">
+        <div class="mp-setting-card__title-row"><span class="mp-setting-card__title">Emby</span></div>
+        <div class="mp-setting-card__subtitle">
+          <span class="mp-setting-card__subtitle-text">Emby</span>
+          <span class="mp-setting-card__status" :class="ready ? 'mp-setting-card__status--active' : 'mp-setting-card__status--inactive'">
+            <span class="mp-setting-card__status-dot" :class="ready ? 'mp-setting-card__status-dot--active' : 'mp-setting-card__status-dot--inactive'" />{{ ready ? '已配置' : '未配置' }}
           </span>
         </div>
       </div>
-      <div class="app-card-summary__media" aria-hidden="true">
-        <VImg :src="embyLogo" contain class="app-card-summary__image" />
+      <div class="mp-setting-card__actions" aria-hidden="true"><VIcon icon="mdi-pencil-outline" size="18" /></div>
+    </div>
+    <div class="mp-setting-card__dock">
+      <div class="mp-setting-card__stats" :title="error || '媒体统计'">
+        <span v-for="item in counts" :key="item.title" class="mp-setting-card__stat" :aria-label="`${item.title}数量 ${item.value}`" :title="`${item.title} ${item.value}`">
+          <VIcon :icon="item.icon" size="14" /><span class="mp-setting-card__stat-value num">{{ item.value }}</span>
+        </span>
       </div>
-    </VCardText>
+      <VIcon class="mp-setting-card__chevron" icon="mdi-chevron-right" size="16" />
+    </div>
   </VCard>
 </template>
-
-<style scoped>
-.emby-media-server-card { cursor:pointer; min-width:0; }
-.media-server-edit { position:absolute; top:12px; right:12px; color:var(--ui-text-muted); }
-.media-server-counts { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; min-height:24px; }
-.media-server-counts > span { display:flex; align-items:center; min-width:0; }
-.media-server-count { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-html[data-theme='glass'][data-glass-color-scheme='dark'] .app-card-summary { background-color:rgba(var(--v-theme-surface),0.2); }
-html[data-theme='glass'][data-glass-color-scheme='dark'] .media-server-count { color:rgb(var(--v-theme-on-surface)); }
-</style>

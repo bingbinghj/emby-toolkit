@@ -146,7 +146,7 @@
                 <VCol cols="12" v-show="settingsSearch.showCard('媒体服务器')">
                   <SettingCard class="dashboard-card media-server-setting-card" title="媒体服务器" subtitle="媒体服务器与媒体库">
                     <VCardText class="service-setting-card-content">
-                      <div class="media-server-card-grid">
+                      <div class="media-server-card-grid grid gap-3 grid-app-card">
                         <EmbyMediaServerCard :ready="Boolean(configModel.emby_server_url && configModel.emby_api_key)"
                           :disabled="savingConfig || loadingConfig" :refresh-key="mediaServerRevision" @edit="openMediaServerDialog" />
                       </div>
@@ -701,7 +701,7 @@
                 <VCol cols="12" v-show="settingsSearch.showCard('存储')">
                   <SettingCard class="dashboard-card storage-setting-card" title="存储" subtitle="115 授权方式与连接状态">
                     <VCardText class="service-setting-card-content">
-                      <div class="storage-card-grid">
+                      <div class="storage-card-grid grid gap-3 grid-app-card">
                         <P115StorageCard :info="p115Info" :disabled="savingConfig || loadingConfig" @edit="openStorageDialog" />
                       </div>
                       <VAlert v-if="p115StatusError && !storageDialogOpen" type="error" variant="tonal" density="compact" class="mt-3">{{ p115StatusError }}</VAlert>
@@ -3365,7 +3365,6 @@ onUnmounted(() => {
 .settings-container { min-width: 0; }
 .settings-container :is(.media-server-setting-card, .storage-setting-card) :deep(.service-setting-card-content) { padding:0 1.25rem 1.25rem; }
 .settings-container :is(.media-server-setting-card, .storage-setting-card) :deep(.app-card-shell > .v-card-text) { padding:1.25rem; }
-:is(.media-server-card-grid, .storage-card-grid) { display:grid; grid-template-columns:repeat(auto-fill,minmax(16rem,1fr)); gap:12px; }
 .storage-dialog :deep(.v-card-text) { min-width:0; }
 .storage-auth-row { display:grid; grid-template-columns:4.5rem minmax(0,1fr); gap:12px; margin-block-end:20px; }
 .storage-auth-row > div { min-width:0; }
