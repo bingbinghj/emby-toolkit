@@ -88,8 +88,63 @@ function alignLyricText(source, local) {
   return positions;
 }
 
-// 用来源原文核对译文对应关系，沿用本地原文的时间标签；跨行整句的译文放在句段起点。
-export function mergeLyricsTranslation(original, sourceOriginal, translation) {
+// 只采用译文已有的分句；括号内空格、英文单词间空格不能作为中文分句。
+function translationPhrases(text) {
+  if(text.includes('\n'))return [text];
+  const pairs={'（':'）','(':')','「':'」','『':'』','[':']'}, stack=[], parts=[];
+  const speaker=text.match(/^[（(][^()（）\r\n]{1,30}[)）]\s*/)?.[0] || '';
+  let part='';
+  const flush=()=>{if(part.trim())parts.push(part.trim());part='';};
+  for(const char of text.slice(speaker.length)){
+    if(pairs[char])stack.push(pairs[char]);
+    else if(stack.at(-1)===char)stack.pop();
+    if(!stack.length && /\s/u.test(char))flush();
+    else {part+=char;if(!stack.length && /[，。；！？,;!?]/u.test(char))flush();}
+  }
+  flush();
+  if(parts.length>1 && parts.every(value=>/\p{Script=Han}/u.test(value))){parts[0]=speaker+parts[0];return parts;}
+  return [text];
+}
+
+export function lyricTranslationRows(text='') {
+  return text.split('\n').map((line,index)=>{
+    const content=line.replace(/^(?:\[(?:\d+:\d{1,2}(?:[.:]\d+)?|[A-Za-z][\w-]*:[^\]\r\n]*)\])+/,'').replace(/<\d+:\d{1,2}(?:[.:]\d+)?>/g,'').trim();
+    return {index,text:line,selectable:/\p{L}/u.test(content),foreign:/\p{L}/u.test(content.replace(/\p{Script=Han}/gu,''))};
+  });
+}
+
+// 机器译文只提供分界证据，输出始终取自来源译文。两侧必须有连续文字锚点，不能靠长度猜。
+function splitWithReference(text, references, key) {
+  if(references.some(value=>!value) || /[\r\n]/.test(text))return null;
+  const chars=[...text], normalized=[], offsets=[];
+  chars.forEach((char,index)=>{for(const value of key(char)){normalized.push(value);offsets.push(index);}});
+  const keys=references.map(key), target=normalized.join('');
+  if(!keys.every(value=>value.length>=2) || !target)return null;
+  const positions=alignLyricText(keys.join(''),target), groups=[];
+  let start=0;
+  for(const value of keys){
+    const aligned=Array.from({length:value.length},(_,i)=>positions.get(start+i)).filter(i=>i!==undefined);
+    start+=value.length;
+    if(aligned.length/value.length<.65 || !aligned.some((v,i)=>i>0 && v===aligned[i-1]+1))return null;
+    groups.push(aligned);
+  }
+  if(positions.size/target.length<.65)return null;
+  const cuts=[0];
+  for(let i=1;i<groups.length;i++){
+    if(groups[i-1].at(-1)+1!==groups[i][0])return null;
+    const cut=offsets[groups[i][0]];
+    // 不在英文单词中间或括号内切开。
+    if(/[A-Za-z]/.test(chars[cut-1]) && /[A-Za-z]/.test(chars[cut]))return null;
+    const prefix=chars.slice(0,cut).join('');
+    if((prefix.match(/[（(「『]/g)||[]).length!==(prefix.match(/[）)」』]/g)||[]).length)return null;
+    cuts.push(cut);
+  }
+  cuts.push(chars.length);
+  return cuts.slice(0,-1).map((cut,i)=>chars.slice(cut,cuts[i+1]).join('').trim());
+}
+
+// 用来源原文核对译文对应关系，沿用本地原文时间；有明确分句时逐行分配，否则保留整句。
+export function mergeLyricsTranslation(original, sourceOriginal, translation, referenceLines=[]) {
   const clean=text=>text.replace(/\[\d+:\d{2}(?:[.:]\d+)?\]|<\d+:\d{2}(?:[.:]\d+)?>/g,'').trim();
   const key=text=>clean(text).normalize('NFKC').replace(/^\([^()\r\n]{1,30}\)\s*(?=\S)/,'').toLowerCase().replace(/[^\p{L}\p{M}\p{N}]/gu,'');
   const translated=parseLyrics(translation), source=parseLyrics(sourceOriginal), matches=new Map(), byTime=new Map();
@@ -104,16 +159,21 @@ export function mergeLyricsTranslation(original, sourceOriginal, translation) {
   const lines=original.split(/\r?\n/), output=[];
   const sourceRows=source.filter(row=>key(row.text)).map(row=>({...row,key:key(row.text)}));
   const sourceText=sourceRows.length ? sourceRows.map(row=>row.key).join('') : plain(sourceOriginal).map(key).join('');
-  const translationKeys=new Set(translated.length ? translated.map(row=>key(row.text)) : plain(translation).map(key));
+  const translationTexts=translated.length ? translated.map(row=>row.text) : plain(translation);
+  const translationKeys=new Set(translationTexts.flatMap(text=>[text,...translationPhrases(text)]).map(key));
+  const knownTranslation=value=>translationKeys.has(value) || /\p{Script=Han}/u.test(value) && value.length>=2 && [...translationKeys].some(text=>text.includes(value));
   const localRows=[];
   let offset=0;
   lines.forEach((line,index)=>{
     const value=key(line);
-    if(!value || /^\[[a-z]+:/i.test(line) || translationKeys.has(value) && !sourceText.includes(value))return;
+    if(!value || /^\[[a-z]+:/i.test(line) || knownTranslation(value) && !sourceText.includes(value))return;
     localRows.push({index,key:value,start:offset,end:offset+value.length});offset+=value.length;
   });
   const positions=alignLyricText(sourceText,localRows.map(row=>row.key).join(''));
-  const additions=new Map(),covered=new Set();
+  const additions=new Map(),covered=new Set(),replaced=new Set();
+  const reference=new Map(referenceLines.map(row=>[row.index,row.text]));
+  const pendingSegments=[], splits=[];
+  const stamps=line=>[...line.matchAll(/\[\d+:\d{2}(?:[.:]\d+)?\]/g)].map(match=>match[0]).join('');
   const append=(index,text)=>{const values=additions.get(index) || new Set();text.split('\n').forEach(line=>values.add(line));additions.set(index,values);};
   offset=0;
   for(const row of sourceRows){
@@ -127,7 +187,34 @@ export function mergeLyricsTranslation(original, sourceOriginal, translation) {
     if(!value || key(value)===row.key || aligned.length/row.key.length<(row.key.length<6 ? 1 : .8) || aligned.length/(aligned.at(-1)-aligned[0]+1)<.8)continue;
     const first=localRows.find(local=>local.end>aligned[0]);
     if(!first)continue;
-    append(first.index,value);aligned.forEach(position=>covered.add(position));
+    const rows=localRows.filter(local=>local.end>aligned[0] && local.start<=aligned.at(-1));
+    let phrases=translationPhrases(value), method='phrases';
+    const completeRows=rows.length>1 && rows.every(local=>{
+      const count=aligned.filter(position=>position>=local.start && position<local.end).length;
+      return count/local.key.length>=(local.key.length<6 ? 1 : .8);
+    });
+    const comparableRows=rows.length>1 && rows.every(local=>aligned.filter(position=>position>=local.start && position<local.end).length/local.key.length>=.6);
+    if(!(completeRows && phrases.length===rows.length) && comparableRows){
+      const existing=rows.map(local=>{
+        const next=localRows.find(item=>item.index>local.index)?.index ?? lines.length;
+        const candidates=lines.slice(local.index+1,next).filter(line=>stamps(line)===stamps(lines[local.index]) && key(value).includes(key(line)) && key(line));
+        return candidates.length===1 ? clean(candidates[0]) : '';
+      });
+      phrases=existing.every(Boolean) && existing.map(key).join('')===key(value) ? existing : splitWithReference(value,rows.map(local=>reference.get(local.index)),key) || [];
+      method='reference';
+    }
+    if((completeRows || comparableRows && method==='reference') && phrases.length===rows.length){
+      rows.forEach((local,index)=>append(local.index,phrases[index]));
+      splits.push({indices:rows.map(local=>local.index),phrases,method});
+      // 升级此前由同一来源合并的整句译文；用户自写的译文保留。
+      for(let index=first.index+1;index<rows[1].index;index++){
+        if(clean(lines[index])===value && stamps(lines[index])===stamps(lines[first.index]))replaced.add(index);
+      }
+    }else {
+      append(first.index,value);
+      if(rows.length>1)pendingSegments.push({indices:rows.map(local=>local.index),translation:value,canCompare:comparableRows});
+    }
+    aligned.forEach(position=>covered.add(position));
   }
   let matched=0;
   for(const row of localRows){
@@ -140,6 +227,7 @@ export function mergeLyricsTranslation(original, sourceOriginal, translation) {
     if(coveredCount>=row.key.length*.6)matched++;
   }
   for(let index=0;index<lines.length;index++){
+    if(replaced.has(index))continue;
     const line=lines[index];output.push(line);
     const values=additions.get(index);
     if(!values)continue;
@@ -147,5 +235,6 @@ export function mergeLyricsTranslation(original, sourceOriginal, translation) {
     const next=localRows.find(row=>row.index>index)?.index ?? lines.length;
     for(const value of values){const addition=stamps+value;if(!lines.slice(index+1,next).includes(addition))output.push(addition);}
   }
-  return {text:output.join('\n'),matched,total:localRows.length};
+  return {text:output.join('\n'),matched,total:localRows.length,splits,pendingSegments,
+    pendingLineIndices:[...new Set(pendingSegments.filter(segment=>segment.canCompare).flatMap(segment=>segment.indices))]};
 }

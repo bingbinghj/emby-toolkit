@@ -421,11 +421,38 @@ for(const width of [390,1440]) test(`双语歌词支持跨行句段和演唱者�
   await page.goto('/music');await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
   await page.getByRole('button',{name:'搜索替换歌词',exact:true}).click();await page.getByText('Kissing You',{exact:true}).click();
   await page.getByRole('checkbox',{name:'使用译文制作双语歌词',exact:true}).check();
-  await expect(page.getByLabel('歌词内容',{exact:true})).toHaveValue(`[00:33.25]어느 샌가 나는 숙녀처럼\n[00:33.25]${translated}\n[00:36.63]내 입술은 사근사근 그대 이름 부르죠`);
+  await expect(page.getByLabel('歌词内容',{exact:true})).toHaveValue(`[00:33.25]어느 샌가 나는 숙녀처럼\n[00:33.25]${translated.split(' ')[0]}\n[00:36.63]내 입술은 사근사근 그대 이름 부르죠\n[00:36.63]${translated.split(' ')[1]}`);
   await expect(page.getByText('保留当前原文和时间轴，已匹配 2/2 句；未匹配的句子保留原样。',{exact:true})).toBeVisible();
   await page.screenshot({path:testInfo.outputPath('bilingual-segments.png')});
   await page.getByRole('button',{name:'应用双语歌词',exact:true}).click();
-  await expect(page.getByLabel('旁挂歌词（LRC / 纯文本）',{exact:true})).toHaveValue(`[00:33.25]어느 샌가 나는 숙녀처럼\n[00:33.25]${translated}\n[00:36.63]내 입술은 사근사근 그대 이름 부르죠`);
+  await expect(page.getByLabel('旁挂歌词（LRC / 纯文本）',{exact:true})).toHaveValue(`[00:33.25]어느 샌가 나는 숙녀처럼\n[00:33.25]${translated.split(' ')[0]}\n[00:36.63]내 입술은 사근사근 그대 이름 부르죠\n[00:36.63]${translated.split(' ')[1]}`);
+  expect(api.requests.filter(row=>row.path.startsWith('/api/music/jobs/'))).toHaveLength(0);
+});
+
+for(const width of [390,1440]) test(`双语辅助分行仅翻译未确认段落并保留来源译文 ${width}px`,async({page,api},testInfo)=>{
+  music(api);await page.setViewportSize({width,height:1000});
+  const original='[00:01]얼굴은 빨개지고\n[00:05]놀란 눈은 커다래지고\n[00:10]어쩜 그대 내 맘을\n[00:15]흔들어 놓는지';
+  api.respond('POST','/api/music/query/inspect',{...track,lyrics:original});
+  api.respond('POST','/api/music/query/lyrics_search',{items:[{id:'22735072',source:'netease',title:'Girls’ Generation'}]});
+  api.respond('POST','/api/music/query/lyrics_detail',{variants:[{value:'original',title:'原文',text:'[00:02]얼굴은 빨개지고 놀란 눈은 커다래지고\n[00:20]어쩜 그대 내 맘을 흔들어 놓는지'},{value:'translation',title:'译文',text:'[00:02]脸变红了 惊慌的眼睛变大了\n[00:20]不知怎么你开始动摇我的心'}]});
+  api.respond('POST','/api/music/query/lyrics_translate',{line_translations:[{index:2,text:'不知怎么你开始'},{index:3,text:'动摇我的心'}],provider:'youdao'});
+  await page.goto('/music');await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await page.getByRole('button',{name:'搜索替换歌词',exact:true}).click();await page.getByText('Girls’ Generation',{exact:true}).click();
+  await page.getByRole('checkbox',{name:'使用译文制作双语歌词',exact:true}).check();
+  expect(api.requests.filter(row=>row.path.endsWith('/lyrics_translate'))).toHaveLength(0);
+  await expect(page.getByText('已自动分行 1 个句段，仍有 1 个句段保留整句。',{exact:true})).toBeVisible();
+  const align=page.getByRole('button',{name:'翻译未确认段落并对照',exact:true});
+  await align.scrollIntoViewIfNeeded();await align.click();
+  await expect(page.getByText('已自动分行 2 个句段，仍有 0 个句段保留整句。',{exact:true})).toBeVisible();
+  const request=api.requests.find(row=>row.path.endsWith('/lyrics_translate'));
+  expect(request.body.line_indices).toEqual([2,3]);
+  await expect(page.getByLabel('歌词内容',{exact:true})).toHaveValue('[00:01]얼굴은 빨개지고\n[00:01]脸变红了\n[00:05]놀란 눈은 커다래지고\n[00:05]惊慌的眼睛变大了\n[00:10]어쩜 그대 내 맘을\n[00:10]不知怎么你开始\n[00:15]흔들어 놓는지\n[00:15]动摇我的心');
+  await page.getByText('查看机器翻译参考',{exact:true}).click();
+  const reference=page.locator('.alignment-reference-row').first();
+  await reference.scrollIntoViewIfNeeded();
+  const bounds=await reference.evaluate(node=>({width:node.clientWidth,scrollWidth:node.scrollWidth}));expect(bounds.scrollWidth).toBeLessThanOrEqual(bounds.width+1);
+  for(const reading of await measureReadingContrast(page,[{role:'机器翻译参考',locator:reference.locator('p').last()}]))expect(reading.contrast).toBeGreaterThanOrEqual(4.5);
+  await page.screenshot({path:testInfo.outputPath('bilingual-reference.png')});
   expect(api.requests.filter(row=>row.path.startsWith('/api/music/jobs/'))).toHaveLength(0);
 });
 
@@ -838,6 +865,33 @@ test('歌词翻译上下显示，取消不更改草稿，双语应用不立即�
   await page.getByRole('button',{name:'机器翻译',exact:true}).click();await page.getByRole('button',{name:'开始翻译',exact:true}).click();
   await page.getByRole('button',{name:'应用双语歌词',exact:true}).click();
   await expect(page.getByLabel('旁挂歌词（LRC / 纯文本）',{exact:true})).toHaveValue('[00:01]Hello\n[00:01]你好');
+  expect(api.requests.filter(row=>row.path.startsWith('/api/music/jobs/'))).toHaveLength(0);
+});
+
+for(const theme of ['light','dark']) for(const width of [390,1440]) test(`中韩歌词只翻译选中段落且选择行完整可读 ${theme} ${width}px`,async({page,api},testInfo)=>{
+  music(api);await page.setViewportSize({width,height:1000});
+  await page.addInitScript(theme=>localStorage.setItem('moviepilot-theme-customizer',JSON.stringify({theme,glassEnabled:false})),theme);
+  const original='[ar:成龙 / 金喜善]\n[00:01]梦中人 熟悉的脸孔\n[00:10]나의 손을 잡아줘\n[00:20]나의 손을 잡아줘\n[00:30]万世沧桑 唯有爱是永远的神话';
+  api.respond('POST','/api/music/query/inspect',{...track,lyrics:original});
+  api.respond('POST','/api/music/query/lyrics_translate',{translation:original.replace('[00:10]나의 손을 잡아줘','[00:10]请握住我的手'),bilingual:original.replace('\n[00:20]','\n[00:10]请握住我的手\n[00:20]'),provider:'youdao'});
+  await page.goto('/music');await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await page.getByRole('button',{name:'机器翻译',exact:true}).click();
+  const first=page.getByRole('checkbox',{name:'翻译第 3 行：[00:10]나의 손을 잡아줘',exact:true});
+  const second=page.getByRole('checkbox',{name:'翻译第 4 行：[00:20]나의 손을 잡아줘',exact:true});
+  await expect(first).toBeChecked();await expect(second).toBeChecked();
+  await expect(page.getByRole('checkbox',{name:'翻译第 2 行：[00:01]梦中人 熟悉的脸孔',exact:true})).not.toBeChecked();
+  await second.uncheck();await page.getByRole('button',{name:'开始翻译',exact:true}).click();
+  await expect(page.getByLabel('歌词译文',{exact:true})).toContainText('请握住我的手');
+  expect(api.requests.find(row=>row.path.endsWith('/lyrics_translate')).body.line_indices).toEqual([2]);
+  const label=page.locator('.translation-original label').last();await label.scrollIntoViewIfNeeded();
+  const bounds=await label.evaluate(node=>({width:node.clientWidth,scrollWidth:node.scrollWidth,height:node.clientHeight,scrollHeight:node.scrollHeight}));
+  expect(bounds.scrollWidth).toBeLessThanOrEqual(bounds.width+1);expect(bounds.scrollHeight).toBeLessThanOrEqual(bounds.height+1);
+  for(const reading of await measureReadingContrast(page,[{role:'歌词选择标签',locator:label}]))expect(reading.contrast).toBeGreaterThanOrEqual(4.5);
+  await page.screenshot({path:testInfo.outputPath('translation-selection.png')});
+  await second.check();await expect(page.getByRole('button',{name:'应用双语歌词',exact:true})).toBeDisabled();
+  await second.uncheck();await page.getByRole('button',{name:'开始翻译',exact:true}).click();
+  await page.getByRole('button',{name:'应用双语歌词',exact:true}).click();
+  await expect(page.getByLabel('旁挂歌词（LRC / 纯文本）',{exact:true})).toHaveValue(original.replace('\n[00:20]','\n[00:10]请握住我的手\n[00:20]'));
   expect(api.requests.filter(row=>row.path.startsWith('/api/music/jobs/'))).toHaveLength(0);
 });
 

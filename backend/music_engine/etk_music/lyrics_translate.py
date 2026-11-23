@@ -34,8 +34,13 @@ def translate(body):
         raise ValueError("请选择有效的翻译服务")
     if not isinstance(text, str) or not text.strip() or len(text) > 20000:
         raise ValueError("请输入不超过 20000 字的歌词")
+    lines = text.split('\n')
+    selected = body.get('line_indices', list(range(len(lines))))
+    if not isinstance(selected, list) or not selected or any(type(index) is not int or not 0 <= index < len(lines) for index in selected):
+        raise ValueError('请选择有效的歌词行')
+    selected = set(selected)
     rows, unique = [], []
-    for line in text.splitlines():
+    for index, line in enumerate(lines):
         prefix = ""
         remaining = line
         while match := STAMP.match(remaining):
@@ -43,7 +48,7 @@ def translate(body):
             remaining = remaining[match.end():]
         content = WORD.sub("", remaining).strip()
         rows.append((line, prefix, content))
-        if content and content not in unique:
+        if index in selected and content and content not in unique:
             unique.append(content)
     if not unique:
         raise ValueError("没有可翻译的歌词正文")
@@ -70,9 +75,12 @@ def translate(body):
                 raise
             raise ValueError(f"{PROVIDERS[provider]}暂时不可用，请稍后重试或切换服务") from error
     translation, bilingual = [], []
-    for original, prefix, content in rows:
-        translation.append(prefix + mapping[content] if content else original)
+    for index, (original, prefix, content) in enumerate(rows):
+        translated = mapping.get(content) if index in selected else None
+        translation.append(prefix + translated if translated is not None else original)
         bilingual.append(original)
-        if content and mapping[content] != content:
-            bilingual.append(prefix + mapping[content])
-    return {"translation": "\n".join(translation), "bilingual": "\n".join(bilingual), "provider": provider}
+        if translated is not None and translated != content:
+            bilingual.append(prefix + translated)
+    return {"translation": "\n".join(translation), "bilingual": "\n".join(bilingual), "provider": provider,
+            "line_translations": [{"index": index, "text": mapping[content]} for index, (_, _, content) in enumerate(rows)
+                                  if index in selected and content in mapping]}

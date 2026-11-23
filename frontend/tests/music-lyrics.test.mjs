@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { shiftLyrics, parseLyrics, formatLyrics, timelineRows, serializeTimeline, mergeLyricsTranslation } from '../src/components/music/lyrics.js';
+import { shiftLyrics, parseLyrics, formatLyrics, timelineRows, serializeTimeline, mergeLyricsTranslation, lyricTranslationRows } from '../src/components/music/lyrics.js';
 import { musicSearchTerm, musicReleaseError, musicReleaseOptions, musicFieldOptions, metadataSources, lyricSources } from '../src/components/music/utils.js';
 
 test('歌曲、歌手、专辑搜索默认使用当前歌曲的对应信息',()=>{
@@ -32,8 +32,80 @@ test('来源演唱者标注和跨行句段不会阻止译文合并，重复应�
   const translation='[00:33.350]（泰妍）不知不觉我像淑女一样 我的嘴唇温柔的叫着你的名字';
   const merged=mergeLyricsTranslation(original,source,translation);
   assert.equal(merged.matched,2);assert.equal(merged.total,2);
-  assert.equal(merged.text,'[ar:原歌手]\n[00:33.25]어느 샌가 나는 숙녀처럼\n[00:33.25]（泰妍）不知不觉我像淑女一样 我的嘴唇温柔的叫着你的名字\n[00:36.63]내 입술은 사근사근 그대 이름 부르죠');
-  assert.deepEqual(mergeLyricsTranslation(merged.text,source,translation),merged);
+  assert.equal(merged.text,'[ar:原歌手]\n[00:33.25]어느 샌가 나는 숙녀처럼\n[00:33.25]（泰妍）不知不觉我像淑女一样\n[00:36.63]내 입술은 사근사근 그대 이름 부르죠\n[00:36.63]我的嘴唇温柔的叫着你的名字');
+  assert.equal(mergeLyricsTranslation(merged.text,source,translation).text,merged.text);
+});
+
+test('网易云整句译文按 LRCLIB 原文分行，保留原时间且可升级已合并的整句',()=>{
+  const original='[offset:200]\n[00:17.66][01:46.27] 날 아직 어리다고\n[00:22.71][01:50.25] 말하던 얄미운 욕심쟁이가';
+  const source='[00:17.660]날 아직 어리다고 말하던 얄미운 욕심쟁이가~';
+  const translation='[00:17.660]还幼小的我 说成是可恶的贪心鬼';
+  const expected='[offset:200]\n[00:17.66][01:46.27] 날 아직 어리다고\n[00:17.66][01:46.27]还幼小的我\n[00:22.71][01:50.25] 말하던 얄미운 욕심쟁이가\n[00:22.71][01:50.25]说成是可恶的贪心鬼';
+  const merged=mergeLyricsTranslation(original,source,translation);
+  assert.equal(merged.text,expected);
+  assert.equal(mergeLyricsTranslation(merged.text,source,translation).text,merged.text);
+  const old=original.replace('\n[00:22.71]', '\n[00:17.66][01:46.27]还幼小的我 说成是可恶的贪心鬼\n[00:22.71]');
+  assert.equal(mergeLyricsTranslation(old,source,translation).text,expected);
+  const custom=original.replace('\n[00:22.71]', '\n[00:17.66]我自己写的中文\n[00:22.71]');
+  assert.match(mergeLyricsTranslation(custom,source,translation).text,/我自己写的中文/);
+});
+
+test('只按清楚的译文分句拆分，不按字数硬拆或拆开括号及英文单词',()=>{
+  const original='[00:01]얼굴은 빨개지고\n[00:05]놀란 눈은 커다래지고';
+  const source='[00:02]얼굴은 빨개지고 놀란 눈은 커다래지고';
+  const split=mergeLyricsTranslation(original,source,'[00:02]脸变红了，惊慌的眼睛变大了（和声 留在这里）');
+  assert.equal(split.text,'[00:01]얼굴은 빨개지고\n[00:01]脸变红了，\n[00:05]놀란 눈은 커다래지고\n[00:05]惊慌的眼睛变大了（和声 留在这里）');
+  for(const value of ['脸变红了惊慌的眼睛变大了','脸变红了 惊慌的 眼睛变大了','My face is red']){
+    assert.equal(mergeLyricsTranslation(original,source,'[00:02]'+value).text,`[00:01]얼굴은 빨개지고\n[00:01]${value}\n[00:05]놀란 눈은 커다래지고`);
+  }
+});
+
+test('仅未确认分界的句段需要翻译参考，确认后仍使用网易云译文',()=>{
+  const original='[00:01]얼굴은 빨개지고\n[00:05]놀란 눈은 커다래지고\n[00:10]어쩜 그대 내 맘을\n[00:15]흔들어 놓는지';
+  const source='[00:02]얼굴은 빨개지고 놀란 눈은 커다래지고\n[00:20]어쩜 그대 내 맘을 흔들어 놓는지';
+  const translation='[00:02]脸变红了 惊慌的眼睛变大了\n[00:20]不知怎么你开始动摇我的心';
+  const first=mergeLyricsTranslation(original,source,translation);
+  assert.deepEqual(first.pendingLineIndices,[2,3]);assert.equal(first.splits.length,1);
+  const result=mergeLyricsTranslation(original,source,translation,[{index:2,text:'不知怎么你开始'},{index:3,text:'动摇我的心'}]);
+  assert.deepEqual(result.pendingLineIndices,[]);assert.equal(result.splits.length,2);
+  assert.match(result.text,/\[00:10\]不知怎么你开始\n\[00:15\]흔들어 놓는지\n\[00:15\]动摇我的心/);
+  assert.equal(mergeLyricsTranslation(result.text,source,translation).text,result.text);
+  const uncertain=mergeLyricsTranslation(original,source,translation,[{index:2,text:'不同的描述'},{index:3,text:'毫不相关的译文'}]);
+  assert.equal(uncertain.text,first.text);assert.deepEqual(uncertain.pendingLineIndices,[2,3]);
+});
+
+test('翻译参考分界有空缺或原文覆盖不足时保持整句，不用机器译文覆盖来源',()=>{
+  const original='[00:10]어쩜 그대 내 맘을\n[00:15]흔들어 놓는지';
+  const source='[00:20]어쩜 그대 내 맘을 흔들어 놓는지';
+  const translation='[00:20]不知怎么你开始慢慢动摇我的心';
+  const result=mergeLyricsTranslation(original,source,translation,[{index:0,text:'不知怎么你开始'},{index:1,text:'动摇我的心'}]);
+  assert.deepEqual(result.pendingLineIndices,[0,1]);assert.equal(result.splits.length,0);
+  assert.match(result.text,/\[00:10\]不知怎么你开始慢慢动摇我的心/);
+});
+
+test('原文局部差异较大的句段计入待调整数量，但不发送无法可靠对照的行',()=>{
+  const result=mergeLyricsTranslation('[00:10]화를 낼까 웃어버릴까\n[00:15]생각하다가 Yeah','[00:01]화를낼까 웃어버릴까 생각하다가~','[00:01]即使发火也要笑 一定要这样想(Yeah!)');
+  assert.equal(result.pendingSegments.length,1);
+  assert.deepEqual(result.pendingLineIndices,[]);
+  assert.equal(result.splits.length,0);
+});
+
+test('中韩混合歌词默认只勾选外语行，时间标签、汉字与空行不参与自动选择',()=>{
+  const rows=lyricTranslationRows('[ar:成龙 / 金喜善]\n[offset:100]\n[00:01]梦中人 熟悉的脸孔\n[00:10]<00:10>나의 <00:11>손을 잡아줘\n\n[00:15]永遠的神話');
+  assert.deepEqual(rows.filter(row=>row.foreign).map(row=>row.index),[3]);
+  assert.deepEqual(rows.filter(row=>row.selectable).map(row=>row.index),[2,3,5]);
+});
+
+test('分段翻译通用于英日韩俄阿拉伯泰等语言，纯汉字歌词可手动选择',()=>{
+  const foreign=['Hold my hand','私の手を握って','나의 손을 잡아줘','Возьми меня за руку','أمسك بيدي','จับมือฉัน','Toma mi mano','Prends ma main'];
+  const text=['[ar:歌手]','[00:01]请握住我的手',...foreign.map((value,i)=>`[00:${10+i}]${value}`),'[00:20]夢'].join('\n');
+  const rows=lyricTranslationRows(text);
+  assert.deepEqual(rows.filter(row=>row.foreign).map(row=>row.index),foreign.map((_,i)=>i+2));
+  assert(rows.at(-1).selectable);assert(!rows.at(-1).foreign);
+  for(const [first,second] of [['Hold my hand','Never let me go'],['私の手を握って','もう離さないで'],['Возьми меня за руку','Никогда не отпускай'],['أمسك بيدي','لا تتركني أبدا']]){
+    const merged=mergeLyricsTranslation(`[00:01]${first}\n[00:05]${second}`,`[00:02]${first} ${second}`,'[00:02]握住我的手 不要放开我');
+    assert.equal(merged.text,`[00:01]${first}\n[00:01]握住我的手\n[00:05]${second}\n[00:05]不要放开我`);
+  }
 });
 
 test('重复副歌按出现顺序保留各次译文，不因译文不同而整句丢弃',()=>{
