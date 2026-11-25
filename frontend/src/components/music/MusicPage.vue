@@ -216,16 +216,17 @@ onBeforeUnmount(() => { active = false; request++; detailRequest++; editorReques
       <VBtn v-if="tab === 'cache'" color="error" variant="tonal" prepend-icon="mdi-delete-outline" @click="cacheConfirm = true">清空识别缓存</VBtn>
       <VBtn v-if="preview && !busy" variant="tonal" @click="previewOpen = true">查看预览</VBtn><VBtn icon="mdi-refresh" variant="text" aria-label="刷新音乐" :loading="loading" @click="load" />
     </div>
-    <VCard v-if="tab === 'explore'" class="my-4"><VCardText class="discover-filter-bar">
-      <div class="music-filter-row discover-filter-row"><VLabel class="discover-filter-label">来源</VLabel><VChipGroup column color="primary" v-model="exploreSource" mandatory class="music-source-chips discover-filter-chips"><VChip value="musicbrainz" filter tile>MusicBrainz</VChip><VChip value="doubanmusic" filter tile>豆瓣音乐</VChip><VChip v-for="source in streamingSources" :key="source.value" :value="source.value" filter tile>{{ source.title }}</VChip></VChipGroup></div>
+    <section v-if="tab === 'explore'" class="my-4" aria-label="音乐探索筛选"><div class="app-filter-bar">
+      <div class="app-filter-row"><VLabel class="app-filter-label">来源</VLabel><VChipGroup column color="primary" v-model="exploreSource" mandatory class="music-source-chips app-filter-chips"><VChip value="musicbrainz" filter tile>MusicBrainz</VChip><VChip value="doubanmusic" filter tile>豆瓣音乐</VChip><VChip v-for="source in streamingSources" :key="source.value" :value="source.value" filter tile>{{ source.title }}</VChip></VChipGroup></div>
       <div v-if="error" class="d-flex ga-2 mb-3"><VBtn variant="tonal" :loading="loading" @click="load">重试</VBtn><VBtn v-if="exploreSource==='musicbrainz'" variant="text" @click="exploreSource='doubanmusic'">豆瓣音乐</VBtn></div>
+      </div>
       <MusicExploreFilters v-if="exploreSource === 'musicbrainz'" @change="exploreChanged" />
       <MusicDoubanFilters v-else-if="exploreSource === 'doubanmusic'" @change="doubanChanged" />
-      <template v-else>
-        <div class="music-filter-row discover-filter-row"><VLabel class="discover-filter-label">榜单</VLabel><VChipGroup column color="primary" v-model="streamParams.chart" mandatory class="streaming-chart-chips discover-filter-chips" @update:model-value="search"><VChip v-for="chart in charts" :key="chart.value" :value="chart.value" filter tile>{{ chart.title }}</VChip></VChipGroup></div>
-        <div v-if="exploreSource==='apple'" class="music-filter-row discover-filter-row"><VLabel class="discover-filter-label">地区</VLabel><VChipGroup column color="primary" v-model="streamParams.region" mandatory @update:model-value="search"><VChip v-for="region in [{title:'中国大陆',value:'cn'},{title:'中国香港',value:'hk'},{title:'中国台湾',value:'tw'},{title:'美国',value:'us'},{title:'日本',value:'jp'},{title:'韩国',value:'kr'},{title:'英国',value:'gb'}]" :key="region.value" :value="region.value" filter tile>{{ region.title }}</VChip></VChipGroup></div>
-      </template>
-    </VCardText></VCard>
+      <div v-else class="app-filter-bar">
+        <div class="app-filter-row"><VLabel class="app-filter-label">榜单</VLabel><VChipGroup column color="primary" v-model="streamParams.chart" mandatory class="streaming-chart-chips app-filter-chips" @update:model-value="search"><VChip v-for="chart in charts" :key="chart.value" :value="chart.value" filter tile>{{ chart.title }}</VChip></VChipGroup></div>
+        <div v-if="exploreSource==='apple'" class="app-filter-row"><VLabel class="app-filter-label">地区</VLabel><VChipGroup column color="primary" v-model="streamParams.region" mandatory class="app-filter-chips" @update:model-value="search"><VChip v-for="region in [{title:'中国大陆',value:'cn'},{title:'中国香港',value:'hk'},{title:'中国台湾',value:'tw'},{title:'美国',value:'us'},{title:'日本',value:'jp'},{title:'韩国',value:'kr'},{title:'英国',value:'gb'}]" :key="region.value" :value="region.value" filter tile>{{ region.title }}</VChip></VChipGroup></div>
+      </div>
+    </section>
     <VAlert v-if="error || taskError" type="error" variant="tonal" class="my-3">{{ error || taskError }}</VAlert>
     <VAlert v-if="taskId" type="info" variant="tonal" class="my-3"><div class="music-toolbar"><span>{{ taskState?.current_action }} · {{ taskState?.message }}</span><VSpacer /><VBtn variant="text" @click="viewLogs">查看日志</VBtn></div><VProgressLinear class="mt-2" :model-value="taskState?.progress" :indeterminate="!taskState?.progress_known" /></VAlert>
     <VAlert v-if="resultVisible && resultData && !busy" :type="resultData.failed || resultData.warning_details?.length ? 'warning' : 'success'" variant="tonal" class="my-3"><div class="music-toolbar"><span>{{ resultData.message }}</span><VSpacer /><VBtn variant="text" @click="resultOpen=true">查看详情</VBtn></div></VAlert>
@@ -277,7 +278,6 @@ onBeforeUnmount(() => { active = false; request++; detailRequest++; editorReques
 </template>
 
 <style scoped>
-.music-filter-row :deep(.v-chip--selected){background:var(--mp-primary-soft)!important;color:var(--mp-primary-fg)!important;}.music-filter-row :deep(.v-chip--selected :is(.v-chip__underlay, .v-chip__overlay)){opacity:0!important;}.music-filter-row :deep(.v-chip--selected .v-chip__content){color:inherit!important;}
 
 .music-workbench{display:grid;grid-template-columns:minmax(15rem,19rem) minmax(0,1fr);gap:1.25rem;align-items:start;}.music-workbench-files{min-inline-size:0;}.streaming-chart-chips{min-inline-size:0;}
 @media(max-width:960px){.music-workbench{grid-template-columns:minmax(0,1fr);}}
@@ -293,10 +293,9 @@ onBeforeUnmount(() => { active = false; request++; detailRequest++; editorReques
 .music-library-footer :deep(:is(.v-pagination__item,.v-pagination__first,.v-pagination__prev,.v-pagination__next,.v-pagination__last)){margin-block:0;}
 @media(max-width:540px){.music-library-footer :deep(.v-pagination){inline-size:100%;}.music-library-footer :deep(.v-pagination__list){justify-content:flex-end;}}
 .music-page-shell { min-inline-size: 0; }
-.music-toolbar,.music-selection,.music-pagination,.music-filter-row,.music-preview-header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+.music-toolbar,.music-selection,.music-pagination,.music-preview-header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
 .music-toolbar > .v-input { flex:1 1 220px; min-inline-size:0; }
 .music-toolbar .music-sources { max-inline-size:340px; }.music-toolbar .music-kind { max-inline-size:200px; }
-.music-filter-row > .v-chip-group { flex:1 1 15rem; min-inline-size:0; }.music-filter-row > .v-label { min-inline-size:4rem; }.music-filter-row > .v-input { max-inline-size:15rem; }
 .music-selection { padding-block:12px; }.music-selection > .v-input { flex:0 0 auto; }
 .music-library-identity { display:flex; align-items:center; gap:12px; padding-block:12px; min-inline-size:240px; }
 .music-library-identity > div:last-child { min-inline-size:0; }.music-title-link { text-align:start; overflow-wrap:anywhere; font-weight:600; }

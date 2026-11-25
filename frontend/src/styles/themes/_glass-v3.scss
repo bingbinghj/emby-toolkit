@@ -1,4 +1,4 @@
-/* MoviePilot-Frontend v3 cf02b12, MIT; see frontend/third-party/MoviePilot-LICENSE. */
+/* MoviePilot-Frontend v3 eb4ac5a, MIT; see frontend/third-party/MoviePilot-LICENSE. */
 @use '@configured-variables' as variables;
 
 // 临时阅读表面共用材质入口；常驻导航、内容卡片和 Footer Dock 不属于这个集合。
@@ -521,7 +521,7 @@ $-custom-content-surfaces: (
       -webkit-backdrop-filter: none !important;
 
       &.footer-nav-btn-active {
-        color: rgb(var(--v-theme-primary)) !important;
+        color: var(--mp-primary-fg) !important;
         background: rgba(255, 255, 255, 0.14) !important;
       }
 

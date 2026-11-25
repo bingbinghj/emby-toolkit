@@ -638,14 +638,49 @@ def test_non_audio_content_is_not_marked_ready_for_tag_edit(fixture):
     assert not result['items'][0]['success']
 
 
-def test_manual_edit_keeps_traditional_input_when_scraping_simplifies(fixture):
+def test_manual_edit_simplifies_text_in_both_preview_and_write(fixture):
     config, source, root = fixture
     config['music_metadata_to_simplified'] = True
     os.link(source, root/'song.wav')
-    row = plan(config, 'song.wav', '歲月與聲音')
-    assert row['metadata']['title'] == '歲月與聲音'
+    original = source.read_bytes()
+    metadata = {'title':'歲月與聲音', 'artists':['藝人'], 'album':'專輯', 'album_artist':'樂團',
+                'composers':['作曲藝人'], 'conductors':['指揮藝人'], 'orchestras':['管弦樂團'],
+                'performers':{'電吉他':['演奏藝人']}, 'comment':'備註', 'description':'專輯簡介'}
+    expected = {'title':'岁月与声音', 'artists':['艺人'], 'album':'专辑', 'album_artist':'乐团',
+                'composers':['作曲艺人'], 'conductors':['指挥艺人'], 'orchestras':['管弦乐团'],
+                'performers':{'电吉他':['演奏艺人']}, 'comment':'备注', 'description':'专辑简介'}
+    row = operations.preview(config, {'operation':'edit', 'paths':['song.wav'], 'metadata':metadata})['items'][0]
+    assert row['success'], row
+    assert {key:row['metadata'][key] for key in expected} == expected
     operations.execute(config, {'item':row, 'operation':'edit', 'execution_id':'abcd-14'})
-    assert AudioMetadataHelper.read_tags(root/'song.wav').title == '歲月與聲音'
+    stored = AudioMetadataHelper.read_tags(root/'song.wav')
+    assert {key:getattr(stored, key) for key in expected} == expected
+    assert source.read_bytes() == original
+    assert not source.samefile(root/'song.wav')
+
+
+@pytest.mark.parametrize('policy', ['missingOnly', 'overwrite'])
+def test_simplified_alias_write_respects_policy_and_protects_seed(fixture, monkeypatch, policy):
+    from etk_music.models import MusicInfo
+    config, source, root = fixture
+    AudioMetadataHelper.write(source, MetaMusic(title='Girls’ Generation', artists=['Girls’ Generation'],
+                                               album_artist='Girls’ Generation', album='Girls’ Generation'), overwrite=True)
+    original = source.read_bytes()
+    os.link(source, root / 'song.wav')
+    config['music_metadata_to_simplified'] = True
+    config['music_scraping_policies']['tags'] = policy
+    monkeypatch.setattr(operations.catalog, 'recognize', lambda *_: (AudioMetadataHelper.read(source), MusicInfo(
+        title='Girls’ Generation', artists=['Girls’ Generation'], album_artist='Girls’ Generation',
+        artist_aliases=['少女時代'], media_source='musicbrainz', media_id='recording')))
+    row = operations.preview(config, {'paths':['song.wav']})['items'][0]
+    assert row['success'], row
+    assert row['metadata']['artists'] == ['少女时代']
+    assert row['metadata']['album_artist'] == '少女时代'
+    operations.execute(config, {'item':row, 'operation':'rescrape', 'execution_id':'abcd-21'})
+    stored = AudioMetadataHelper.read_tags(root / 'song.wav')
+    expected = '少女时代' if policy == 'overwrite' else 'Girls’ Generation'
+    assert stored.artists == [expected] and stored.album_artist == expected
+    assert source.read_bytes() == original
 
 
 def test_missing_only_lyrics_does_not_query_existing_sidecar(fixture, monkeypatch):

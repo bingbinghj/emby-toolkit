@@ -119,7 +119,7 @@ for(const theme of ['light','dark']) for(const width of [390,1440]) test(`歌曲
   await page.screenshot({path:testInfo.outputPath(`music-readable-${theme}-${width}.png`),fullPage:true});
   api.respond('POST','/api/music/query/explore',{items:[],charts:[{title:'流行歌曲排行榜',value:'hot'},{title:'新歌榜',value:'new'}],chart:'hot',has_more:false});
   await page.getByRole('tab',{name:'探索',exact:true}).click();
-  await page.locator('.music-filter-row .v-chip').filter({hasText:'网易云音乐'}).click();
+  await page.locator('.music-source-chips .v-chip').filter({hasText:'网易云音乐'}).click();
   const sourceBounds=await page.locator('.music-source-chips .v-chip').evaluateAll(nodes=>nodes.map(node=>{const box=node.getBoundingClientRect(),parent=node.closest('.v-slide-group__container').getBoundingClientRect();return box.left>=parent.left-1 && box.right<=parent.right+1;}));
   expect(sourceBounds.every(Boolean)).toBeTruthy();
   const selectedChart=page.locator('.streaming-chart-chips .v-chip--selected .v-chip__content');
@@ -544,7 +544,7 @@ test('音乐只提供所选文件刮削，确认后关闭弹窗并保留日志�
   await expect(page.getByRole('dialog').filter({hasText:'音乐刮削预览'})).toContainText('新曲名');
   await page.getByRole('button',{name:'确认',exact:true}).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect(page.getByRole('link',{name:'查看日志',exact:true})).toBeVisible();
+  await expect(page.getByRole('button',{name:'查看日志',exact:true})).toBeVisible();
   const request=api.requests.find(request=>request.path==='/api/music/jobs/preview');
   expect(request.body.paths).toEqual([track.path]);
   expect(request.body.operation).toBe('rescrape');
@@ -611,6 +611,30 @@ test('音乐探索采用 MP 筛选控件，结果可打开专辑详情', async({
   await expect(page.getByRole('dialog')).toContainText('新曲名');
 });
 
+test('移动端 MP 音乐筛选可展开收起并保留已选条件', async({page,api})=>{
+  music(api);
+  await page.setViewportSize({width:390,height:900});
+  api.respond('POST','/api/music/query/explore',{items:[]});
+  await page.goto('/music');
+  await page.getByRole('tab',{name:'探索',exact:true}).click();
+  const filters=page.locator('.music-explore-filters');
+  const toggle=filters.locator('.app-filter-toggle-pill');
+  await expect(toggle).toHaveAttribute('aria-expanded','false');
+  await expect.poll(()=>filters.locator('.app-filter-collapsible').evaluate(node=>node.getBoundingClientRect().height)).toBe(0);
+  await toggle.click();
+  await expect(toggle).toHaveAttribute('aria-expanded','true');
+  const choice=filters.locator('.app-filter-chips .v-chip').filter({hasText:/^热门单曲$/});
+  await choice.click();
+  await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/query/explore').at(-1)?.body.entity).toBe('recording');
+  const requests=api.requests.filter(row=>row.path==='/api/music/query/explore').length;
+  await toggle.click();
+  await expect(toggle.locator('.app-filter-toggle-pill__count')).toHaveText('1');
+  await toggle.click();
+  await expect(choice).toHaveClass(/v-chip--selected/);
+  expect(api.requests.filter(row=>row.path==='/api/music/query/explore').length).toBe(requests);
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBeTruthy();
+});
+
 for(const width of [390,1440]) test(`音乐库目录导航紧凑排列且可以点击 ${width}px`, async({page,api},testInfo)=>{
   await page.setViewportSize({width,height:1000});
   music(api);
@@ -670,7 +694,7 @@ test('五个流媒体来源沿用探索卡片，榜单切换重置分页，详�
   await page.goto('/music');
   await page.getByRole('tab',{name:'探索',exact:true}).click();
   for(const [label,source] of [['网易云音乐','netease'],['QQ 音乐','qqmusic'],['Apple Music','apple'],['酷狗音乐','kugou'],['酷我音乐','kuwo']]) {
-    await page.locator('.music-filter-row .v-chip').filter({hasText:label}).click();
+    await page.locator('.music-source-chips .v-chip').filter({hasText:label}).click();
     await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/query/explore').at(-1)?.body.source).toBe(source);
     await expect(page.locator('.music-card')).toContainText('榜单歌曲');
     await expect(page.locator('.music-card')).toContainText(label);

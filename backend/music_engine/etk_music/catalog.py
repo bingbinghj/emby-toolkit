@@ -82,6 +82,45 @@ def detail(source, identity, kind="recording", release=None):
     return module.recognize_music(source, identity, music_type="recording")
 
 
+def with_credit_aliases(info):
+    """按人物 ID 复用 MusicBrainz 请求缓存，补全当前标签涉及的署名别名。"""
+    if not isinstance(info, (MusicInfo, MusicAlbumInfo)) or not get_runtime_setting("MUSIC_METADATA_TO_SIMPLIFIED", True) or info.media_source != MediaSource.MusicBrainz:
+        return info
+    result = deepcopy(info)
+    targets = {}
+    for item in [result, *(result.tracks if isinstance(result, MusicAlbumInfo) else [])]:
+        names = {name for field in (item.composers, item.conductors, item.orchestras, *item.performers.values()) for name in field}
+        raw = item.raw_data or {}
+        relations = list(raw.get("relations") or [])
+        for relation in list(relations):
+            if isinstance(relation, dict) and relation.get("type") == "performance":
+                relations.extend((relation.get("work") or {}).get("relations") or [])
+        credits = [*(raw.get("artist-credit") or []), *(raw.get("album-artist-credit") or [])]
+        for credit in credits:
+            artist = credit.get("artist") if isinstance(credit, dict) else None
+            if isinstance(artist, dict) and not artist.get("aliases") and MusicBrainzModule._alias_artist_ids([str(artist.get("id") or "")]):
+                targets.setdefault(artist["id"], []).append(artist)
+        for relation in relations:
+            artist = relation.get("artist") if isinstance(relation, dict) else None
+            if (isinstance(artist, dict) and (relation.get("target-credit") or artist.get("name")) in names
+                    and not artist.get("aliases") and MusicBrainzModule._alias_artist_ids([str(artist.get("id") or "")])):
+                targets.setdefault(artist["id"], []).append(artist)
+    if targets:
+        module = provider("musicbrainz")
+        with request_budget(20):
+            for identity, artists in targets.items():
+                try:
+                    payload = module._request_json(f"/artist/{identity}", params={"inc":"aliases", "fmt":"json"})
+                    if not payload or payload.get("id") != identity:
+                        continue
+                    for artist in artists:
+                        artist["aliases"] = deepcopy(payload.get("aliases") or [])
+                except Exception:
+                    # 中文别名不可用时仍保留原署名，不阻断已确认的音乐资料。
+                    continue
+    return result
+
+
 def related(source, identity, kind, page=1, album_type=None):
     module, source = provider(source), MediaSource(source)
     if kind == "artist_albums":

@@ -13,6 +13,7 @@ _settings = {
     "CONF": SimpleNamespace(musicbrainz=512, theaudiodb=512, listenbrainz=128, meta=86400),
     "PROXY": None,
     "MUSIC_CUE_ENABLE": True,
+    "MUSIC_TRACK_MATCH": "strict",
     "MUSIC_METADATA_TO_SIMPLIFIED": True,
     "MUSIC_COVER_PROXY": "",
     "MUSIC_RELEASE_REGION_PRIORITY": "CN,TW,HK",

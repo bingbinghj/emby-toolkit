@@ -12,7 +12,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from itertools import chain
-from typing import Any, Iterable, Optional, Tuple, TypeVar, Union
+from typing import Any, Iterable, Literal, Optional, Tuple, TypeVar, Union
 
 from etk_music.http import AsyncRequestUtils, RequestUtils
 from etk_music.observation import (
@@ -39,6 +39,8 @@ from etk_music.sources import is_media_source_enabled, is_media_source_selected
 from etk_music.base import MetaBase
 from etk_music.meta import MUSIC_CREDIT_FIELDS, MetaMusic, music_credit_values
 from etk_music.matching import (
+    AutoMusicTrackMatch,
+    normalize_auto_music_track_match,
     align_music_tracks,
     music_album_artist_evidence_matches,
     music_album_matches,
@@ -1044,6 +1046,15 @@ class MusicBrainzModule(_ModuleBase):
             index += 1
         return results
 
+    @classmethod
+    def _track_match_mode(cls, track_match: Optional[str] = None) -> AutoMusicTrackMatch:
+        """
+        解析本次自动专辑匹配的曲目对齐策略，未显式传入时读取部署配置。
+        """
+        raw = get_runtime_setting("MUSIC_TRACK_MATCH") if track_match is None else track_match
+        return normalize_auto_music_track_match(str(raw) if raw is not None else None)
+
+
     def match_music_album(
             self,
             meta: MetaMusic,
@@ -1051,6 +1062,7 @@ class MusicBrainzModule(_ModuleBase):
             limit: int = 5,
             music_release_regions: Optional[list[str]] = None,
             music_release_scripts: Optional[list[str]] = None,
+            track_match: Optional[AutoMusicTrackMatch] = None,
     ) -> Optional[MusicAlbumInfo]:
         """
         根据目录线索和曲目证据匹配具体发行版本。
@@ -1063,11 +1075,13 @@ class MusicBrainzModule(_ModuleBase):
         :param limit: 候选发行搜索的数量预算
         :param music_release_regions: 发行地区优先顺序，省略时使用运行配置
         :param music_release_scripts: 发行文字字形优先顺序，省略时使用运行配置
+        :param track_match: 自动整理曲目对齐策略，省略时使用部署配置
         :return: 带完整曲目表的确认专辑；无合格结果、版本歧义或查询失败时返回 None
         """
         with capture_music_recognition():
             if not tracks or meta.organization_error:
                 return None
+            effective_track_match = self._track_match_mode(track_match)
             preference = self._release_preference(
                 music_release_regions,
                 music_release_scripts,
@@ -1095,7 +1109,9 @@ class MusicBrainzModule(_ModuleBase):
             enrich_music_artist_aliases(pairs, self._source, lambda identity: self._lookup_artist_aliases([identity], []))
             if music_recognition_failed():
                 return None
-            return self._select_release_match(meta, tracks, details, preference, albums)
+            return self._select_release_match(
+                meta, tracks, details, preference, albums, track_match=effective_track_match,
+            )
 
     async def async_match_music_album(
             self,
@@ -1104,6 +1120,7 @@ class MusicBrainzModule(_ModuleBase):
             limit: int = 5,
             music_release_regions: Optional[list[str]] = None,
             music_release_scripts: Optional[list[str]] = None,
+            track_match: Optional[AutoMusicTrackMatch] = None,
     ) -> Optional[MusicAlbumInfo]:
         """
         异步根据目录线索和曲目证据匹配具体发行版本。
@@ -1116,11 +1133,13 @@ class MusicBrainzModule(_ModuleBase):
         :param limit: 候选发行搜索的数量预算
         :param music_release_regions: 发行地区优先顺序，省略时使用运行配置
         :param music_release_scripts: 发行文字字形优先顺序，省略时使用运行配置
+        :param track_match: 自动整理曲目对齐策略，省略时使用部署配置
         :return: 带完整曲目表的确认专辑；无合格结果、版本歧义或查询失败时返回 None
         """
         with capture_music_recognition():
             if not tracks or meta.organization_error:
                 return None
+            effective_track_match = self._track_match_mode(track_match)
             preference = self._release_preference(
                 music_release_regions,
                 music_release_scripts,
@@ -1150,21 +1169,24 @@ class MusicBrainzModule(_ModuleBase):
             await async_enrich_music_artist_aliases(pairs, self._source, lambda identity: self._async_lookup_artist_aliases([identity], []))
             if music_recognition_failed():
                 return None
-            return self._select_release_match(meta, tracks, details, preference, albums)
+            return self._select_release_match(
+                meta, tracks, details, preference, albums, track_match=effective_track_match,
+            )
 
     @classmethod
-    def _select_release_match(
+    def _rank_release_matches(
             cls,
             meta: MetaMusic,
             tracks: list[MetaMusic],
-            details: Iterable[dict[str, Any]],
-            preference: Optional[_MusicReleasePreference] = None,
-            albums: Optional[dict[str, MusicAlbumInfo]] = None,
-    ) -> Optional[MusicAlbumInfo]:
+            details: list[dict[str, Any]],
+            selected_preference: _MusicReleasePreference,
+            albums: Optional[dict[str, MusicAlbumInfo]],
+            *,
+            track_match: Literal["strict", "ignore_duration"],
+    ) -> tuple[str, Optional[MusicAlbumInfo], list[dict[str, Any]]]:
         """
-        统一比较发行；复用本次已补证的模型，避免重新投影丢失Artist别名。
+        使用单一对齐模式对候选发行打分并判定唯一最优、歧义或未命中状态。
         """
-        selected_preference = preference or cls._release_preference()
         ranked: list[tuple[float, tuple[int, int], MusicAlbumInfo]] = []
         seen: set[str] = set()
         for detail in details:
@@ -1174,29 +1196,75 @@ class MusicBrainzModule(_ModuleBase):
             seen.add(release_id)
             summary = cls._release_track_summary(detail)
             album = albums.get(release_id) if albums is not None else cls._release_to_album(detail)
-            score = cls._score_release(meta, tracks, detail, summary, album=album)
+            score = cls._score_release(
+                meta, tracks, detail, summary, album=album, track_match=track_match,
+            )
             if album and score > 0:
                 ranked.append((score, cls._release_preference_sort_key(detail, selected_preference), album))
         if not ranked:
-            report_music_recognition("not_found", "没有候选发行通过曲目信息核对")
-            return None
+            return "not_found", None, []
         ranked.sort(key=lambda entry: (-entry[0], entry[1]))
         best_score, _preference, best = ranked[0]
         if best_score < cls._album_match_threshold:
-            return None
+            return "below_threshold", None, []
         equivalent = cls._release_content_key(best)
         for score, _rank, candidate in ranked[1:]:
             if best_score - score <= 5 and cls._release_content_key(candidate) != equivalent:
-                report_music_recognition("ambiguous", "多个发行版本均符合现有信息，请手动选择专辑版本", [
+                candidates = [
                     {"release_id": item.musicbrainz_release_id, "album_id": item.media_id,
                      "title": item.title, "artist": item.artist, "year": item.year, "score": round(points, 2)}
                     for points, _preference_rank, item in ranked[:5]
-                ])
-                return None
-        best.raw_data.update(match_score=round(best_score, 2), match_coverage=1.0,
-                             match_basis="release_id" if meta.musicbrainz_release_id else "track_evidence")
-        report_music_recognition("matched", "专辑及当前曲目已匹配")
-        return best
+                ]
+                return "ambiguous", None, candidates
+        best.raw_data.update(
+            match_score=round(best_score, 2),
+            match_coverage=1.0,
+            match_basis="release_id" if meta.musicbrainz_release_id else "track_evidence",
+            track_match=track_match,
+        )
+        return "matched", best, []
+
+
+    @classmethod
+    def _select_release_match(
+            cls,
+            meta: MetaMusic,
+            tracks: list[MetaMusic],
+            details: Iterable[dict[str, Any]],
+            preference: Optional[_MusicReleasePreference] = None,
+            albums: Optional[dict[str, MusicAlbumInfo]] = None,
+            *,
+            track_match: Optional[AutoMusicTrackMatch] = None,
+    ) -> Optional[MusicAlbumInfo]:
+        """
+        统一比较发行；复用本次已补证的模型，避免重新投影丢失Artist别名。
+
+        回落模式下仅在严格校验未命中或低于阈值时改用忽略时长重试，
+        严格校验已判定多版本歧义时直接保留歧义结果。
+        """
+        selected_preference = preference or cls._release_preference()
+        detail_list = list(details)
+        policy = cls._track_match_mode(track_match)
+        first_mode: Literal["strict", "ignore_duration"] = (
+            "ignore_duration" if policy == "ignore_duration" else "strict"
+        )
+        status, best, candidates = cls._rank_release_matches(
+            meta, tracks, detail_list, selected_preference, albums, track_match=first_mode,
+        )
+        if policy == "fallback_ignore_duration" and status in {"not_found", "below_threshold"}:
+            status, best, candidates = cls._rank_release_matches(
+                meta, tracks, detail_list, selected_preference, albums, track_match="ignore_duration",
+            )
+        if status == "not_found":
+            report_music_recognition("not_found", "没有候选发行通过曲目信息核对")
+            return None
+        if status == "ambiguous":
+            report_music_recognition("ambiguous", "多个发行版本均符合现有信息，请手动选择专辑版本", candidates)
+            return None
+        if status == "matched" and best is not None:
+            report_music_recognition("matched", "专辑及当前曲目已匹配")
+            return best
+        return None
 
     @staticmethod
     def _release_content_key(album: MusicAlbumInfo) -> tuple[Optional[str], tuple[tuple[int, int, str], ...]]:
@@ -1420,7 +1488,9 @@ class MusicBrainzModule(_ModuleBase):
             tracks: list[MetaMusic],
             detail: dict[str, Any],
             summary: list[dict[str, Any]],
-            *, album: Optional[MusicAlbumInfo] = None,
+            *,
+            album: Optional[MusicAlbumInfo] = None,
+            track_match: Literal["strict", "ignore_duration"] = "strict",
     ) -> float:
         """
         给候选发行版本打分（0-100），综合标题、歌手、曲目数和时长相似度。
@@ -1444,15 +1514,20 @@ class MusicBrainzModule(_ModuleBase):
             return 0.0
         if meta.version and not music_version_matches(album.to_music_info(), meta):
             return 0.0
-        aligned = align_music_tracks(tracks, album.tracks)
+        aligned = align_music_tracks(tracks, album.tracks, track_match=track_match)
         if len(aligned) != len(tracks):
             return 0.0
         # 曲序只是槽位。无标签曲名且没有可比时长时，除非提供具体发行ID，否则不能确认内容。
         named = sum(not music_track_title_is_weak(track) for track in tracks)
-        durations = [
-            cls._duration_similarity(tracks[local].duration, album.tracks[remote].duration)
-            for local, remote in aligned.items() if tracks[local].duration and album.tracks[remote].duration
-        ]
+        # 忽略时长模式下不再把物理时长当作内容确认或版本拉开分差的依据。
+        durations = (
+            []
+            if track_match == "ignore_duration"
+            else [
+                cls._duration_similarity(tracks[local].duration, album.tracks[remote].duration)
+                for local, remote in aligned.items() if tracks[local].duration and album.tracks[remote].duration
+            ]
+        )
         if not meta.musicbrainz_release_id and (not named and not durations or not known_title and len(tracks) < 2):
             return 0.0
         score = 40.0 + 25 * title_sim + 15 * artist_match
@@ -1541,6 +1616,8 @@ class MusicBrainzModule(_ModuleBase):
             genres=cls._names_of(detail.get("genres")),
             detail_link=f"https://musicbrainz.org/release/{release_id}",
             raw_data={
+                "artist-credit": deepcopy(detail.get("artist-credit") or []),
+                "relations": deepcopy(detail.get("relations") or []),
                 "release_id": str(release_id),
                 "release_country": cls._stripped(detail.get("country")),
                 "release_script": cls._release_script(detail) or None,
@@ -2594,7 +2671,7 @@ class MusicBrainzModule(_ModuleBase):
             album_aliases=cls._names_of(release_group.get("aliases")),
             artist_aliases=cls._credit_aliases(recording.get("artist-credit")),
             detail_link=f"{cls._detail_url}/{media_id}",
-            raw_data=recording,
+            raw_data={**deepcopy(recording), "album-artist-credit": deepcopy((release or {}).get("artist-credit") or [])},
         ))
 
     @classmethod
@@ -2809,6 +2886,7 @@ class MusicBrainzModule(_ModuleBase):
         album.__dict__.update(_musicbrainz_credits(payload))
         album.raw_data = {
             **(album.raw_data or {}),
+            "relations": deepcopy(payload.get("relations") or []),
             "release_id": cls._stripped(payload.get("id")),
             "release_country": cls._stripped(payload.get("country")),
             "release_script": cls._release_script(payload) or None,
@@ -2885,7 +2963,10 @@ class MusicBrainzModule(_ModuleBase):
             release_status=album.release_status,
             names=[str(title)],
             detail_link=f"{cls._detail_url}/{media_id}",
-            raw_data={"isrcs": list(recording.get("isrcs") or [])},
+            raw_data={"isrcs": list(recording.get("isrcs") or []),
+                      "artist-credit": deepcopy(track.get("artist-credit") or recording.get("artist-credit") or album.raw_data.get("artist-credit") or []),
+                      "album-artist-credit": deepcopy(album.raw_data.get("artist-credit") or []),
+                      "relations": deepcopy(recording.get("relations") or [])},
         ))
 
     @classmethod

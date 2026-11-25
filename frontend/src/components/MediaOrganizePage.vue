@@ -46,7 +46,7 @@
           <VBtn size="small" variant="text" :disabled="processing" @click="selectedItems = []">取消全选</VBtn>
         </div>
       </div>
-      <div v-else class="organize-summary text-medium-emphasis">{{ total === null ? '正在读取入库记录' : smAndDown ? `共 ${total} 条记录` : `共 ${total} 条记录，${pages} 页` }}</div>
+      <div v-else class="organize-summary"><span class="mp-canvas-pill num">{{ total === null ? '正在读取入库记录' : smAndDown ? `共 ${total} 条记录` : `共 ${total} 条记录，${pages} 页` }}</span></div>
 
       <VAlert v-if="itemsError" type="error" variant="tonal" class="mb-4" data-testid="organize-load-error">{{ itemsError }}<VBtn variant="text" :loading="loadingItems" @click="loadItems">重新读取</VBtn></VAlert>
       <VAlert v-if="feedback" :type="feedback.type" :title="feedback.message" variant="tonal" class="mb-4" data-testid="organize-result">
@@ -492,7 +492,9 @@ onBeforeUnmount(() => { active = false; ++itemSequence; clearTimeout(searchTimer
 .organize-page-title { margin: 0; flex: 0 0 auto; }
 .organize-toolbar-actions { display: flex; align-items: center; gap: 4px; min-width: 0; }
 .organize-search { inline-size: clamp(12rem, 24vw, 24rem); flex: 0 1 auto; min-width: 0; margin-inline-end: 8px; }
-.organize-search :deep(.v-field), .organize-page-size :deep(.v-field) { border: 0 !important; border-radius: var(--app-vuetify-rounded-pill); background: rgba(var(--v-theme-surface-variant), 0.04) !important; box-shadow: none !important; min-block-size: 42px; }
+.organize-search :deep(.v-field) { border: 1px solid var(--mp-reading-border) !important; border-radius: var(--app-vuetify-rounded-pill); background: var(--mp-reading-surface) !important; box-shadow: none !important; min-block-size: 42px; }
+:global(html[data-theme='glass']) .organize-toolbar-actions > .v-btn.v-btn--icon { border: 1px solid var(--mp-reading-border); background: var(--mp-reading-surface) !important; }
+.organize-page-size :deep(.v-field) { border: 0 !important; border-radius: var(--app-vuetify-rounded-pill); background: rgba(var(--v-theme-surface-variant), 0.04) !important; box-shadow: none !important; min-block-size: 42px; }
 .organize-search :deep(.v-field__outline), .organize-search :deep(.v-field__overlay), .organize-page-size :deep(.v-field__outline), .organize-page-size :deep(.v-field__overlay) { display: none; }
 .organize-selection { flex: 0 0 auto; }
 .organize-selection-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 8px 16px; min-block-size: 58px; }

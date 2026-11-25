@@ -71,7 +71,7 @@ test('changing the custom primary color updates the existing save button without
   await expectFilledPrimary(save);
 });
 
-test('media hover details follow the surface palette without displaying numeric ratings', async ({ page, api }) => {
+test('media hover details retain readable foreground on the poster scrim without numeric ratings', async ({ page, api }) => {
   await prepare(page, cases[4]);
   api.respond('GET', '/api/media_center/libraries/movies/items', { library: { id: 'movies', name: '电影', collection_type: 'movies' },
     total: 1, start_index: 0, items: [{ Id: '101', Name: '主题详情验证', Type: 'Movie', CommunityRating: 8.8,
@@ -85,11 +85,12 @@ test('media hover details follow the surface palette without displaying numeric 
   await expect(detail).toBeVisible();
   const colors = await detail.evaluate(element => {
     const style = getComputedStyle(element);
-    return { foreground: style.color, title: getComputedStyle(element.querySelector('.media-detail-title')).color,
+    return { foreground: style.color, onMedia: style.getPropertyValue('--mp-on-media').trim(), title: getComputedStyle(element.querySelector('.media-detail-title')).color,
       background: style.backgroundImage, page: getComputedStyle(document.body).backgroundColor };
   });
-  expect(colors.foreground).toBe('rgb(0, 0, 0)');
+  expect(colors.onMedia).toBe('#f8fafc');
+  expect(colors.foreground).toBe('rgb(248, 250, 252)');
   expect(colors.title).toBe(colors.foreground);
-  expect(colors.background).toContain('rgba(255, 255, 255, 0.96)');
+  expect(colors.background).toContain('rgba(11, 19, 34, 0.94)');
   expect(colors.page).not.toBe('rgb(255, 255, 255)');
 });

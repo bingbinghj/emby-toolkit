@@ -33,6 +33,7 @@ def _dispatch(request):
     elif action == "edit_metadata":
         manual_source = (body.get("selection") or {}).get("media_source")
     if action in {"search", "detail", "edit_metadata"} and manual_source in streaming_sources | {"gd_netease", "gd_joox", "gd_bilibili"}:
+        from etk_music.display import simplify_metadata_dict
         if manual_source.startswith("gd_"):
             from etk_music import gd_metadata as streaming_metadata
         else:
@@ -40,7 +41,8 @@ def _dispatch(request):
         from etk_music.runtime import request_budget
         with request_budget(30):
             if action == "search":
-                return streaming_metadata.search(manual_source, body.get("query"), body.get("kind") or "recording", body.get("page",1), body.get("count",20))
+                result = streaming_metadata.search(manual_source, body.get("query"), body.get("kind") or "recording", body.get("page",1), body.get("count",20))
+                return {**result, "items": [simplify_metadata_dict(item) for item in result.get("items", [])]}
             if action == "edit_metadata":
                 from etk_music import library
                 from etk_music.audio import AudioMetadataHelper
@@ -51,8 +53,8 @@ def _dispatch(request):
                 selected = body["selection"]
                 if selected.get("music_type") == "album":
                     raise ValueError("请在专辑中选择对应歌曲")
-                return streaming_metadata.detail(manual_source, selected["media_id"])
-            return streaming_metadata.detail(manual_source, body["id"], body.get("kind") or "recording")
+                return simplify_metadata_dict(streaming_metadata.detail(manual_source, selected["media_id"]))
+            return simplify_metadata_dict(streaming_metadata.detail(manual_source, body["id"], body.get("kind") or "recording"))
     if action in {"library", "selection", "scope", "scan", "scan_batch", "scan_finish", "inspect", "image", "preview_groups", "audio_path"}:
         from etk_music import library
     elif action in {"preview", "execute", "cleanup", "clear_comments_preview"}:
@@ -115,12 +117,12 @@ def _dispatch(request):
     if action=="explore":
         return catalog.explore(body)
     if action=="detail":
-        return catalog.serialize(catalog.detail(body["source"], body["id"], body.get("kind", "recording"), body.get("release")))
+        return catalog.serialize(catalog.with_credit_aliases(catalog.detail(body["source"], body["id"], body.get("kind", "recording"), body.get("release"))))
     if action=="edit_metadata":
         from etk_music import library
         path = library.target(config, body["path"])
         _, info = catalog.recognize(path, config.get("music_sources") or ["musicbrainz"], body["selection"], body.get("music_track_match") or "strict")
-        return catalog.serialize(info)
+        return catalog.serialize(catalog.with_credit_aliases(info))
     if action=="related":
         return {"items": catalog.related(body["source"], body["id"], body["kind"], int(body.get("page",1)), body.get("album_type"))}
     if action=="preview":

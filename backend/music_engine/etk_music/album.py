@@ -8,25 +8,50 @@ from typing import Optional, Literal
 from .audio import AudioMetadataHelper
 from .models import MusicAlbumInfo, MusicInfo
 from .meta import MetaMusic, music_credit_values
-from .matching import (music_text_key, music_album_candidate_matches,
-                      music_album_lookup_plan, music_album_has_consistent_tracks, expand_music_tracks, align_music_tracks)
+from .matching import (AutoMusicTrackMatch, normalize_auto_music_track_match, align_music_tracks_by_policy, music_text_key, music_album_candidate_matches,
+                      music_album_lookup_plan, music_album_has_consistent_tracks, expand_music_tracks)
+from .runtime import get_runtime_setting
 from .recognition import unique_music_match, recognize_music_sources
 from .observation import report_music_recognition
 from .types import MediaSource, MUSIC_ENTITY_ALBUM, MUSIC_ENTITY_RECORDING
 
-def _verified_source_album(albums: list[MusicAlbumInfo], meta: MetaMusic, tracks: list[MetaMusic]) -> Optional[MusicAlbumInfo]:
+def _verified_source_album(
+        albums: list[MusicAlbumInfo],
+        meta: MetaMusic,
+        tracks: list[MetaMusic],
+        *,
+        track_match: AutoMusicTrackMatch = "strict",
+) -> Optional[MusicAlbumInfo]:
     """
     只使用完整对位的唯一专辑，返回副本以免污染来源自己的详情缓存。
+
+    回落模式仅在严格核验无任何候选通过时尝试忽略时长，
+    严格核验已命中多个候选时保持歧义不回落。
     """
-    matched = unique_music_match([album for album in albums if music_album_candidate_matches(album, meta, tracks)])
+    first_mode: Literal["strict", "ignore_duration"] = (
+        "ignore_duration" if track_match == "ignore_duration" else "strict"
+    )
+    candidates = [
+        album for album in albums
+        if music_album_candidate_matches(album, meta, tracks, track_match=first_mode)
+    ]
+    effective_mode = first_mode
+    if not candidates and track_match == "fallback_ignore_duration":
+        candidates = [
+            album for album in albums
+            if music_album_candidate_matches(album, meta, tracks, track_match="ignore_duration")
+        ]
+        effective_mode = "ignore_duration"
+    matched = unique_music_match(candidates)
     if matched is None:
         return None
     result = deepcopy(matched)
-    result.raw_data.update(match_coverage=1, match_basis="source_track_evidence")
+    result.raw_data.update(match_coverage=1, match_basis="source_track_evidence", track_match=effective_mode)
     return result
 
 def _lookup_source_album(
         chain, source: MediaSource, meta: MetaMusic, tracks: list[MetaMusic],
+        *, track_match: AutoMusicTrackMatch = "strict",
 ) -> Optional[MusicAlbumInfo]:
     """
     通过来源链驱动纯检索计划，豆瓣不将专辑搜索结果伪装成独立录音。
@@ -48,7 +73,7 @@ def _lookup_source_album(
                 response = chain.get_music_album(action.album_id or "")
             action = plan.send(response)
     except StopIteration as completed:
-        return _verified_source_album(completed.value, meta, tracks)
+        return _verified_source_album(completed.value, meta, tracks, track_match=track_match)
     finally:
         plan.close()
 
@@ -126,7 +151,7 @@ def album_track_map(
     album: MusicAlbumInfo,
     *,
     allow_title_override: bool = False,
-    track_match: Literal["strict", "ignore_duration", "sequential"] = "strict",
+    track_match: Literal["strict", "fallback_ignore_duration", "ignore_duration", "sequential"] = "strict",
 ) -> dict[str, MusicInfo]:
     """
     逻辑曲目全部对位后才输出对应物理文件，整轨始终保持 Album 身份。
@@ -134,7 +159,7 @@ def album_track_map(
     if len(files) != len(metas) or not music_album_has_consistent_tracks(album):
         return {}
     logical, owners = expand_music_tracks(metas)
-    aligned = align_music_tracks(logical, album.tracks, allow_title_override=allow_title_override, track_match=track_match)
+    aligned = align_music_tracks_by_policy(logical, album.tracks, allow_title_override=allow_title_override, track_match=track_match)
     result: dict[str, MusicInfo] = {}
     for index, path in enumerate(files):
         positions = [position for position, owner in enumerate(owners) if owner == index]
@@ -148,7 +173,7 @@ def album_track_map(
                     info.field_sources.pop(key, None)
                     if key in metas[index].field_sources:
                         info.field_sources[key] = metas[index].field_sources[key]
-        for key in ("match_score", "match_coverage", "match_basis"):
+        for key in ("match_score", "match_coverage", "match_basis", "track_match"):
             if key in album.raw_data:
                 info.raw_data[key] = album.raw_data[key]
         info.set_library_category(album.library_category)
@@ -184,6 +209,7 @@ def recognize_group(files, metas, sources, selected=None, directory=None, track_
             raise ValueError("所选发行与文件不能唯一对位，请核对专辑、曲序和时长")
         diagnostic = {"status": "manual", "message": "手动选择发行并核验曲目"}
     else:
+        auto_match = normalize_auto_music_track_match(get_runtime_setting("MUSIC_TRACK_MATCH"))
         context = _album_context_with_resource(directory or files[0].parent, metas, None)
         if context.organization_error:
             raise ValueError(context.organization_error)
@@ -194,12 +220,12 @@ def recognize_group(files, metas, sources, selected=None, directory=None, track_
         def recognize(source):
             module = provider(source)
             if source==MediaSource.MusicBrainz:
-                return module.match_music_album(context, logical)
-            return _lookup_source_album(SourceAlbums(module, source), source, context, logical)
+                return module.match_music_album(context, logical, **({"track_match": auto_match} if auto_match != "strict" else {}))
+            return _lookup_source_album(SourceAlbums(module, source), source, context, logical, track_match=auto_match)
         album, diagnostic = recognize_music_sources(pinned, recognize, lambda item, source: bool(item and item.tracks and item.media_source==source))
         if not album:
             return {}, diagnostic
-        result = album_track_map(files, metas, album)
+        result = album_track_map(files, metas, album, track_match=auto_match)
         if len(result)!=len(files):
             return {}, {"status":"conflict", "message":"专辑不能覆盖当前全部音频，请核对发行版本"}
     for path, meta in zip(files, metas):

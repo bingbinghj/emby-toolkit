@@ -24,6 +24,24 @@ def test_worker_json_protocol(tmp_path):
     assert json.loads(result.stdout) == {'success':True, 'data':{'items':[]}}
 
 
+@pytest.mark.parametrize('source', ['netease', 'gd_netease'])
+@pytest.mark.parametrize('enabled', [True, False])
+def test_streaming_and_gd_details_use_the_same_simplified_setting(tmp_path, monkeypatch, source, enabled):
+    import worker
+    from etk_music import streaming_metadata, gd_metadata
+    module = gd_metadata if source.startswith('gd_') else streaming_metadata
+    raw = {'media_source':source,'media_id':'song','title':'歲月','artists':['樂團'],
+           'composers':['作曲藝人'],'performers':{'電吉他':['演奏藝人']},'comment':'備註'}
+    monkeypatch.setattr(module, 'detail', lambda *_:raw)
+    result = worker.dispatch({'action':'detail','config':{'music_metadata_to_simplified':enabled},
+                              'cache_dir':str(tmp_path/'cache'),'body':{'source':source,'id':'song'}})
+    assert result['title'] == ('岁月' if enabled else '歲月')
+    assert result['performers'] == ({'电吉他':['演奏艺人']} if enabled else raw['performers'])
+    assert result['comment'] == ('备注' if enabled else '備註')
+    assert result['media_id'] == 'song' and result['media_source'] == source
+    assert raw['title'] == '歲月'
+
+
 @pytest.mark.skipif(not sys.platform.startswith('linux'), reason='Linux 宿主退出通知')
 def test_worker_exits_when_host_dies(tmp_path):
     script = '''import os,subprocess,sys,time

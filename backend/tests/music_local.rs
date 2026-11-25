@@ -10,6 +10,17 @@ use std::{sync::Arc, time::Duration};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
+#[test]
+fn automatic_music_alignment_rejects_sequential_and_unknown_modes() {
+    for mode in ["strict", "fallback_ignore_duration", "ignore_duration"] {
+        assert!(emby_toolkit::music::validate_config(&json!({"music_track_match":mode})).is_ok());
+    }
+    for mode in [json!("sequential"), json!("auto"), json!(false), json!([])] {
+        assert!(emby_toolkit::music::validate_config(&json!({"music_track_match":mode})).is_err());
+    }
+    assert!(emby_toolkit::music::validate_config(&json!({})).is_ok());
+}
+
 async fn request(app: &Router, method: &str, uri: &str, body: Value) -> (u16, Value) {
     let response = app
         .clone()
@@ -156,6 +167,14 @@ async fn local_music_scan_preview_write_and_cleanup_preserve_seed() {
         preview["result"]["preview"]["items"][0]["success"], true,
         "{preview}"
     );
+    // Changing automatic alignment invalidates the old preview before any write.
+    state.config.write().await["music_track_match"] = json!("ignore_duration");
+    let (_, stale) = request(&app, "POST", "/api/music/jobs/execute", json!({"preview_task_id":id})).await;
+    let rejected = finished(&state, stale["task_id"].as_str().unwrap()).await;
+    assert_eq!(rejected["state"], "failed", "{rejected}");
+    assert!(rejected.to_string().contains("音乐刮削设置已变化"), "{rejected}");
+    assert_eq!(std::fs::read(library.join("song.wav")).unwrap(), original);
+    state.config.write().await.as_object_mut().unwrap().remove("music_track_match");
     let (_, job) = request(
         &app,
         "POST",

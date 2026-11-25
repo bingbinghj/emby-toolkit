@@ -185,7 +185,8 @@ def preview(config, body):
                 info.raw_data = album_info.raw_data
             if operation != "edit":
                 info = _merge_music_audio_quality(info, meta)
-                info = catalog.simplified(info, config.get("music_metadata_to_simplified", True))
+                info = catalog.with_credit_aliases(info)
+            info = catalog.simplified(info, config.get("music_metadata_to_simplified", True))
             if relative in cue_digests and hashlib.sha256((path.parent / Path(meta.cue_filename).name).read_bytes()).hexdigest()!=cue_digests[relative]:
                 raise ValueError("CUE 在识别期间已变化，请重新预览")
             before = MusicInfo.from_meta(AudioMetadataHelper.read_tags(path) or MetaMusic()).to_dict()

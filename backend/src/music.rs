@@ -102,6 +102,11 @@ pub fn validate_config(config: &Value) -> Result<()> {
             return Err(ApiError::bad("音乐资料源无效"));
         }
     }
+    if let Some(mode) = config.get("music_track_match") {
+        if !matches!(mode.as_str(), Some("strict" | "fallback_ignore_duration" | "ignore_duration")) {
+            return Err(ApiError::bad("自动音乐曲目对齐方式无效"));
+        }
+    }
     if let Some(policies) = config.get("music_scraping_policies") {
         for field in ["tags", "cover", "lyrics"] {
             if !matches!(
@@ -559,6 +564,7 @@ async fn execute_inner(
                 || value["library_path"] != config["music_library_path"]
                 || value["seed_path"] != config["music_seed_path"]
                 || value["cue_enable"] != config["music_cue_enable"]
+                || value["auto_track_match"] != config["music_track_match"]
                 || value["write_policy"] != config["music_scraping_policies"]
                 || value["simplified"] != config["music_metadata_to_simplified"]
                 || (body["operation"] == "edit" && value["metadata"] != body["metadata"])
@@ -600,7 +606,7 @@ async fn execute_inner(
                     .ok_or_else(|| ApiError::bad("音乐预览结果无效"))?,
             );
         }
-        let value = json!({"operation":body["operation"],"metadata":body["metadata"],"music_type":body["music_type"],"music_track_match":body["music_track_match"],"music_cue_enable":body["music_cue_enable"],"collection_root":body["collection_root"],"items":rows,"selection":body["selection"],"selections":body["selections"],"library_path":config["music_library_path"],"seed_path":config["music_seed_path"],"cue_enable":config["music_cue_enable"],"write_policy":config["music_scraping_policies"],"simplified":config["music_metadata_to_simplified"]});
+        let value = json!({"operation":body["operation"],"metadata":body["metadata"],"music_type":body["music_type"],"music_track_match":body["music_track_match"],"music_cue_enable":body["music_cue_enable"],"collection_root":body["collection_root"],"items":rows,"selection":body["selection"],"selections":body["selections"],"library_path":config["music_library_path"],"seed_path":config["music_seed_path"],"cue_enable":config["music_cue_enable"],"auto_track_match":config["music_track_match"],"write_policy":config["music_scraping_policies"],"simplified":config["music_metadata_to_simplified"]});
         context.save_plan("music-preview", &value).await?;
         return Ok((200, json!({"preview":value,"message":"音乐预览已完成"})));
     }
@@ -642,6 +648,7 @@ async fn execute_inner(
                 return Err(ApiError::bad("音乐预览尚未完成"));
             }
             if preview["write_policy"] != config["music_scraping_policies"]
+                || preview["auto_track_match"] != config["music_track_match"]
                 || preview["simplified"] != config["music_metadata_to_simplified"]
             {
                 return Err(ApiError::bad("音乐刮削设置已变化，请重新预览"));

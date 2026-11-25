@@ -8,8 +8,8 @@ from .text import convert as zhconv_convert
 from .runtime import get_runtime_setting
 
 class MusicDisplay:
-    _music_simplified_text_fields = ("title","album","album_artist","album_type","version","metadata_category")
-    _music_simplified_list_fields = ("artists","secondary_types","genres","tags","names")
+    _music_simplified_text_fields = ("title","album","album_artist","album_type","version","metadata_category","comment","description")
+    _music_simplified_list_fields = ("artists","secondary_types","genres","tags","names","composers","conductors","orchestras")
 
     @staticmethod
     def _contains_han(value: str) -> bool:
@@ -17,6 +17,12 @@ class MusicDisplay:
         判断名称中是否包含可用于中文展示的汉字。
         """
         return any("\u3400" <= char <= "\u9fff" for char in value)
+
+    @staticmethod
+    def _chinese_aliases(artist: dict) -> list[str]:
+        return [alias.get("name") for alias in artist.get("aliases") or []
+                if isinstance(alias, dict) and (not alias.get("locale")
+                    or str(alias["locale"]).lower().replace("_", "-").split("-")[0] == "zh")]
 
     @classmethod
     def _music_artist_aliases(
@@ -49,11 +55,7 @@ class MusicDisplay:
             if not artist_id and current_name not in credit_names:
                 continue
             aliases = [credit.get("name"), artist.get("name")]
-            aliases.extend(
-                alias.get("name")
-                for alias in artist.get("aliases") or []
-                if isinstance(alias, dict)
-            )
+            aliases.extend(cls._chinese_aliases(artist))
             return list(dict.fromkeys(
                 str(alias).strip() for alias in aliases if str(alias or "").strip()
             ))
@@ -96,6 +98,43 @@ class MusicDisplay:
         ]
 
     @classmethod
+    def _simplify_credit_name(cls, info: MusicInfo | MusicAlbumInfo, name: str) -> str:
+        """复用当前资料里按身份绑定的别名；同名的不同人物不能相互替换。"""
+        identities: dict[str, list[str]] = {}
+        for index, artist in enumerate(info.artists or []):
+            identity = info.artist_ids[index] if index < len(info.artist_ids or []) else f"credit-{index}"
+            identities.setdefault(identity, []).extend([artist, *cls._music_artist_aliases(info, index)])
+        raw = info.raw_data if isinstance(info.raw_data, dict) else {}
+        relations = list(raw.get("relations") or [])
+        for relation in list(relations):
+            if isinstance(relation, dict) and relation.get("type") == "performance":
+                relations.extend((relation.get("work") or {}).get("relations") or [])
+        for relation in relations:
+            artist = relation.get("artist") if isinstance(relation, dict) else None
+            if isinstance(artist, dict) and artist.get("id"):
+                identities.setdefault(artist["id"], []).extend([
+                    relation.get("target-credit"), artist.get("name"),
+                    *cls._chinese_aliases(artist),
+                ])
+        matches = [aliases for aliases in identities.values()
+                   if name.casefold() in {str(value).casefold() for value in aliases if value}]
+        return cls._simplify_music_artist_name(name, matches[0]) if len(matches) == 1 else str(zhconv_convert(name, "zh-hans"))
+
+    @classmethod
+    def _simplify_album_artist(cls, info: MusicInfo, value: str) -> str:
+        """按专辑原始署名逐人转换合唱，不能按斜杠猜分人物或乐队名称。"""
+        raw = info.raw_data if isinstance(info.raw_data, dict) else {}
+        credits = [credit for credit in raw.get("album-artist-credit") or []
+                   if isinstance(credit, dict) and isinstance(credit.get("artist"), dict)]
+        names = [credit.get("name") or credit["artist"].get("name") or "" for credit in credits]
+        if names and all(names) and value == " / ".join(names):
+            return " / ".join(cls._simplify_music_artist_name(name, cls._chinese_aliases(credit["artist"]))
+                              for name, credit in zip(names, credits))
+        if info.artists and value == " / ".join(info.artists):
+            return " / ".join(cls._simplify_music_artist_names(info))
+        return cls._simplify_credit_name(info, value)
+
+    @classmethod
     def _simplify_recognized_music_info(cls, info: MusicInfo | MusicAlbumInfo) -> MusicInfo | MusicAlbumInfo:
         """
         按开关转换音乐及专辑曲目文本，保留来源缓存、原文别名和身份。
@@ -106,7 +145,12 @@ class MusicDisplay:
         for field_name in cls._music_simplified_text_fields:
             value = getattr(info, field_name, None)
             if isinstance(value, str):
-                converted = zhconv_convert(value, "zh-hans")
+                if field_name == "album_artist":
+                    converted = cls._simplify_album_artist(info, value)
+                elif field_name in {"title", "album"}:
+                    converted = cls._simplify_music_artist_name(value, getattr(info, field_name + "_aliases", None) or [])
+                else:
+                    converted = zhconv_convert(value, "zh-hans")
                 if converted != value:
                     updates[field_name] = converted
         for field_name in cls._music_simplified_list_fields:
@@ -115,6 +159,8 @@ class MusicDisplay:
                 converted_items = (
                     cls._simplify_music_artist_names(info)
                     if field_name == "artists"
+                    else [cls._simplify_credit_name(info, item) for item in value]
+                    if field_name in {"composers", "conductors", "orchestras"}
                     else [
                         zhconv_convert(item, "zh-hans")
                         if isinstance(item, str)
@@ -124,6 +170,14 @@ class MusicDisplay:
                 )
                 if converted_items != value:
                     updates[field_name] = converted_items
+        performers = {}
+        for role, names in (info.performers or {}).items():
+            converted_role = str(zhconv_convert(role, "zh-hans"))
+            performers[converted_role] = list(dict.fromkeys([
+                *performers.get(converted_role, []), *(cls._simplify_credit_name(info, name) for name in names),
+            ]))
+        if performers != info.performers:
+            updates["performers"] = performers
         if isinstance(info, MusicAlbumInfo):
             tracks = [cls._simplify_recognized_music_info(track) for track in info.tracks]
             if any(converted is not original for converted, original in zip(tracks, info.tracks)):
@@ -151,3 +205,19 @@ class MusicDisplay:
         for field_name, value in updates.items():
             setattr(simplified, field_name, value)
         return simplified
+
+
+def simplify_metadata_dict(value: dict) -> dict:
+    """直连和 GD 资料保留各自 ID、扩展字段，只转换标签文本。"""
+    if not get_runtime_setting("MUSIC_METADATA_TO_SIMPLIFIED", True):
+        return value
+    fields = (*MusicDisplay._music_simplified_text_fields, *MusicDisplay._music_simplified_list_fields,
+              "performers", "artist_ids", "artist_aliases", "title_aliases", "album_aliases", "raw_data")
+    info = MusicInfo(**{key: value[key] for key in fields if value.get(key) is not None})
+    converted = MusicDisplay._simplify_recognized_music_info(info)
+    result = {**value, **{key: getattr(converted, key) for key in fields if key in value}}
+    if "artist" in value:
+        result["artist"] = " / ".join(converted.artists) if converted.artists else zhconv_convert(value["artist"] or "", "zh-hans")
+    if isinstance(value.get("tracks"), list):
+        result["tracks"] = [simplify_metadata_dict(track) for track in value["tracks"]]
+    return result

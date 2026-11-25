@@ -526,74 +526,28 @@
     "route": "general"
   },
   {
-    "field": "music_cue_enable",
-    "label": "音乐 CUE 识别",
+    "field": "acoustid_api_key",
+    "label": "AcoustID API Key",
     "card": "音乐",
     "category": "music",
     "keywords": [
-      "音乐 CUE 识别",
+      "AcoustID API Key",
       "音乐",
-      "本地音乐库、识别与刮削"
+      "本地音乐库、识别与刮削",
+      "用于通过音频指纹识别 MusicBrainz 录音 ID"
     ],
     "route": "general"
   },
   {
-    "field": "music_metadata_to_simplified",
-    "label": "音乐媒体信息转简体中文",
+    "field": "theaudiodb_api_key",
+    "label": "TheAudioDB API Key",
     "card": "音乐",
     "category": "music",
     "keywords": [
-      "音乐媒体信息转简体中文",
+      "TheAudioDB API Key",
       "音乐",
-      "本地音乐库、识别与刮削"
-    ],
-    "route": "general"
-  },
-  {
-    "field": "music_lyrics_to_simplified",
-    "label": "歌词正文转简体中文",
-    "card": "音乐",
-    "category": "music",
-    "keywords": [
-      "歌词正文转简体中文",
-      "音乐",
-      "本地音乐库、识别与刮削"
-    ],
-    "route": "general"
-  },
-  {
-    "field": "music_local_cover_enable",
-    "label": "音乐本地封面",
-    "card": "音乐",
-    "category": "music",
-    "keywords": [
-      "音乐本地封面",
-      "音乐",
-      "本地音乐库、识别与刮削"
-    ],
-    "route": "general"
-  },
-  {
-    "field": "music_cover_file_patterns",
-    "label": "本地封面匹配规则",
-    "card": "音乐",
-    "category": "music",
-    "keywords": [
-      "本地封面匹配规则",
-      "音乐",
-      "本地音乐库、识别与刮削"
-    ],
-    "route": "general"
-  },
-  {
-    "field": "music_cover_proxy",
-    "label": "音乐封面代理地址",
-    "card": "音乐",
-    "category": "music",
-    "keywords": [
-      "音乐封面代理地址",
-      "音乐",
-      "本地音乐库、识别与刮削"
+      "本地音乐库、识别与刮削",
+      "用于音乐元数据和纯文本歌词兜底，默认 123 为官方公开 V1 Key"
     ],
     "route": "general"
   },
@@ -606,7 +560,7 @@
       "音乐发行地区优先级",
       "音乐",
       "本地音乐库、识别与刮削",
-      "例如 CN,TW,HK"
+      "MusicBrainz 版本结构同样准确时，按顺序优先选择发行地区，最多 3 项"
     ],
     "route": "general"
   },
@@ -619,31 +573,85 @@
       "音乐文字字形优先级",
       "音乐",
       "本地音乐库、识别与刮削",
-      "例如 Hans,Hant,Latn"
+      "MusicBrainz 版本结构同样准确时，按顺序优先选择标题字形，最多 3 项"
     ],
     "route": "general"
   },
   {
-    "field": "acoustid_api_key",
-    "label": "AcoustID API Key",
+    "field": "music_cover_proxy",
+    "label": "音乐封面代理地址",
     "card": "音乐",
     "category": "music",
     "keywords": [
-      "AcoustID API Key",
+      "音乐封面代理地址",
       "音乐",
-      "本地音乐库、识别与刮削"
+      "本地音乐库、识别与刮削",
+      "用于解决 coverartarchive.org 无法访问导致的封面不显示问题，留空则使用官方地址"
     ],
     "route": "general"
   },
   {
-    "field": "theaudiodb_api_key",
-    "label": "TheAudioDB API Key",
+    "field": "music_track_match",
+    "label": "自动整理曲目对齐方式",
     "card": "音乐",
     "category": "music",
     "keywords": [
-      "TheAudioDB API Key",
+      "自动整理曲目对齐方式",
       "音乐",
-      "本地音乐库、识别与刮削"
+      "本地音乐库、识别与刮削",
+      "用于重新刮削时的自动专辑识别。忽略时长仍要求曲名、碟号或曲序唯一对位；手选专辑使用本次曲目对齐方式。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "music_metadata_to_simplified",
+    "label": "音乐媒体信息转简体中文",
+    "card": "音乐",
+    "category": "music",
+    "keywords": [
+      "音乐媒体信息转简体中文",
+      "音乐",
+      "本地音乐库、识别与刮削",
+      "预览和写入时转换所有文本标签，含作曲、指挥、乐团、演奏者及备注描述；人物优先使用资料源的可信中文别名。已有标签设为“仅缺失”时仍保留原值；不自动翻译缺少中文别名的外文。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "music_local_cover_enable",
+    "label": "音乐本地封面",
+    "card": "音乐",
+    "category": "music",
+    "keywords": [
+      "音乐本地封面",
+      "音乐",
+      "本地音乐库、识别与刮削",
+      "在线封面不可用时使用同目录封面内嵌回退；关闭后仍可使用在线封面。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "music_cue_enable",
+    "label": "音乐 CUE 识别",
+    "card": "音乐",
+    "category": "music",
+    "keywords": [
+      "音乐 CUE 识别",
+      "音乐",
+      "本地音乐库、识别与刮削",
+      "已分轨专辑附带错误 CUE 时可关闭，改用音频标签和文件名；整轨专辑请保持开启。"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "music_cover_file_patterns",
+    "label": "本地封面匹配规则",
+    "card": "音乐",
+    "category": "music",
+    "keywords": [
+      "本地封面匹配规则",
+      "音乐",
+      "本地音乐库、识别与刮削",
+      "按顺序匹配封面文件名，多个规则用逗号分隔。"
     ],
     "route": "general"
   },
@@ -655,7 +663,8 @@
     "keywords": [
       "LRCLIB 服务地址",
       "音乐",
-      "本地音乐库、识别与刮削"
+      "本地音乐库、识别与刮削",
+      "可填写官方地址或兼容 LRCLIB API 的自建实例"
     ],
     "route": "general"
   },
@@ -667,31 +676,47 @@
     "keywords": [
       "AMLL TTML 服务地址",
       "音乐",
-      "本地音乐库、识别与刮削"
+      "本地音乐库、识别与刮削",
+      "可填写 AMLL TTML 歌词 API 地址或兼容的自建实例，无需 API Key"
     ],
     "route": "general"
   },
   {
     "field": "lyrics_batch_timeout",
-    "label": "歌词批次查询预算（秒）",
+    "label": "歌词批次查询预算",
     "card": "音乐",
     "category": "music",
     "keywords": [
-      "歌词批次查询预算（秒）",
+      "歌词批次查询预算",
       "音乐",
-      "本地音乐库、识别与刮削"
+      "本地音乐库、识别与刮削",
+      "单次音乐刮削用于所有在线歌词请求的最长时间，0 表示仅使用本地歌词"
     ],
     "route": "general"
   },
   {
     "field": "lyrics_provider_retry_max_wait",
-    "label": "歌词来源最大重试等待（秒）",
+    "label": "歌词来源最大重试等待",
     "card": "音乐",
     "category": "music",
     "keywords": [
-      "歌词来源最大重试等待（秒）",
+      "歌词来源最大重试等待",
       "音乐",
-      "本地音乐库、识别与刮削"
+      "本地音乐库、识别与刮削",
+      "Retry-After 超过该秒数时进入来源冷却，避免阻塞整张专辑"
+    ],
+    "route": "general"
+  },
+  {
+    "field": "music_lyrics_to_simplified",
+    "label": "歌词正文转简体中文",
+    "card": "音乐",
+    "category": "music",
+    "keywords": [
+      "歌词正文转简体中文",
+      "音乐",
+      "本地音乐库、识别与刮削",
+      "写入 LRC/TXT 时转换正文，保留时间轴、LRC 标签和来源 Lyricsfile；已有歌词需选择“覆盖”重新刮削。"
     ],
     "route": "general"
   },
