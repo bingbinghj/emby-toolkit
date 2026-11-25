@@ -83,18 +83,12 @@ def preflight(root, source, destination):
 
 def plan(root, row):
     updates = row["tag_updates"]
-    if not updates.keys() & {"title", "artist", "album", "albumartist", "date", "originaldate", "tracknumber", "discnumber"}:
-        return
     after = projected(row["before"], updates)
     if not str(after.get("title") or "").strip():
         row["rename_note"] = "当前没有曲名，保留现有文件和目录名称；标签仍按预览保存"
         return
     destination = render(after, Path(row["path"]).suffix)
-    try:
-        if destination == render(row["before"], Path(row["path"]).suffix):
-            return
-    except ValueError:
-        pass  # 修正原先不完整或无效的名称后，允许同步新名称。
+    # 标签可能已在之前保存；以磁盘路径判断是否仍需同步，不能仅比较标签变化。
     if destination == row["path"]:
         return
     source = root / row["path"]

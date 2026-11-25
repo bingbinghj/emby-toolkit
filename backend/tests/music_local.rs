@@ -11,6 +11,18 @@ use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 #[test]
+fn music_rename_defaults_off_and_only_accepts_boolean() {
+    let defaults: Value = serde_json::from_str(include_str!("../assets/config_defaults.json")).unwrap();
+    assert_eq!(defaults["music_rename_on_save"], false);
+    for value in [json!(true), json!(false)] {
+        assert!(emby_toolkit::music::validate_config(&json!({"music_rename_on_save":value})).is_ok());
+    }
+    for value in [json!("false"), json!(null), json!(0)] {
+        assert!(emby_toolkit::music::validate_config(&json!({"music_rename_on_save":value})).is_err());
+    }
+}
+
+#[test]
 fn music_search_default_only_accepts_supported_entities() {
     for kind in ["album", "recording"] {
         assert!(emby_toolkit::music::validate_config(&json!({"music_search_type":kind})).is_ok());
@@ -185,6 +197,14 @@ async fn local_music_scan_preview_write_and_cleanup_preserve_seed() {
     assert!(rejected.to_string().contains("音乐刮削设置已变化"), "{rejected}");
     assert_eq!(std::fs::read(library.join("song.wav")).unwrap(), original);
     state.config.write().await.as_object_mut().unwrap().remove("music_track_match");
+    // A rename toggle after preview must not silently change the confirmed paths.
+    state.config.write().await["music_rename_on_save"] = json!(true);
+    let (_, stale) = request(&app, "POST", "/api/music/jobs/execute", json!({"preview_task_id":id})).await;
+    let rejected = finished(&state, stale["task_id"].as_str().unwrap()).await;
+    assert_eq!(rejected["state"], "failed", "{rejected}");
+    assert!(rejected.to_string().contains("音乐刮削设置已变化"), "{rejected}");
+    assert_eq!(std::fs::read(library.join("song.wav")).unwrap(), original);
+    state.config.write().await["music_rename_on_save"] = json!(false);
     let (_, job) = request(
         &app,
         "POST",

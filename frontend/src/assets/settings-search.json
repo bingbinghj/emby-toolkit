@@ -539,6 +539,19 @@
     "route": "general"
   },
   {
+    "field": "music_rename_on_save",
+    "label": "名称变化后同步重命名",
+    "card": "音乐",
+    "category": "music",
+    "keywords": [
+      "名称变化后同步重命名",
+      "音乐",
+      "本地音乐库、识别与刮削",
+      "默认关闭。开启后按标题、艺术家和专辑等实际标签预览文件、目录及同名歌词的新名称；之前已修改标签的歌曲也会补做同步，确认保存后生效。"
+    ],
+    "route": "general"
+  },
+  {
     "field": "acoustid_api_key",
     "label": "AcoustID API Key",
     "card": "音乐",

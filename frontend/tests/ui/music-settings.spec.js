@@ -17,6 +17,10 @@ for (const theme of ['light', 'dark']) for (const width of [390, 1440]) {
     await page.addInitScript(theme => localStorage.setItem('moviepilot-theme-customizer', JSON.stringify({ theme, glassEnabled: true, glassAppearance: 'frosted', glassQuality: 'css' })), theme);
     await page.goto('/settings/general?tab=music');
     const card = page.locator('#music-settings');
+    const rename = card.locator('[data-field="music_rename_on_save"]');
+    await expect(rename.getByRole('checkbox')).not.toBeChecked();
+    await rename.getByRole('checkbox').check();
+    await expect(rename).toContainText('之前已修改标签的歌曲也会补做同步');
     const searchType = card.locator('[data-field="music_search_type"]');
     await expect(searchType).toContainText('专辑');
     await searchType.getByRole('combobox').click();
@@ -64,11 +68,22 @@ for (const theme of ['light', 'dark']) for (const width of [390, 1440]) {
     expect(saved.music_release_script_priority).toBe('Hans,Hant,Kore');
     expect(saved.music_track_match).toBe('fallback_ignore_duration');
     expect(saved.music_search_type).toBe('recording');
+    expect(saved.music_rename_on_save).toBe(true);
     expect(saved).not.toHaveProperty('emby_server_url');
     await page.reload();
     await expect(regions.locator('.v-chip')).toHaveText(['中国大陆', '中国香港', '韩国']);
     await expect(match).toContainText('严格校验失败时回落忽略时长');
     await expect(searchType).toContainText('单曲');
+    await expect(rename.getByRole('checkbox')).toBeChecked();
+    await rename.scrollIntoViewIfNeeded();
+    for (const selector of ['.v-label, .app-responsive-input__label', '.v-messages__message, .app-responsive-input__hint']) {
+      const text = rename.locator(selector).filter({ visible: true }).first();
+      const bounds = await text.evaluate(node => ({ width: node.clientWidth, scrollWidth: node.scrollWidth, height: node.clientHeight, scrollHeight: node.scrollHeight }));
+      expect(bounds.scrollWidth).toBeLessThanOrEqual(bounds.width + 1);
+      expect(bounds.scrollHeight).toBeLessThanOrEqual(bounds.height + 1);
+      for (const reading of await measureReadingContrast(page, [{ role: '同步重命名设置', locator: text }])) expect(reading.contrast).toBeGreaterThanOrEqual(4.5);
+    }
+    await page.screenshot({ path: testInfo.outputPath('music-rename-setting.png') });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBeTruthy();
   });
 }

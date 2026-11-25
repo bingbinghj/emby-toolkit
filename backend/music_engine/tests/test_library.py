@@ -77,7 +77,7 @@ def test_write_preserves_seed_and_independent_copy_can_be_edited_again(fixture,k
     result=operations.execute(config,{"item":row,"operation":"edit","execution_id":"abcd-1"})
     assert result["success"]
     assert source.read_bytes()==before
-    assert not target.exists()
+    assert result["target"] == "renamed.wav"
     target = root/result["target"]
     assert AudioMetadataHelper.read(target).title=="新曲名"
     assert not target.samefile(source) and not target.is_symlink()
@@ -245,6 +245,7 @@ def test_uploaded_cover_uses_existing_atomic_write_without_touching_seed(fixture
 
 def test_rescrape_renames_only_selected_track(fixture,monkeypatch):
     config,source,root=fixture
+    config["music_rename_on_save"] = True
     os.link(source,root/"first.wav");os.link(source,root/"second.wav")
     original=source.read_bytes()
     from etk_music.models import MusicInfo
@@ -463,6 +464,9 @@ def test_reorganize_is_not_supported(fixture):
         operations.preview(config, {'operation':'reorganize', 'paths':['song.wav']})
     row = plan(config, 'song.wav')
     row['target'] = 'moved.wav'
+    with pytest.raises(ValueError, match='同步重命名设置已变化'):
+        operations.execute(config, {'item':row, 'operation':'edit', 'execution_id':'abcd-8'})
+    config['music_rename_on_save'] = True
     with pytest.raises(ValueError, match='同步名称与预览标签不一致'):
         operations.execute(config, {'item':row, 'operation':'edit', 'execution_id':'abcd-8'})
     assert source.samefile(root/'song.wav')

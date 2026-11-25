@@ -16,6 +16,7 @@ def preview(config, relative="旧歌手/旧专辑/01.wav", **metadata):
 
 def setup_song(fixture):
     config, seed, root = fixture
+    config["music_rename_on_save"] = True
     source = root/"旧歌手/旧专辑/01.wav"
     source.parent.mkdir(parents=True)
     os.link(seed, source)
@@ -24,6 +25,87 @@ def setup_song(fixture):
     os.link(lyrics_seed, source.with_suffix(".lrc"))
     library.scan_one(config, str(source.relative_to(root)), "initial")
     return config, seed, root, source, lyrics_seed
+
+
+@pytest.mark.parametrize("enabled", [None, False])
+def test_rename_defaults_off_and_preserves_path_when_tags_change(fixture, enabled):
+    config, seed, root, source, lyrics_seed = setup_song(fixture)
+    config.pop("music_rename_on_save")
+    if enabled is not None:
+        config["music_rename_on_save"] = enabled
+    original = seed.read_bytes()
+    row = preview(config)
+    assert row["target"] == row["path"]
+    operations.execute(config, {"operation":"edit", "item":row, "execution_id":"eeaa-1"})
+    assert AudioMetadataHelper.read_tags(source).title == "Oh!"
+    assert source.with_suffix(".lrc").read_bytes() == lyrics_seed.read_bytes()
+    assert seed.read_bytes() == original
+
+
+def test_enabled_preview_renames_previously_saved_tags_without_another_tag_change(fixture):
+    config, seed, root, source, lyrics_seed = setup_song(fixture)
+    original = seed.read_bytes()
+    config["music_rename_on_save"] = False
+    row = preview(config)
+    operations.execute(config, {"operation":"edit", "item":row, "execution_id":"eeaa-2"})
+    assert source.exists()
+    config["music_rename_on_save"] = True
+    saved_audio = source.read_bytes()
+    row = preview(config, str(source.relative_to(root)), title="Oh!")
+    assert not row["tag_updates"]
+    assert row["target"] == "少女时代/Oh! (2010)/01 - Oh!.wav"
+    operations.execute(config, {"operation":"edit", "item":row, "execution_id":"eeaa-3"})
+    destination = root/row["target"]
+    assert destination.read_bytes() == saved_audio
+    assert destination.with_suffix(".lrc").read_bytes() == lyrics_seed.read_bytes()
+    assert not source.exists() and seed.read_bytes() == original
+    again = preview(config, row["target"], title="Oh!")
+    assert again["target"] == row["target"] and "rename_lyrics" not in again
+
+
+def test_saved_chinese_artist_tags_fix_existing_flac_directory(fixture):
+    import shutil
+    config, seed, root = fixture
+    config["music_rename_on_save"] = True
+    original = seed.with_suffix(".flac")
+    shutil.copyfile(Path(__file__).parent/"fixtures/audio/silence.flac", original)
+    metadata = {"title":"Girls’ Generation", "artists":["少女时代"], "album_artist":"少女时代", "album":"Girls’ Generation", "release_year":2007, "track_number":1}
+    assert AudioMetadataHelper.write(original, MetaMusic(**metadata))
+    path = root/"Girls’ Generation/Girls’ Generation (2007)/01 - Girls’ Generation.flac"
+    path.parent.mkdir(parents=True)
+    os.link(original, path)
+    path.with_suffix(".lrc").write_text("[00:01]歌词\n")
+    audio = original.read_bytes()
+    row = preview(config, str(path.relative_to(root)), **metadata)
+    assert not row["tag_updates"]
+    assert row["target"] == "少女时代/Girls’ Generation (2007)/01 - Girls’ Generation.flac"
+    operations.execute(config, {"operation":"edit", "item":row, "execution_id":"eeaa-5"})
+    assert (root/row["target"]).read_bytes() == audio == original.read_bytes()
+    assert (root/row["target"]).with_suffix(".lrc").read_text() == "[00:01]歌词\n"
+
+
+def test_relative_seed_symlink_is_isolated_before_rename_without_tag_changes(fixture):
+    config, seed, root = fixture
+    config["music_rename_on_save"] = True
+    path = root/"song.wav"
+    path.symlink_to(os.path.relpath(seed, root))
+    original = seed.read_bytes()
+    row = preview(config, path.name, title="原曲名")
+    assert not row["tag_updates"] and row["target"] != row["path"]
+    operations.execute(config, {"operation":"edit", "item":row, "execution_id":"eeaa-6"})
+    target = root/row["target"]
+    assert target.is_file() and not target.is_symlink()
+    assert seed.read_bytes() == original
+    assert AudioMetadataHelper.read_tags(target).title == "原曲名"
+
+
+def test_disabling_rename_after_preview_does_not_write(fixture):
+    config, seed, root, source, _ = setup_song(fixture)
+    row = preview(config)
+    config["music_rename_on_save"] = False
+    with pytest.raises(ValueError, match="设置已变化"):
+        operations.execute(config, {"operation":"edit", "item":row, "execution_id":"eeaa-7"})
+    assert source.samefile(seed) and not (root/row["target"]).exists()
 
 
 def test_mp_template_year_artist_track_disc_and_invalid_characters():
@@ -147,15 +229,17 @@ def test_destination_symlink_cannot_reach_seed(fixture):
 
 def test_lyrics_only_changes_keep_existing_path(fixture):
     config, _, _, source, _ = setup_song(fixture)
+    config["music_rename_on_save"] = False
     row = preview(config, lyrics="[00:00.50]只改歌词")
     assert row["target"] == row["path"] and "rename_lyrics" not in row
 
 
-def test_changes_unused_by_template_do_not_move_files(fixture):
+def test_unused_template_fields_keep_an_already_synchronized_path(fixture):
     config, seed, root, source, _ = setup_song(fixture)
-    assert preview(config, total_tracks=20)["target"] == str(source.relative_to(root))
-    assert AudioMetadataHelper.write(source, MetaMusic(album_artist="专辑艺人"))
-    assert preview(config, artists=["新的客串艺人"])["target"] == str(source.relative_to(root))
+    row = preview(config)
+    operations.execute(config, {"operation":"edit", "item":row, "execution_id":"eeaa-4"})
+    assert preview(config, row["target"], total_tracks=20)["target"] == row["target"]
+    assert preview(config, row["target"], artists=["新的客串艺人"])["target"] == row["target"]
 
 
 @pytest.mark.parametrize("shared", [False, True])
@@ -199,6 +283,7 @@ def test_other_audio_containers_keep_extension_stream_and_seed(fixture, extensio
     import shutil
     import subprocess
     config, seed, root = fixture
+    config["music_rename_on_save"] = True
     original = seed.with_suffix("."+extension)
     shutil.copyfile(Path(__file__).parent/"fixtures"/"audio"/("silence."+extension), original)
     assert AudioMetadataHelper.write(original, MetaMusic(title="原曲名", artists=["歌手"], album="专辑", track_number=1))

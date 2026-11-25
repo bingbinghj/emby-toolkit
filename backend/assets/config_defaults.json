@@ -134,6 +134,7 @@
     "musicbrainz"
   ],
   "music_search_type": "album",
+  "music_rename_on_save": false,
   "music_cue_enable": true,
   "music_track_match": "strict",
   "music_metadata_to_simplified": true,

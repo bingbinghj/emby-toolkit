@@ -31,7 +31,7 @@ function seek(value, end=null) {
   if(!audio.value || !Number.isFinite(value))return;
   clearRangeTimer();rangeEnd=Number.isFinite(end) && end>value ? end : null;
   pendingSeek=value;error.value='';position();
-  // 首次试听 preload=none；开始加载后在 loadedmetadata 应用所选歌词时间。
+  // 元数据尚未加载时，在 loadedmetadata 应用所选歌词时间。
   audio.value.play()?.catch(()=>{error.value='浏览器未能开始播放，请使用播放器的播放按钮。';});
 }
 defineExpose({seek});
@@ -41,7 +41,7 @@ onBeforeUnmount(stop);
 </script>
 <template>
   <div class="music-audio-player">
-    <audio ref="audio" :key="path" :src="url" controls preload="none" aria-label="本地歌曲试听" @loadedmetadata="position" @timeupdate="updateTime" @playing="scheduleRange" @seeked="scheduleRange" @ratechange="scheduleRange" @pause="clearRangeTimer" @waiting="clearRangeTimer" @ended="stop" @error="stop();error='无法试听此文件，请检查目录挂载和浏览器是否支持该音频格式。'" />
+    <audio ref="audio" :key="path" :src="url" controls preload="metadata" aria-label="本地歌曲试听" @loadedmetadata="position" @timeupdate="updateTime" @playing="scheduleRange" @seeked="scheduleRange" @ratechange="scheduleRange" @pause="clearRangeTimer" @waiting="clearRangeTimer" @ended="stop" @error="stop();error='无法试听此文件，请检查目录挂载和浏览器是否支持该音频格式。'" />
     <VAlert v-if="error" type="error" variant="tonal" class="mt-2">{{ error }}</VAlert>
     <div v-if="rows.length" ref="lyricPanel" class="player-lyrics mt-4" aria-label="同步歌词">
       <button v-for="(row,index) in rows" :key="index" type="button" class="lyric-line" :class="{'text-primary lyric-line--active':index===current}" :aria-current="index===current ? 'true' : undefined" :aria-label="`跳至 ${row.time.toFixed(2)} 秒：${row.text || '间奏'}`" @click="seek(row.time)">{{ row.text || '♪' }}</button>

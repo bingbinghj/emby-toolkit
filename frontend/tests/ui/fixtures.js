@@ -192,6 +192,10 @@ export const test = base.extend({
         return;
       }
       const payload = typeof handler.body === 'function' ? await handler.body(request) : clone(handler.body);
+      if (Buffer.isBuffer(payload)) {
+        await route.fulfill({ status: handler.status, contentType: 'audio/flac', body: payload });
+        return;
+      }
       await route.fulfill({ status: handler.status, json: payload });
     });
 

@@ -196,7 +196,8 @@ def preview(config, body):
                 rows[-1]["cover_edit"] = cover_url
                 rows[-1]["cover_upload"] = cover_upload
             try:
-                naming.plan(root, rows[-1])
+                if config.get("music_rename_on_save") is True:
+                    naming.plan(root, rows[-1])
             except (ValueError, OSError) as error:
                 rows[-1].update(success=False, message=str(error))
         except Exception as error:
@@ -347,6 +348,8 @@ def execute(config, body):
         if not saved:
             path = library.target(config, row["path"])
             if row["target"] != row["path"]:
+                if config.get("music_rename_on_save") is not True:
+                    raise ValueError("音乐同步重命名设置已变化，请重新预览")
                 naming.verify(root, row)
             if row.get("cue_digest"):
                 cue = path.parent / Path(row["cue_filename"]).name
@@ -377,7 +380,7 @@ def execute(config, body):
             lyrics_elapsed = time.monotonic()-started
             if library.signature(path)!=row["signature"]:
                 raise ValueError("音乐文件在读取资料时已变化，请重新预览")
-            changed = (write_tags and AudioMetadataHelper._needs_tag_write(audio, info, overwrite)) or bool(cover_data)
+            changed = (write_tags and AudioMetadataHelper._needs_tag_write(audio, info, overwrite)) or bool(cover_data) or (row["target"] != row["path"] and path.is_symlink())
             temporary = path.with_name("."+path.name[:40]+".etk-music-"+identifier)
             saved = {"state":"staging","path":row["path"],"target":row["target"],"original":row["signature"],"temporary":str(temporary),"changed":bool(changed),
                 "lyrics_edit":row.get("lyrics_edit"),

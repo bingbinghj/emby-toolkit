@@ -1,5 +1,8 @@
 import { test, expect } from './fixtures.js';
 import { measureReadingContrast } from './reading-contrast.js';
+import { readFileSync } from 'node:fs';
+
+const silence = readFileSync(new URL('../../../backend/music_engine/tests/fixtures/audio/silence.flac', import.meta.url));
 
 const track = {name:'01 - 测试歌曲.flac',type:'file',is_audio:true,path:'专辑/01 - 测试歌曲.flac',title:'测试歌曲',artists:['测试歌手'],album:'测试专辑',audio_specs:'FLAC / 24bit / 96kHz',signature:{mtime:1}};
 const previewItem = {...track,source:track.path,source_storage:'local',source_item:{storage:'local',path:track.path,type:'file'},target:track.path,success:true,metadata:{title:'新曲名'},before:{title:track.title},music:{title:'新曲名',album:'测试专辑',artists:track.artists,group_id:'group',group_directory:'专辑',file_role:'audio',status:'matched',online_confirmed:true,read_status:'tags',field_sources:{title:'remote'},media_source:'musicbrainz',media_id:'song'}};
@@ -398,6 +401,7 @@ test('批量刮削选择发行版本后将所选身份传入预览',async({page,
 });
 
 function music(api) {
+  api.respond('GET','/api/music/audio',()=>silence);
   api.respond('GET','/api/music/image',{message:'没有封面'},404);
   api.respond('GET','/api/music/library',{items:[track],total:1});
   api.respond('POST','/api/music/query/inspect',{...track,lyrics:'[00:01.00]测试歌词',lyrics_revision:{},music_search_type:'recording'});
@@ -726,7 +730,7 @@ for(const width of [390,1440]) test(`歌曲预览和歌词替换在 ${width}px �
   await page.goto('/music');
   await page.getByRole('button',{name:`预览 ${track.name}`,exact:true}).click();
   await expect(page.getByRole('dialog')).toContainText('歌曲预览');
-  await expect(page.locator('audio')).toHaveAttribute('preload','none');
+  await expect(page.locator('audio')).toHaveAttribute('preload','metadata');
   await expect(page.locator('audio')).toHaveAttribute('src',`/api/music/audio?path=${encodeURIComponent(track.path)}`);
   await page.getByRole('button',{name:'编辑歌词',exact:true}).click();
   await expect(page.getByRole('dialog')).toContainText('编辑音乐标签');
@@ -785,21 +789,26 @@ test('取消歌词搜索不改变编辑中的歌词，来源错误可读',async(
   expect(api.requests.filter(row=>row.path.startsWith('/api/music/jobs/'))).toHaveLength(0);
 });
 
-test('试听按需读取音频，可跳转歌词且关闭后停止',async({page,api})=>{
+for (const entry of ['preview', 'editor']) test(`播放前已显示实际时长，可跳转歌词且关闭后停止 ${entry}`,async({page,api},testInfo)=>{
   music(api);
   const wave=Buffer.alloc(44+8000*2*6);
   wave.write('RIFF');wave.writeUInt32LE(wave.length-8,4);wave.write('WAVEfmt ',8);wave.writeUInt32LE(16,16);wave.writeUInt16LE(1,20);wave.writeUInt16LE(1,22);wave.writeUInt32LE(8000,24);wave.writeUInt32LE(16000,28);wave.writeUInt16LE(2,32);wave.writeUInt16LE(16,34);wave.write('data',36);wave.writeUInt32LE(wave.length-44,40);
   let reads=0;
   await page.route('**/api/music/audio?*',route=>{reads++;return route.fulfill({status:200,contentType:'audio/wav',body:wave,headers:{'Accept-Ranges':'bytes'}});});
   await page.goto('/music');
-  await page.getByRole('button',{name:`预览 ${track.name}`,exact:true}).click();
+  if (entry === 'preview') await page.getByRole('button',{name:`预览 ${track.name}`,exact:true}).click();
+  else await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
   const audio=page.locator('audio');
-  await expect(audio).toBeVisible();expect(reads).toBe(0);
+  await expect(audio).toBeVisible();
+  await expect.poll(()=>audio.evaluate(node=>node.duration)).toBe(6);
+  expect(reads).toBeGreaterThan(0);
+  expect(await audio.evaluate(node=>({paused:node.paused,time:node.currentTime}))).toEqual({paused:true,time:0});
+  await audio.screenshot({path:testInfo.outputPath('duration-before-play.png')});
   await audio.evaluate(async node=>{window.__testAudio=node;await node.play();});
   await expect.poll(()=>audio.evaluate(node=>node.currentTime)).toBeGreaterThan(0);
   await page.getByRole('button',{name:'跳至 1.00 秒：测试歌词'}).click();
   await expect.poll(()=>audio.evaluate(node=>node.currentTime)).toBeGreaterThanOrEqual(1);
-  await page.getByRole('button',{name:'关闭',exact:true}).last().click();
+  await page.getByRole('button',{name:entry==='preview'?'关闭':'取消',exact:true}).last().click();
   await expect.poll(()=>page.evaluate(()=>window.__testAudio.paused)).toBe(true);
 });
 
