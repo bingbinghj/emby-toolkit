@@ -30,6 +30,20 @@ def plan(config,path,title="新曲名"):
     return result["items"][0]
 
 
+def test_editor_receives_saved_search_type_without_changing_file_identity(fixture):
+    config, source, root = fixture
+    os.link(source, root / 'song.wav')
+    original = source.read_bytes()
+    for setting, expected in [(None, 'album'), ('recording', 'recording'), ('album', 'album')]:
+        if setting is not None:
+            config['music_search_type'] = setting
+        inspected = library.inspect(config, 'song.wav')
+        assert inspected['music_search_type'] == expected
+        assert inspected['title'] == '原曲名'
+        assert (root / 'song.wav').samefile(source)
+        assert source.read_bytes() == original
+
+
 def test_invalid_cue_preview_explains_recovery_without_writes(fixture):
     config, source, root = fixture
     os.link(source, root / "song.wav")

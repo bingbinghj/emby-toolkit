@@ -124,7 +124,7 @@ onBeforeUnmount(() => {
         v-model="keyword"
         :mobile-layout="false"
         single-line
-        :placeholder="t('dialog.reorganize.mediaSearchPlaceholder')"
+        :placeholder="type === 'musicbrainz' ? '输入名称或 MusicBrainz ID' : t('dialog.reorganize.mediaSearchPlaceholder')"
         variant="outlined"
         append-inner-icon="mdi-magnify"
         flat

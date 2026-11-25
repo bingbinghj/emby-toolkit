@@ -102,6 +102,11 @@ pub fn validate_config(config: &Value) -> Result<()> {
             return Err(ApiError::bad("音乐资料源无效"));
         }
     }
+    if let Some(kind) = config.get("music_search_type") {
+        if !matches!(kind.as_str(), Some("album" | "recording")) {
+            return Err(ApiError::bad("音乐资料默认搜索类型无效"));
+        }
+    }
     if let Some(mode) = config.get("music_track_match") {
         if !matches!(mode.as_str(), Some("strict" | "fallback_ignore_duration" | "ignore_duration")) {
             return Err(ApiError::bad("自动音乐曲目对齐方式无效"));

@@ -526,6 +526,19 @@
     "route": "general"
   },
   {
+    "field": "music_search_type",
+    "label": "音乐资料默认搜索类型",
+    "card": "音乐",
+    "category": "music",
+    "keywords": [
+      "音乐资料默认搜索类型",
+      "音乐",
+      "本地音乐库、识别与刮削",
+      "打开音乐标签编辑时默认使用此类型，编辑时可临时切换。"
+    ],
+    "route": "general"
+  },
+  {
     "field": "acoustid_api_key",
     "label": "AcoustID API Key",
     "card": "音乐",

@@ -4,6 +4,45 @@ import { measureReadingContrast } from './reading-contrast.js';
 const track = {name:'01 - 测试歌曲.flac',type:'file',is_audio:true,path:'专辑/01 - 测试歌曲.flac',title:'测试歌曲',artists:['测试歌手'],album:'测试专辑',audio_specs:'FLAC / 24bit / 96kHz',signature:{mtime:1}};
 const previewItem = {...track,source:track.path,source_storage:'local',source_item:{storage:'local',path:track.path,type:'file'},target:track.path,success:true,metadata:{title:'新曲名'},before:{title:track.title},music:{title:'新曲名',album:'测试专辑',artists:track.artists,group_id:'group',group_directory:'专辑',file_role:'audio',status:'matched',online_confirmed:true,read_status:'tags',field_sources:{title:'remote'},media_source:'musicbrainz',media_id:'song'}};
 
+for (const setting of [undefined, 'album', 'recording']) test(`资料搜索遵循默认类型并隔离录音和专辑身份 ${setting || '旧配置'}`, async ({page,api}) => {
+  music(api);
+  const recording='11111111-1111-1111-1111-111111111111', album='949fe498-457d-401d-a271-6dce887283d2';
+  const kind=setting || 'album';
+  api.respond('POST','/api/music/query/inspect',{...track,album:'Oh!',year:2010,media_source:'musicbrainz',media_id:recording,music_type:'recording',music_search_type:setting});
+  api.respond('POST','/api/music/query/search',{items:[{media_source:'musicbrainz',media_id:kind==='album'?album:recording,music_type:kind,title:'Oh!',year:2010,type:'音乐'}]});
+  api.respond('POST','/api/music/query/detail',{media_source:'musicbrainz',media_id:album,musicbrainz_release_id:recording,title:'Oh!',releases:[{media_id:recording,title:'韩国首发版'}]});
+  api.respond('POST','/api/music/query/edit_metadata',{title:'Oh!'});
+  await page.goto('/music');
+  await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  const type=page.getByRole('combobox').filter({has:page.getByLabel('音乐类型',{exact:true})});
+  await expect(type).toContainText(kind==='album'?'专辑':'单曲');
+  await expect(page.getByLabel('搜索音乐资料',{exact:true}).and(page.locator('input'))).toHaveValue(kind==='album'?'Oh! (2010)':track.title);
+  await expect(page.getByLabel('MusicBrainz ID',{exact:true})).toHaveValue(kind==='album'?'':recording);
+  expect(api.requests.filter(row=>row.path==='/api/music/query/detail')).toHaveLength(0);
+  const id=kind==='album'?album:recording;
+  await page.getByLabel('搜索音乐资料',{exact:true}).and(page.locator('input')).fill(id);
+  await page.getByRole('button',{name:'搜索资料',exact:true}).click();
+  await expect(page.locator('.media-id-selector')).toContainText('Oh!（2010）');
+  expect(api.requests.filter(row=>row.path==='/api/music/query/search').at(-1).body).toMatchObject({query:id,kind,sources:['musicbrainz']});
+  await page.locator('.media-id-selector').getByText('Oh!（2010）',{exact:true}).click();
+  await expect(page.getByLabel('MusicBrainz ID',{exact:true})).toHaveValue(id);
+  if(kind==='album')await expect(page.getByRole('combobox').filter({has:page.getByLabel('具体发行版本',{exact:true})})).toContainText('韩国首发版');
+  await type.click();await page.getByRole('option',{name:kind==='album'?'单曲':'专辑',exact:true}).click();
+  await expect(page.getByLabel('MusicBrainz ID',{exact:true})).toHaveValue('');
+  expect(api.requests.filter(row=>row.path==='/api/music/jobs/execute')).toHaveLength(0);
+});
+
+test('默认专辑资料使用歌曲已有专辑组 ID',async({page,api})=>{
+  music(api);
+  const group='949fe498-457d-401d-a271-6dce887283d2', recording='11111111-1111-1111-1111-111111111111';
+  api.respond('POST','/api/music/query/inspect',{...track,media_source:'musicbrainz',media_id:recording,music_type:'recording',musicbrainz_release_group_id:group});
+  api.respond('POST','/api/music/query/detail',{media_source:'musicbrainz',media_id:group,musicbrainz_release_id:recording,releases:[{media_id:recording,title:'专辑发行版'}]});
+  await page.goto('/music');await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await expect(page.getByLabel('MusicBrainz ID',{exact:true})).toHaveValue(group);
+  await expect(page.getByRole('combobox').filter({has:page.getByLabel('具体发行版本',{exact:true})})).toContainText('专辑发行版');
+  expect(api.requests.filter(row=>row.path==='/api/music/query/detail').map(row=>row.body.id)).toEqual([group]);
+});
+
 for(const width of [390,1440]) test(`音乐任务提示完整显示且不被路径卡片遮挡 ${width}px`,async({page,api},testInfo)=>{
   music(api);await page.setViewportSize({width,height:800});
   api.respond('GET','/api/music/library',{items:[track],tracks:Array.from({length:50},(_,i)=>({...track,path:`album/${i}.flac`,title:`歌曲 ${i}`})),total:1000});
@@ -71,17 +110,17 @@ for(const theme of ['light','dark'])for(const width of [390,1440]) test(`备注�
   await expect(page.getByLabel('简介 / 描述',{exact:true}).and(page.locator('textarea'))).toHaveValue('');
 });
 
-test('歌曲资料、封面及歌词默认只搜索曲名，关闭后重置关键词',async({page,api})=>{
+test('设置默认单曲后资料与封面使用曲名，关闭后重置关键词',async({page,api})=>{
   music(api);
-  api.respond('POST','/api/music/query/inspect',{...track,title:'天地行',artists:['戴荃']});
+  api.respond('POST','/api/music/query/inspect',{...track,title:'天地行',artists:['戴荃'],music_search_type:'recording'});
   api.respond('POST','/api/music/query/lyrics_search',{items:[],has_more:false});
   await page.goto('/music');
   await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
-  await expect(page.getByLabel('按名称搜索音乐资料',{exact:true})).toHaveValue('天地行');
+  await expect(page.getByLabel('搜索音乐资料',{exact:true}).and(page.locator('input'))).toHaveValue('天地行');
   await page.getByRole('button',{name:'搜索资料',exact:true}).click();
   await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/query/search').at(-1)?.body.query).toBe('天地行');
   await page.locator('.media-id-selector').getByRole('button',{name:'关闭',exact:true}).click();
-  await page.getByLabel('按名称搜索音乐资料',{exact:true}).fill('手工关键词');
+  await page.getByLabel('搜索音乐资料',{exact:true}).and(page.locator('input')).fill('手工关键词');
   await page.getByRole('button',{name:'搜索资料',exact:true}).click();
   await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/query/search').at(-1)?.body.query).toBe('手工关键词');
   await page.locator('.media-id-selector').getByRole('button',{name:'关闭',exact:true}).click();
@@ -161,14 +200,14 @@ test('标签支持名称与 MusicBrainz ID，流媒体专辑逐首选择，单�
   await page.getByRole('option',{name:'网易云音乐',exact:true}).click();
   await page.getByRole('combobox').filter({has:page.getByLabel('音乐类型',{exact:true})}).click();
   await page.getByRole('option',{name:'专辑',exact:true}).click();
-  await expect(page.getByLabel('按名称搜索音乐资料',{exact:true})).toHaveValue(track.album);
-  await page.getByLabel('按名称搜索音乐资料',{exact:true}).fill('手工输入的专辑名');
+  await expect(page.getByLabel('搜索音乐资料',{exact:true}).and(page.locator('input'))).toHaveValue(track.album);
+  await page.getByLabel('搜索音乐资料',{exact:true}).and(page.locator('input')).fill('手工输入的专辑名');
   api.respond('POST','/api/music/query/search',{items:[{media_source:'netease',media_id:'album123',music_type:'album',title:'专辑候选',type:'音乐'}]});
   api.respond('POST','/api/music/query/detail',{title:'专辑候选',tracks:[{media_id:'song123',title:'封面曲目',music_type:'recording'}]});
   await page.getByRole('button',{name:'从资料源替换封面',exact:true}).click();
   await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/query/search').at(-1)?.body.query).toBe('手工输入的专辑名');
   await page.locator('.media-id-selector').getByRole('button',{name:'关闭',exact:true}).click();
-  await expect(page.getByLabel('按名称搜索音乐资料',{exact:true})).toHaveValue(track.album);
+  await expect(page.getByLabel('搜索音乐资料',{exact:true}).and(page.locator('input'))).toHaveValue(track.album);
   await page.getByRole('button',{name:'从资料源替换封面',exact:true}).click();
   await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/query/search').at(-1)?.body.query).toBe(track.album);
   await page.getByText('专辑候选',{exact:true}).click();
@@ -339,7 +378,7 @@ test('批量刮削选择发行版本后将所选身份传入预览',async({page,
 function music(api) {
   api.respond('GET','/api/music/image',{message:'没有封面'},404);
   api.respond('GET','/api/music/library',{items:[track],total:1});
-  api.respond('POST','/api/music/query/inspect',{...track,lyrics:'[00:01.00]测试歌词',lyrics_revision:{}});
+  api.respond('POST','/api/music/query/inspect',{...track,lyrics:'[00:01.00]测试歌词',lyrics_revision:{},music_search_type:'recording'});
   api.respond('POST','/api/music/query/selection',request=>({paths:request.body.paths}));
   api.respond('POST','/api/music/jobs/preview',{task_id:'music-preview'},202);
   api.respond('GET','/api/tasks/result/music-preview',{state:'completed',result:{preview:{operation:'rescrape',items:[previewItem]}}});
@@ -1129,10 +1168,10 @@ test('专辑搜索默认携带当前歌曲发行年份并在重开后重置',asy
   music(api);api.respond('POST','/api/music/query/inspect',{...track,album:'GIRLS’ GENERATION II ～Girls & Peace～',release_year:2012});
   await page.goto('/music');await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
   await page.getByRole('combobox').filter({has:page.getByLabel('音乐类型',{exact:true})}).click();await page.getByRole('option',{name:'专辑',exact:true}).click();
-  const query=page.getByLabel('按名称搜索音乐资料',{exact:true});
+  const query=page.getByLabel('搜索音乐资料',{exact:true}).and(page.locator('input'));
   await expect(query).toHaveValue('GIRLS’ GENERATION II ～Girls & Peace～ (2012)');
   await query.fill('修改的搜索词');await page.getByRole('button',{name:'取消',exact:true}).click();
   await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
   await page.getByRole('combobox').filter({has:page.getByLabel('音乐类型',{exact:true})}).click();await page.getByRole('option',{name:'专辑',exact:true}).click();
-  await expect(page.getByLabel('按名称搜索音乐资料',{exact:true})).toHaveValue('GIRLS’ GENERATION II ～Girls & Peace～ (2012)');
+  await expect(page.getByLabel('搜索音乐资料',{exact:true}).and(page.locator('input'))).toHaveValue('GIRLS’ GENERATION II ～Girls & Peace～ (2012)');
 });

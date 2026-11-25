@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from itertools import zip_longest
 from pathlib import Path
+import re
 from .audio import AudioMetadataHelper
 from .meta import MetaMusic
 from .models import MusicInfo, MusicAlbumInfo, MusicLyrics
@@ -48,7 +49,13 @@ def search(query, sources, kind=None, count=30):
     def fetch(source):
         try:
             with capture_music_recognition(seconds=90, request_limit=16) as observed:
-                result = provider(source).search_music(meta, limit=count, media_source=MediaSource(source), music_types=[kind] if kind else ["recording", "album"] )
+                module = provider(source)
+                if source == "musicbrainz" and re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", query.strip()):
+                    identity = query.strip().lower()
+                    item = module.music_artist(MediaSource(source), identity) if kind == "artist" else module.recognize_music(MediaSource(source), identity, music_type=kind)
+                    result = [item] if item else []
+                else:
+                    result = module.search_music(meta, limit=count, media_source=MediaSource(source), music_types=[kind] if kind else ["recording", "album"] )
                 if observed.status in {"service_error", "budget_exhausted"}:
                     errors[source] = observed.message or "音乐资料源暂时不可用"
                 return result or []

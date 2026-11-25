@@ -6,6 +6,7 @@ const defaults = JSON.parse(readFileSync(new URL('../../../backend/assets/config
 
 for (const theme of ['light', 'dark']) for (const width of [390, 1440]) {
   test(`MP 音乐设置多选顺序、上限、保存与可读性 ${theme} ${width}px`, async ({ page, api }, testInfo) => {
+    test.setTimeout(60000);
     const config = structuredClone(defaults);
     api.respond('GET', '/api/config', () => config);
     api.respond('POST', '/api/config', request => {
@@ -16,6 +17,10 @@ for (const theme of ['light', 'dark']) for (const width of [390, 1440]) {
     await page.addInitScript(theme => localStorage.setItem('moviepilot-theme-customizer', JSON.stringify({ theme, glassEnabled: true, glassAppearance: 'frosted', glassQuality: 'css' })), theme);
     await page.goto('/settings/general?tab=music');
     const card = page.locator('#music-settings');
+    const searchType = card.locator('[data-field="music_search_type"]');
+    await expect(searchType).toContainText('专辑');
+    await searchType.getByRole('combobox').click();
+    await page.getByRole('option', { name: '单曲', exact: true }).click();
     const regions = card.locator('[data-field="music_release_region_priority"]');
     const scripts = card.locator('[data-field="music_release_script_priority"]');
     await regions.locator('input').press('ArrowDown');
@@ -39,7 +44,7 @@ for (const theme of ['light', 'dark']) for (const width of [390, 1440]) {
     await expect(page.getByRole('option')).toHaveCount(3);
     await page.getByRole('option', { name: '严格校验失败时回落忽略时长', exact: true }).click();
     await expect(card).toContainText('已有标签设为“仅缺失”时仍保留原值');
-    for (const field of [regions, scripts, match]) {
+    for (const field of [searchType, regions, scripts, match]) {
       await field.evaluate(node => node.scrollIntoView({ block: 'center' }));
       const text = field.locator('.v-select__selection-text, .v-chip__content').first();
       const readings = await measureReadingContrast(page, [{ role: await field.getAttribute('data-field'), locator: text }]);
@@ -58,10 +63,12 @@ for (const theme of ['light', 'dark']) for (const width of [390, 1440]) {
     expect(saved.music_release_region_priority).toBe('CN,HK,KR');
     expect(saved.music_release_script_priority).toBe('Hans,Hant,Kore');
     expect(saved.music_track_match).toBe('fallback_ignore_duration');
+    expect(saved.music_search_type).toBe('recording');
     expect(saved).not.toHaveProperty('emby_server_url');
     await page.reload();
     await expect(regions.locator('.v-chip')).toHaveText(['中国大陆', '中国香港', '韩国']);
     await expect(match).toContainText('严格校验失败时回落忽略时长');
+    await expect(searchType).toContainText('单曲');
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBeTruthy();
   });
 }

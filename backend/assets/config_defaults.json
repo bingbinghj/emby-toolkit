@@ -133,6 +133,7 @@
   "music_sources": [
     "musicbrainz"
   ],
+  "music_search_type": "album",
   "music_cue_enable": true,
   "music_track_match": "strict",
   "music_metadata_to_simplified": true,

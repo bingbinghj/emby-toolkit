@@ -18,7 +18,8 @@ const props = defineProps({ item: Object, error: String, busy: Boolean, focusFie
 const emit = defineEmits(['close','save']);
 const { smAndDown } = useDisplay();
 const draft = ref(props.item ? JSON.parse(JSON.stringify(props.item)) : null);
-const source = ref(props.item?.media_source || 'musicbrainz'), entity = ref(props.item?.music_type === 'album' ? 'album' : 'recording'), identity = ref(props.item?.media_id || '');
+const source = ref(props.item?.media_source || 'musicbrainz'), entity = ref(props.item?.music_search_type === 'recording' ? 'recording' : 'album');
+const identity = ref(entity.value === (props.item?.music_type || 'recording') ? props.item?.media_id || '' : entity.value === 'album' && source.value === 'musicbrainz' ? props.item?.musicbrainz_release_group_id || '' : '');
 const selectedRelease=ref(''), releaseLoading=ref(false),releaseLoadError=ref('');
 const sourceMetadata=ref(null), albumDetails=ref(null), chosenTrack=ref(null);
 const trackMatch=ref('strict'), cueEnable=ref(props.item?.music_cue_enable !== false), appliedSelection=ref(null);
@@ -36,7 +37,7 @@ function selectTrack(index){
 }
 const releaseError=computed(()=>releaseLoadError.value || musicReleaseError({media_source:source.value,music_type:entity.value,media_id:identity.value,musicbrainz_release_id:selectedRelease.value}));
 watch([source,entity,identity],()=>{selectedRelease.value='';albumDetails.value=null;chosenTrack.value=null;sourceMetadata.value=null;},{flush:'sync'});
-watch(entity,()=>{trackMatch.value='strict';},{flush:'sync'});
+watch(entity,()=>{identity.value='';trackMatch.value='strict';},{flush:'sync'});
 watch([source,entity,identity,selectedRelease],()=>{appliedSelection.value=null;},{flush:'sync'});
 const searchOpen = ref(false), lookupBusy = ref(false), error = ref(''), offset = ref(0);
 const lyricsSearchOpen = ref(false), form = ref(null), coverOnly = ref(false), coverError = ref(false);
@@ -60,7 +61,7 @@ const credits = [['artists','艺术家'],['composers','作曲'],['conductors','�
 const ids = [['media_id','MusicBrainz 录音 ID'],['musicbrainz_release_id','MusicBrainz 发行 ID'],['musicbrainz_release_group_id','MusicBrainz 专辑组 ID'],['musicbrainz_release_track_id','MusicBrainz 发行曲目 ID']];
 async function applySelection(item) {
   if (!draft.value || lookupBusy.value) return;
-  identity.value = item.id || identity.value; entity.value = item.music_type || entity.value;
+  entity.value = item.music_type || entity.value; identity.value = item.id || identity.value;
   searchOpen.value = false;
   if(item.id && entity.value==='album' && source.value==='musicbrainz' && !coverOnly.value)return;
   lookupBusy.value = true; error.value = '';
@@ -116,7 +117,7 @@ onMounted(focusEditor);
         <VForm v-if="draft" ref="form" :disabled="lookupBusy || busy || coverBusy" @submit.prevent="save">
           <MusicAudioPlayer v-if="visible && !searchOpen && !lyricsSearchOpen && !timelineOpen && !translationOpen" :path="draft.path" :lyrics="draft.lyrics" class="mb-5" />
           <VRow><VCol cols="12" md="6"><VSelect v-model="source" :items="musicSources" label="资料来源" prepend-inner-icon="mdi-database-search" @update:model-value="identity=''" /></VCol><VCol cols="12" md="6"><VSelect v-model="entity" :items="entityOptions" @update:model-value="searchKeyword=musicSearchTerm(draft, $event)" label="音乐类型" prepend-inner-icon="mdi-music-box-multiple" /></VCol>
-          <VCol cols="12"><VTextField v-model="searchKeyword" label="按名称搜索音乐资料" :mobile-layout="false" prepend-inner-icon="mdi-magnify" @keyup.enter.prevent="searchMetadata()"><template #append><VBtn variant="tonal" :disabled="lookupBusy || !searchKeyword.trim()" @click="searchMetadata()">搜索资料</VBtn></template></VTextField></VCol>
+          <VCol cols="12"><VTextField v-model="searchKeyword" label="搜索音乐资料" :placeholder="source === 'musicbrainz' ? '输入名称或 MusicBrainz ID' : '输入音乐名称'" :hint="source === 'musicbrainz' ? 'ID 按所选音乐类型精确查询：专辑使用专辑组 ID，单曲使用录音 ID。' : ''" :persistent-hint="source === 'musicbrainz'" :mobile-layout="false" prepend-inner-icon="mdi-magnify" @keyup.enter.prevent="searchMetadata()"><template #append><VBtn variant="tonal" :disabled="lookupBusy || !searchKeyword.trim()" @click="searchMetadata()">搜索资料</VBtn></template></VTextField></VCol>
           <VCol cols="12"><VTextField v-model.trim="identity" :label="`${musicSources.find(item=>item.value===source)?.title || source} ID`" prepend-inner-icon="mdi-identifier" hint="搜索资料并填入下方标签，核对后预览保存。" persistent-hint :error-messages="validId ? [] : ['ID 格式不正确']" @keyup.enter.prevent="validId && identity && readIdentity()"><template #append-inner><VBtn icon="mdi-magnify" variant="text" aria-label="搜索音乐资料" :disabled="lookupBusy" @click="searchMetadata()" /></template><template #append><VBtn variant="tonal" :loading="lookupBusy" :disabled="!identity || !validId || !!releaseError || releaseLoading" @click="readIdentity()">读取资料</VBtn></template></VTextField></VCol><VCol v-if="source==='musicbrainz' && entity==='album'" cols="12"><MusicReleaseSelect v-model="selectedRelease" :album-id="identity" :disabled="busy || lookupBusy" @loading="releaseLoading=$event" @error="releaseLoadError=$event" @album="receiveAlbum" /></VCol><VCol v-if="albumTracks.length" cols="12"><VSelect :model-value="chosenTrack" :items="albumTracks" label="专辑曲目" :disabled="releaseLoading || lookupBusy || busy" @update:model-value="selectTrack"><template #item="{props:itemProps}"><VListItem v-bind="itemProps" role="option" class="music-track-option" /></template></VSelect></VCol></VRow>
           <MusicProcessingOptions v-model:cue-enable="cueEnable" v-model:track-match="trackMatch" :entity="entity" :disabled="busy || lookupBusy" class="mt-4" />
           <VDivider class="my-6" />

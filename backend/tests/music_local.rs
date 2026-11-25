@@ -11,6 +11,16 @@ use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 #[test]
+fn music_search_default_only_accepts_supported_entities() {
+    for kind in ["album", "recording"] {
+        assert!(emby_toolkit::music::validate_config(&json!({"music_search_type":kind})).is_ok());
+    }
+    for kind in [json!("artist_collection"), json!(""), json!(null), json!(false)] {
+        assert!(emby_toolkit::music::validate_config(&json!({"music_search_type":kind})).is_err());
+    }
+}
+
+#[test]
 fn automatic_music_alignment_rejects_sequential_and_unknown_modes() {
     for mode in ["strict", "fallback_ignore_duration", "ignore_duration"] {
         assert!(emby_toolkit::music::validate_config(&json!({"music_track_match":mode})).is_ok());
