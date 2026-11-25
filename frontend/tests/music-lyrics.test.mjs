@@ -1,7 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { shiftLyrics, parseLyrics, formatLyrics, timelineRows, serializeTimeline, mergeLyricsTranslation, lyricTranslationRows } from '../src/components/music/lyrics.js';
-import { musicSearchTerm, musicReleaseError, musicReleaseOptions, musicFieldOptions, metadataSources, lyricSources } from '../src/components/music/utils.js';
+import { musicSearchTerm, musicReleaseError, musicReleaseOptions, musicFieldOptions, musicMetadataValue, metadataSources, lyricSources } from '../src/components/music/utils.js';
+
+test('应用空资料允许清空问号署名，保留正常姓名和合法问号',()=>{
+  assert.deepEqual(musicMetadataValue(['? ??'],[]),[]);
+  assert.deepEqual(musicMetadataValue(['? ??','이재명'],null),['이재명']);
+  assert.equal(musicMetadataValue('????',null),'');
+  assert.deepEqual(musicMetadataValue(['? ??'],['이재명']),['이재명']);
+  for(const value of ['?','Who?','이재명','??? ???? (Stick Wit U)'])assert.equal(musicMetadataValue(value,''),value);
+});
 
 test('歌曲、歌手、专辑搜索默认使用当前歌曲的对应信息',()=>{
   const item={title:'Oh!',artists:['少女时代'],album:'The Second Album'};

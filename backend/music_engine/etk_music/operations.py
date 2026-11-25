@@ -25,6 +25,8 @@ from . import lyrics as local_lyrics
 
 EDIT_FIELDS = {"title", "artists", "album", "album_artist", "track_number", "total_tracks", "disc_number", "total_discs", "year", "release_year", "original_year", "composers", "conductors", "orchestras", "performers", "isrc", "media_source", "media_id", "music_type", "musicbrainz_release_id", "musicbrainz_release_group_id", "musicbrainz_release_track_id"}
 EDIT_FIELDS.update({"comment", "description"})
+EMPTY_TAG_FIELDS = {"title": "title", "artists": "artist", "album": "album", "album_artist": "albumartist", "isrc": "isrc",
+                    "composers": "composer", "conductors": "conductor", "orchestras": "orchestra", "performers": "performer"}
 
 def uploaded_cover(value):
     if not isinstance(value, str) or len(value) > 1_400_000:
@@ -159,7 +161,9 @@ def preview(config, body):
                 for key in identity_keys:
                     if values.get(key) and not AudioMetadataHelper._normalize_musicbrainz_id(values[key]):
                         raise ValueError("MusicBrainz 身份必须为有效 UUID")
-                info = MusicInfo.from_dict({**info.to_dict(), **{key: value for key, value in values.items() if key in EDIT_FIELDS}})
+                current = info.to_dict()
+                current.pop("artist", None)  # 派生显示字段不能把已清空的 artists 补回来。
+                info = MusicInfo.from_dict({**current, **{key: value for key, value in values.items() if key in EDIT_FIELDS}})
                 manual_lyrics = local_lyrics.prepare_edit(path, values)
                 cover_url = values.get("cover_url") or ""
                 cover_upload = values.get("cover_upload") or ""
@@ -190,7 +194,10 @@ def preview(config, body):
             if relative in cue_digests and hashlib.sha256((path.parent / Path(meta.cue_filename).name).read_bytes()).hexdigest()!=cue_digests[relative]:
                 raise ValueError("CUE 在识别期间已变化，请重新预览")
             before = MusicInfo.from_meta(AudioMetadataHelper.read_tags(path) or MetaMusic()).to_dict()
-            rows.append({"path": relative, "target": relative, "signature": identity, "metadata": info.to_dict(), "before": before, "tag_updates": tag_updates(path, info, config, operation), "success": True, "music_layout": meta.music_layout, "cue_filename": meta.cue_filename, "cue_digest":cue_digests.get(relative)})
+            # 显式清空与资料缺失分开；仅在用户预览过的清空请求中删除原标签。
+            clear_tags = [tag for field, tag in EMPTY_TAG_FIELDS.items()
+                          if operation == "edit" and field in values and values[field] in (None, "", [], {})]
+            rows.append({"path": relative, "target": relative, "signature": identity, "metadata": info.to_dict(), "before": before, "clear_tags": clear_tags, "tag_updates": tag_updates(path, info, config, operation, clear_tags), "success": True, "music_layout": meta.music_layout, "cue_filename": meta.cue_filename, "cue_digest":cue_digests.get(relative)})
             if operation == "edit":
                 rows[-1]["lyrics_edit"] = manual_lyrics
                 rows[-1]["cover_edit"] = cover_url
@@ -228,11 +235,11 @@ def preview(config, body):
     return {"operation": operation, "items": rows, "library_path":config.get("music_library_path"), "seed_path":config.get("music_seed_path"), "cue_enable":config.get("music_cue_enable", True), "write_policy":config.get("music_scraping_policies"), "simplified":config.get("music_metadata_to_simplified")}
 
 
-def tag_updates(path, info, config, operation):
+def tag_updates(path, info, config, operation, clear_tags=()):
     policy = (config.get("music_scraping_policies") or {}).get("tags", "missingOnly")
     if operation != "edit" and policy == "skip":
         return {}
-    return AudioMetadataHelper._tag_updates(AudioMetadataHelper._open_audio(path), info, operation=="edit" or policy=="overwrite")
+    return AudioMetadataHelper._tag_updates(AudioMetadataHelper._open_audio(path), info, operation=="edit" or policy=="overwrite", clear_tags)
 
 
 def cover(info, path, config):
@@ -362,6 +369,7 @@ def execute(config, body):
             policies = config.get("music_scraping_policies") or {"tags":"missingOnly","cover":"missingOnly","lyrics":"upgrade"}
             write_tags = operation=="edit" or policies.get("tags")!="skip"
             overwrite = operation=="edit" or policies.get("tags")=="overwrite"
+            clear_tags = tuple(row.get("clear_tags", ())) if operation == "edit" else ()
             audio = AudioMetadataHelper._open_audio(path)
             cover_data, cover_mime = None, "image/jpeg"
             if operation=="edit" and row.get("cover_upload"):
@@ -380,7 +388,7 @@ def execute(config, body):
             lyrics_elapsed = time.monotonic()-started
             if library.signature(path)!=row["signature"]:
                 raise ValueError("音乐文件在读取资料时已变化，请重新预览")
-            changed = (write_tags and AudioMetadataHelper._needs_tag_write(audio, info, overwrite)) or bool(cover_data) or (row["target"] != row["path"] and path.is_symlink())
+            changed = (write_tags and AudioMetadataHelper._needs_tag_write(audio, info, overwrite, clear_tags)) or bool(cover_data) or (row["target"] != row["path"] and path.is_symlink())
             temporary = path.with_name("."+path.name[:40]+".etk-music-"+identifier)
             saved = {"state":"staging","path":row["path"],"target":row["target"],"original":row["signature"],"temporary":str(temporary),"changed":bool(changed),
                 "lyrics_edit":row.get("lyrics_edit"),
@@ -393,12 +401,12 @@ def execute(config, body):
                         shutil.copyfileobj(source, output, 1024*1024)
                         output.flush(); os.fsync(output.fileno())
                     temporary.chmod(path.stat().st_mode | 0o600)
-                    if not AudioMetadataHelper.write(temporary, info, cover_data=cover_data, cover_mime=cover_mime, write_tags=write_tags, overwrite=overwrite, cover_overwrite=operation=="edit" or policies.get("cover")=="overwrite"):
+                    if not AudioMetadataHelper.write(temporary, info, cover_data=cover_data, cover_mime=cover_mime, write_tags=write_tags, overwrite=overwrite, cover_overwrite=operation=="edit" or policies.get("cover")=="overwrite", clear_tags=clear_tags):
                         raise ValueError("音乐标签或封面写入失败")
-                    if write_tags and operation == "edit" and any(getattr(info, key) is not None for key in ("comment", "description")):
-                        remaining = AudioMetadataHelper._tag_updates(AudioMetadataHelper._open_audio(temporary), info, True)
-                        if remaining.keys() & {"comment", "description"}:
-                            raise ValueError("备注或描述未正确写入，保留原音乐文件")
+                    if write_tags and operation == "edit":
+                        remaining = AudioMetadataHelper._tag_updates(AudioMetadataHelper._open_audio(temporary), info, True, clear_tags)
+                        if remaining.keys() & {"comment", "description", *clear_tags}:
+                            raise ValueError("音乐标签未正确写入或清空，保留原音乐文件")
                     with temporary.open("rb") as stream: os.fsync(stream.fileno())
                     saved["prepared"] = library.signature(temporary)
                 else:

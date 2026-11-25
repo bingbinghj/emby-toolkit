@@ -946,6 +946,7 @@ class AudioMetadataHelper:
             overwrite: bool = True,
             write_tags: bool = True,
             cover_overwrite: Optional[bool] = None,
+            clear_tags: tuple[str, ...] = (),
     ) -> bool:
         """
         按独立策略写入标签与封面；链接目标仅在独立副本写入成功后替换。
@@ -956,7 +957,7 @@ class AudioMetadataHelper:
             audio = cls._open_audio(path)
             if audio is None:
                 raise ValueError("文件不是受支持的音频")
-            needs_tags = write_tags and cls._needs_tag_write(audio, music, overwrite)
+            needs_tags = write_tags and cls._needs_tag_write(audio, music, overwrite, clear_tags)
             overwrite_cover = overwrite if cover_overwrite is None else cover_overwrite
             needs_cover = bool(cover_data) and (overwrite_cover or not cls._has_cover(audio))
             if not needs_tags and not needs_cover:
@@ -966,7 +967,7 @@ class AudioMetadataHelper:
                 if audio is None:
                     raise ValueError("文件不是受支持的音频")
                 if needs_tags:
-                    cls._write_tag_values(audio, music, overwrite, write_path)
+                    cls._write_tag_values(audio, music, overwrite, write_path, clear_tags)
                 if needs_cover and cover_data is not None:
                     cls._write_cover(
                         path=write_path,
@@ -980,14 +981,14 @@ class AudioMetadataHelper:
             return False
 
     @classmethod
-    def _needs_tag_write(cls, audio: Any, music: Union[MetaMusic, MusicInfo], overwrite: bool) -> bool:
+    def _needs_tag_write(cls, audio: Any, music: Union[MetaMusic, MusicInfo], overwrite: bool, clear_tags: tuple[str, ...] = ()) -> bool:
         """
         先只读比较已有标签，完整元数据不应触发大音频文件的副本创建。
         """
-        return bool(cls._tag_updates(audio, music, overwrite))
+        return bool(cls._tag_updates(audio, music, overwrite, clear_tags))
 
     @classmethod
-    def _tag_updates(cls, audio: Any, music: Union[MetaMusic, MusicInfo], overwrite: bool) -> dict[str, list[str]]:
+    def _tag_updates(cls, audio: Any, music: Union[MetaMusic, MusicInfo], overwrite: bool, clear_tags: tuple[str, ...] = ()) -> dict[str, list[str]]:
         """
         预检和实际写入共用字段差异，年份模型不能抹掉标签中同年的完整日期。
         """
@@ -1008,9 +1009,11 @@ class AudioMetadataHelper:
                 if "\n".join(current) != value and (overwrite or not current):
                     updates[key] = [value] if value else []
                 continue
-            if value in (None, "", []):
-                continue
             current = next((items for alias in aliases.get(key, (key,)) if (items := cls._values(tags, alias))), [])
+            if value in (None, "", []):
+                if overwrite and key in clear_tags and (credits.get(key) or current):
+                    updates[key] = []
+                continue
             expected = value if isinstance(value, list) else [str(value)]
             if key in credits:
                 current = credits[key]
@@ -1046,13 +1049,13 @@ class AudioMetadataHelper:
         return bool(hasattr(tags, "getall") and tags.getall("APIC"))
 
     @classmethod
-    def _write_tag_values(cls, audio: Any, music: Union[MetaMusic, MusicInfo], overwrite: bool, path: Path) -> None:
+    def _write_tag_values(cls, audio: Any, music: Union[MetaMusic, MusicInfo], overwrite: bool, path: Path, clear_tags: tuple[str, ...] = ()) -> None:
         """
         按标签策略保存可支持的字段；空标签音频仍然是可写的有效容器。
         """
         if audio.tags is None:
             audio.add_tags()
-        values = cls._tag_updates(audio, music, overwrite)
+        values = cls._tag_updates(audio, music, overwrite, clear_tags)
         if isinstance(audio.tags, ID3):
             changed = cls._write_id3_tags(audio.tags, values, overwrite)
         elif isinstance(audio.tags, MP4Tags):
@@ -1082,9 +1085,10 @@ class AudioMetadataHelper:
         for name, value in values.items():
             key = ape_fields.get(name, name) if isinstance(audio.tags, APEv2) else name
             if not value and overwrite:
-                if key in audio.tags:
-                    del audio.tags[key]
-                    changed = True
+                for alias in (key, "album artist") if name == "albumartist" else (key,):
+                    if alias in audio.tags:
+                        del audio.tags[alias]
+                        changed = True
                 continue
             if cls._values(audio.tags, key) == value or (not overwrite and audio.tags.get(key)):
                 continue
@@ -1133,6 +1137,11 @@ class AudioMetadataHelper:
             elif key in custom:
                 frame = TXXX(encoding=3, desc=custom[key], text=value)
             else:
+                continue
+            if not value and overwrite:
+                if frame.HashKey in tags:
+                    del tags[frame.HashKey]
+                    changed = True
                 continue
             if tags.get(frame.HashKey) != frame and (overwrite or not tags.get(frame.HashKey)):
                 tags.add(frame)

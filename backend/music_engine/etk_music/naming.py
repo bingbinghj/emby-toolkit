@@ -37,7 +37,7 @@ def projected(before, updates):
     after = dict(before)
     for tag, field in {"title":"title", "artist":"artists", "album":"album", "albumartist":"album_artist"}.items():
         if tag in updates:
-            after[field] = updates[tag] if field == "artists" else updates[tag][0]
+            after[field] = updates[tag] if field == "artists" else next(iter(updates[tag]), None)
     for tag, field, total in [("tracknumber","track_number","total_tracks"), ("discnumber","disc_number","total_discs")]:
         if tag in updates:
             after[field], after[total] = AudioMetadataHelper._number_pair(updates[tag][0])

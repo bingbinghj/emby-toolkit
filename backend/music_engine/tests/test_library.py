@@ -417,6 +417,83 @@ def test_manual_edit_all_mp_identity_and_credit_tags(fixture):
         assert result[key] == values[key], key
 
 
+@pytest.mark.parametrize("container", ["flac", "mp3", "wav", "m4a", "wma", "ogg", "opus", "aiff", "wv", "tta", "aac"])
+def test_explicit_empty_labels_are_previewed_cleared_and_isolated(fixture, container):
+    config, original, root = fixture
+    source = original.with_suffix('.' + container)
+    if container != 'wav':
+        subprocess.run(['ffmpeg', '-v', 'error', '-i', str(original), str(source)], check=True)
+    labels = dict(composers=['? ??'], conductors=['指挥'], orchestras=['乐团'], performers={'guitar':['演奏者']})
+    assert AudioMetadataHelper.write(source, MetaMusic(**labels))
+    target = root / ('song.' + container)
+    os.link(source, target)
+    original_bytes = source.read_bytes()
+    audio_hash = lambda path: subprocess.check_output(['ffmpeg','-v','error','-i',str(path),'-map','0:a:0','-c:a','copy','-f','hash','-'])
+    original_audio = audio_hash(source)
+    empty = dict(composers=[], conductors=None, orchestras=[], performers={})
+    row = operations.preview(config, {'operation':'edit','paths':[target.name],'metadata':empty})['items'][0]
+    assert row['success'], row
+    assert all(row['tag_updates'][key] == [] for key in ['composer','conductor','orchestra','performer'])
+    assert row['before']['composers'] == ['? ??']
+    assert target.samefile(source)  # 预览不改变硬链接或标签。
+    result = operations.execute(config, {'item':row,'operation':'edit','execution_id':'aacd-e0'})
+    assert result['success']
+    after = library.inspect(config, target.name)
+    assert all(not after[key] for key in empty)
+    assert AudioMetadataHelper.read_tags(target).title == row['before']['title']
+    assert source.read_bytes() == original_bytes and not target.samefile(source)
+    assert audio_hash(target) == original_audio
+    assert operations.execute(config, {'item':row,'operation':'edit','execution_id':'aacd-e0'}) == result
+    second = operations.preview(config, {'operation':'edit','paths':[target.name],'metadata':empty})['items'][0]
+    assert second['tag_updates'] == {}
+
+
+def test_missing_credit_is_preserved_and_empty_title_does_not_rename(fixture):
+    config, source, root = fixture
+    assert AudioMetadataHelper.write(source, MetaMusic(composers=['可信作曲']))
+    os.link(source, root/'song.wav')
+    audio = AudioMetadataHelper._open_audio(source)
+    assert AudioMetadataHelper._tag_updates(audio, MetaMusic(), True) == {}
+    config['music_rename_on_save'] = True
+    row = operations.preview(config, {'operation':'edit','paths':['song.wav'],'metadata':{'title':None}})['items'][0]
+    assert row['success'] and row['target'] == 'song.wav', row
+    assert row['tag_updates'] == {'title':[]}
+    assert '保留' in row['rename_note']
+    operations.execute(config, {'item':row,'operation':'edit','execution_id':'aacd-e1'})
+    assert AudioMetadataHelper.read_tags(root/'song.wav').title is None
+    assert library.inspect(config,'song.wav')['composers'] == ['可信作曲']
+
+
+def test_failed_credit_clear_preserves_seed_and_library(fixture, monkeypatch):
+    config, source, root = fixture
+    assert AudioMetadataHelper.write(source, MetaMusic(composers=['? ??']))
+    os.link(source, root/'song.wav')
+    row = operations.preview(config, {'operation':'edit','paths':['song.wav'],'metadata':{'composers':[]}})['items'][0]
+    monkeypatch.setattr(AudioMetadataHelper, 'write', lambda *args, **kwargs: True)
+    with pytest.raises(ValueError, match='未正确写入或清空'):
+        operations.execute(config, {'item':row,'operation':'edit','execution_id':'aacd-e2'})
+    assert source.samefile(root/'song.wav')
+    assert library.inspect(config,'song.wav')['composers'] == ['? ??']
+
+
+@pytest.mark.parametrize('container', ['wav','flac','m4a','wma','wv'])
+def test_explicit_empty_name_fields_clear_without_derived_artist_fallback(fixture, container):
+    config, original, root = fixture
+    source = original.with_suffix('.' + container)
+    if container != 'wav':
+        subprocess.run(['ffmpeg','-v','error','-i',str(original),str(source)],check=True)
+    assert AudioMetadataHelper.write(source, MetaMusic(title='标题',artists=['????'],album='专辑',album_artist='????',isrc='KRA340918953'))
+    os.link(source, root/('song.'+container))
+    fields = dict(title='',artists=[],album=None,album_artist=None,isrc='')
+    row = operations.preview(config, {'operation':'edit','paths':['song.'+container],'metadata':fields})['items'][0]
+    assert row['success'],row
+    assert row['tag_updates'] == {key:[] for key in ['title','artist','album','albumartist','isrc']}
+    operations.execute(config, {'item':row,'operation':'edit','execution_id':'aacd-e3'})
+    after = AudioMetadataHelper.read_tags(root/row['target'])
+    assert all(not getattr(after,key) for key in fields)
+    assert AudioMetadataHelper.read_tags(source).artists == ['????']
+
+
 def test_manual_lyrics_resume_after_commit_keeps_new_file_and_seed(fixture, monkeypatch):
     config, source, root = fixture
     os.link(source, root/'song.wav')

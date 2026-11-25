@@ -7,7 +7,7 @@ import DialogCloseBtn from '@/components/theme/DialogCloseBtn.vue';
 import MusicIdSelector from './MusicIdSelector.vue';
 import MusicAudioPlayer from './MusicAudioPlayer.vue';
 import MusicLyricsSearch from './MusicLyricsSearch.vue';
-import { metadataSources as musicSources, streamingSources, gdSources, musicSearchTerm, musicReleaseError, musicFieldOptions } from './utils';
+import { metadataSources as musicSources, streamingSources, gdSources, musicSearchTerm, musicReleaseError, musicFieldOptions, musicMetadataValue } from './utils';
 import { shiftLyrics, formatLyrics } from './lyrics';
 import { prepareMusicCover } from './cover';
 import MusicLyricsTimeline from './MusicLyricsTimeline.vue';
@@ -78,7 +78,7 @@ async function applySelection(item) {
 function applyMetadata(data,onlyCover=false){
   sourceMetadata.value=onlyCover ? {...sourceMetadata.value,cover_url:data.cover_url} : data;
   const keys=onlyCover ? ['cover_url'] : [...fields,...numbers,...credits,...(isStreaming.value ? [] : ids)].map(([key])=>key).concat(isStreaming.value ? ['cover_url'] : ['media_source','music_type','cover_url']);
-  for(const key of keys)if(data[key]!=null && data[key]!=='' && (!Array.isArray(data[key]) || data[key].length))draft.value[key]=data[key];
+  for(const key of keys)if(Object.hasOwn(data,key))draft.value[key]=musicMetadataValue(draft.value[key],data[key]);
   if(data.cover_url)draft.value.cover_upload='';
   coverError.value=false;
   if(onlyCover && !data.cover_url)error.value='此资料没有可用封面，请选择其他结果';
@@ -122,7 +122,7 @@ onMounted(focusEditor);
           <MusicProcessingOptions v-model:cue-enable="cueEnable" v-model:track-match="trackMatch" :entity="entity" :disabled="busy || lookupBusy" class="mt-4" />
           <VDivider class="my-6" />
           <VRow class="mb-3"><VCol cols="12" md="6"><VTextarea v-model="draft.comment" label="备注" data-music-field="comment" rows="3" auto-grow hint="保存在音频标签中；清空后预览保存可删除。" persistent-hint /></VCol><VCol cols="12" md="6"><VTextarea v-model="draft.description" label="简介 / 描述" data-music-field="description" rows="3" auto-grow hint="保存在音频标签中，与备注分别编辑。" persistent-hint /></VCol></VRow>
-          <VRow><VCol v-for="[key,label] in fields" :key="key" cols="12" md="6"><VSelect v-if="options(key).length" v-model="draft[key]" :items="withCurrent(key,draft[key])" :label="label" :data-music-field="key" /><VTextField v-else v-model="draft[key]" :label="label" :data-music-field="key" /></VCol>
+          <VRow><VCol v-for="[key,label] in fields" :key="key" cols="12" md="6"><VSelect v-if="options(key).length" v-model="draft[key]" :items="withCurrent(key,draft[key])" :label="label" :data-music-field="key" clearable /><VTextField v-else v-model="draft[key]" :label="label" :data-music-field="key" clearable /></VCol>
           <VCol v-for="[key,label] in credits" :key="key" cols="12" md="6"><VSelect v-if="options(key).length" v-model="draft[key]" :items="withCurrent(key,draft[key])" :label="label" :data-music-field="key" multiple chips closable-chips /><VCombobox v-else v-model="draft[key]" :label="label" :data-music-field="key" multiple chips closable-chips /></VCol>
           <VCol v-for="[key,label] in numbers" :key="key" cols="6" md="4"><VSelect v-if="options(key).length" v-model="draft[key]" :items="withCurrent(key,draft[key])" :data-music-field="key" :label="label" /><VTextField v-else v-model.number="draft[key]" :data-music-field="key" :label="label" type="number" min="0" /></VCol></VRow>
           <div class="d-flex align-center ga-3 my-4"><h3 class="text-subtitle-1">演奏者</h3><VBtn variant="text" prepend-icon="mdi-plus" @click="performers.push({role:'',names:[]})">添加乐器 / 声部</VBtn></div>

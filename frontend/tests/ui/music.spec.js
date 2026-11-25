@@ -7,6 +7,27 @@ const silence = readFileSync(new URL('../../../backend/music_engine/tests/fixtur
 const track = {name:'01 - 测试歌曲.flac',type:'file',is_audio:true,path:'专辑/01 - 测试歌曲.flac',title:'测试歌曲',artists:['测试歌手'],album:'测试专辑',audio_specs:'FLAC / 24bit / 96kHz',signature:{mtime:1}};
 const previewItem = {...track,source:track.path,source_storage:'local',source_item:{storage:'local',path:track.path,type:'file'},target:track.path,success:true,metadata:{title:'新曲名'},before:{title:track.title},music:{title:'新曲名',album:'测试专辑',artists:track.artists,group_id:'group',group_directory:'专辑',file_role:'audio',status:'matched',online_confirmed:true,read_status:'tags',field_sources:{title:'remote'},media_source:'musicbrainz',media_id:'song'}};
 
+for(const width of [390,1440])test(`空作曲资料清除问号并在保存前显示清空预览 ${width}px`,async({page,api})=>{
+  music(api);await page.setViewportSize({width,height:1000});
+  const id='83e21b89-fc4c-4c24-b387-a4bc916152ec';
+  api.respond('POST','/api/music/query/inspect',{...track,music_search_type:'recording',media_source:'musicbrainz',media_id:id,composers:['? ??']});
+  api.respond('POST','/api/music/query/edit_metadata',{title:track.title,composers:[]});
+  api.respond('GET','/api/tasks/result/music-preview',{state:'completed',result:{preview:{operation:'edit',items:[{...previewItem,before:{composers:['? ??']},metadata:{composers:[]},tag_updates:{composer:[]}}]}}});
+  await page.goto('/music');await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await expect(page.locator('[data-music-field="composers"]')).toContainText('? ??');
+  await page.getByRole('button',{name:'读取资料',exact:true}).click();
+  await expect(page.locator('[data-music-field="composers"]')).not.toContainText('? ??');
+  await page.getByRole('button',{name:'预览修改',exact:true}).click();
+  const region=page.getByRole('region',{name:'作曲',exact:true});
+  await expect(region).toContainText('? ??');await expect(region).toContainText('已清空');
+  await region.scrollIntoViewIfNeeded();
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1)).toBeTruthy();
+  expect(api.requests.find(row=>row.path==='/api/music/jobs/preview').body.metadata.composers).toEqual([]);
+  expect(api.requests.filter(row=>row.path==='/api/music/jobs/execute')).toHaveLength(0);
+  await page.getByRole('button',{name:'保存修改',exact:true}).click();
+  expect(api.requests.find(row=>row.path==='/api/music/jobs/execute').body).toEqual({preview_task_id:'music-preview'});
+});
+
 for(const theme of ['light','dark'])for(const width of [390,1440])test(`同步音乐名称预览可读且保存后进入新目录 ${theme} ${width}px`,async({page,api},testInfo)=>{
   music(api);await page.setViewportSize({width,height:1000});
   await page.addInitScript(theme=>localStorage.setItem('moviepilot-theme-customizer',JSON.stringify({theme,glassEnabled:false})),theme);
