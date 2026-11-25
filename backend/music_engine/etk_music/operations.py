@@ -10,7 +10,7 @@ import time
 from collections import defaultdict
 from pathlib import Path
 from dataclasses import asdict
-from . import catalog, library
+from . import catalog, library, naming
 from .audio import AudioMetadataHelper, capture_audio_metadata
 from .models import MusicInfo, MusicLyrics
 from .meta import MetaMusic
@@ -195,8 +195,20 @@ def preview(config, body):
                 rows[-1]["lyrics_edit"] = manual_lyrics
                 rows[-1]["cover_edit"] = cover_url
                 rows[-1]["cover_upload"] = cover_upload
+            try:
+                naming.plan(root, rows[-1])
+            except (ValueError, OSError) as error:
+                rows[-1].update(success=False, message=str(error))
         except Exception as error:
             rows.append({"path": relative, "success": False, "message": str(error)})
+    targets = defaultdict(list)
+    for row in rows:
+        if row["success"]:
+            targets[row["target"]].append(row)
+    for group in targets.values():
+        if len(group) > 1:
+            for row in group:
+                row.update(success=False, message="所选歌曲同步后名称相同，请调整标签后重新预览")
     for row in rows:
         relative = row["path"]
         if not row["success"] and relative in invalid_cue:
@@ -312,8 +324,8 @@ def flush_directory(path):
 def execute(config, body):
     """暂存副本和持久意图先落盘；原子替换后可凭 inode 回执恢复。"""
     row, operation, identifier = body["item"], body["operation"], body["execution_id"]
-    if operation not in {"rescrape", "edit"} or row["target"]!=row["path"]:
-        raise ValueError("ETK 音乐仅支持原位置刮削和标签编辑")
+    if operation not in {"rescrape", "edit"}:
+        raise ValueError("ETK 音乐仅支持刮削和标签编辑")
     if not identifier or any(char not in "0123456789abcdef-" for char in identifier):
         raise ValueError("音乐任务标识无效")
     directory = get_runtime_setting("CACHE_PATH")/"operations"
@@ -334,6 +346,8 @@ def execute(config, body):
             saved = None
         if not saved:
             path = library.target(config, row["path"])
+            if row["target"] != row["path"]:
+                naming.verify(root, row)
             if row.get("cue_digest"):
                 cue = path.parent / Path(row["cue_filename"]).name
                 if hashlib.sha256(cue.read_bytes()).hexdigest()!=row["cue_digest"]:
@@ -386,6 +400,10 @@ def execute(config, body):
                     saved["prepared"] = library.signature(temporary)
                 else:
                     saved["prepared"] = library.signature(path)
+                if row["target"] != row["path"]:
+                    actual = MusicInfo.from_meta(AudioMetadataHelper.read_tags(temporary if changed else path)).to_dict()
+                    if naming.render(actual, path.suffix) != row["target"]:
+                        raise ValueError("实际写入的名称标签与预览不一致，保留原音乐文件")
                 saved["state"]="prepared"
                 write_json(receipt,saved)
             except Exception:
@@ -395,6 +413,8 @@ def execute(config, body):
         destination = root/saved["target"]
         if saved["state"]=="prepared":
             library.target(config,row["path"])
+            if row["target"] != row["path"]:
+                naming.verify(root, row)
             local_lyrics.verify_edit(path, saved.get("lyrics_edit"))
             if saved["changed"]:
                 if identity_matches(path,saved["prepared"]):
@@ -416,8 +436,21 @@ def execute(config, body):
             elif lyric:
                 saved["lyrics_result"] = sidecar(path,lyric,saved["lyrics_policy"],saved["lyrics_simplified"],identifier)
             saved["state"]="lyrics_done"; write_json(receipt,saved)
+        if saved["state"]=="lyrics_done" and destination != path:
+            if not identity_matches(path, saved["prepared"]):
+                raise ValueError("音乐文件在同步名称前已变化")
+            saved["moves"] = naming.manifest(root, path, destination, config)
+            saved["state"] = "moving"; write_json(receipt, saved)
+        if saved["state"]=="moving":
+            naming.link_files(root, saved["moves"], identity_matches, flush_directory)
+            saved["state"] = "linked"; write_json(receipt, saved)
+        if saved["state"]=="linked":
+            naming.finish(root, saved["moves"], identity_matches, flush_directory)
         result={"path":row["path"],"target":row["target"],"success":True,"lyrics_elapsed":saved.get("lyrics_elapsed",0),"message":"音乐处理完成"+("，"+saved["lyrics_result"] if saved.get("lyrics_result") else "")}
         library.scan_one(config,row["target"],"updated")
+        if destination != path:
+            with library.database() as db:
+                db.execute("DELETE FROM tracks WHERE root=? AND path=?", (str(root), row["path"]))
         write_json(receipt,{"state":"completed","result":result,"signature":library.signature(destination)})
         temporary.unlink(missing_ok=True)
         return result
@@ -437,6 +470,13 @@ def cleanup(config, body):
             saved = json.loads(receipt.read_text())
             if saved.get("state")!="completed":
                 root,_=library.roots(config)
+                if saved.get("state") == "moving":
+                    naming.rollback(root, saved["moves"], identity_matches, flush_directory)
+                elif saved.get("state") == "linked":
+                    naming.finish(root, saved["moves"], identity_matches, flush_directory)
+                    library.scan_one(config, saved["target"], "updated")
+                    with library.database() as db:
+                        db.execute("DELETE FROM tracks WHERE root=? AND path=?", (str(root), saved["path"]))
                 path=root/saved["path"]
                 if not path.is_relative_to(root) or ".." in path.parts or path.parent.resolve()!=path.parent:
                     raise ValueError("音乐暂存目录已变化，未清理")

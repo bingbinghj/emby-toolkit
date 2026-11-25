@@ -17,7 +17,11 @@ for (const [tab, button, field, value, savedValue] of cards) {
     await page.getByRole('tab', { name: tab, exact: true }).click();
     if (button === '保存媒体服务器') await page.getByRole('button', { name: '编辑 Emby 媒体服务器', exact: true }).click();
     if (button === '保存存储') await page.getByRole('button', { name: '编辑 115 存储', exact: true }).click();
-    await page.locator(`[data-field="${field}"]`).locator('input,textarea').first().fill(value);
+    const input = page.locator(`[data-field="${field}"]`).locator('input,textarea').first();
+    if (field === 'movie_rename_format') {
+      await input.press('ControlOrMeta+A');
+      await input.pressSequentially(value);
+    } else await input.fill(value);
     await page.getByRole('button', { name: button, exact: true }).click();
     await expect.poll(() => api.requests.some(request => request.method === 'POST' && request.path === '/api/config')).toBe(true);
     const payload = api.requests.find(request => request.method === 'POST' && request.path === '/api/config').body;

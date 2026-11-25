@@ -121,6 +121,12 @@ function evidence(item) {
           <p v-if="item.music?.artists?.length" class="text-caption mt-1">{{ item.music.artists.join(' / ') }}</p>
           <p v-if="evidence(item)" class="text-caption text-medium-emphasis mt-1">{{ evidence(item) }}</p>
           <p class="music-preview-path mt-3"><VIcon icon="mdi-file-outline" size="18" /><span>{{ item.source || item.path }}</span></p>
+          <section v-if="item.target && item.target !== item.path" class="music-asset-preview mt-3" aria-label="同步文件名称">
+            <h4 class="mb-3"><VIcon icon="mdi-file-move-outline" size="20" /> 保存后路径</h4>
+            <p>{{ item.target }}</p>
+            <p class="text-caption mt-2">同名歌词同步更名</p>
+          </section>
+          <VAlert v-if="item.rename_note" type="info" variant="tonal" class="mt-3">{{ item.rename_note }}</VAlert>
           <div class="d-flex flex-wrap ga-2 my-3">
             <VChip size="small" color="primary" variant="tonal">{{ fields(item).length ? `${fields(item).length} 项标签变更` : '标签不变' }}</VChip>
             <VChip v-if="item.cover_upload || item.cover_edit" size="small" prepend-icon="mdi-image-outline" variant="tonal">替换封面</VChip>

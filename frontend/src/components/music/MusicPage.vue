@@ -183,7 +183,20 @@ async function poll() {
       taskId.value = '';
       sessionStorage.removeItem('etk.music.task');
       if (data.result?.preview) { preview.value = data.result.preview; previewTask.value = id; corrections.value=preview.value.selections || {}; selection.value=preview.value.selection || null; previewOpen.value = true; }
-      else { resultData.value=data.result; sessionStorage.removeItem('etk.music.task'); if (data.state === 'failed') taskError.value = data.result?.error || data.message || '音乐任务失败'; await load(); }
+      else {
+        resultData.value=data.result; sessionStorage.removeItem('etk.music.task');
+        if (data.state === 'failed') taskError.value = data.result?.error || data.message || '音乐任务失败';
+        const moved = data.result?.items?.filter(item => item.success && item.target && item.target !== item.path) || [];
+        if (moved.length) {
+          selected.value = [];
+          const destinations = [...new Set(moved.map(item => item.target.split('/').slice(0,-1).join('/')))];
+          directory.value = destinations.length === 1 ? destinations[0] : '';
+          query.value = '';
+          page.value = 1;
+          songPreview.value = null;
+        }
+        await load();
+      }
       return;
     }
   } catch (cause) { if (active && id === taskId.value) { if(cause.response?.status===404){taskId.value='';sessionStorage.removeItem('etk.music.task');taskError.value=editorOpen.value ? '预览任务已失效，请重新预览后保存' : '';}else taskError.value = failure(cause); } }

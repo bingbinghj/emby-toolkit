@@ -1174,14 +1174,7 @@
                       <div class="rename-format-grid">
                         <div class="rename-format-form">
                           <div class="settings-field" data-field="movie_rename_format">
-                            <VTextarea
-                              v-model="configModel.movie_rename_format"
-                              spellcheck="false"
-                              auto-grow
-                              rows="3"
-                              max-rows="8"
-                              label="电影重命名格式"
-                            ></VTextarea>
+                            <TemplateEditor v-model="configModel.movie_rename_format" label="电影重命名格式" />
                             <div class="settings-hint">
                               <span class="text-medium-emphasis">
                                 使用Jinja2语法，格式参考：https://jinja.palletsprojects.com/en/3.0.x/templates
@@ -1190,7 +1183,6 @@
                           </div>
                         </div>
                         <div class="rename-preview-panel">
-                          <div class="rename-preview-title">电影示例<span v-if="renameFormatPreview.movie_sample?.title"> · {{ renameFormatPreview.movie_sample.title }}</span></div>
                           <div class="settings-loading">
                             <VProgressLinear
                               v-if="isPreviewingRenameFormats"
@@ -1219,14 +1211,7 @@
                         </div>
                         <div class="rename-format-form">
                           <div class="settings-field" data-field="tv_rename_format">
-                            <VTextarea
-                              v-model="configModel.tv_rename_format"
-                              spellcheck="false"
-                              auto-grow
-                              rows="3"
-                              max-rows="8"
-                              label="电视剧重命名格式"
-                            ></VTextarea>
+                            <TemplateEditor v-model="configModel.tv_rename_format" label="电视剧重命名格式" />
                             <div class="settings-hint">
                               <span class="text-medium-emphasis">
                                 使用Jinja2语法，格式参考：https://jinja.palletsprojects.com/en/3.0.x/templates
@@ -1235,7 +1220,6 @@
                           </div>
                         </div>
                         <div class="rename-preview-panel">
-                          <div class="rename-preview-title">电视剧示例<span v-if="renameFormatPreview.tv_sample?.title"> · {{ renameFormatPreview.tv_sample.title }} {{ renameFormatPreview.tv_sample.season_episode }}</span></div>
                           <div class="settings-loading">
                             <VProgressLinear
                               v-if="isPreviewingRenameFormats"
@@ -1986,6 +1970,7 @@
 </template>
 
 <script setup>
+import TemplateEditor from './general/TemplateEditor.vue';
 import { ref, reactive, watch, computed, onMounted, onUnmounted, nextTick } from 'vue';
 import { useMessage, useDialog } from '@/composables/useFeedback';
 import { useDisplay } from 'vuetify';
@@ -3470,7 +3455,6 @@ html[data-theme='glass'][data-glass-color-scheme='dark'] .storage-dialog :deep(.
 .rename-format-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr); gap: 20px; }
 .rename-format-form { min-width: 0; }
 .rename-preview-panel { min-width: 0; padding: 16px; border: thin solid rgba(var(--v-border-color), var(--v-border-opacity)); border-radius: var(--v-border-radius, 10px); }
-.rename-preview-title { margin-block-end: 8px; font-size: 13px; font-weight: 500; }
 .rename-preview-tree { min-height: 28px; }
 .rename-preview-node { display: flex; align-items: center; gap: 7px; min-height: 26px; font-family: monospace; font-size: 12px; overflow-wrap: anywhere; }
 @media (max-width: 1000px) {

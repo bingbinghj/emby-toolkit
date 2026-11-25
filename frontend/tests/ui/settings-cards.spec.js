@@ -239,15 +239,17 @@ test('monitor formats have built-in media candidates and preserve custom selecti
   expect(payload.monitor_extensions).toContain('.strm');
 });
 
-test('rename examples display real recent movie and episode titles and preserve format drafts', async ({ page, api }) => {
+test('rename preview displays paths directly and keeps highlighted template drafts', async ({ page, api }) => {
   api.respond('POST', '/api/config/rename_preview', { movie: '最新电影 (2026)/最新电影.mkv', tv: '最新电视剧 (2025)/S02E09.mp4', movie_sample: { id: 'new-movie', title: '最新电影' }, tv_sample: { id: 'new-episode', title: '最新电视剧', season_episode: 'S02E09' }, errors: {} });
   await page.goto('/setting?tab=rule');
-  await expect(page.getByText('电影示例 · 最新电影', { exact: true })).toBeVisible();
-  await expect(page.getByText('电视剧示例 · 最新电视剧 S02E09', { exact: true })).toBeVisible();
-  const movie = page.locator('[data-field="movie_rename_format"] textarea').first();
-  await movie.fill('{{title}}.{{year}}.mkv');
+  await expect(page.getByText('最新电影.mkv', { exact: true })).toBeVisible();
+  await expect(page.getByText('S02E09.mp4', { exact: true })).toBeVisible();
+  await expect(page.getByText(/电影示例|电视剧示例/)).toHaveCount(0);
+  const movie = page.getByRole('textbox', { name: '电影重命名格式', exact: true });
+  await movie.press('ControlOrMeta+A');
+  await movie.pressSequentially('{{title}}.{{year}}.mkv');
   await expect.poll(() => api.requests.filter(request => request.path === '/api/config/rename_preview').some(request => request.body.movie_format === '{{title}}.{{year}}.mkv')).toBe(true);
-  await expect(movie).toHaveValue('{{title}}.{{year}}.mkv');
+  await expect(page.locator('[data-field="movie_rename_format"] .ace_content')).toContainText('{{title}}.{{year}}.mkv');
   expect(api.requests.filter(request => request.method === 'POST' && request.path === '/api/config')).toEqual([]);
 });
 

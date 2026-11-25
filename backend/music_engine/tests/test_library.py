@@ -77,10 +77,12 @@ def test_write_preserves_seed_and_independent_copy_can_be_edited_again(fixture,k
     result=operations.execute(config,{"item":row,"operation":"edit","execution_id":"abcd-1"})
     assert result["success"]
     assert source.read_bytes()==before
+    assert not target.exists()
+    target = root/result["target"]
     assert AudioMetadataHelper.read(target).title=="新曲名"
     assert not target.samefile(source) and not target.is_symlink()
-    operations.execute(config,{"item":plan(config,"renamed.wav","再次编辑"),"operation":"edit","execution_id":"abcd-2"})
-    assert AudioMetadataHelper.read(target).title=="再次编辑"
+    second = operations.execute(config,{"item":plan(config,result["target"],"再次编辑"),"operation":"edit","execution_id":"abcd-2"})
+    assert AudioMetadataHelper.read(root/second["target"]).title=="再次编辑"
     assert source.read_bytes()==before
 
 
@@ -241,7 +243,7 @@ def test_uploaded_cover_uses_existing_atomic_write_without_touching_seed(fixture
         assert not result['items'][0]['success']
 
 
-def test_rescrape_changes_only_selected_track_without_renaming(fixture,monkeypatch):
+def test_rescrape_renames_only_selected_track(fixture,monkeypatch):
     config,source,root=fixture
     os.link(source,root/"first.wav");os.link(source,root/"second.wav")
     original=source.read_bytes()
@@ -249,9 +251,9 @@ def test_rescrape_changes_only_selected_track_without_renaming(fixture,monkeypat
     monkeypatch.setattr(operations.catalog,"recognize",lambda *_:(AudioMetadataHelper.read(source),MusicInfo(title="刮削标题",artists=["歌手"],album="专辑",media_source="musicbrainz",media_id="a")))
     config["music_scraping_policies"]["tags"]="overwrite"
     preview=operations.preview(config,{"operation":"rescrape","paths":["first.wav"]})
-    assert len(preview["items"])==1 and preview["items"][0]["target"]=="first.wav"
+    assert len(preview["items"])==1 and preview["items"][0]["target"]=="歌手/专辑/01 - 刮削标题.wav"
     operations.execute(config,{"item":preview["items"][0],"operation":"rescrape","execution_id":"abcd-4"})
-    assert AudioMetadataHelper.read(root/"first.wav").title=="刮削标题"
+    assert AudioMetadataHelper.read(root/preview["items"][0]["target"]).title=="刮削标题"
     assert source.read_bytes()==(root/"second.wav").read_bytes()==original
 
 
@@ -296,7 +298,7 @@ def test_resume_after_atomic_replacement_does_not_write_again(fixture,monkeypatc
     changed=(root/"song.wav").stat().st_ino
     monkeypatch.setattr(operations,"write_json",write)
     assert operations.execute(config,body)["success"]
-    assert (root/"song.wav").stat().st_ino==changed
+    assert (root/row["target"]).stat().st_ino==changed
     assert AudioMetadataHelper.read(source).title=="原曲名"
 
 
@@ -461,7 +463,7 @@ def test_reorganize_is_not_supported(fixture):
         operations.preview(config, {'operation':'reorganize', 'paths':['song.wav']})
     row = plan(config, 'song.wav')
     row['target'] = 'moved.wav'
-    with pytest.raises(ValueError, match='原位置'):
+    with pytest.raises(ValueError, match='同步名称与预览标签不一致'):
         operations.execute(config, {'item':row, 'operation':'edit', 'execution_id':'abcd-8'})
     assert source.samefile(root/'song.wav')
 
@@ -480,7 +482,7 @@ def test_resume_after_interrupted_staging_retries_automatically(fixture, monkeyp
     with pytest.raises(SystemExit): operations.execute(config, body)
     monkeypatch.setattr(operations, 'write_json', write)
     assert operations.execute(config, body)['success']
-    assert AudioMetadataHelper.read(root/'song.wav').title == '新曲名'
+    assert AudioMetadataHelper.read(root/row['target']).title == '新曲名'
     assert AudioMetadataHelper.read(source).title == '原曲名'
 
 
@@ -667,10 +669,10 @@ def test_manual_edit_simplifies_text_in_both_preview_and_write(fixture):
     assert row['success'], row
     assert {key:row['metadata'][key] for key in expected} == expected
     operations.execute(config, {'item':row, 'operation':'edit', 'execution_id':'abcd-14'})
-    stored = AudioMetadataHelper.read_tags(root/'song.wav')
+    stored = AudioMetadataHelper.read_tags(root/row['target'])
     assert {key:getattr(stored, key) for key in expected} == expected
     assert source.read_bytes() == original
-    assert not source.samefile(root/'song.wav')
+    assert not source.samefile(root/row['target'])
 
 
 @pytest.mark.parametrize('policy', ['missingOnly', 'overwrite'])
@@ -691,7 +693,7 @@ def test_simplified_alias_write_respects_policy_and_protects_seed(fixture, monke
     assert row['metadata']['artists'] == ['少女时代']
     assert row['metadata']['album_artist'] == '少女时代'
     operations.execute(config, {'item':row, 'operation':'rescrape', 'execution_id':'abcd-21'})
-    stored = AudioMetadataHelper.read_tags(root / 'song.wav')
+    stored = AudioMetadataHelper.read_tags(root / row['target'])
     expected = '少女时代' if policy == 'overwrite' else 'Girls’ Generation'
     assert stored.artists == [expected] and stored.album_artist == expected
     assert source.read_bytes() == original
@@ -789,7 +791,7 @@ def test_selected_disc_directories_share_album_alignment_without_expanding_scope
     paths = ['专辑/CD1/01.wav','专辑/CD2/01.wav']
     assert library.preview_groups(paths) == {'专辑':paths}
     from etk_music.models import MusicAlbumInfo, MusicInfo
-    album = MusicAlbumInfo(title='专辑',media_source='musicbrainz',media_id='album',total_discs=2,tracks=[MusicInfo(title='原曲名',artists=['歌手'],disc_number=disc,track_number=1,duration=1,media_source='musicbrainz',media_id=f'song-{disc}') for disc in (1,2)])
+    album = MusicAlbumInfo(title='专辑',media_source='musicbrainz',media_id='album',total_discs=2,tracks=[MusicInfo(title='原曲名',artists=['歌手'],total_discs=2,disc_number=disc,track_number=1,duration=1,media_source='musicbrainz',media_id=f'song-{disc}') for disc in (1,2)])
     monkeypatch.setattr(operations.catalog, 'detail', lambda *_:album)
     rows = operations.preview(config, {'paths':paths,'selections':{'专辑':{'media_source':'musicbrainz','media_id':'album','music_type':'album'}}})['items']
     assert len(rows)==2 and all(row['success'] for row in rows), rows
@@ -933,8 +935,8 @@ def test_editor_album_alignment_reaches_read_preview_and_seed_safe_save(fixture,
     assert run('preview')['items'][0]['success'] is False
     result = dispatch({'action':'execute','config':config,'body':{'item':preview,'operation':'edit','execution_id':'cafe-90'},'cache_dir':str(tmp_path/'cache')})
     assert result['success']
-    assert AudioMetadataHelper.read(root/'song.wav').title == '用户核对后手改'
-    assert not source.samefile(root/'song.wav') and source.read_bytes() == before
+    assert AudioMetadataHelper.read(root/result['target']).title == '用户核对后手改'
+    assert not source.samefile(root/result['target']) and source.read_bytes() == before
 
 
 def test_editor_cue_override_applies_to_read_and_preview_without_changing_setting(fixture, tmp_path, monkeypatch):

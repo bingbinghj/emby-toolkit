@@ -4,6 +4,28 @@ import { measureReadingContrast } from './reading-contrast.js';
 const track = {name:'01 - 测试歌曲.flac',type:'file',is_audio:true,path:'专辑/01 - 测试歌曲.flac',title:'测试歌曲',artists:['测试歌手'],album:'测试专辑',audio_specs:'FLAC / 24bit / 96kHz',signature:{mtime:1}};
 const previewItem = {...track,source:track.path,source_storage:'local',source_item:{storage:'local',path:track.path,type:'file'},target:track.path,success:true,metadata:{title:'新曲名'},before:{title:track.title},music:{title:'新曲名',album:'测试专辑',artists:track.artists,group_id:'group',group_directory:'专辑',file_role:'audio',status:'matched',online_confirmed:true,read_status:'tags',field_sources:{title:'remote'},media_source:'musicbrainz',media_id:'song'}};
 
+for(const theme of ['light','dark'])for(const width of [390,1440])test(`同步音乐名称预览可读且保存后进入新目录 ${theme} ${width}px`,async({page,api},testInfo)=>{
+  music(api);await page.setViewportSize({width,height:1000});
+  await page.addInitScript(theme=>localStorage.setItem('moviepilot-theme-customizer',JSON.stringify({theme,glassEnabled:false})),theme);
+  const target='少女时代/GIRLS’ GENERATION II ～Girls & Peace～ (2012)/Disc 2/01 - FLOWER POWER.flac';
+  api.respond('GET','/api/tasks/result/music-preview',{state:'completed',result:{preview:{operation:'edit',items:[{...previewItem,target}]}}});
+  api.respond('POST','/api/music/jobs/execute',{task_id:'music-save'});
+  api.respond('GET','/api/tasks/result/music-save',{state:'completed',result:{items:[{path:track.path,target,success:true}],message:'音乐处理完成'}});
+  await page.goto('/music');await page.getByTestId('music-library').getByText(track.name,{exact:true}).click();
+  await page.getByLabel('标题',{exact:true}).and(page.locator('input')).fill('FLOWER POWER');
+  await page.getByRole('button',{name:'预览修改',exact:true}).click();
+  const region=page.getByRole('region',{name:'同步文件名称'});
+  await expect(region).toContainText(target);await expect(region).toContainText('同名歌词同步更名');
+  const path=region.locator('p').first();await path.scrollIntoViewIfNeeded();
+  for(const reading of await measureReadingContrast(page,[{role:'新路径',locator:path}]))expect(reading.contrast).toBeGreaterThanOrEqual(4.5);
+  const dimensions=await path.evaluate(node=>({width:node.clientWidth,scrollWidth:node.scrollWidth}));
+  expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.width+1);
+  expect(api.requests.filter(row=>row.path==='/api/music/jobs/execute')).toHaveLength(0);
+  await page.screenshot({path:testInfo.outputPath('music-name-preview.png')});
+  await page.getByRole('button',{name:'保存修改',exact:true}).click();
+  await expect.poll(()=>api.requests.filter(row=>row.path==='/api/music/library').at(-1)?.query.directory).toBe(target.split('/').slice(0,-1).join('/'));
+});
+
 for (const setting of [undefined, 'album', 'recording']) test(`资料搜索遵循默认类型并隔离录音和专辑身份 ${setting || '旧配置'}`, async ({page,api}) => {
   music(api);
   const recording='11111111-1111-1111-1111-111111111111', album='949fe498-457d-401d-a271-6dce887283d2';
