@@ -423,7 +423,7 @@ def test_explicit_empty_labels_are_previewed_cleared_and_isolated(fixture, conta
     source = original.with_suffix('.' + container)
     if container != 'wav':
         subprocess.run(['ffmpeg', '-v', 'error', '-i', str(original), str(source)], check=True)
-    labels = dict(composers=['? ??'], conductors=['指挥'], orchestras=['乐团'], performers={'guitar':['演奏者']})
+    labels = dict(composers=['作曲者'], conductors=['指挥'], orchestras=['乐团'], performers={'guitar':['演奏者']})
     assert AudioMetadataHelper.write(source, MetaMusic(**labels))
     target = root / ('song.' + container)
     os.link(source, target)
@@ -434,7 +434,7 @@ def test_explicit_empty_labels_are_previewed_cleared_and_isolated(fixture, conta
     row = operations.preview(config, {'operation':'edit','paths':[target.name],'metadata':empty})['items'][0]
     assert row['success'], row
     assert all(row['tag_updates'][key] == [] for key in ['composer','conductor','orchestra','performer'])
-    assert row['before']['composers'] == ['? ??']
+    assert row['before']['composers'] == ['作曲者']
     assert target.samefile(source)  # 预览不改变硬链接或标签。
     result = operations.execute(config, {'item':row,'operation':'edit','execution_id':'aacd-e0'})
     assert result['success']
@@ -466,14 +466,14 @@ def test_missing_credit_is_preserved_and_empty_title_does_not_rename(fixture):
 
 def test_failed_credit_clear_preserves_seed_and_library(fixture, monkeypatch):
     config, source, root = fixture
-    assert AudioMetadataHelper.write(source, MetaMusic(composers=['? ??']))
+    assert AudioMetadataHelper.write(source, MetaMusic(composers=['作曲者']))
     os.link(source, root/'song.wav')
     row = operations.preview(config, {'operation':'edit','paths':['song.wav'],'metadata':{'composers':[]}})['items'][0]
     monkeypatch.setattr(AudioMetadataHelper, 'write', lambda *args, **kwargs: True)
     with pytest.raises(ValueError, match='未正确写入或清空'):
         operations.execute(config, {'item':row,'operation':'edit','execution_id':'aacd-e2'})
     assert source.samefile(root/'song.wav')
-    assert library.inspect(config,'song.wav')['composers'] == ['? ??']
+    assert library.inspect(config,'song.wav')['composers'] == ['作曲者']
 
 
 @pytest.mark.parametrize('container', ['wav','flac','m4a','wma','wv'])
@@ -482,7 +482,7 @@ def test_explicit_empty_name_fields_clear_without_derived_artist_fallback(fixtur
     source = original.with_suffix('.' + container)
     if container != 'wav':
         subprocess.run(['ffmpeg','-v','error','-i',str(original),str(source)],check=True)
-    assert AudioMetadataHelper.write(source, MetaMusic(title='标题',artists=['????'],album='专辑',album_artist='????',isrc='KRA340918953'))
+    assert AudioMetadataHelper.write(source, MetaMusic(title='标题',artists=['歌手'],album='专辑',album_artist='歌手',isrc='KRA340918953'))
     os.link(source, root/('song.'+container))
     fields = dict(title='',artists=[],album=None,album_artist=None,isrc='')
     row = operations.preview(config, {'operation':'edit','paths':['song.'+container],'metadata':fields})['items'][0]
@@ -491,7 +491,56 @@ def test_explicit_empty_name_fields_clear_without_derived_artist_fallback(fixtur
     operations.execute(config, {'item':row,'operation':'edit','execution_id':'aacd-e3'})
     after = AudioMetadataHelper.read_tags(root/row['target'])
     assert all(not getattr(after,key) for key in fields)
-    assert AudioMetadataHelper.read_tags(source).artists == ['????']
+    assert AudioMetadataHelper.read_tags(source).artists == ['歌手']
+
+
+@pytest.mark.parametrize('operation,policy', [('edit','missingOnly'),('rescrape','missingOnly'),('rescrape','overwrite')])
+def test_corrupt_tags_are_empty_in_preview_and_saved_without_touching_seed(fixture, monkeypatch, operation, policy):
+    from etk_music.models import MusicInfo
+    from mutagen.flac import FLAC
+    config, original, root = fixture
+    source=original.with_suffix('.flac')
+    subprocess.run(['ffmpeg','-v','error','-i',str(original),str(source)],check=True)
+    tags=FLAC(source)
+    tags['title']=['??? ???? (Stick Wit U)'];tags['artist']=['????'];tags['albumartist']=['????']
+    tags['composer']=['? ??'];tags['performer']=['坏\ufffd名 (guitar)'];tags['comment']=['坏\ufffd备注'];tags.save()
+    before=source.read_bytes();os.link(source,root/'song.flac')
+    config['music_rename_on_save']=True;config['music_scraping_policies']['tags']=policy
+    metadata=dict(title='??? ???? (Stick Wit U)',artists=['????'],album_artist='????',composers=['? ??'],performers={'guitar':['坏\ufffd名']},comment='坏\ufffd备注')
+    monkeypatch.setattr(operations.catalog,'recognize',lambda *args,**kwargs:(AudioMetadataHelper.read(source),MusicInfo(**metadata)))
+    row=operations.preview(config,{'operation':operation,'music_type':'recording','paths':['song.flac'],'metadata':metadata})['items'][0]
+    assert row['success'] and row['target']=='song.flac',row
+    assert all(not row['metadata'][key] for key in metadata)
+    assert all(row['tag_updates'][key]==[] for key in ['title','artist','albumartist','composer','performer','comment'])
+    assert operations.execute(config,{'item':row,'operation':operation,'execution_id':'aacd-e4'})['success']
+    after=AudioMetadataHelper.read_tags(root/'song.flac')
+    assert all(not getattr(after,key) for key in metadata)
+    assert source.read_bytes()==before
+
+
+def test_tag_writer_rejects_bad_incoming_values_preserves_good_names(fixture):
+    from etk_music.audio import clean_tag_text
+    config,source,root=fixture
+    assert AudioMetadataHelper.write(source,MetaMusic(title='Who?',composers=['이재명'],performers={'guitar':['Sam Lee']}))
+    original=source.read_bytes();os.link(source,root/'song.wav')
+    assert AudioMetadataHelper.write(root/'song.wav',MetaMusic(title='??? ???? (Stick Wit U)',composers=['? ??'],performers={'guitar':['坏\ufffd名']}))
+    assert source.samefile(root/'song.wav') and source.read_bytes()==original
+    for text in ['Who?','What??','What???','¿Quién?','무조건 해피엔딩','少女时代','카라멜 커피','Тест','?']:
+        assert clean_tag_text(text)==text
+    assert clean_tag_text(['? ??','이재명'])==['이재명']
+
+
+def test_clear_comments_does_not_clean_unrelated_corrupt_credits(fixture):
+    from mutagen.wave import WAVE
+    from mutagen.id3 import TCOM
+    config,source,root=fixture
+    assert AudioMetadataHelper.write(source,MetaMusic(comment='待清理备注'))
+    audio=WAVE(source);audio.tags.add(TCOM(encoding=3,text=['? ??']));audio.save()
+    os.link(source,root/'song.wav')
+    row=operations.clear_comments_preview(config)[0]
+    operations.execute(config,{'item':row,'operation':'edit','execution_id':'aacd-e5'})
+    after=library.inspect(config,'song.wav')
+    assert not after['comment'] and after['composers']==['? ??']
 
 
 def test_manual_lyrics_resume_after_commit_keeps_new_file_and_seed(fixture, monkeypatch):

@@ -11,7 +11,7 @@ from collections import defaultdict
 from pathlib import Path
 from dataclasses import asdict
 from . import catalog, library, naming
-from .audio import AudioMetadataHelper, capture_audio_metadata
+from .audio import AudioMetadataHelper, capture_audio_metadata, clean_tag_text
 from .models import MusicInfo, MusicLyrics
 from .meta import MetaMusic
 from .matching import music_tags_are_usable
@@ -194,9 +194,18 @@ def preview(config, body):
             if relative in cue_digests and hashlib.sha256((path.parent / Path(meta.cue_filename).name).read_bytes()).hexdigest()!=cue_digests[relative]:
                 raise ValueError("CUE 在识别期间已变化，请重新预览")
             before = MusicInfo.from_meta(AudioMetadataHelper.read_tags(path) or MetaMusic()).to_dict()
+            for field in (*EMPTY_TAG_FIELDS, "comment", "description"):
+                value = clean_tag_text(getattr(info, field))
+                # 来源缺失时只清除原有损坏内容；显式清空仍按用户选择执行。
+                if not value and not (operation == "edit" and field in values and values[field] in (None, "", [], {})):
+                    old = before.get(field)
+                    if old != clean_tag_text(old):
+                        value = clean_tag_text(old)
+                setattr(info, field, value)
             # 显式清空与资料缺失分开；仅在用户预览过的清空请求中删除原标签。
             clear_tags = [tag for field, tag in EMPTY_TAG_FIELDS.items()
-                          if operation == "edit" and field in values and values[field] in (None, "", [], {})]
+                          if (operation == "edit" and field in values and values[field] in (None, "", [], {}))
+                          or (before.get(field) != clean_tag_text(before.get(field)) and not getattr(info, field))]
             rows.append({"path": relative, "target": relative, "signature": identity, "metadata": info.to_dict(), "before": before, "clear_tags": clear_tags, "tag_updates": tag_updates(path, info, config, operation, clear_tags), "success": True, "music_layout": meta.music_layout, "cue_filename": meta.cue_filename, "cue_digest":cue_digests.get(relative)})
             if operation == "edit":
                 rows[-1]["lyrics_edit"] = manual_lyrics
@@ -369,7 +378,7 @@ def execute(config, body):
             policies = config.get("music_scraping_policies") or {"tags":"missingOnly","cover":"missingOnly","lyrics":"upgrade"}
             write_tags = operation=="edit" or policies.get("tags")!="skip"
             overwrite = operation=="edit" or policies.get("tags")=="overwrite"
-            clear_tags = tuple(row.get("clear_tags", ())) if operation == "edit" else ()
+            clear_tags = tuple(row.get("clear_tags", ()))
             audio = AudioMetadataHelper._open_audio(path)
             cover_data, cover_mime = None, "image/jpeg"
             if operation=="edit" and row.get("cover_upload"):

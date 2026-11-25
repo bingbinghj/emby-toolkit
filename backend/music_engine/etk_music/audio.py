@@ -45,6 +45,17 @@ from etk_music.types import MUSIC_ENTITY_RECORDING, MediaSource
 
 _AudioSignature = tuple[str, int, int, int, int]
 
+
+def clean_tag_text(value):
+    """移除明确的编码替代字符和问号占位，保留正常多语言文字及句末问号。"""
+    if isinstance(value, str):
+        return "" if "\ufffd" in value or re.search(r"(?<![\w?])\?(?:\s*\?)+(?![\w?])", value) else value
+    if isinstance(value, list):
+        return [item for entry in value if (item := clean_tag_text(entry))]
+    if isinstance(value, dict):
+        return {key: items for key, names in value.items() if clean_tag_text(key) and (items := clean_tag_text(names))}
+    return value
+
 # 首项是写入键，其余是只读兼容别名；独立乐团/演奏者是自定义字段。
 _ASF_FIELDS = {
     "title": ("Title",), "artist": ("Author",), "album": ("WM/AlbumTitle",),
@@ -1006,15 +1017,22 @@ class AudioMetadataHelper:
         for key, value in cls._tag_values(music).items():
             if key in {"comment", "description"} and value is not None:
                 current = cls._values(tags, key)
-                if "\n".join(current) != value and (overwrite or not current):
+                value = clean_tag_text(value)
+                if "\n".join(current) != value and (overwrite or not current or current != clean_tag_text(current)):
                     updates[key] = [value] if value else []
                 continue
             current = next((items for alias in aliases.get(key, (key,)) if (items := cls._values(tags, alias))), [])
+            current = credits.get(key, current)
             if value in (None, "", []):
-                if overwrite and key in clear_tags and (credits.get(key) or current):
+                if key in clear_tags and current and (overwrite or current != clean_tag_text(current)):
                     updates[key] = []
                 continue
             expected = value if isinstance(value, list) else [str(value)]
+            expected = clean_tag_text(expected)
+            if not expected:
+                if current != clean_tag_text(current):
+                    updates[key] = clean_tag_text(current)
+                continue
             if key in credits:
                 current = credits[key]
                 if set(current) == set(expected):
@@ -1026,7 +1044,7 @@ class AudioMetadataHelper:
                 continue
             if key in {"date", "originaldate"} and current and len(expected[0]) == 4 and current[0].startswith(f"{expected[0]}-"):
                 continue
-            if not current or (overwrite and current != expected):
+            if current != clean_tag_text(current) or not current or (overwrite and current != expected):
                 updates[key] = expected
         return updates
 
@@ -1056,6 +1074,8 @@ class AudioMetadataHelper:
         if audio.tags is None:
             audio.add_tags()
         values = cls._tag_updates(audio, music, overwrite, clear_tags)
+        # 写入策略已在差异计划中应用；容器层执行获准的字段更新，包括清除损坏值。
+        overwrite = True
         if isinstance(audio.tags, ID3):
             changed = cls._write_id3_tags(audio.tags, values, overwrite)
         elif isinstance(audio.tags, MP4Tags):
