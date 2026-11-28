@@ -853,7 +853,7 @@ impl Fixture {
             .route("/Items/SyncMediaInfo", post(sync_empty_media))
             .route("/Items/{id}/Refresh", post(refresh))
             .route("/Items/{id}/ClearMediaInfo", post(clear))
-            .route("/Plugins", get(|| async { Json(json!([{"Id":"63c322b7-a371-41a3-b11f-04f8418b37d8","Name":"Strm Assistant PRO","Version":"3.0.0.57"}])) }))
+            .route("/Plugins", get(|| async { Json(json!([{"Id":"63c322b7-a371-41a3-b11f-04f8418b37d8","Name":"Strm Assistant PRO","Version":"3.0.0.58"}])) }))
             .route("/swagger.json", get(|| async { Json(pro_swagger_with_file_refresh()) }))
             .route("/Items/{id}/Ancestors", get(|| async { Json(json!([])) }))
             .route("/Library/VirtualFolders", get(move || { let location = location.clone(); async move { Json(json!([{"ItemId":"library","Guid":"fixture","Locations":[location]}])) } }))

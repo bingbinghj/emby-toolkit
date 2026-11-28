@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::State,
+    extract::{Query, State},
     http::{Request, StatusCode},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -38,6 +38,8 @@ struct Host {
     download_gate: Arc<Semaphore>,
     delete_gate: Arc<Semaphore>,
     fail_raw_upload: Arc<Mutex<bool>>,
+    ignore_raw_upload: Arc<Mutex<bool>>,
+    crop_native_preview: Arc<Mutex<bool>>,
     fail_all_uploads: Arc<Mutex<bool>>,
 }
 async fn picture(State(host): State<Host>) -> Response {
@@ -71,6 +73,9 @@ async fn upload(State(host): State<Host>, request: Request<Body>) -> Response {
     host.events.lock().await.push("upload");
     let body = to_bytes(request.into_body(), 1024 * 1024).await.unwrap();
     let decoded = base64::engine::general_purpose::STANDARD.decode(&body);
+    if decoded.is_err() && *host.ignore_raw_upload.lock().await {
+        return StatusCode::NO_CONTENT.into_response();
+    }
     if *host.fail_all_uploads.lock().await || decoded.is_err() && *host.fail_raw_upload.lock().await
     {
         return (StatusCode::SERVICE_UNAVAILABLE, [("Retry-After", "1")]).into_response();
@@ -102,9 +107,16 @@ async fn upload(State(host): State<Host>, request: Request<Body>) -> Response {
     StatusCode::NO_CONTENT.into_response()
 }
 
-async fn native_picture(State(host): State<Host>) -> Response {
+async fn native_picture(State(host): State<Host>, Query(query): Query<std::collections::HashMap<String,String>>) -> Response {
     host.events.lock().await.push("readback");
-    let native = host.native.lock().await.clone();
+    let mut native = host.native.lock().await.clone();
+    if !native.is_empty() && *host.crop_native_preview.lock().await && query.get("CropWhitespace").map(String::as_str) != Some("false") {
+        let image = image::load_from_memory(&native).unwrap();
+        let cropped = image.crop_imm(0, 0, 1, 1);
+        let mut output = std::io::Cursor::new(Vec::new());
+        cropped.write_to(&mut output, image::ImageFormat::Png).unwrap();
+        native = output.into_inner();
+    }
     if native.is_empty() {
         StatusCode::NOT_FOUND.into_response()
     } else {
@@ -171,6 +183,8 @@ impl Fixture {
             download_gate: Arc::new(Semaphore::new(usize::from(!block_download))),
             delete_gate: Arc::new(Semaphore::new(usize::from(block_download))),
             fail_raw_upload: Arc::default(),
+            ignore_raw_upload: Arc::default(),
+            crop_native_preview: Arc::default(),
             fail_all_uploads: Arc::default(),
         };
         let app = Router::new()
@@ -309,14 +323,14 @@ async fn cancellation_after_native_delete_finishes_image_commit_and_keeps_result
     assert_eq!(
         events,
         vec![
-            "download", "readback", "delete", "upload", "upload", "refresh", "readback"
+            "download", "readback", "delete", "upload", "refresh", "readback"
         ]
     );
 }
 
 #[tokio::test]
 #[ignore = "requires disposable PostgreSQL DATABASE_URL; Emby and image source are localhost"]
-async fn exhausted_raw_upload_still_tries_base64_and_finishes_refresh() {
+async fn native_base64_upload_avoids_raw_failure_and_finishes_refresh() {
     let f = Fixture::new(false).await;
     *f.host.fail_raw_upload.lock().await = true;
     f.host.delete_gate.add_permits(1);
@@ -328,7 +342,7 @@ async fn exhausted_raw_upload_still_tries_base64_and_finishes_refresh() {
     f.close().await;
     assert_eq!(result["state"], "completed", "{result}");
     assert_eq!(native, replacement);
-    assert_eq!(events.iter().filter(|event| **event == "upload").count(), 7);
+    assert_eq!(events.iter().filter(|event| **event == "upload").count(), 1);
     assert_eq!(events.last(), Some(&"readback"));
 }
 
@@ -571,4 +585,19 @@ async fn similar_unchanged_original_does_not_pass_replacement_readback() {
         "{result}"
     );
     assert_eq!(native, original);
+}
+
+#[tokio::test]
+#[ignore = "requires disposable PostgreSQL DATABASE_URL; native image host is localhost"]
+async fn base64_upload_and_original_readback_handle_silent_raw_success_and_cropped_previews() {
+    let f = Fixture::new(false).await;
+    *f.host.ignore_raw_upload.lock().await = true;
+    *f.host.crop_native_preview.lock().await = true;
+    f.host.delete_gate.add_permits(1);
+    let task = f.submit().await;
+    let result = f.finished(&task).await;
+    assert_eq!(result["state"], "completed", "{result}");
+    assert_eq!(*f.host.native.lock().await, f.host.replacement);
+    assert_eq!(f.host.events.lock().await.iter().filter(|event| **event == "upload").count(), 1);
+    f.close().await;
 }

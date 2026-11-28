@@ -1,10 +1,13 @@
 <template>
   <section class="notification-center" :class="{ 'is-dark-theme': isDarkTheme, 'is-standalone': standalone }" aria-label="实时日志">
     <header class="notification-heading">
-      <VCardTitle tag="h2" class="pa-0">实时日志</VCardTitle>
-      <VBtn variant="tonal" prepend-icon="mdi-download" color="default" class="logging-heading-action" size="small" aria-label="下载实时日志" title="下载日志" :loading="isDownloading" :disabled="isDownloading" @click="downloadLogs">下载</VBtn>
-      <VBtn v-if="!standalone" variant="tonal" prepend-icon="mdi-open-in-new" color="default" class="logging-heading-action" size="small" aria-label="在新窗口中打开实时日志" title="在新窗口中打开" :href="logFileUrl" target="_blank" rel="noopener noreferrer">在新窗口中打开</VBtn>
-      <VSpacer class="logging-heading-spacer" />
+      <div class="logging-dialog-title">
+        <VCardTitle tag="h2" class="pa-0 logging-dialog-title__main"><VIcon icon="mdi-file-document" class="me-2 flex-shrink-0" />实时日志</VCardTitle>
+        <span class="logging-dialog-title__actions">
+          <button type="button" class="logging-dialog-action" aria-label="下载实时日志" title="下载日志" :disabled="isDownloading" @click="downloadLogs"><VChip color="grey-darken-1" size="small"><VIcon :icon="isDownloading ? 'mdi-loading' : 'mdi-download'" size="small" start />下载</VChip></button>
+          <a v-if="!standalone" class="logging-dialog-action" aria-label="在新窗口中打开实时日志" title="在新窗口中打开" :href="logFileUrl" target="_blank" rel="noopener noreferrer"><VChip color="grey-darken-1" size="small"><VIcon icon="mdi-open-in-new" size="small" start />在新窗口中打开</VChip></a>
+        </span>
+      </div>
       <VBtn v-if="!standalone" variant="text" icon="mdi-close" color="default" class="logging-close-action" size="small" aria-label="关闭实时日志" title="关闭" @click="$emit('close')" />
     </header>
     <VTabs v-model="activeTab" color="primary" density="compact" class="notification-tabs">
@@ -108,14 +111,18 @@ function toggleStream() {
 }
 </script>
 
+<style lang="scss" src="@/styles/logging-dialog.scss"></style>
+
 <style scoped>
 .notification-center { --logging-shell-background:var(--mp-card); --logging-record-bg-even:var(--mp-list-group-bg); --logging-record-bg-odd:transparent; --logging-border:var(--mp-border); --logging-text:var(--mp-fg); --logging-shadow:none; display:flex; flex-direction:column; box-sizing:border-box; height:calc(100dvh - 48px); min-height:0; min-width:0; gap:16px; padding:24px; overflow:hidden; }
 .notification-center.is-dark-theme { --logging-shell-background:rgba(var(--v-theme-surface),.72); }
 :global(html[data-theme='glass'] .notification-center) { --logging-shell-background:transparent; }
 .notification-center.is-standalone { height:100dvh; }
-.notification-heading { display:flex; align-items:center; gap:8px; flex-shrink:0; }
+.notification-heading { display:flex; align-items:flex-start; gap:8px; flex-shrink:0; min-inline-size:0; }
+.notification-heading > .logging-dialog-title { display:flex; flex:1; flex-wrap:wrap; align-items:center; gap:0.5rem 1rem; min-inline-size:0; }
+.logging-close-action { flex:0 0 auto; }
+.logging-dialog-action:disabled { cursor:wait; opacity:0.6; }
 .notification-heading :deep(.v-card-title) { white-space:normal; overflow-wrap:anywhere; }
-.logging-heading-action { color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,rgb(var(--v-theme-primary))); }
 .notification-tabs { flex-shrink:0; }
 .notification-tabs :deep(.v-tab--selected) { color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,rgb(var(--v-theme-primary))) !important; }
 .notification-live { display:flex; flex:1; flex-direction:column; min-height:0; min-width:0; gap:12px; overflow:hidden; }
@@ -132,7 +139,7 @@ function toggleStream() {
 .logging-level-toggle :deep(.logging-level-toggle__button--info) { color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,rgb(var(--v-theme-success))); }
 .logging-level-toggle :deep(.logging-level-toggle__button--warning) { color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,rgb(var(--v-theme-warning))); }
 .logging-level-toggle :deep(.logging-level-toggle__button--error) { color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,rgb(var(--v-theme-error))); }
-.logging-level-toggle :deep(.logging-level-toggle__button--active) { background:var(--mp-primary-soft); color:var(--mp-primary-fg); }
+.logging-level-toggle :deep(.logging-level-toggle__button--active) { background:var(--mp-primary-soft); color:color-mix(in srgb,rgb(var(--v-theme-on-surface)) 80%,rgb(var(--v-theme-primary))) !important; }
 .notification-log { position:relative; display:flex; flex-direction:column; gap:6px; flex:1 1 0; min-height:0; min-width:0; overflow:auto; overscroll-behavior:contain; padding:14px; border:1px solid var(--logging-border); background:var(--logging-shell-background); box-shadow:var(--logging-shadow); }
 .logging-empty { display:flex; align-items:center; justify-content:center; flex:1; gap:8px; color:var(--ui-text-muted); }
 .notification-footer { display:flex; align-items:center; flex-wrap:wrap; gap:8px; flex-shrink:0; }
@@ -146,11 +153,6 @@ function toggleStream() {
 @media (max-width:959px) {
   .notification-center { height:100dvh; padding:16px; }
   .notification-center, .notification-live { gap:12px; }
-  .notification-heading { display:grid; grid-template-columns:auto 1fr auto; }
-  .notification-heading :deep(.v-card-title) { grid-column:1 / 3; }
-  .logging-close-action { grid-column:3; grid-row:1; }
-  .logging-heading-action { grid-row:2; justify-self:start; }
-  .logging-heading-spacer { display:none; }
   .notification-log { padding:8px; }
 }
 </style>

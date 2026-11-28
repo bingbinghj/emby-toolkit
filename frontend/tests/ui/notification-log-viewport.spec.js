@@ -3,6 +3,29 @@ import { readFile } from 'node:fs/promises';
 import { test, expect } from './fixtures.js';
 import { measureReadingContrast } from './reading-contrast.js';
 
+for (const width of [320, 390]) {
+  test(`MP 日志标题操作在 ${width}px 窄屏换行且不遮挡关闭按钮`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 });
+    await page.goto('/dashboard');
+    await page.getByRole('button', { name: '实时日志', exact: true }).click();
+    const heading = page.locator('.notification-heading');
+    const close = heading.getByRole('button', { name: '关闭实时日志', exact: true });
+    const closeBox = await close.boundingBox();
+    for (const control of [heading.getByRole('button', { name: '下载实时日志', exact: true }), heading.getByRole('link', { name: '在新窗口中打开实时日志', exact: true })]) {
+      await expect(control).toBeVisible();
+      const box = await control.boundingBox();
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(width);
+      const overlaps = box.x < closeBox.x + closeBox.width && box.x + box.width > closeBox.x && box.y < closeBox.y + closeBox.height && box.y + box.height > closeBox.y;
+      expect(overlaps).toBe(false);
+      const text = await control.evaluate(el => ({ client: el.clientWidth, scroll: el.scrollWidth }));
+      expect(text.scroll).toBeLessThanOrEqual(text.client + 1);
+    }
+    await close.click();
+    await expect(page.locator('.notification-center')).toHaveCount(0);
+  });
+}
+
 const lines = Array.from({ length: 30 }, (_, i) => `[12:30:${String(i).padStart(2, '0')}] [INFO] 第 ${i + 1} 条日志完整正文`);
 const bellPath = JSON.parse(readFileSync(new URL('../../node_modules/@iconify-json/mdi/icons.json', import.meta.url))).icons['bell-outline'].body.match(/d="([^"]+)"/)[1];
 
@@ -81,17 +104,11 @@ test('native live dates, single and grouped accents and title actions match the 
   await expect(heading.getByRole('link', { name: '在新窗口中打开实时日志', exact: true })).toHaveAttribute('target', '_blank');
   await expect(page.locator('.logging-toolbar').getByRole('button', { name: '暂停日志流', exact: true })).toBeVisible();
   await expect(page.locator('.logging-toolbar').getByRole('button', { name: '下载实时日志', exact: true })).toHaveCount(0);
-  const colorOf = button => button.evaluate(element => {
-    const style = getComputedStyle(element);
-    return { background: style.backgroundColor, primary: `rgb(${style.getPropertyValue('--v-theme-primary').trim().split(/\s*,\s*/).join(', ')})` };
-  });
   const pause = page.getByRole('button', { name: '暂停日志流', exact: true });
-  const runningColor = await colorOf(pause);
-  expect(runningColor.background).toBe(runningColor.primary);
+  for (const reading of await measureReadingContrast(page, [{ role: '暂停图标', locator: pause.locator('svg') }])) expect(reading.contrast).toBeGreaterThanOrEqual(3);
   await pause.click();
   const resume = page.getByRole('button', { name: '继续日志流', exact: true });
-  const pausedColor = await colorOf(resume);
-  expect(pausedColor.background).toBe(pausedColor.primary);
+  for (const reading of await measureReadingContrast(page, [{ role: '继续图标', locator: resume.locator('svg') }])) expect(reading.contrast).toBeGreaterThanOrEqual(3);
   api.setTask({ logs: [...initialLines, '2026-11-12 09:56:24,040 - media::source - INFO - 恢复后记录'] });
   await resume.click();
   await expect(page.getByText('恢复后记录', { exact: true })).toBeVisible();

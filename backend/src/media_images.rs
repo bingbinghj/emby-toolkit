@@ -234,6 +234,8 @@ async fn read_image(state: &AppState, url: &str, key: &str) -> Result<Option<Vec
             .get(url)
             .header("X-Emby-Token", key)
             .header(header::CACHE_CONTROL, "no-cache")
+            // Logo/Art previews crop transparent borders by default. Verify the stored original.
+            .query(&[("Format", "Original"), ("CropWhitespace", "false"), ("EnableImageEnhancers", "false")])
             .timeout(Duration::from_secs(20)),
     )
     .await?;
@@ -258,30 +260,21 @@ async fn upload_image(
     mime: &str,
     bytes: &[u8],
 ) -> Result<()> {
-    let mut failures = vec![];
-    for body in [bytes.to_vec(), STANDARD.encode(bytes).into_bytes()] {
-        match crate::emby::send(
-            state
-                .http
-                .post(url)
-                .header("X-Emby-Token", key)
-                .header(header::CONTENT_TYPE, mime)
-                .body(body),
-        )
-        .await
-        {
-            Ok(response) if response.status().is_success() => return Ok(()),
-            Ok(response) => failures.push(format!("上传请求返回 HTTP {}", response.status())),
-            Err(error) => failures.push(error.status().map_or_else(
-                || "图片上传请求失败，无法访问上游服务".into(),
-                |status| format!("上传请求失败：HTTP {status}"),
-            )),
-        }
+    // Emby's image endpoint requires Base64. A raw body can receive 204 without
+    // replacing the image, so HTTP success alone is not a format fallback signal.
+    let response = crate::emby::send(
+        state.http.post(url)
+            .header("X-Emby-Token", key)
+            .header(header::CONTENT_TYPE, mime)
+            .body(STANDARD.encode(bytes)),
+    ).await.map_err(|error| ApiError::bad(error.status().map_or_else(
+        || "图片上传请求失败，无法访问上游服务".into(),
+        |status| format!("上传请求失败：HTTP {status}"),
+    )))?;
+    if !response.status().is_success() {
+        return Err(ApiError::bad(format!("上传请求返回 HTTP {}", response.status())));
     }
-    Err(ApiError::bad(format!(
-        "上传Emby失败：{}",
-        failures.join("；")
-    )))
+    Ok(())
 }
 // RGB beneath a fully transparent PNG pixel is not part of the displayed image.
 fn visible_pixels(image: image::DynamicImage) -> image::RgbaImage {

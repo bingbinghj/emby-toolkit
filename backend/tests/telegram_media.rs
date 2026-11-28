@@ -84,3 +84,122 @@ async fn native_images_and_files_preserve_topics_buttons_and_local_source() {
     assert_eq!(calls.lock().await.len(), 3);
     server.abort();
 }
+
+async fn rate_limit_host(
+    responses: Vec<(axum::http::StatusCode, serde_json::Value)>,
+) -> (
+    String,
+    Arc<Mutex<Vec<serde_json::Value>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let replies = Arc::new(Mutex::new(std::collections::VecDeque::from(responses)));
+    let requests = Arc::new(Mutex::new(vec![]));
+    let seen = requests.clone();
+    let app = Router::new().route(
+        "/bottest/sendMessage",
+        post(move |Json(body): Json<serde_json::Value>| {
+            let replies = replies.clone();
+            let seen = seen.clone();
+            async move {
+                seen.lock().await.push(body);
+                let (status, response) = replies
+                    .lock()
+                    .await
+                    .pop_front()
+                    .expect("no unexpected retry");
+                (status, Json(response))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (base, requests, server)
+}
+
+#[tokio::test]
+async fn rate_limit_retries_only_the_refused_payload_after_its_cooldown() {
+    use axum::http::StatusCode;
+    let (base, calls, server) = rate_limit_host(vec![
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            json!({"ok":false,"error_code":429,"parameters":{"retry_after":1}}),
+        ),
+        (
+            StatusCode::OK,
+            json!({"ok":true,"result":{"message_id":42}}),
+        ),
+    ])
+    .await;
+    let payload = json!({"chat_id":"123","text":"只重试本条消息","message_thread_id":7});
+    let start = std::time::Instant::now();
+    let result = telegram_media::request(
+        &reqwest::Client::new(),
+        &base,
+        "test",
+        "sendMessage",
+        &payload,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["result"]["message_id"], 42);
+    assert!(start.elapsed() >= std::time::Duration::from_secs(1));
+    assert_eq!(*calls.lock().await, vec![payload.clone(), payload]);
+    server.abort();
+}
+
+#[tokio::test]
+async fn delivery_does_not_retry_uncertain_errors_or_wait_beyond_the_budget() {
+    use axum::http::StatusCode;
+    for (status, body) in [
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            json!({"ok":false,"error_code":429,"parameters":{"retry_after":61}}),
+        ),
+        (
+            StatusCode::BAD_REQUEST,
+            json!({"ok":false,"description":"bad request"}),
+        ),
+        (StatusCode::INTERNAL_SERVER_ERROR, json!({"ok":false})),
+    ] {
+        let (base, calls, server) = rate_limit_host(vec![(status, body)]).await;
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            telegram_media::request(
+                &reqwest::Client::new(),
+                &base,
+                "test",
+                "sendMessage",
+                &json!({"chat_id":"123","text":"正文"}),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(outcome.is_err());
+        assert_eq!(calls.lock().await.len(), 1);
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn repeated_rate_limits_stop_after_two_retries() {
+    use axum::http::StatusCode;
+    let response = (
+        StatusCode::TOO_MANY_REQUESTS,
+        json!({"ok":false,"error_code":429,"parameters":{"retry_after":1}}),
+    );
+    let (base, calls, server) = rate_limit_host(vec![response; 3]).await;
+    assert!(
+        telegram_media::request(
+            &reqwest::Client::new(),
+            &base,
+            "test",
+            "sendMessage",
+            &json!({"chat_id":"123","text":"正文"})
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(calls.lock().await.len(), 3);
+    server.abort();
+}

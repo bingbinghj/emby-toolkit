@@ -6,6 +6,9 @@ use std::{path::Path, time::Duration};
 
 const IMAGE_LIMIT: usize = 10 * 1024 * 1024;
 const FILE_LIMIT: usize = 50 * 1024 * 1024;
+// MP v3.2.16: wait for explicit 429 refusals only, bounded to two retries / 60 s.
+const RATE_LIMIT_MAX_WAIT: u64 = 60;
+const RATE_LIMIT_MAX_RETRIES: usize = 2;
 
 fn decode(data: &str, limit: usize) -> Result<Vec<u8>> {
     if data.len() > limit.div_ceil(3) * 4 {
@@ -129,59 +132,75 @@ pub async fn request(
     } else {
         None
     };
-    let mut request = client
-        .post(format!(
-            "{}/bot{token}/{method}",
-            api_base.trim_end_matches('/')
-        ))
-        .timeout(Duration::from_secs(
-            if upload.is_some() || method == "sendPhoto" {
-                30
-            } else {
-                15
-            },
-        ));
-    if let Some((field, name, bytes, mime)) = upload {
-        let part = reqwest::multipart::Part::bytes(bytes)
-            .file_name(name)
-            .mime_str(mime)?;
-        let mut form = reqwest::multipart::Form::new().part(field, part);
-        for (key, value) in payload
-            .as_object()
-            .ok_or_else(|| ApiError::bad("通知格式无效"))?
-        {
-            if key != field && !value.is_null() {
-                form = form.text(
-                    key.clone(),
-                    value
-                        .as_str()
-                        .map(str::to_string)
-                        .unwrap_or_else(|| value.to_string()),
-                );
+    let mut waited = 0;
+    for attempt in 0..=RATE_LIMIT_MAX_RETRIES {
+        let mut request = client
+            .post(format!(
+                "{}/bot{token}/{method}",
+                api_base.trim_end_matches('/')
+            ))
+            .timeout(Duration::from_secs(
+                if upload.is_some() || method == "sendPhoto" {
+                    30
+                } else {
+                    15
+                },
+            ));
+        if let Some((field, name, bytes, mime)) = &upload {
+            let part = reqwest::multipart::Part::bytes(bytes.clone())
+                .file_name(name.clone())
+                .mime_str(mime)?;
+            let mut form = reqwest::multipart::Form::new().part(*field, part);
+            for (key, value) in payload
+                .as_object()
+                .ok_or_else(|| ApiError::bad("通知格式无效"))?
+            {
+                if key != *field && !value.is_null() {
+                    form = form.text(
+                        key.clone(),
+                        value
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| value.to_string()),
+                    );
+                }
+            }
+            request = request.multipart(form);
+        } else {
+            request = request.json(&payload);
+        }
+        let response = request.send().await?;
+        let status = response.status();
+        let data: Value = response.json().await.unwrap_or(Value::Null);
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || data["error_code"] == 429 {
+            let delay = data["parameters"]["retry_after"]
+                .as_u64()
+                .unwrap_or(1)
+                .max(1);
+            if attempt < RATE_LIMIT_MAX_RETRIES && delay <= RATE_LIMIT_MAX_WAIT - waited {
+                waited += delay;
+                tokio::time::sleep(Duration::from_secs(delay)).await;
+                continue;
             }
         }
-        request = request.multipart(form);
-    } else {
-        request = request.json(&payload);
+        if !status.is_success() {
+            return Err(ApiError(
+                reqwest::StatusCode::BAD_GATEWAY,
+                format!("Telegram 返回 HTTP {}", status.as_u16()),
+            ));
+        }
+        if data["ok"] != true {
+            let reason = data["description"]
+                .as_str()
+                .unwrap_or("未确认发送成功")
+                .replace(token, "********")
+                .replace(api_base, "Telegram API");
+            return Err(ApiError(
+                reqwest::StatusCode::BAD_GATEWAY,
+                format!("Telegram 发送失败：{}", crate::logs::redact(&reason)),
+            ));
+        }
+        return Ok(data);
     }
-    let response = request.send().await?;
-    if !response.status().is_success() {
-        return Err(ApiError(
-            reqwest::StatusCode::BAD_GATEWAY,
-            format!("Telegram 返回 HTTP {}", response.status().as_u16()),
-        ));
-    }
-    let data: Value = response.json().await?;
-    if data["ok"] != true {
-        let reason = data["description"]
-            .as_str()
-            .unwrap_or("未确认发送成功")
-            .replace(token, "********")
-            .replace(api_base, "Telegram API");
-        return Err(ApiError(
-            reqwest::StatusCode::BAD_GATEWAY,
-            format!("Telegram 发送失败：{}", crate::logs::redact(&reason)),
-        ));
-    }
-    Ok(data)
+    unreachable!("the final Telegram attempt always returns")
 }

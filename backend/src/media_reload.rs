@@ -1780,13 +1780,15 @@ async fn ensure_sync_supported(state: &AppState, settings: &Value) -> Result<Val
     if settings["IsModSupported"] != true {
         return Err(conflict("神医当前未支持原生章节恢复，未提交媒体信息同步"));
     }
+    // Plugin identity, advertised API contract and native readback govern compatibility;
+    // a compatible patch release must not prevent ingestion.
     let plugins = state.emby(Method::GET, "Plugins", &[], None).await?;
     if !media_edit::list(&plugins)
         .iter()
-        .any(|p| p["Id"] == "63c322b7-a371-41a3-b11f-04f8418b37d8" && p["Version"] == "3.0.0.57")
+        .any(|p| p["Id"] == "63c322b7-a371-41a3-b11f-04f8418b37d8")
     {
         return Err(conflict(
-            "当前神医版本尚未验证媒体信息同步协议，未提交媒体信息同步",
+            "未安装神医媒体信息同步插件，未提交媒体信息同步",
         ));
     }
     let swagger = state.emby(Method::GET, "swagger.json", &[], None).await?;

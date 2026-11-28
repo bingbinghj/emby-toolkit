@@ -15,6 +15,7 @@ use tokio::sync::RwLock;
 #[derive(Clone)]
 struct Fixture {
     inventory: Arc<RwLock<Vec<Value>>>,
+    plugins: Arc<RwLock<Value>>,
     inventory_reads: Arc<AtomicUsize>,
     writes: Arc<AtomicUsize>,
     policy: Arc<RwLock<Value>>,
@@ -57,6 +58,7 @@ async fn fixture() -> (
 ) {
     let fixture = Fixture {
         inventory: Arc::new(RwLock::new(vec![live("1"), live("2")])),
+        plugins: Arc::new(RwLock::new(json!([{"Id":"63c322b7-a371-41a3-b11f-04f8418b37d8","Version":"3.0.0.58"}]))),
         inventory_reads: Arc::new(AtomicUsize::new(0)),
         writes: Arc::new(AtomicUsize::new(0)),
         policy: Arc::new(RwLock::new(
@@ -104,7 +106,7 @@ async fn fixture() -> (
         .route("/UI/View",get(||async {Json(json!({"EditObjectContainer":{"Object":{
             "ExclusiveControlFeatures":"IgnoreFileChange","ExclusiveExtract":true,
             "IsModSupported":true,"PersistMediaInfoMode":"Restore"}}}))}))
-        .route("/Plugins",get(||async {Json(json!([{"Id":"63c322b7-a371-41a3-b11f-04f8418b37d8","Version":"3.0.0.57"}]))}))
+        .route("/Plugins",get(|State(f):State<Fixture>|async move {Json(f.plugins.read().await.clone())}))
         .route("/swagger.json",get(move || {let swagger=swagger.clone();async move {Json(swagger)}}))
         .route("/Items/{id}/Refresh",post(|State(f):State<Fixture>|async move {
             f.writes.fetch_add(1,Ordering::SeqCst);Json(json!({"success":true}))
@@ -398,4 +400,33 @@ async fn noop_without_original_images_does_not_require_a_visible_media_parent() 
     assert_eq!(f.writes.load(Ordering::SeqCst), 0);
     assert!(!path.parent().unwrap().exists());
     server.abort();
+}
+
+#[tokio::test]
+async fn sync_compatibility_uses_plugin_and_contract_instead_of_a_patch_version() {
+    let (_root, state, fixture, server) = fixture().await;
+    for version in ["3.0.0.57", "3.0.0.58"] {
+        fixture.plugins.write().await[0]["Version"] = json!(version);
+        assert!(ensure_sync_supported(&state, &json!({"IsModSupported":true})).await.is_ok());
+    }
+    fixture.plugins.write().await[0]["Id"] = json!("different-plugin");
+    assert!(ensure_sync_supported(&state, &json!({"IsModSupported":true})).await.is_err());
+    assert_eq!(fixture.writes.load(Ordering::SeqCst), 0);
+    server.abort();
+}
+
+#[test]
+fn sync_contract_rejects_missing_id_or_non_bundle_request() {
+    let bundle = json!({"type":"array","items":{"$ref":"#/definitions/StrmAssistant.Dto.MediaInfoBundle"}});
+    let swagger = json!({"paths":{"/Items/SyncMediaInfo":{"post":{
+        "parameters":[{"in":"query","name":"Id","type":"string"},{"in":"body","schema":bundle}],
+        "responses":{"200":{"schema":bundle}}
+    }}}});
+    assert!(sync_contract_supported(&swagger));
+    let mut missing_id = swagger.clone();
+    missing_id["paths"]["/Items/SyncMediaInfo"]["post"]["parameters"][0]["name"] = json!("Path");
+    assert!(!sync_contract_supported(&missing_id));
+    let mut changed_body = swagger;
+    changed_body["paths"]["/Items/SyncMediaInfo"]["post"]["parameters"][1]["schema"] = json!({"type":"string"});
+    assert!(!sync_contract_supported(&changed_body));
 }
